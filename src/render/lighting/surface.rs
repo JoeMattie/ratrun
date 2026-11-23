@@ -65,10 +65,10 @@ const SLOPE_FULL: i32 = 192;
 const NDOTL_MIN_Q8: i32 = -90;
 const NDOTL_MAX_Q8: i32 = 141;
 
-/// Three neighbouring rows of the pre-lit luminance (`y-1`, `y`, `y+1`, slot
-/// `y % 3`), so each pixel's luminance is computed once and its gradient reads
-/// neighbours out of L1. Render-only scratch: grown on the first frame of a
-/// size, never allocated again.
+// Three neighbouring rows of the pre-lit luminance (`y-1`, `y`, `y+1`, slot
+// `y % 3`), so each pixel's luminance is computed once and its gradient reads
+// neighbours out of L1. Render-only scratch: grown on the first frame of a
+// size, never allocated again.
 thread_local! {
     static LUM_ROWS: std::cell::RefCell<Vec<u8>> = const {
         std::cell::RefCell::new(Vec::new())
@@ -184,7 +184,7 @@ pub(super) fn apply(
                             normals[i] = [nx as i8, ny as i8];
                             // Q8 `N·L`: the tangent dot the light (a light
                             // straight overhead shades no relief at all).
-                            let d = ((nx * lx + ny * ly) * 2 >> 12)
+                            let d = (((nx * lx + ny * ly) * 2) >> 12)
                                 .clamp(NDOTL_MIN_Q8, NDOTL_MAX_Q8);
                             let e = d * k / 256;
                             if e == 0 {

@@ -145,18 +145,22 @@ pub(super) struct FxLight {
     /// `Light::extent()` (infinite for the sun).
     pub extent: f32,
     pub tag: LightTag,
+    /// `gain` without the flicker term (stable across frames).
+    pub steady: f32,
 }
 
 impl FxLight {
     pub(super) fn of(light: &Light, tag: LightTag, flicker: f32) -> Self {
         let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
+        let steady = peak * (light.energy.abs() + light.scatter.abs());
         Self {
             pos: light.pos,
             height: light.height,
             color: light.color,
-            gain: peak * (light.energy.abs() + light.scatter.abs()) * flicker,
+            gain: steady * flicker,
             extent: light.extent(),
             tag,
+            steady,
         }
     }
 
@@ -196,6 +200,7 @@ pub(super) fn sort_fx_lights(list: &mut [FxLight]) {
 
 /// What `air::splat_sample` sees for one touched sample of one light.
 pub(super) struct SampleHit<'a> {
+    pub theme: Theme,
     pub light: &'a Light,
     pub tag: LightTag,
     /// Sample point minus light position, world px.

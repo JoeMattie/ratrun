@@ -1051,6 +1051,14 @@ pub fn draw_mower_ground(pb: &mut PixelBuffer, view: &MowerView, cam: Vec2, acce
 }
 
 fn draw_mower_shadow(pb: &mut PixelBuffer, fr: &Frame, state: MowerState) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_mower_shadow_body(pb, fr, state);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_mower_shadow_body(pb: &mut PixelBuffer, fr: &Frame, state: MowerState) {
     let sh_ofs = match state {
         MowerState::Flipped => Vec2::new(1.5, 2.2),
         MowerState::Charge | MowerState::Ricochet => Vec2::new(2.5, 3.0),

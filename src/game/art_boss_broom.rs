@@ -1185,6 +1185,20 @@ fn draw_foot_shadow(
     cam: Vec2,
     alpha: f32,
 ) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_foot_shadow_body(pb, foot, side, cam, alpha);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_foot_shadow_body(
+    pb: &mut PixelBuffer,
+    foot: &FootPose,
+    side: f32,
+    cam: Vec2,
+    alpha: f32,
+) {
     if alpha <= 0.02 {
         return;
     }
@@ -1216,6 +1230,14 @@ fn draw_foot_shadow(
 }
 
 fn draw_broom_shadow(pb: &mut PixelBuffer, broom: &BroomPose, cam: Vec2, alpha: f32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_broom_shadow_body(pb, broom, cam, alpha);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_broom_shadow_body(pb: &mut PixelBuffer, broom: &BroomPose, cam: Vec2, alpha: f32) {
     if alpha <= 0.02 {
         return;
     }
@@ -1258,6 +1280,14 @@ fn draw_broom_shadow(pb: &mut PixelBuffer, broom: &BroomPose, cam: Vec2, alpha: 
 }
 
 fn draw_dustpan_shadow(pb: &mut PixelBuffer, pan: &DustpanPose, cam: Vec2) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_dustpan_shadow_body(pb, pan, cam);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_dustpan_shadow_body(pb: &mut PixelBuffer, pan: &DustpanPose, cam: Vec2) {
     if pan.alpha <= 0.02 {
         return;
     }

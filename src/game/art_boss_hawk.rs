@@ -1649,6 +1649,14 @@ pub fn draw_hawk_ground(pb: &mut PixelBuffer, view: &HawkView, cam: Vec2, accent
 /// edge hardness are the bird's altitude: faint and small high, dark and crisp
 /// on the deck.
 fn draw_shadow(pb: &mut PixelBuffer, pose: &Pose) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_shadow_body(pb, pose);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_shadow_body(pb: &mut PixelBuffer, pose: &Pose) {
     let low = 1.0 - pose.lift01;
     let alpha = (0.17 + 0.40 * low) * pose.alpha;
     // On the ground point exactly, whatever the altitude: the shadow *is* the

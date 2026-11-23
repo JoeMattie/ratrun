@@ -216,6 +216,14 @@ fn apply_flash(c: Rgb, flash: f32) -> Rgb {
 
 /// Fast soft elliptical ground shadow cast down-right (no per-pixel `sqrt`).
 fn draw_shadow(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, strength: f32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_shadow_body(pb, cx, cy, rx, ry, strength);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_shadow_body(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, strength: f32) {
     if rx <= 0.5 || ry <= 0.5 || strength <= 0.01 {
         return;
     }

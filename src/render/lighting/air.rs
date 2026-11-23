@@ -33,7 +33,7 @@
 use super::engine::{Grid, LightingMode, MIN_GAIN};
 use super::fx::{strength, Canvas, FxFrame, FxLight, LightInfo, LightTag, SampleHit};
 use super::{LayerMask, Light};
-use crate::game::level::LightFixtureKind;
+use crate::game::level::{LightFixtureKind, Theme};
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 use crate::term::ColorDepth;
@@ -100,12 +100,8 @@ const AIR_MAX: u16 = 40 * 256;
 const AIR_STEP_LOW: i32 = 4;
 const FOG_STEP_LOW: i32 = 16;
 
-/// The one theme whose drawn sconce wears a wire cage (`fixtures::housing`: the
-/// Sewer's caged amber bulkhead), as that theme's sconce colour. `SampleHit`
-/// carries no theme, but no other theme's sconce shares this tint, so the tint
-/// is the key the cage bars read. (A `theme` field on `SampleHit` would be the
-/// cleaner hook; see the worker report.)
-const CAGED_SCONCE_TINT: Rgb = (255, 190, 96);
+// The one theme whose drawn sconce wears a wire cage is the Sewer
+// (`fixtures::housing`: the caged amber bulkhead); `caged_sconce` keys on it.
 /// The cage's bars run round the lamp every 30° (12 bars a turn, so about 5
 /// cross a 150° fan).
 const CAGE_BARS: f32 = 6.0;
@@ -147,6 +143,11 @@ pub(super) fn wants(light: &Light, tag: LightTag, mode: LightingMode) -> bool {
     if !light.extent().is_finite() || light.extent() < SHAFT_MIN_REACH {
         return false;
     }
+    // A spent wall lamp's sputter (energy 0.42; a live one is >= 0.60 even
+    // zone-capped) must not flash a beam.
+    if tag == LightTag::Fixture(LightFixtureKind::Sconce) && light.energy < 0.5 {
+        return false;
+    }
     matches!(
         tag,
         LightTag::Fixture(
@@ -185,9 +186,9 @@ pub(super) fn splat_sample(info: &mut LightInfo, hit: &SampleHit<'_>) {
     }
 }
 
-/// Is this the caged bulkhead (Sewer sconce)? See [`CAGED_SCONCE_TINT`].
+/// Is this the caged bulkhead (the Sewer's sconce)?
 fn caged_sconce(hit: &SampleHit<'_>) -> bool {
-    hit.tag == LightTag::Fixture(LightFixtureKind::Sconce) && hit.light.color == CAGED_SCONCE_TINT
+    hit.theme == Theme::Sewer && hit.tag == LightTag::Fixture(LightFixtureKind::Sconce)
 }
 
 /// The wire cage's bars: dark spokes across the fan, keyed on the sample's
@@ -235,7 +236,7 @@ struct Bloom {
 
 impl Bloom {
     fn of(light: &FxLight) -> Option<Self> {
-        if !blooms(light.tag) || light.gain < BLOOM_MIN_GAIN || !light.extent.is_finite() {
+        if !blooms(light.tag) || light.steady < BLOOM_MIN_GAIN || !light.extent.is_finite() {
             return None;
         }
         let reach = (light.extent * BLOOM_REACH_SHARE).clamp(BLOOM_MIN_REACH, BLOOM_MAX_REACH);
@@ -311,7 +312,13 @@ fn bloom(grid: &mut Grid, frame: &FxFrame<'_>) {
                 if g_t == 0 && g_w == 0 {
                     continue;
                 }
-                let info = &mut grid.info[(sy * gw + sx) as usize];
+                let i = (sy * gw + sx) as usize;
+                // A halo only where the lamp itself reached (its own colour
+                // dominates): a sample behind a wall never took this light.
+                if grid.info[i].dom == 0 || grid.info[i].dom_rgb != light.color {
+                    continue;
+                }
+                let info = &mut grid.info[i];
                 for (n, (t, w)) in b.tight.iter().zip(&b.wide).enumerate() {
                     let add = (t * g_t + w * g_w) >> 10;
                     if add < MIN_GAIN as i32 {
@@ -440,7 +447,8 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
                     + i32::from(grid.info[i10].air[n]) * m10
                     + i32::from(grid.info[i01].air[n]) * m01
                     + i32::from(grid.info[i11].air[n]) * m11;
-                (sum >> 16).clamp(0, 255)
+                // Q16 weights over Q8.8 air: 24 bits down to output levels.
+                ((sum + (1 << 23)) >> 24).clamp(0, 255)
             };
             let mut air = [air(0), air(1), air(2)];
             let fog = (i32::from(grid.info[i00].fog) * w00
@@ -469,6 +477,8 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
 
 #[cfg(test)]
 mod tests {
+    /// The Sewer sconce's colour (`fixtures::sconce_color`).
+    const CAGED_SCONCE_TINT: Rgb = (255, 190, 96);
     use super::super::engine::Curve;
     use super::super::fx::testkit;
     use super::super::shadow::Surface;
@@ -492,6 +502,7 @@ mod tests {
 
     fn hit<'a>(light: &'a Light, delta: Vec2, core: f32, visibility: f32) -> SampleHit<'a> {
         SampleHit {
+            theme: Theme::Sewer,
             light,
             tag: LightTag::Fixture(LightFixtureKind::Sconce),
             delta,
@@ -558,6 +569,7 @@ mod tests {
             gain: 686.0,
             extent: 110.0,
             tag: LightTag::Fixture(LightFixtureKind::Sconce),
+            steady: 686.0,
         };
         let mut dim = steady;
         dim.gain = 665.0; // a 3 % held-step dip in the sconce's core
@@ -587,7 +599,7 @@ mod tests {
         let mut faint = sconce_light();
         faint.energy = 2.28;
         faint.scatter = 0.32;
-        let (mut ia, ib) = (LightInfo::default(), LightInfo::default());
+        let (mut ia, mut ib) = (LightInfo::default(), LightInfo::default());
         splat_sample(&mut ia, &hit(&bright, Vec2::new(0.0, 30.0), 0.7, 1.0));
         splat_sample(&mut ib, &hit(&faint, Vec2::new(0.0, 30.0), 0.7, 1.0));
         assert_eq!(ia.air, ib.air);
@@ -632,6 +644,7 @@ mod tests {
                 gain: 686.0,
                 extent: 110.0,
                 tag: LightTag::Fixture(LightFixtureKind::Sconce),
+                steady: 686.0,
             })
             .collect();
         let mut frame = testkit::frame(&level, LightingMode::Full);

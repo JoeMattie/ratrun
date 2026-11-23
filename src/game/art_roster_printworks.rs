@@ -201,6 +201,14 @@ fn disc(pb: &mut PixelBuffer, cx: i32, cy: i32, rad: i32, c: Rgb, alpha: f32) {
 
 /// Soft hovering ground shadow ellipse offset down-right from `fr.pos`.
 fn hover_shadow(pb: &mut PixelBuffer, cx: i32, cy: i32, rx: f32, ry: f32, strength: f32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    hover_shadow_body(pb, cx, cy, rx, ry, strength);
+    pb.set_pen(prev_pen);
+}
+
+fn hover_shadow_body(pb: &mut PixelBuffer, cx: i32, cy: i32, rx: f32, ry: f32, strength: f32) {
     let irx = rx.ceil() as i32;
     let iry = ry.ceil() as i32;
     let inv_rx = 1.0 / rx.max(0.5);

@@ -96,9 +96,22 @@ pub(crate) fn rat_pen() -> u8 {
     pen(MaterialKind::Fur, true, RAT_HEIGHT)
 }
 
+/// The pen for the rat under the Growth Serum: the same fur on a body five
+/// times the size, so its dome curves slowly instead of like the small rat's.
+pub(crate) fn giant_rat_pen() -> u8 {
+    pen(MaterialKind::Fur, true, 7)
+}
+
 /// The pen for a prop (tanks and lenses: Glass; pipes and housings: Metal; …).
 pub(crate) fn prop_pen(kind: PropKind) -> u8 {
-    pen(prop_material(kind), false, 0)
+    pen(prop_material(kind), false, prop_height_class(kind))
+}
+
+/// A prop's height class, from its smaller footprint half (a squat crate is
+/// low, a tank is tall): `surface` reads deeper relief on a raised prop.
+fn prop_height_class(kind: PropKind) -> u8 {
+    let (w, h) = kind.size();
+    height_class(w.min(h) * 0.5)
 }
 
 /// The pen for an acid pool (Acid Spit's ground pool).
@@ -345,6 +358,9 @@ struct Tables {
     /// [`Tables::peak`] with only the materials `Hard` draws (Slime, Ink,
     /// Metal) left in, so the tier test costs one array read per pixel.
     hard_peak: [u8; KINDS],
+    /// The up component of a Q0.7 tangent normal, indexed by
+    /// `(nx² + ny²) >> 7` (exact at the steep end, where a parabola is not).
+    nz: [u8; 256],
 }
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
@@ -358,7 +374,12 @@ fn build_tables() -> Tables {
         lobe: [[0u8; LUT]; KINDS],
         peak: [0u8; KINDS],
         hard_peak: [0u8; KINDS],
+        nz: [0u8; 256],
     };
+    for (i, v) in tables.nz.iter_mut().enumerate() {
+        let t = (i as f32) * 128.0;
+        *v = (16129.0 - t).max(0.0).sqrt().round() as u8;
+    }
     for (k, row) in tables.lobe.iter_mut().enumerate() {
         let params = material::params(MaterialKind::from_bits(k as u8));
         if params.gloss < GLOSS_FLOOR {
@@ -422,16 +443,6 @@ fn highlight_add(lobe: i32, energy: i32, colour: Rgb) -> [i32; 3] {
     out
 }
 
-/// The up component of a Q0.7 tangent normal (0..=127), from the same `N`
-/// `material::nz` describes but without a square root in the pixel loop: a
-/// two-term parabola, exact to about one Q0.7 level for any normal that is not
-/// on its side.
-#[inline]
-fn up_component(nx: i32, ny: i32) -> i32 {
-    let t = nx * nx + ny * ny;
-    (127 - ((t * 129) >> 15) - ((t * t) >> 24)).clamp(0, 127)
-}
-
 /// Post-composite pixel stage: specular highlights by material and the rim
 /// light on CREATURE perimeter pixels (`fx::strength::SPECULAR`, `RIM`).
 pub(super) fn apply(grid: &Grid, canvas: &mut Canvas<'_>, normals: &[Normal], frame: &FxFrame<'_>) {
@@ -467,6 +478,26 @@ fn run(
     let theme = frame.theme;
     let mat: &[u8] = canvas.mat;
     let pixels: &mut [Rgb] = &mut *canvas.px;
+    // The ink pads in view, as screen rectangles (the Printworks only).
+    const MAX_PADS: usize = 24;
+    let mut pads = [(0i32, 0i32, 0i32, 0i32); MAX_PADS];
+    let mut npads = 0;
+    for pad in &frame.level.objects.ink_pads {
+        if npads >= MAX_PADS {
+            break;
+        }
+        let p = pad.pos - frame.cam;
+        let r = (
+            (p.x - pad.half.x).floor() as i32,
+            (p.y - pad.half.y).floor() as i32,
+            (p.x + pad.half.x).ceil() as i32,
+            (p.y + pad.half.y).ceil() as i32,
+        );
+        if r.0 < w as i32 && r.2 > 0 && r.1 < h as i32 && r.3 > 0 {
+            pads[npads] = r;
+            npads += 1;
+        }
+    }
     // The first run of a row ends at the next sample boundary.
     let first_run = (stride - grid.offset.0 % stride).min(w);
     let first_sample = grid.offset.0 / stride;
@@ -486,15 +517,28 @@ fn run(
             let wall = grid
                 .surfaces
                 .get(si)
-                .map_or(false, |s| s.layer & LayerMask::WALLS.0 != 0);
+                .is_some_and(|s| s.layer & LayerMask::WALLS.0 != 0);
             // Once per run: the half vector and the energy the whole run's
             // highlights share.
             let (half, energy) = match half_vector(&info) {
                 Some(half) => (half, scaled(i32::from(info.spec), spec_q8, SPEC_ENERGY_CAP)),
                 None => ([0; 3], 0),
             };
-            let floor_kind = material::resolve(0, theme, wall) as usize;
-            let rim = rim_light(grid, frame, &info, sx, y, rim_q8);
+            // §2.3: an ink pad is untagged floor, read from the level.
+            let on_ink = !wall && npads > 0 && {
+                let cx = (sx * stride) as i32 - grid.offset.0 as i32 + stride as i32 / 2;
+                let cy = y as i32;
+                pads[..npads]
+                    .iter()
+                    .any(|r| cx >= r.0 && cx < r.2 && cy >= r.1 && cy < r.3)
+            };
+            let floor_kind = if on_ink {
+                MaterialKind::Ink as usize
+            } else {
+                material::resolve(0, theme, wall) as usize
+            };
+            // Looked up on the run's first creature pixel: most runs have none.
+            let mut rim: Option<Option<Rim>> = None;
             for px_index in x..end {
                 let i = row + px_index;
                 let byte = mat.get(i).copied().unwrap_or(0);
@@ -522,15 +566,18 @@ fn run(
                             normals.get(i).copied().unwrap_or([0, 0])
                         };
                         let (nx, ny) = (i32::from(normal[0]), i32::from(normal[1]));
-                        let nz = up_component(nx, ny);
+                        let nz =
+                            i32::from(tables.nz[((nx * nx + ny * ny) >> 7).min(255) as usize]);
                         let dot = nx * half[0] + ny * half[1] + nz * half[2];
                         let index = (dot >> 7).clamp(0, (LUT - 1) as i32) as usize;
                         add = highlight_add(i32::from(tables.lobe[slot][index]), energy, info.dom_rgb);
                     }
                 }
                 // ---- the rim on a creature's silhouette ------------------
-                if let Some(rim) = &rim {
-                    if creature {
+                if creature {
+                    let rim =
+                        rim.get_or_insert_with(|| rim_light(grid, frame, &info, sx, y, rim_q8));
+                    if let Some(rim) = rim {
                         let free = mask_free(mat, w, h, px_index, y);
                         if free != 0 {
                             let r = RIM_NORMAL[free as usize];
@@ -549,13 +596,13 @@ fn run(
                     }
                 }
                 let mut any = false;
-                for n in 0..3 {
-                    let mut a = add[n].max(0) + rim_add[n].max(0);
+                for (slot, rim) in add.iter_mut().zip(rim_add) {
+                    let mut a = (*slot).max(0) + rim.max(0);
                     if low_colour {
                         a &= !7;
                     }
-                    add[n] = a.min(MAX_ADD);
-                    any |= add[n] > 0;
+                    *slot = a.min(MAX_ADD);
+                    any |= *slot > 0;
                 }
                 if any {
                     let pixel = pixels[i];
@@ -591,7 +638,7 @@ fn half_vector(info: &LightInfo) -> Option<[i32; 3]> {
         light[2] + VIEW[2],
     ];
     let len = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
-    if !(len > 0.001) {
+    if len <= 0.001 || len.is_nan() {
         return None;
     }
     let k = 256.0 / len;
@@ -731,7 +778,10 @@ fn rim_light(
     }
     // The run's block, in world pixels.
     let point = frame.cam
-        + Vec2::new((sx * grid.stride) as f32, (y + grid.offset.1) as f32);
+        + Vec2::new(
+            (sx * grid.stride) as f32 - grid.offset.0 as f32 + grid.stride as f32 * 0.5,
+            y as f32 + 0.5,
+        );
     let mut best: Option<Rim> = None;
     let mut best_energy = RIM_MIN_ENERGY;
     for light in frame.lights {
@@ -748,7 +798,7 @@ fn rim_light(
         }
         let q = distance / reach;
         let energy = light.gain * (1.0 - q * q) * RIM_REACH_GAIN;
-        if !(energy > 1.0) {
+        if energy <= 1.0 || energy.is_nan() {
             continue;
         }
         let energy = scaled(energy as i32, rim_q8, RIM_ENERGY_CAP);
@@ -787,13 +837,13 @@ fn wall_between(grid: &Grid, frame: &FxFrame<'_>, a: Vec2, b: Vec2) -> bool {
     let i = grid.sample_index(px, py);
     grid.surfaces
         .get(i)
-        .map_or(false, |s| s.layer & LayerMask::WALLS.0 != 0)
+        .is_some_and(|s| s.layer & LayerMask::WALLS.0 != 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::engine::{Grid, LightingMode};
-    use super::super::fx::{testkit, LightInfo, DIR_ONE};
+    use super::super::fx::{testkit, DIR_ONE};
     use super::super::material::{self, pen, MaterialKind};
     use super::{
         boss_pen, enemy_pen, keep_glints, pool_pen, prop_pen, rat_pen, run, tables, KINDS, LUT,

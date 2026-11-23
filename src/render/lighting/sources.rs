@@ -190,8 +190,9 @@ impl LightMap {
                     beam.height = 7.0;
                     self.push_shaped(beam, 3);
                 }
-                // The L4+ mirrored beam lights the floor too.
-                if b > 0.05 && lfx.twin && lfx.beam_b > 2.0 {
+                // Both beams exist at every rank (batch 13): the second bar
+                // lights the floor too.
+                if b > 0.05 && lfx.beam_b > 2.0 {
                     let dir = Vec2::from_angle(lfx.angle_b);
                     let mut beam =
                         Light::radial(muzzle, lfx.beam_b + 18.0, (255, 86, 84), 0.85 * b);
@@ -206,7 +207,7 @@ impl LightMap {
                 }
             }
             // Carbon Copy: warm amber glow at the recorded eye pair + stepped
-            // copper-amber pools along the replaying backward sweep.
+            // copper-amber pools along the two inward-closing replay beams.
             if lfx.copy_active() {
                 if let Some(copy) = lfx.copy {
                     let cf = if copy.facing.len_sq() > 1e-4 {
@@ -231,34 +232,45 @@ impl LightMap {
                             hard: false,
                         });
                     }
-                    let pulses = copy.pulses.max(1);
-                    let last_idx = lfx.copy_fired.saturating_sub(1).min(pulses - 1);
-                    let rev = (pulses - 1).saturating_sub(last_idx);
-                    let span = crate::game::weapon::LASER_SWEEP_HALF * 2.0;
-                    let t = if pulses <= 1 {
-                        0.5
-                    } else {
-                        rev as f32 / (pulses - 1) as f32
-                    };
-                    let ang = cf.y.atan2(cf.x) + (t - 0.5) * span;
-                    let dir = Vec2::from_angle(ang);
+                    let ct = (lfx.copy_age / lfx.copy_secs.max(1e-4)).clamp(0.0, 1.0);
+                    let base = cf.angle();
+                    let pair = [
+                        base - lfx.copy_half + lfx.copy_span * ct,
+                        base + lfx.copy_half - lfx.copy_span * ct,
+                    ];
                     let reach = copy.reach.clamp(12.0, 120.0);
-                    for &frac in &[0.42f32, 0.82] {
-                        let p = copy.origin + dir * (reach * frac);
-                        let sx = p.x - cam.x;
-                        let sy = p.y - cam.y;
-                        if in_range(sx, sy, 26.0) {
-                            self.lights.push(PointLight {
-                                x: sx,
-                                y: sy,
-                                radius: 24.0,
-                                color: (242, 154, 44),
-                                intensity: (162.0 * pulse) as u16,
-                                scatter: (42.0 * pulse) as u16,
-                                priority: 2,
-                                occlude: false,
-                                hard: false,
-                            });
+                    for ang in pair {
+                        let dir = Vec2::from_angle(ang);
+                        // Stop the pools at the first wall, the same test the
+                        // hit uses.
+                        let stop = scene
+                            .level
+                            .tiles
+                            .segment_hit(
+                                copy.origin,
+                                copy.origin + dir * reach,
+                                crate::game::weapon::LASER_HALF_WIDTH,
+                            )
+                            .map(|t| t.clamp(0.0, 1.0))
+                            .unwrap_or(1.0);
+                        let len = reach * stop;
+                        for &frac in &[0.42f32, 0.82] {
+                            let p = copy.origin + dir * (len * frac);
+                            let sx = p.x - cam.x;
+                            let sy = p.y - cam.y;
+                            if in_range(sx, sy, 26.0) {
+                                self.lights.push(PointLight {
+                                    x: sx,
+                                    y: sy,
+                                    radius: 24.0,
+                                    color: (242, 154, 44),
+                                    intensity: (162.0 * pulse) as u16,
+                                    scatter: (42.0 * pulse) as u16,
+                                    priority: 2,
+                                    occlude: false,
+                                    hard: false,
+                                });
+                            }
                         }
                     }
                 }

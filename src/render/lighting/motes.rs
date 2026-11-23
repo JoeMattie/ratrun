@@ -141,7 +141,7 @@ pub(super) fn caustics_here(theme: Theme, zone: Option<LightZoneKind>) -> bool {
     water && !matches!(zone, Some(LightZoneKind::Blackout))
 }
 
-/// Test-only switch: pretend the level asked for caustics (the ocean arm).
+// Test-only switch: pretend the level asked for caustics (the ocean arm).
 #[cfg(test)]
 thread_local! {
     static CAUSTICS_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -195,6 +195,7 @@ fn particulate(
     let seed = (frame.level.seed as u32) ^ (frame.level.seed >> 32) as u32;
     let field = (canvas.w * canvas.h) as u32;
     let cold = flavour == Flavour::Cold;
+    let cam = (frame.cam.x as i64, frame.cam.y as i64);
     for i in 0..count {
         // Ambience's hashing, cloned: the mote's whole life comes from these
         // bits, so two runs (or two frames in a step) agree exactly.
@@ -202,7 +203,7 @@ fn particulate(
         let h1 = hash(h0 ^ 0x5bf0_3635);
         let cell = (h0 % field) as i32;
         let (base_x, base_y) = (cell % canvas.w as i32, cell / canvas.w as i32);
-        let (mut vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
+        let (vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
         match flavour {
             // A wisp rises whether or not its hash wanted to drift.
             Flavour::Steam => vy = -1,
@@ -215,12 +216,14 @@ fn particulate(
         // Each mote steps on every other 8 Hz step, so about half the field
         // moves a pixel at a time: 30 moves ≈ 60 changed cells, the budget.
         let moves = (i64::from(clock) + 1 + i64::from(i as u32 & 1)) / 2;
-        let x = (i64::from(base_x) + i64::from(vx) * moves).rem_euclid(canvas.w as i64) as i32;
-        let y = (i64::from(base_y) + i64::from(vy) * moves).rem_euclid(canvas.h as i64) as i32;
+        // Anchored to the world (tiled at the view size), so the dust rides
+        // the floor under a moving camera instead of sticking to the screen.
+        let x = (i64::from(base_x) + i64::from(vx) * moves - cam.0).rem_euclid(canvas.w as i64) as i32;
+        let y = (i64::from(base_y) + i64::from(vy) * moves - cam.1).rem_euclid(canvas.h as i64) as i32;
         let Some((rel, tint)) = beam.at(grid, x as usize, y as usize) else {
             continue;
         };
-        let lift = lift_q8(rel, cold) * gains.motes >> 8;
+        let lift = (lift_q8(rel, cold) * gains.motes) >> 8;
         if lift <= 0 {
             continue;
         }

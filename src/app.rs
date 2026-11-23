@@ -4335,7 +4335,7 @@ impl App {
             || self
                 .world
                 .as_ref()
-                .is_some_and(|w| w.zoom_view != w.zoom)
+                .is_some_and(|w| w.zoom_view != w.zoom_view_target())
     }
 
     pub fn render(&mut self, frame: &mut Frame) {

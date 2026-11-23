@@ -995,6 +995,28 @@ pub fn draw_rat_with_whip(
     draw_dash_charge(pb, player, elapsed, cam);
 }
 
+/// The live Spiked Tail chain alone, at its ordinary size: the Growth Serum's
+/// giant draws its body through a small offscreen window the 120 px lash
+/// cannot live in, so `World::draw_giant_rat` draws the lash with this.
+pub fn draw_live_whip(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    elapsed: f32,
+    cam: Vec2,
+    tail_flash: f32,
+    whip: &WhipChain,
+) {
+    if !whip.is_active() {
+        return;
+    }
+    let tint = tint_of(player, elapsed);
+    let mut tail = tail_charge(player);
+    if let Some(t) = tail.as_mut() {
+        t.flash = tail_flash.clamp(0.0, 1.0);
+    }
+    draw_whip_chain(pb, elapsed, tint, cam, tail, whip);
+}
+
 /// Everything about this frame's pose, derived once (split out so the tests can
 /// redraw one layer — the body mask for the tail's "never covers the rat"
 /// check — from the same numbers the real pass uses).
@@ -2389,6 +2411,14 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
                     fur
                 };
                 out = mix(out, tint.apply(colour), cover * a_all);
+            }
+            if cover <= 0.0 && dark < 0.5 {
+                // The drop shadow alone is floor, not body (the lighting's
+                // material pen): no rim or sheen on it.
+                let body_pen = pb.set_pen(0);
+                pb.plot(x, y, out);
+                pb.set_pen(body_pen);
+                continue;
             }
             pb.plot(x, y, out);
         }

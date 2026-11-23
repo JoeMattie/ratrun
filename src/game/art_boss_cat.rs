@@ -1173,6 +1173,14 @@ pub fn draw_boss_cat_ground(pb: &mut PixelBuffer, view: &BossCatView, cam: Vec2,
 /// Ground drop shadow: crisp contact shadow while grounded; clearly **grows
 /// larger and darker** directly underneath the plunging jaguar during `Pounce`.
 fn draw_ground_shadow(pb: &mut PixelBuffer, pose: &Pose) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_ground_shadow_body(pb, pose);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_ground_shadow_body(pb: &mut PixelBuffer, pose: &Pose) {
     let (sh_center, sh_su, sh_sv, sh_alpha) = if pose.state == BossCatState::Pounce {
         let p = pose.progress;
         let approach = (p / POUNCE_LAND_PROGRESS).clamp(0.0, 1.0);

@@ -179,6 +179,14 @@ fn shade(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
 
 /// Soft elliptical ground shadow.
 fn shadow_oval(pb: &mut PixelBuffer, cx: i32, cy: i32, rx: i32, ry: i32, amount: f32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    shadow_oval_body(pb, cx, cy, rx, ry, amount);
+    pb.set_pen(prev_pen);
+}
+
+fn shadow_oval_body(pb: &mut PixelBuffer, cx: i32, cy: i32, rx: i32, ry: i32, amount: f32) {
     if rx <= 0 || ry <= 0 {
         shade(pb, cx, cy, amount);
         return;

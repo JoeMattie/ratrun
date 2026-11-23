@@ -470,14 +470,10 @@ fn start_attack(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput
     //    band's length at it instead of stalking forever. `enter_crouch`
     //    already clamps the landing to the art's band, and both the landing
     //    footprint and the rat's escape lane are still required.
-    if boss.out_of_reach > 0.0
+    boss.out_of_reach >= OUT_OF_REACH_SECS
         && distance <= CLOSING_POUNCE_MAX
         && ctx.los_clear(boss.pos, ctx.player_pos, PLAYER_RADIUS)
         && enter_crouch(ctx, boss, out)
-    {
-        return true;
-    }
-    false
 }
 
 // ============================================================================

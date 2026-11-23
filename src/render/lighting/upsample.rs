@@ -94,7 +94,7 @@ pub(super) fn ambient_scale(theme: Theme, mode: LightingMode) -> f32 {
         Theme::Lab => AMBIENT_LAB,
         Theme::Laundry => AMBIENT_LAUNDRY,
         Theme::Printworks => AMBIENT_PRINTWORKS,
-        Theme::Flatbed => AMBIENT_FLATBED,
+        Theme::Trailer => AMBIENT_FLATBED,
     }
 }
 
@@ -178,9 +178,12 @@ struct Scratch {
     flat: Vec<bool>,
 }
 
+/// The bounce term's two scratch planes (energy, blur).
+type BouncePlanes = (Vec<[i32; 3]>, Vec<[i32; 3]>);
+
 thread_local! {
     static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default());
-    static BOUNCE: RefCell<(Vec<[i32; 3]>, Vec<[i32; 3]>)> =
+    static BOUNCE: RefCell<BouncePlanes> =
         const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
@@ -451,56 +454,70 @@ fn bilinear(
             } else {
                 CH
             };
-            for px in x..end {
-                let pbx = px + ox;
-                let (_, wx) = locate(pbx, stride);
-                let own = own_row * gw + (pbx / stride).min(gw - 1);
+            // Within the segment the horizontal weight steps by exactly
+            // `256 / stride` a pixel (the stride is a power of two) and the
+            // pixel's own sample changes once, at the block boundary.
+            let (_, wx0) = locate(bx, stride);
+            let dw = 256 / s;
+            let split = (((s0x + 1) * s).max(0) as usize).saturating_sub(ox).clamp(x, end);
+            for (lo, hi) in [(x, split), (split, end)] {
+                if lo == hi {
+                    continue;
+                }
+                let own = own_row * gw + ((lo + ox) / stride).min(gw - 1);
                 let k = class(grid, own);
                 let (cl, cr) = (&cols[l * 2 + k], &cols[r * 2 + k]);
-                let (hl, hr) = (256 - wx, wx);
-                let ws = hl * cl.w + hr * cr.w;
-                let sample = if ws <= 0 {
-                    toned[own]
-                } else {
-                    let mut v = [0i32; CH];
-                    if ws == 1 << 16 {
-                        for j in 0..nch {
-                            v[j] = (hl * cl.v[j] + hr * cr.v[j] + (1 << 15)) >> 16;
-                        }
+                for px in lo..hi {
+                    let pbx = px + ox;
+                    let wx = wx0 + (px - x) as i32 * dw;
+                    let (hl, hr) = (256 - wx, wx);
+                    let ws = hl * cl.w + hr * cr.w;
+                    let sample = if ws <= 0 {
+                        toned[own]
                     } else {
-                        let d = i64::from(ws);
-                        for j in 0..nch {
-                            let sum = i64::from(hl) * i64::from(cl.v[j])
-                                + i64::from(hr) * i64::from(cr.v[j]);
-                            v[j] = (sum * 2 + d).div_euclid(2 * d) as i32;
+                        let mut v = [0i32; CH];
+                        if ws == 1 << 16 {
+                            for j in 0..nch {
+                                v[j] = (hl * cl.v[j] + hr * cr.v[j] + (1 << 15)) >> 16;
+                            }
+                        } else {
+                            let d = i64::from(ws);
+                            for j in 0..nch {
+                                let sum = i64::from(hl) * i64::from(cl.v[j])
+                                    + i64::from(hr) * i64::from(cr.v[j]);
+                                v[j] = (sum * 2 + d).div_euclid(2 * d) as i32;
+                            }
                         }
-                    }
-                    Sample {
-                        mul: [
-                            v[0].clamp(0, MUL_CEILING) as u16,
-                            v[1].clamp(0, MUL_CEILING) as u16,
-                            v[2].clamp(0, MUL_CEILING) as u16,
-                        ],
-                        add: [
-                            v[3].clamp(-128, 142) as i16,
-                            v[4].clamp(-128, 142) as i16,
-                            v[5].clamp(-128, 142) as i16,
-                        ],
-                        tint: [
-                            v[6].clamp(0, 255) as u8,
-                            v[7].clamp(0, 255) as u8,
-                            v[8].clamp(0, 255) as u8,
-                            v[9].clamp(0, 255) as u8,
-                        ],
-                    }
-                };
-                let pixel = &mut row[px];
-                let lit = sample.shade_exact(*pixel);
-                *pixel = if low_colour {
-                    palette_dither(lit, depth, pbx, by)
-                } else {
-                    lit
-                };
+                        Sample {
+                            mul: [
+                                v[0].clamp(0, MUL_CEILING) as u16,
+                                v[1].clamp(0, MUL_CEILING) as u16,
+                                v[2].clamp(0, MUL_CEILING) as u16,
+                            ],
+                            add: [
+                                // An interpolated value lies between its taps
+                                // (the vignette may lift one past 142): only
+                                // the i16 range needs guarding.
+                                v[3].clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                                v[4].clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                                v[5].clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                            ],
+                            tint: [
+                                v[6].clamp(0, 255) as u8,
+                                v[7].clamp(0, 255) as u8,
+                                v[8].clamp(0, 255) as u8,
+                                v[9].clamp(0, 255) as u8,
+                            ],
+                        }
+                    };
+                    let pixel = &mut row[px];
+                    let lit = sample.shade_exact(*pixel);
+                    *pixel = if low_colour {
+                        palette_dither(lit, depth, pbx, by)
+                    } else {
+                        lit
+                    };
+                }
             }
             x = end;
         }
@@ -519,7 +536,7 @@ mod tests {
         Theme::Lab,
         Theme::Laundry,
         Theme::Printworks,
-        Theme::Flatbed,
+        Theme::Trailer,
     ];
     const MODES: [LightingMode; 4] = [
         LightingMode::Full,

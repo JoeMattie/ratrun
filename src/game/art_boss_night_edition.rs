@@ -1061,6 +1061,14 @@ fn draw_press_bed(pb: &mut PixelBuffer, c: Vec2, accent: Rgb) {
 }
 
 fn draw_shadow(pb: &mut PixelBuffer, fr: &Frame, state: NightEditionState) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_shadow_body(pb, fr, state);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_shadow_body(pb: &mut PixelBuffer, fr: &Frame, state: NightEditionState) {
     let alpha_scale = if state == NightEditionState::Wreck {
         (1.0 - fr.prog * 0.45).clamp(0.35, 1.0)
     } else {

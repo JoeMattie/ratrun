@@ -245,6 +245,8 @@ pub struct World {
     /// The eased zoom the renderer used last frame (chases `zoom` over about
     /// 0.15 s, so a wheel step glides instead of snapping).
     pub zoom_view: f32,
+    /// Growth Serum: the giant rat's two offscreen windows (render scratch).
+    giant_scratch: (PixelBuffer, PixelBuffer),
     /// Source pixels per screen pixel of the last draw (`1,1` unzoomed). The
     /// app's screen→world mapping (mouse steering, click targets) scales the
     /// cell offset by this so aim stays exact at every zoom.
@@ -533,6 +535,7 @@ impl World {
             render_viewport: Vec2::new(160.0, 80.0),
             zoom: zoom::DEFAULT,
             zoom_view: zoom::DEFAULT,
+            giant_scratch: (PixelBuffer::new(0, 0), PixelBuffer::new(0, 0)),
             zoom_scale: Vec2::new(1.0, 1.0),
             world_buf: None,
             subcell: crate::render::subcell::SubcellSet::Off,
@@ -2167,12 +2170,18 @@ impl World {
         // layered over the player's own choice (the wheel and `Z`/`X` keep
         // moving `self.zoom`; only what `zoom_view` chases is overridden). The
         // simulation reads neither value.
-        let target = zoom::giant_target(
+        let target = self.zoom_view_target();
+        self.zoom_view = zoom::ease(self.zoom_view, target, dt.max(0.0));
+    }
+
+    /// What `zoom_view` is easing toward this frame: the player's rung, or the
+    /// Growth Serum's pulled-back view while the find runs. Render-only.
+    pub fn zoom_view_target(&self) -> f32 {
+        zoom::giant_target(
             self.zoom,
             self.player.buffs.giant,
             crate::game::ecs::systems::powerups::GROWTH_SECS,
-        );
-        self.zoom_view = zoom::ease(self.zoom_view, target, dt.max(0.0));
+        )
     }
 
     /// Step the zoom one rung (`dir > 0` widens the view). Returns the setting.
@@ -3269,12 +3278,19 @@ impl World {
             self.elapsed,
             &mut self.tail_ready_at,
         );
-        let pen = pb.set_pen(crate::render::lighting::rat_pen());
+        // The giant is lit as a body five times the size (a slow dome), not as
+        // the small rat's.
+        let giant = giant_draw_scale(self.player.buffs.giant);
+        let pen = pb.set_pen(if giant.is_some_and(|s| s > 1.5) {
+            crate::render::lighting::giant_rat_pen()
+        } else {
+            crate::render::lighting::rat_pen()
+        });
         // Growth Serum (batch 13): while the find runs, the rat is rasterised at
         // 1:1 into a small offscreen buffer and blitted back five times as big
         // (see `draw_giant_rat`), so the giant is made of the rat's own pixels.
         // The camera, the zoom and everything else are untouched.
-        match giant_draw_scale(self.player.buffs.giant) {
+        match giant {
             Some(scale) => self.draw_giant_rat(pb, cam, scale, flash),
             None => art_rat::draw_rat_with_whip(
                 pb,
@@ -3336,8 +3352,13 @@ impl World {
         let (sx, sy) = self.w2s(self.player.pos, cam);
         let (x0, y0) = (sx - half, sy - half);
 
-        let mut src = PixelBuffer::new(side, side);
-        let mut under = PixelBuffer::new(side, side);
+        // Kept scratch: no allocation on the per-frame path.
+        let (mut src, mut under) = std::mem::replace(
+            &mut self.giant_scratch,
+            (PixelBuffer::new(0, 0), PixelBuffer::new(0, 0)),
+        );
+        src.resize(side, side);
+        under.resize(side, side);
         for j in 0..side {
             for i in 0..side {
                 let (px, py) = (x0 + i as i32, y0 + j as i32);
@@ -3389,6 +3410,18 @@ impl World {
                 let bx = left + ((i as f32 + 1.0) * scale).round() as i32;
                 pb.rect_fill(sx + ax, sy + ay, bx - ax, by - ay, c);
             }
+        }
+        self.giant_scratch = (src, under);
+        // The live lash at its ordinary size, over the giant.
+        if self.whip_chain.is_active() {
+            art_rat::draw_live_whip(
+                pb,
+                &self.player,
+                self.elapsed,
+                cam,
+                tail_flash,
+                &self.whip_chain,
+            );
         }
     }
 

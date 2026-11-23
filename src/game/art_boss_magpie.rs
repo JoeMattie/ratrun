@@ -1368,6 +1368,14 @@ pub fn draw_magpie_ground(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2, ac
 
 /// Crisp sweeping avian shadow on the oak planks (tight when perched, wide sweeping wings in flight!).
 fn draw_shadow(pb: &mut PixelBuffer, pose: &Pose) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_shadow_body(pb, pose);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_shadow_body(pb: &mut PixelBuffer, pose: &Pose) {
     let fly = (pose.altitude / 13.0).clamp(0.0, 1.4);
     let alpha = (0.50 - 0.14 * fly) * pose.alpha;
     let offset = Vec2::new(2.0 + 3.0 * fly, 3.0 + 5.0 * fly);

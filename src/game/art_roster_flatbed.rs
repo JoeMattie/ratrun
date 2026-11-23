@@ -369,6 +369,14 @@ fn thick_line(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), core: Rgb, edg
 
 /// Soft elliptical contact or hover shadow on the oak deck.
 fn shadow_ellipse(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, strength: f32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    shadow_ellipse_body(pb, cx, cy, rx, ry, strength);
+    pb.set_pen(prev_pen);
+}
+
+fn shadow_ellipse_body(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, strength: f32) {
     if pb.w == 0 || pb.h == 0 || rx <= 0.2 || ry <= 0.2 {
         return;
     }

@@ -1568,7 +1568,7 @@ enum Script {
     /// Spiked Tail at rank 5, kited at 100 px: the lash plus the burst it lands
     /// on the same tick.
     Lash,
-    /// Laser Eyes at rank 5, kited at 70 px: one sweep's worth of pulses a tick.
+    /// Laser Eyes at rank 5, kited at 70 px: one sweep's single hit per cycle.
     Laser,
     /// Tail Whip at rank 5 behind Counterweight x6, at hugging range.
     Whip6,
@@ -1654,7 +1654,8 @@ impl Script {
                 }
             }
             Script::Laser => {
-                let hit = weapon.laser_hit_damage() * weapon.laser_pulses() as f32 * mult;
+                // One sweep cuts a body once for one old pulse's damage.
+                let hit = weapon.laser_hit_damage() * mult;
                 let mut t = 0.0;
                 while t < secs {
                     out.push((t, hit, 0.0, 0.0));

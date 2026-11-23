@@ -95,6 +95,14 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
 /// Soft grounded contact shadow cast toward bottom-right (top-left light).
 /// Spills 3px below and 3px to the right of `(x, y, w, h)`.
 fn shadow_rect(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    shadow_rect_body(pb, x, y, w, h);
+    pb.set_pen(prev_pen);
+}
+
+fn shadow_rect_body(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
     let bw = pb.w as i32;
     let bh = pb.h as i32;
     for dy in 0..3 {
@@ -133,6 +141,14 @@ fn shadow_rect(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
 
 /// Soft elliptical contact shadow over the floor or surface.
 fn shadow_ellipse(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, strength: f32) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    shadow_ellipse_body(pb, cx, cy, rx, ry, strength);
+    pb.set_pen(prev_pen);
+}
+
+fn shadow_ellipse_body(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, strength: f32) {
     let bw = pb.w as i32;
     let bh = pb.h as i32;
     let x0 = ((cx - rx).floor() as i32).max(0);

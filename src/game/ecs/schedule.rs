@@ -43,7 +43,7 @@
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact`; the last reader of `EnemyIndex` by index |
-//! | 16a | `powerups::giant_stomp_system` | the Growth Serum's stomp disc (batch 13); right after contact and before the reap, so a stomp kill is reaped and loots on the same tick |
+//! | 16a | `powerups::giant_stomp_system` | the Growth Serum's stomp disc (batch 13); right after contact (the head of 16b's nested chain) and before 16b-16e and the reap, so a stomp kill is seen by the death jump, reaped and looted on the same tick |
 //! | 16b | `evolutions::{milk_teeth,fondue_tines,fondue_string}_system`, `fairy_ring_system`, `drain_cleaner_system`, `roll_call_system`, `dead_letter_system`, `ripcord_system` | evolved weapons (new), in this order |
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
 //! | 16c2 | `enemy_wave4::wave4_system` | wave-4 kinds' tells and hazards (new); right after 16c |
@@ -219,23 +219,6 @@ pub fn build_tick_schedule() -> Schedule {
             .after(weapons::active_weapons_system),
     );
 
-    // 16a: Growth Serum's stomp (batch 13). It has to sit in the one window that
-    // matters — after `contact_system` (an ordinary body touching the giant is
-    // being stomped, so the two passes agree on the same tick) and **before**
-    // `reap_enemies_system`, so a body it crushes is despawned, pays its gem,
-    // gold and rare drop and counts in this tick's counters exactly like a trap
-    // kill. It is registered on its own with both ends named rather than chained
-    // into either tuple: the reap is the *far* end of the 16b-24 group, and a
-    // chain alone would leave the stomp free to run after it. It spawns and
-    // despawns nothing and draws no rng (the dust ring is a fixed-shape
-    // emitter), so the `EnemyIndex` window is untouched, and a run without the
-    // find returns on its first line.
-    schedule.add_systems(
-        powerups::giant_stomp_system
-            .after(combat::contact_system)
-            .before(loot::reap_enemies_system),
-    );
-
     // 11c: wave 3's self-driving weapons (Laser Eyes' burst, Super Dash's dash
     // hit) and Counterweight's nudge clock. Chained right after the active
     // weapons and before `bullets_system`: the cached `EnemyIndex` order is
@@ -339,7 +322,15 @@ pub fn build_tick_schedule() -> Schedule {
             // tuple stays inside `IntoScheduleConfigs`' 20-element limit: the
             // tines fly before their string is ticked, so a cast that settles
             // this tick already has a string this tick.
+            // 16a: Growth Serum's stomp (batch 13) heads the nested chain: right
+            // after `contact_system` (a body touching the giant is being
+            // stomped, so the two passes agree on the tick) and before every
+            // 16b-16e system and the reap, so a crushed body is seen by the
+            // Hantavirus death jump, reaped and looted this tick. It spawns and
+            // despawns nothing and draws no rng, so the `EnemyIndex` window is
+            // untouched; a run without the find returns on its first line.
             (
+                powerups::giant_stomp_system,
                 evolutions::milk_teeth_system,
                 evolutions::fondue_tines_system,
                 evolutions::fondue_string_system,

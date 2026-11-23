@@ -4359,32 +4359,38 @@ fn recentre_the_fight(boss: &mut Boss, level: &Level, rat: Vec2) {
 /// committed beats look like. The leap never draws from the rng, so it cannot
 /// perturb a controller's stream.
 fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
-    if boss.dead || boss.state != boss.kind.initial_state() {
-        // An attack beat is the boss fighting. The timer restarts when the beat
-        // ends, so a boss that attacks from range never accrues a pursuit.
+    if boss.dead {
         boss.out_of_reach = 0.0;
         boss.leap_t = 0.0;
         return;
     }
     let to = ctx.player_pos - boss.pos;
     let gap = to.len();
+    // The clock measures distance, not the beat: it runs in every state and
+    // only a rat back inside engage range resets it (several kinds leave their
+    // neutral beat on a timer shorter than `OUT_OF_REACH_SECS`).
+    if gap <= boss.kind.engage_range() {
+        boss.out_of_reach = 0.0;
+    } else {
+        boss.out_of_reach += dt;
+    }
+    if boss.state != boss.kind.initial_state() {
+        // A committed beat never moves under the pursuit rule.
+        boss.leap_t = 0.0;
+        return;
+    }
     if boss.leap_t > 0.0 {
         // Committed to the leap: a straight dash at [`LEAP_SPEED`], steered at
         // the rat each tick so it cannot be side-stepped by a pixel.
         boss.leap_t = (boss.leap_t - dt).max(0.0);
-        let dir = if gap > 1e-3 { to / gap } else { boss.facing };
+        let dir = if gap > 1e-3 { to * (1.0 / gap) } else { boss.facing };
         if !move_boss(ctx, boss, dir, LEAP_SPEED) {
             // A leap into a wall ends early (the slide still moved it).
             boss.leap_t = 0.0;
         }
         return;
     }
-    if gap <= boss.kind.engage_range() {
-        boss.out_of_reach = 0.0;
-        return;
-    }
-    boss.out_of_reach += dt;
-    if boss.out_of_reach < OUT_OF_REACH_SECS {
+    if gap <= boss.kind.engage_range() || boss.out_of_reach < OUT_OF_REACH_SECS {
         return;
     }
     let radius = boss.kind.body_radius();
@@ -4395,7 +4401,7 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         boss.leap_t = LEAP_SECS;
         boss.leap_cd = LEAP_COOLDOWN;
         boss.out_of_reach = 0.0;
-        let dir = if gap > 1e-3 { to / gap } else { boss.facing };
+        let dir = if gap > 1e-3 { to * (1.0 / gap) } else { boss.facing };
         move_boss(ctx, boss, dir, LEAP_SPEED);
         return;
     }
@@ -4697,7 +4703,7 @@ pub fn boss_update_system(
         // before the controller so a controller's own neutral walk composes on
         // top of it rather than fighting it.
         {
-            let mut ctx = BossContext {
+            let ctx = BossContext {
                 dt,
                 time: boss.elapsed,
                 player_pos: player.pos,

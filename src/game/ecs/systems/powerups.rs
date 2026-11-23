@@ -380,7 +380,7 @@ pub fn giant_stomp_system(
         let pos = e.pos;
         let radius = e.radius;
         let id = e.id;
-        if giant_crushes(&*e) {
+        if giant_crushes(&e) {
             // Crushed outright: the same damage path a Nuke uses on fodder, so
             // the reap below pays the kill, its gem, its gold and its rare drop.
             let applied = e.hp.max(1.0);
@@ -413,7 +413,9 @@ pub fn giant_stomp_system(
         if !boss.hit_shapes().circle_hits_grounded(ppos, reach) {
             continue;
         }
-        let amount = GIANT_BOSS_DAMAGE;
+        // The same per-state and shell multipliers every other boss hit takes.
+        let amount =
+            GIANT_BOSS_DAMAGE * boss.damage_mult * boss.incoming_multiplier(Vec2::ZERO, ppos);
         if !boss.take_damage(amount) {
             continue;
         }
@@ -1238,10 +1240,11 @@ mod tests {
         let p = w.player.pos;
         w.clear_enemies();
         let elite = w.spawn_enemy(EnemyKind::Brute, p, 1.0);
-        let mut body = w.ecs.get_mut::<Enemy>(elite).expect("the elite is alive");
-        body.elite = true;
-        let raw = body.damage;
-        drop(body);
+        let raw = {
+            let mut body = w.ecs.get_mut::<Enemy>(elite).expect("the elite is alive");
+            body.elite = true;
+            body.damage
+        };
         let hp = w.player.hp;
         w.begin_tick(DT, Vec2::ZERO, false);
         w.ecs

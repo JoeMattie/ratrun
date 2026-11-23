@@ -1532,6 +1532,14 @@ fn draw_spring_ticks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2, p: f32, pulse
 }
 
 fn draw_frame_shadow(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_frame_shadow_body(pb, pose, cam);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_frame_shadow_body(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
     if pose.alpha <= 0.02 {
         return;
     }

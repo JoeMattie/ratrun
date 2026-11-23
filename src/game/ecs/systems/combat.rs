@@ -340,7 +340,7 @@ fn contact_one(
     // (the stomp pass treats the pair on its own beat). Elites, named
     // minibosses and the boss still land their contact, at the giant's half
     // (`Player::take_damage` does that multiplication).
-    if giant && crate::game::ecs::systems::powerups::giant_crushes(&*e) {
+    if giant && crate::game::ecs::systems::powerups::giant_crushes(&e) {
         return;
     }
     if e.contact_cd <= 0.0 && collision::circles_overlap(ppos, PLAYER_RADIUS, e.pos, e.radius) {

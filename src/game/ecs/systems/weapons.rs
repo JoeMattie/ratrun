@@ -1162,9 +1162,10 @@ fn thrash_sweep(
         // A sweep shoves a boss the same few pixels a squeak does: capped by
         // `Boss::shove` (4 px a hit, 12 px a second) and never inside a
         // committed beat.
+        let away = boss.pos - ppos;
         let _ = boss.shove(
-            &level,
-            boss.pos - ppos,
+            level,
+            away,
             crate::game::ecs::systems::boss::SHOVE_PER_HIT_PX,
         );
         ledger.add_boss(kind, amount);
@@ -1301,9 +1302,10 @@ fn squeak_cone(
         // 4 px a hit and 12 px a second and refuses it outright inside a
         // committed beat (batch 13 — a shove mid-wind-up would slide the pose
         // out from under its own tell).
+        let away = boss.pos - origin;
         let _ = boss.shove(
-            &level,
-            boss.pos - origin,
+            level,
+            away,
             crate::game::ecs::systems::boss::SHOVE_PER_HIT_PX,
         );
         ledger.add_boss(kind, amount);

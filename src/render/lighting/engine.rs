@@ -592,6 +592,8 @@ pub struct LightMap {
     /// and each moving shadow slot.
     static_soft: Vec<SoftProfile>,
     moving_soft: [SoftProfile; 3],
+    /// Batch 13: the frame's body list for `softshadow::entity_shadows`.
+    body_shadows: softshadow::BodyShadows,
     /// Whether the last pass ran the effects (widens the cost budget).
     fx_active: bool,
 }
@@ -624,6 +626,7 @@ impl LightMap {
             normals: Vec::new(),
             static_soft: Vec::new(),
             moving_soft: Default::default(),
+            body_shadows: softshadow::BodyShadows::new(),
             fx_active: false,
         }
     }
@@ -875,7 +878,9 @@ impl LightMap {
                 }
                 rebaked
             };
-            if fx {
+            // Only `Full` reads the soft profile; its own key rebuilds it on the
+            // first Full frame after a tier change.
+            if fx && scene.mode == LightingMode::Full {
                 softshadow::bake(&mut self.static_soft[i], &self.geometry, &light, tag, rebaked);
             }
             let shadow: &ShadowProfile = shadow;
@@ -980,7 +985,7 @@ impl LightMap {
                     }
                     rebaked
                 };
-                if fx {
+                if fx && scene.mode == LightingMode::Full {
                     softshadow::bake(
                         &mut self.moving_soft[shadow_index],
                         &self.geometry,
@@ -1034,12 +1039,25 @@ impl LightMap {
                 // The effects' pixel stages, in the contract's order: the
                 // albedo pass, the shade, then the lit-space passes.
                 let (w, h) = (pb.w, pb.h);
+                let bodies_on = matches!(scene.mode, LightingMode::Full | LightingMode::Hard);
+                if bodies_on {
+                    self.body_shadows.gather(scene, (w, h));
+                }
                 self.normals.clear();
                 self.normals.resize(w * h, [0, 0]);
                 let (px, mat) = pb.split_mat();
                 let mut canvas = Canvas { w, h, px, mat };
                 surface::apply(&self.grid, &mut canvas, &mut self.normals, &frame);
                 upsample::composite(&self.grid, &mut canvas, &frame);
+                if bodies_on {
+                    softshadow::entity_shadows(
+                        &self.grid,
+                        &mut canvas,
+                        &mut self.body_shadows,
+                        &frame,
+                        &self.geometry,
+                    );
+                }
                 specular::apply(&self.grid, &mut canvas, &self.normals, &frame);
                 softshadow::reflections(&self.grid, &mut canvas, &self.normals, &frame);
                 air::composite(&self.grid, &mut canvas, &frame);
@@ -1322,6 +1340,7 @@ impl Grid {
                     air::splat_sample(
                         &mut self.info[i],
                         &SampleHit {
+                            theme,
                             light: &light,
                             tag,
                             delta,

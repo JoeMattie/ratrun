@@ -1647,7 +1647,10 @@ mod tests {
         rig.tick();
         let boss = rig.boss();
         assert!(
-            matches!(boss.state, BroomBossState::Hurt { left_foot_hit: true }),
+            matches!(
+                boss.state,
+                BossState::Broom(BroomBossState::Hurt { left_foot_hit: true })
+            ),
             "the rat is on the left slipper's side ({:?})",
             boss.state
         );

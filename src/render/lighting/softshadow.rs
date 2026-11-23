@@ -29,10 +29,6 @@
 //!
 //! Render-only and deterministic; integer arithmetic in the pixel loops.
 
-// `BodyShadows`/`entity_shadows` wait for their two call lines in
-// `engine.rs` (see the W6 report); remove this once they are wired.
-#![allow(dead_code)]
-
 use std::cell::Cell;
 
 use super::engine::{Grid, LightingMode};
@@ -266,7 +262,6 @@ const RAT_HEIGHT: f32 = 8.0;
 const FLYER_LIFT: f32 = 10.0;
 const FLYER_HEIGHT: f32 = 4.0;
 const BOSS_HEIGHT: f32 = 23.0;
-const BOSS_LIFT: f32 = 26.0;
 
 /// One body that occludes real lights (world px).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -281,6 +276,7 @@ pub(super) struct ShadowBody {
 }
 
 /// What [`entity_shadows`] did this frame (tests and the profiler).
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct CastStats {
     pub bodies: usize,
@@ -304,11 +300,13 @@ impl BodyShadows {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn bodies(&self) -> &[ShadowBody] {
         &self.list
     }
 
     /// Offer one body (call [`BodyShadows::finish`] after the last).
+    #[cfg(test)]
     pub(super) fn push(&mut self, body: ShadowBody) {
         self.list.push(body);
     }
@@ -364,12 +362,16 @@ impl BodyShadows {
                         boss.state,
                         BossState::Magpie(st) if st.flying()
                     );
-                    let up = boss.is_airborne() || magpie_up;
+                    // Its art draws its own detached shadow (as `LightMap::sun`):
+                    // a lamp shadow under it would be a third one.
+                    if boss.is_airborne() || magpie_up {
+                        continue;
+                    }
                     self.list.push(ShadowBody {
                         pos: boss.pos,
                         radius: boss.kind.body_radius(),
                         height: BOSS_HEIGHT,
-                        lift: if up { BOSS_LIFT } else { 0.0 },
+                        lift: 0.0,
                     });
                 } else if let Some(e) = entity.get::<Enemy>() {
                     if !e.alive() || !on(e.pos) {
@@ -404,8 +406,31 @@ fn reach_gain(l: &FxLight, d: f32) -> f32 {
     l.gain * k * k
 }
 
+/// Does light `l` have a clear line to body `b`? One short DDA trace: a lamp
+/// behind a wall casts no body shadow (the pixels it would darken never took
+/// its light).
+fn reaches(geometry: &Geometry, l: &FxLight, b: &ShadowBody) -> bool {
+    let to = b.pos - l.pos;
+    let linf = to.x.abs().max(to.y.abs());
+    if linf <= b.radius + 1.0 {
+        return true;
+    }
+    let t = geometry.trace(
+        l.pos,
+        to * (1.0 / linf),
+        linf - b.radius,
+        |_, h| h + 5.0 >= l.height,
+        LayerMask::WALLS,
+    );
+    !t.is_finite()
+}
+
 /// The ≤ 2 strongest lights reaching `b` (index into `lights`, gain at `b`).
-fn strongest(b: &ShadowBody, lights: &[FxLight]) -> [Option<(usize, f32)>; LIGHTS_PER_BODY] {
+fn strongest(
+    b: &ShadowBody,
+    lights: &[FxLight],
+    geometry: &Geometry,
+) -> [Option<(usize, f32)>; LIGHTS_PER_BODY] {
     let mut best: [Option<(usize, f32)>; LIGHTS_PER_BODY] = [None; LIGHTS_PER_BODY];
     for (i, l) in lights.iter().enumerate() {
         if l.tag == LightTag::Sun {
@@ -418,6 +443,10 @@ fn strongest(b: &ShadowBody, lights: &[FxLight]) -> [Option<(usize, f32)>; LIGHT
         }
         let c = reach_gain(l, d);
         if c < MIN_CAST {
+            continue;
+        }
+        // Cheap rejects first: only a light that would displace one is traced.
+        if best[1].is_some_and(|(_, g)| c <= g) || !reaches(geometry, l, b) {
             continue;
         }
         // Strictly stronger displaces: ties keep the earlier (more important).
@@ -552,6 +581,7 @@ pub(super) fn entity_shadows(
     canvas: &mut Canvas<'_>,
     bodies: &mut BodyShadows,
     frame: &FxFrame<'_>,
+    geometry: &Geometry,
 ) -> CastStats {
     let mut stats = CastStats::default();
     if !matches!(frame.mode, LightingMode::Full | LightingMode::Hard) {
@@ -572,7 +602,7 @@ pub(super) fn entity_shadows(
     for b in list.iter().take(MAX_BODIES) {
         stats.bodies += 1;
         let mut here = 0;
-        for (li, gain) in strongest(b, frame.lights).into_iter().flatten() {
+        for (li, gain) in strongest(b, frame.lights, geometry).into_iter().flatten() {
             let Some(cast) = plan_cast(b, &frame.lights[li], gain, frame.cam) else {
                 continue;
             };
@@ -972,6 +1002,7 @@ mod tests {
             gain: 300.0,
             extent: 120.0,
             tag: LightTag::Moving { priority: 2 },
+            steady: 300.0,
         }
     }
 
@@ -989,7 +1020,9 @@ mod tests {
         set.finish(frame.rat);
         let stats = {
             let mut canvas = testkit::canvas(&mut pb);
-            entity_shadows(&grid, &mut canvas, &mut set, &frame)
+            let mut geometry = Geometry::default();
+            geometry.sync(&level);
+            entity_shadows(&grid, &mut canvas, &mut set, &frame, &geometry)
         };
         (pb, stats)
     }
@@ -1053,9 +1086,11 @@ mod tests {
 
     #[test]
     fn body_darkening_never_passes_the_clamp() {
-        assert!(MAX_DARK > 0.3 && MAX_DARK < 0.36, "{MAX_DARK}");
-        // Under the overhead core the floor keeps 45 %.
-        assert!((1.0 - strength::OVERHEAD_DARKEN) * (1.0 - MAX_DARK) >= FLOOR_KEEP - 1e-4);
+        const {
+            assert!(MAX_DARK > 0.3 && MAX_DARK < 0.36);
+            // Under the overhead core the floor keeps 45 %.
+            assert!((1.0 - strength::OVERHEAD_DARKEN) * (1.0 - MAX_DARK) >= FLOOR_KEEP - 1e-4);
+        }
         let lights: Vec<FxLight> = (0..4)
             .map(|i| {
                 let mut l = lamp(Vec2::new(2.0 + 20.0 * i as f32, 30.0));

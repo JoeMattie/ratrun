@@ -1318,6 +1318,14 @@ pub fn draw_megarat_ground(pb: &mut PixelBuffer, view: &MegaRatView, cam: Vec2, 
 }
 
 fn draw_shadow(pb: &mut PixelBuffer, pose: &Pose) {
+    // A cast shadow is floor, not body: stamp it with the floor pen so the
+    // lighting's rim and sheen never treat it as a creature (batch 13).
+    let prev_pen = pb.set_pen(0);
+    draw_shadow_body(pb, pose);
+    pb.set_pen(prev_pen);
+}
+
+fn draw_shadow_body(pb: &mut PixelBuffer, pose: &Pose) {
     // A big low body: the shadow is a wide soft ellipse, weaker while rearing
     // (the chest comes off the floor) and gone in the death beat.
     let widen = 1.0 + pose.stretch * 0.5;

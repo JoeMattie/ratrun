@@ -1473,6 +1473,8 @@ fn draw_bat(pb: &mut PixelBuffer, fr: &Frame) {
     let sy1 = (scy + sry).min(pb.h as i32 - 1);
     let sx0 = (scx - srx).max(0);
     let sx1 = (scx + srx).min(pb.w as i32 - 1);
+    // A cast shadow is floor, not body (the lighting's material pen).
+    let body_pen = pb.set_pen(0);
     for y in sy0..=sy1 {
         let ny = (y - scy) as f32 * inv_sh_ry;
         let ny2 = ny * ny;
@@ -1486,6 +1488,7 @@ fn draw_bat(pb: &mut PixelBuffer, fr: &Frame) {
             }
         }
     }
+    pb.set_pen(body_pen);
 
     // 2) Classic M-arched scalloped bat wings + furry violet torso + pointed ears.
     let u_min = (-0.65 * s + sweep.min(0.0) - 2.55 * s).min(-2.1 * s) - 1.1 * s;
@@ -3109,6 +3112,7 @@ fn draw_bat_lod(pb: &mut PixelBuffer, fr: &Frame) {
     // Compact elevated hover shadow matching full-detail footprint.
     let scx = fr.pos.x.round() as i32 + (2.2 * s).round() as i32;
     let scy = fr.pos.y.round() as i32 + (3.4 * s + 0.45 * flap * s).round() as i32;
+    let body_pen = pb.set_pen(0);
     for dy in -1..=1 {
         for dx in -2..=2 {
             if dx * dx + dy * dy * 2 <= 5 {
@@ -3116,6 +3120,7 @@ fn draw_bat_lod(pb: &mut PixelBuffer, fr: &Frame) {
             }
         }
     }
+    pb.set_pen(body_pen);
 
     let u_min = (-0.65 * s + sweep.min(0.0) - 2.55 * s).min(-2.1 * s) - 0.9 * s;
     let u_max = (1.65 * s + sweep.max(0.0)).max(3.1 * s) + 0.9 * s;
@@ -4381,6 +4386,7 @@ fn draw_wickmoth(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
     let sx1 = (scx + srx.ceil() as i32).min(pb.w as i32 - 1);
     let inv_srx = 1.0 / srx;
     let inv_sry = 1.0 / sry;
+    let body_pen = pb.set_pen(0);
     for y in sy0..=sy1 {
         let ny = (y - scy) as f32 * inv_sry;
         for x in sx0..=sx1 {
@@ -4391,6 +4397,7 @@ fn draw_wickmoth(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
             }
         }
     }
+    pb.set_pen(body_pen);
 
     // 2) Swept parchment/soot moth wings + plump teardrop torso (distinct delta silhouette vs Bat!).
     let (body_sh, body_mid, body_hi) = if elite {
@@ -5310,6 +5317,7 @@ fn draw_hornet(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
     } else {
         // Grounded: a squat shadow makes the punish window obvious.
         let p = fr.px(-0.4 * s, 0.0);
+        let body_pen = pb.set_pen(0);
         line_blend(
             pb,
             (p.0 - 2, p.1 + 2),
@@ -5317,6 +5325,7 @@ fn draw_hornet(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
             (28, 24, 20),
             0.5,
         );
+        pb.set_pen(body_pen);
     }
 }
 

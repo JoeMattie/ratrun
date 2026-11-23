@@ -84,6 +84,8 @@ pub(crate) struct OverheadScene<'a> {
     pub player: &'a Player,
     /// World position of pixel (0, 0).
     pub cam: Vec2,
+    /// Unread: the overhead light does not move, so nothing here keys on time.
+    #[allow(dead_code)]
     pub elapsed: f32,
     /// The tier this frame's lighting runs at.
     pub mode: LightingMode,
@@ -433,9 +435,11 @@ fn enemy_body(e: &Enemy) -> (i32, i32, bool) {
 /// Rasterise one elliptical shadow into the darkness buffer, keeping the
 /// darker value per pixel.
 ///
-/// Rows run along the ellipse's major axis (`u`, the slide direction) and the
-/// darkness ramps across each row (`v`), so the falloff is one integer
-/// multiply per pixel: no `sqrt`, no divide, no per-pixel `f32`.
+/// Inverse-mapped over the bounding box: every pixel asks which row of the
+/// ellipse (`u`, along the slide direction) it lies on and how far across it
+/// (`v`). A forward-mapped rotated lattice is not onto, and left pinholes in
+/// every shadow whose slide was not axis-aligned. The per-row profile is two
+/// small stack tables, so the pixel loop is integer multiplies only.
 fn splat(
     rows: &mut Rows<'_>,
     (bw, bh): (i32, i32),
@@ -444,19 +448,17 @@ fn splat(
     soft: bool,
     clip: &Clip<'_>,
 ) -> usize {
-    let a = cast.a.max(1);
+    const MAX_A: i32 = 63;
+    let a = cast.a.clamp(1, MAX_A);
     let b = cast.b.max(1);
     let a2 = a * a;
-    let (vx, vy) = (-cast.uy, cast.ux);
-    let mut written = 0;
+    let mut span_of = [0i32; (2 * MAX_A + 1) as usize];
+    let mut step_of = [0i32; (2 * MAX_A + 1) as usize];
     for u in -a..=a {
         let t2 = a2 - u * u;
         // Q8 half-width factor: 256 * sqrt(1 - u²/a²).
         let f8 = ((t2 << 16) / a2).isqrt();
         let span = (b * f8) >> 8;
-        if span < 1 {
-            continue;
-        }
         // The core thins toward the ellipse's tips (half strength at `u = a`),
         // so the shadow reads as a soft blob rather than a dark bar. Faint
         // tiers get one flat step instead: the core, with no gradient at all.
@@ -465,32 +467,55 @@ fn splat(
         } else {
             i32::from(core)
         };
-        if core_row < 4 {
+        if span < 1 || core_row < 4 {
             continue;
         }
+        let k = (u + a) as usize;
+        span_of[k] = span;
         // Darkness per pixel across the row; `v = 0` is the darkest line, and
         // its value is the core exactly (the ceiling keeps the rounding from
         // eating a level at the core).
-        let step = (core_row * 256 + span - 1) / span;
-        let cut = if soft { span } else { (span * 3) / 5 };
-        for v in -cut..=cut {
+        step_of[k] = if soft {
+            (core_row * 256 + span - 1) / span
+        } else {
+            core_row
+        };
+    }
+    let reach = a.max(b);
+    let (x0, x1) = ((cast.x - reach).max(0), (cast.x + reach).min(bw - 1));
+    let (y0, y1) = ((cast.y - reach).max(0), (cast.y + reach).min(bh - 1));
+    let mut written = 0;
+    for y in y0..=y1 {
+        let dy = y - cast.y;
+        for x in x0..=x1 {
+            let dx = x - cast.x;
+            let uq = dx * cast.ux + dy * cast.uy; // u, Q8
+            let vq = (dy * cast.ux - dx * cast.uy).abs(); // |v|, Q8
+            let ui = (uq + 128) >> 8;
+            if ui < -a || ui > a {
+                continue;
+            }
+            let k = (ui + a) as usize;
+            let span = span_of[k];
+            if span == 0 {
+                continue;
+            }
             let d = if soft {
-                ((step * (span - v.abs()).max(0)) >> 8) as u8
+                let left = (span << 8) - vq;
+                if left <= 0 {
+                    continue;
+                }
+                (step_of[k] * left) >> 16
             } else {
-                core_row as u8
+                if vq * 5 > span * 3 * 256 {
+                    continue;
+                }
+                step_of[k]
             };
-            if d == 0 {
+            if d <= 0 || !clip.open(x, y) {
                 continue;
             }
-            let x = cast.x + ((u * cast.ux + v * vx) >> 8);
-            let y = cast.y + ((u * cast.uy + v * vy) >> 8);
-            if x < 0 || y < 0 || x >= bw || y >= bh {
-                continue;
-            }
-            if !clip.open(x, y) {
-                continue;
-            }
-            rows.put(bw, x, y, d);
+            rows.put(bw, x, y, d.min(255) as u8);
             written += 1;
         }
     }
@@ -541,7 +566,7 @@ mod tests {
             for x in 0..pb.w {
                 let c = pb.pixel_at(x, y);
                 let loss = i32::from(FLOOR.0) - i32::from(c.0);
-                if loss > 0 && best.map_or(true, |b| loss > b.2) {
+                if loss > 0 && best.is_none_or(|b| loss > b.2) {
                     best = Some((x as i32, y as i32, loss));
                 }
             }
