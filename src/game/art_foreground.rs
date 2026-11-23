@@ -72,7 +72,13 @@ pub fn extent(item: &ForeItem) -> (f32, f32) {
         // ---- Sewer ----
         ForeKind::MainPipe => (span_half(item, 44.0, s), 10.6 * s),
         ForeKind::CatwalkGrating => (span_half(item, 44.0, s), 6.8 * s),
-        ForeKind::ChainHoist => (10.5 * s, 6.2 * s),
+        ForeKind::ChainHoist => {
+            if item.horizontal {
+                (6.2 * s, 10.5 * s)
+            } else {
+                (10.5 * s, 6.2 * s)
+            }
+        }
         // ---- Kitchen ----
         ForeKind::ExtractorHood => (edge_reach(item, 18.0, s), 14.0 * s),
         ForeKind::PotRail => (span_half(item, 44.0, s), 10.5 * s),
@@ -124,8 +130,9 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
     let alpha_norm = (d.alpha as f32 / (ALPHA_MAX as f32).max(1.0)).clamp(0.0, 1.0);
 
     let (body_alpha, max_shadow) = if item.kind == ForeKind::Cloud {
-        let ca = (((d.alpha as u32) * 44) / (ALPHA_MAX as u32).max(1)).min(60) as u8;
-        (ca.max(1), 0.30 * (0.70 + 0.30 * alpha_norm))
+        let ca = d.alpha.min(52);
+        let cloud_norm = (d.alpha as f32 / 60.0).clamp(0.0, 1.0);
+        (ca.max(1), 0.30 * (0.75 + 0.25 * cloud_norm))
     } else {
         (
             d.alpha.min(ALPHA_MAX),
@@ -223,7 +230,7 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
                 emit_power_pole(&mut list, &ctx);
             } else {
                 let hl = power_wire_half(item, scale);
-                emit_power_wires(&mut list, &ctx, hl, item.horizontal, item.len > 0.0);
+                emit_power_wires(&mut list, &ctx, hl, item.horizontal, item.attach == Attach::Span);
             }
         }
     }
@@ -729,6 +736,7 @@ enum BdKind {
         cw: f32,
         seam_step: f32,
         seam_w: f32,
+        has_louvre: bool,
         s: f32,
         seed: u32,
         pal: ForePal,
@@ -744,6 +752,7 @@ enum BdKind {
         strap_step: f32,
         strap_w: f32,
         leak_u: f32,
+        has_leak: bool,
         s: f32,
         pal: ForePal,
         tc: (i8, i8),
@@ -2194,6 +2203,7 @@ fn eval_bd_row(
             cw,
             seam_step,
             seam_w,
+            has_louvre,
             s,
             seed,
             pal,
@@ -2219,7 +2229,7 @@ fn eval_bd_row(
                 let idx = (x - tile_x0) as usize;
                 let at_end = hl - au <= cw;
                 let su = (u + hl + seam_w * 0.5).rem_euclid(seam_step);
-                let on_seam = !at_end && hl - au > cw * 1.2 && su <= seam_w;
+                let on_seam = has_louvre && !at_end && hl - au > cw * 1.2 && su <= seam_w;
                 if at_end || on_seam {
                     let d = (seam_hw - av).min(if at_end { hl - au } else { su.min(seam_w - su) });
                     let wa = soft_u8(d, 1.8, 255);
@@ -2240,8 +2250,8 @@ fn eval_bd_row(
                 let d = (hw - av).min(hl - au);
                 let wa = soft_u8(d, 2.0, 255);
                 let on_rim = (tc_v > 0.0 && hw - v <= 1.8) || (tc_v < 0.0 && hw + v <= 1.8);
-                // Recessed ventilation louvre grille
-                let in_lv = (u - lv_c).abs() <= lv_hl && av <= lv_hv;
+                // Recessed ventilation louvre grille (dropped on short corridor spans)
+                let in_lv = has_louvre && (u - lv_c).abs() <= lv_hl && av <= lv_hv;
                 let c = if on_rim {
                     pal.rim
                 } else if in_lv {
@@ -2278,6 +2288,7 @@ fn eval_bd_row(
             strap_step,
             strap_w,
             leak_u,
+            has_leak,
             s,
             pal,
             tc,
@@ -2301,7 +2312,7 @@ fn eval_bd_row(
                 let idx = (x - tile_x0) as usize;
                 let at_end = hl - au <= cw;
                 let d_leak = (u - leak_u).abs();
-                let on_leak_flange = d_leak >= 0.35 * s && d_leak <= 2.1 * s;
+                let on_leak_flange = has_leak && d_leak >= 0.35 * s && d_leak <= 2.1 * s;
                 if at_end || on_leak_flange {
                     let d = (collar_r - av).min(hl - au);
                     let wa = soft_u8(d, 1.7, 255);
@@ -2310,7 +2321,7 @@ fn eval_bd_row(
                     continue;
                 }
                 let su = (u + hl - cw - strap_step * 0.6).rem_euclid(strap_step);
-                let on_strap = d_leak > 3.2 * s && su <= strap_w && av <= strap_r;
+                let on_strap = has_leak && d_leak > 3.2 * s && su <= strap_w && av <= strap_r;
                 if on_strap {
                     let d = (strap_r - av).min(su.min(strap_w - su) + 0.8);
                     let wa = soft_u8(d, 1.4, 255);
@@ -2686,9 +2697,10 @@ fn emit_main_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let sr = 4.2 * s;
     let fr = 5.6 * s;
-    let cw = (3.2 * s).min(hl * 0.45);
+    let cw = (3.2 * s).min(hl * 0.36);
     let fw = 2.0 * s;
     let flange_step = 24.0 * s;
+    let has_valve = hl >= 9.5 * s;
 
     let h = hash_u32(c.seed ^ 0x51A7);
     let valve_u = ((h & 255) as f32 / 255.0 - 0.5) * (hl * 0.85).max(0.0);
@@ -2696,7 +2708,7 @@ fn emit_main_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let vr = 4.6 * s;
     let valve_vc = valve_side * (sr + vr * 0.55);
 
-    // Shadow: shaft, wall collars, mid flanges, spoked wheel disc
+    // Shadow: shaft, wall collars, mid flanges, spoked wheel disc (dropped on short corridor spans)
     list.sh_rect_uv(c.sh, horiz, -hl, -sr, hl, sr, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, -hl, -fr, -hl + cw, fr, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, hl - cw, -fr, hl, fr, 255, 4.0);
@@ -2705,8 +2717,10 @@ fn emit_main_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
         list.sh_rect_uv(c.sh, horiz, fu - fw * 0.5, -fr, fu + fw * 0.5, fr, 255, 4.0);
         fu += flange_step;
     }
-    let (svx, svy) = uv_to_xy(c.sh, horiz, valve_u, valve_vc);
-    list.sh_ellipse(svx, svy, vr, vr, 240, 4.0);
+    if has_valve {
+        let (svx, svy) = uv_to_xy(c.sh, horiz, valve_u, valve_vc);
+        list.sh_ellipse(svx, svy, vr, vr, 240, 4.0);
+    }
 
     // Body: pipe shaft + collars + flanges + rivets + rust
     let (bx0, by0, bx1, by1) = if horiz {
@@ -2735,6 +2749,9 @@ fn emit_main_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
         },
     );
 
+    if !has_valve {
+        return;
+    }
     // Valve stem + spoked handwheel
     let stem_v0 = (valve_side * sr * 0.6).min(valve_vc);
     let stem_v1 = (valve_side * sr * 0.6).max(valve_vc);
@@ -2817,7 +2834,7 @@ fn emit_catwalk_grating(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) 
     let s = c.s;
     let hw = 6.0 * s;
     let rail = 1.35 * s;
-    let end_w = (2.6 * s).min(hl * 0.45);
+    let end_w = (2.6 * s).min(hl * 0.34);
     let bar_pitch = (2.2 * s).max(4.0);
     let bar_w = (0.65 * s).max(1.6);
     let str_v = (hw - rail) * 0.36;
@@ -3110,7 +3127,7 @@ fn emit_pot_rail(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let rail_v = -4.2 * s;
     let rail_h = 1.15 * s;
-    let cw = (2.6 * s).min(hl * 0.45);
+    let cw = (2.6 * s).min(hl * 0.34);
     let spacing = 10.6 * s;
 
     // Rail + wall brackets (shadow & body)
@@ -3121,6 +3138,29 @@ fn emit_pot_rail(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     list.bd_rect_uv(c.sc, horiz, -hl, rail_v - rail_h, hl, rail_v + rail_h, c.pal.deep, Some(c.pal.rim), c.tc, 255, 1.8, 1.5);
     list.bd_rect_uv(c.sc, horiz, -hl, rail_v - rail_h * 2.0, -hl + cw, rail_v + rail_h * 2.0, c.pal.deep, Some(c.pal.rim), c.tc, 255, 1.8, 1.5);
     list.bd_rect_uv(c.sc, horiz, hl - cw, rail_v - rail_h * 2.0, hl, rail_v + rail_h * 2.0, c.pal.deep, Some(c.pal.rim), c.tc, 255, 1.8, 1.5);
+
+    // Short corridor spans: hang one compact centered skillet when there is room, else just the rail.
+    let hook_r = (0.38 * s).max(1.0);
+    if hl < cw + spacing * 0.65 {
+        let clear = (hl - cw - 1.5).max(0.0);
+        if clear >= 5.0 {
+            let pr = (4.0 * s).min(clear * 0.9);
+            let sw_u = c.sway * (1.2 * s).min(clear * 0.25);
+            let sh0 = uv_to_xy(c.sh, horiz, 0.0, rail_v + rail_h * 0.6);
+            let sh1 = uv_to_xy(c.sh, horiz, sw_u * 0.3, rail_v + 2.6 * s);
+            let bh0 = uv_to_xy(c.sc, horiz, 0.0, rail_v + rail_h * 0.6);
+            let bh1 = uv_to_xy(c.sc, horiz, sw_u * 0.3, rail_v + 2.6 * s);
+            let sp = uv_to_xy(c.sh, horiz, sw_u, rail_v + 5.0 * s + pr * 0.6);
+            let bp = uv_to_xy(c.sc, horiz, sw_u, rail_v + 5.0 * s + pr * 0.6);
+            list.sh_capsule(sh0, hook_r, sh1, hook_r, 182, 2.5);
+            list.sh_ellipse(sp.0, sp.1, pr, pr, 255, 4.0);
+            list.bd_capsule(bh0, hook_r, bh1, hook_r, c.pal.deep, c.pal.soft, Some(c.pal.rim), c.tc, 255, 1.0, 1.0);
+            list.bd_capsule(bh1, 0.5 * s, bp, 0.65 * s, c.pal.deep, c.pal.mid, Some(c.pal.rim), c.tc, 255, 1.3, 1.2);
+            list.bd_ellipse(bp.0, bp.1, pr, pr, c.pal.deep, Some(c.pal.mid), Some(c.pal.rim), c.tc, 255, 2.0, 2.0);
+            list.bd_ellipse(bp.0, bp.1, pr * 0.72, pr * 0.72, c.pal.mid, Some(c.pal.deep), None, c.tc, 255, 1.2, 0.0);
+        }
+        return;
+    }
 
     // Clip hanging cookware slots to the visible buffer axis so huge spans stay fast
     let (axis_o, axis_max) = if horiz {
@@ -3133,7 +3173,6 @@ fn emit_pot_rail(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let u_origin = -hl + cw + spacing * 0.52;
     let first_slot = ((u_vis0 - u_origin) / spacing).floor().max(0.0) as i32;
     let last_slot = ((u_vis1 - u_origin) / spacing).ceil() as i32;
-    let hook_r = (0.38 * s).max(1.0);
 
     for slot in first_slot..=last_slot {
         let u = u_origin + slot as f32 * spacing;
@@ -3238,7 +3277,7 @@ fn emit_cable_tray(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let hw = 5.0 * s;
     let rail = 1.15 * s;
-    let cw = (2.6 * s).min(hl * 0.45);
+    let cw = (2.6 * s).min(hl * 0.34);
     let rung_step = (4.8 * s).max(5.0);
     let rung_w = (0.65 * s).max(1.4);
     let end_hw = hw + 0.6 * s;
@@ -3275,6 +3314,9 @@ fn emit_cable_tray(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
         },
     );
 
+    if hl < 9.0 * s {
+        return;
+    }
     // Drooping catenary cable loop sagging out past one side rail
     let h = hash_u32(c.seed ^ 0xCAB1);
     let droop_u0 = -hl * 0.45 + ((h & 63) as f32 / 63.0) * hl * 0.35;
@@ -3314,17 +3356,20 @@ fn emit_vent_duct(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let hw = 4.8 * s;
     let seam_hw = 5.4 * s;
-    let cw = (3.0 * s).min(hl * 0.45);
+    let cw = (3.0 * s).min(hl * 0.35);
     let seam_step = 20.0 * s;
     let seam_w = (1.25 * s).max(1.8);
+    let has_louvre = hl >= 8.5 * s;
 
     list.sh_rect_uv(c.sh, horiz, -hl, -hw, hl, hw, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, -hl, -seam_hw, -hl + cw, seam_hw, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, hl - cw, -seam_hw, hl, seam_hw, 255, 4.0);
-    let mut su = -hl + seam_step;
-    while su < hl - cw * 1.4 {
-        list.sh_rect_uv(c.sh, horiz, su - seam_w * 0.5, -seam_hw, su + seam_w * 0.5, seam_hw, 255, 4.0);
-        su += seam_step;
+    if has_louvre {
+        let mut su = -hl + seam_step;
+        while su < hl - cw * 1.4 {
+            list.sh_rect_uv(c.sh, horiz, su - seam_w * 0.5, -seam_hw, su + seam_w * 0.5, seam_hw, 255, 4.0);
+            su += seam_step;
+        }
     }
 
     let (bx0, by0, bx1, by1) = if horiz {
@@ -3346,6 +3391,7 @@ fn emit_vent_duct(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
             cw,
             seam_step,
             seam_w,
+            has_louvre,
             s,
             seed: c.seed,
             pal: c.pal,
@@ -3417,7 +3463,7 @@ fn emit_clothesline(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let line_v = -4.2 * s;
     let sag_max = (2.2 * s).min(hl * 0.08);
-    let cw = (2.4 * s).min(hl * 0.45);
+    let cw = (2.4 * s).min(hl * 0.34);
     let cord_r = (0.45 * s).max(1.2);
     let sag_at = |u: f32| {
         let t = (u / hl.max(1.0)).clamp(-1.0, 1.0);
@@ -3454,6 +3500,83 @@ fn emit_clothesline(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     // Spaced big sheets and shirts along the visible portion of the line
     let step = 15.2 * s;
     let u_origin = -hl + cw + step * 0.55;
+    if hl < cw + step * 0.65 {
+        // Short corridor span: hang one compact draped towel if there is room.
+        let clear = (hl - cw - 2.0).max(0.0);
+        if clear >= 5.0 {
+            let w_half = (3.4 * s).min(clear * 0.72);
+            let h_len = 7.4 * s;
+            let top_v = sag_at(0.0);
+            let sw_bot = c.sway * (1.4 * s).min(clear * 0.28);
+            let u0 = -w_half * 1.1 + sw_bot.min(0.0) - 2.0;
+            let u1 = w_half * 1.1 + sw_bot.max(0.0) + 2.0;
+            let v0 = top_v - 1.0;
+            let v1 = top_v + h_len + 1.0;
+            let (sx0, sy0, sx1, sy1) = if horiz {
+                (c.sh.0 + u0, c.sh.1 + v0, c.sh.0 + u1, c.sh.1 + v1)
+            } else {
+                (c.sh.0 + v0, c.sh.1 + u0, c.sh.0 + v1, c.sh.1 + u1)
+            };
+            list.push_sh(
+                sx0,
+                sy0,
+                sx1,
+                sy1,
+                ShKind::DrapedSheet {
+                    o: c.sh,
+                    horiz,
+                    u_center: 0.0,
+                    v_top: top_v,
+                    w_half,
+                    h_len,
+                    sw_bot,
+                    mode: SheetMode::Bedsheet,
+                },
+            );
+            let (bx0, by0, bx1, by1) = if horiz {
+                (c.sc.0 + u0, c.sc.1 + v0, c.sc.0 + u1, c.sc.1 + v1)
+            } else {
+                (c.sc.0 + v0, c.sc.1 + u0, c.sc.0 + v1, c.sc.1 + u1)
+            };
+            list.push_bd(
+                bx0,
+                by0,
+                bx1,
+                by1,
+                BdKind::DrapedSheet {
+                    o: c.sc,
+                    horiz,
+                    u_center: 0.0,
+                    v_top: top_v,
+                    w_half,
+                    h_len,
+                    sw_bot,
+                    mode: SheetMode::Bedsheet,
+                    seed: c.seed,
+                    pal: c.pal,
+                    tc: c.tc,
+                },
+            );
+            for &sign in &[-1.0f32, 1.0] {
+                let pu = sign * w_half * 0.65;
+                list.bd_rect_uv(
+                    c.sc,
+                    horiz,
+                    pu - 0.5 * s,
+                    top_v - 1.1 * s,
+                    pu + 0.5 * s,
+                    top_v + 0.9 * s,
+                    c.pal.accent,
+                    Some(c.pal.rim),
+                    c.tc,
+                    255,
+                    0.85,
+                    0.8,
+                );
+            }
+        }
+        return;
+    }
     let (axis_o, axis_max) = if horiz {
         (c.sc.0, list.bw as f32)
     } else {
@@ -3562,9 +3685,10 @@ fn emit_steam_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let sr = 4.6 * s;
     let strap_r = 5.1 * s;
     let collar_r = strap_r * 1.15;
-    let cw = (3.2 * s).min(hl * 0.45);
+    let cw = (3.2 * s).min(hl * 0.35);
     let strap_step = 13.0 * s;
     let strap_w = (1.05 * s).max(1.6);
+    let has_leak = hl >= 8.0 * s;
 
     let h = hash_u32(c.seed ^ 0x57EA);
     let leak_u = ((h & 255) as f32 / 255.0 - 0.5) * (hl * 0.75).max(0.0);
@@ -3574,7 +3698,9 @@ fn emit_steam_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     list.sh_rect_uv(c.sh, horiz, -hl, -sr, hl, sr, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, -hl, -collar_r, -hl + cw, collar_r, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, hl - cw, -collar_r, hl, collar_r, 255, 4.0);
-    list.sh_rect_uv(c.sh, horiz, leak_u - 2.1 * s, -collar_r, leak_u + 2.1 * s, collar_r, 255, 4.0);
+    if has_leak {
+        list.sh_rect_uv(c.sh, horiz, leak_u - 2.1 * s, -collar_r, leak_u + 2.1 * s, collar_r, 255, 4.0);
+    }
 
     // Body: lagged diagonal-wrap pipe + metal straps + split leaking flange
     let (bx0, by0, bx1, by1) = if horiz {
@@ -3597,12 +3723,16 @@ fn emit_steam_pipe(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
             strap_step,
             strap_w,
             leak_u,
+            has_leak,
             s,
             pal: c.pal,
             tc: c.tc,
         },
     );
 
+    if !has_leak {
+        return;
+    }
     // Billowing translucent steam jetting from the leaking flange gap
     let puffs: [(f32, f32, f32, f32, u8); 6] = [
         (0.0, 0.8, 1.6, 1.3, 175),
@@ -3678,7 +3808,7 @@ fn emit_paper_web(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let hw = 5.4 * s;
     let rol_hw = 6.6 * s;
-    let cw = (3.0 * s).min(hl * 0.45);
+    let cw = (3.0 * s).min(hl * 0.35);
     let rol_step = 22.0 * s;
     let rol_w = (1.55 * s).max(2.2);
 
@@ -3723,18 +3853,21 @@ fn emit_roller_beam(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     let s = c.s;
     let hw = 3.5 * s;
     let flange = 1.1 * s;
-    let cw = (3.0 * s).min(hl * 0.45);
+    let cw = (3.0 * s).min(hl * 0.35);
     let h = hash_u32(c.seed ^ 0xB3A4);
     let car_u = ((h & 255) as f32 / 255.0 - 0.5) * (hl * 0.75).max(0.0);
     let car_hu = 6.2 * s;
     let car_hv = 5.4 * s;
     let end_hw = hw * 1.35;
+    let has_carriage = hl >= car_hu + cw + 4.0;
 
-    // Shadow: gantry beam, end gussets, trolley carriage
+    // Shadow: gantry beam, end gussets, trolley carriage (dropped on short corridor spans)
     list.sh_rect_uv(c.sh, horiz, -hl, -hw, hl, hw, 248, 4.0);
     list.sh_rect_uv(c.sh, horiz, -hl, -end_hw, -hl + cw, end_hw, 255, 4.0);
     list.sh_rect_uv(c.sh, horiz, hl - cw, -end_hw, hl, end_hw, 255, 4.0);
-    list.sh_rect_uv(c.sh, horiz, car_u - car_hu, -car_hv, car_u + car_hu, car_hv, 255, 4.0);
+    if has_carriage {
+        list.sh_rect_uv(c.sh, horiz, car_u - car_hu, -car_hv, car_u + car_hu, car_hv, 255, 4.0);
+    }
 
     // Body: I-beam with ribs & punched lightening holes
     let (bx0, by0, bx1, by1) = if horiz {
@@ -3754,7 +3887,7 @@ fn emit_roller_beam(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
             hw,
             flange,
             cw,
-            car_u,
+            car_u: if has_carriage { car_u } else { hl + 100.0 },
             car_hu,
             s,
             pal: c.pal,
@@ -3762,6 +3895,9 @@ fn emit_roller_beam(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
         },
     );
 
+    if !has_carriage {
+        return;
+    }
     // Wheeled roller carriage riding on the beam
     let wr = 1.85 * s;
     for &du in &[-car_hu * 0.68, car_hu * 0.68] {
@@ -3887,8 +4023,11 @@ fn emit_tree_branch(list: &mut PrimList, c: &DrawCtx, side: Side, reach: f32) {
     let r_f2 = r_root * 0.23;
     let r_tip = (r_root * 0.10).max(1.2);
 
+    let inv_reach = 1.0 / reach.max(1.0);
+    let sway_amp = c.sway * 2.2 * s;
     let pt = |o: (f32, f32), u: f32, v: f32| {
-        let ve = v + u * lean;
+        let t = (u * inv_reach).clamp(0.0, 1.0);
+        let ve = v + u * lean + sway_amp * t;
         (o.0 + dx * u + px * ve, o.1 + dy * u + py * ve)
     };
 
@@ -4199,10 +4338,12 @@ mod tests {
                 l5 >= l1 && a5 > a1,
                 "{kind:?} extent must grow with scale: scale 1 ({l1}, {a1}) vs scale 5 ({l5}, {a5})"
             );
-            assert!(
-                l1 >= a1 * 0.99,
-                "{kind:?} extent should report long axis first: ({l1}, {a1})"
-            );
+            if kind != ForeKind::ChainHoist {
+                assert!(
+                    l1 >= a1 * 0.99,
+                    "{kind:?} extent should report long axis first: ({l1}, {a1})"
+                );
+            }
         }
         // Also verify PowerLine pole mode grows with scale
         let p1 = make_item(ForeKind::PowerLine, Attach::Sky, 0.0, false, 1.0, 7);
@@ -4377,16 +4518,56 @@ mod tests {
             (ForeKind::HangingLamp, Theme::Kitchen, Attach::Drop),
             (ForeKind::Clothesline, Theme::Laundry, Attach::Span),
             (ForeKind::HangingProofs, Theme::Printworks, Attach::Drop),
+            (ForeKind::TreeBranch, Theme::Trailer, Attach::Edge(Side::N)),
         ] {
-            let len = if matches!(attach, Attach::Span) { 180.0 } else { 0.0 };
-            let item = make_item(kind, attach, len, true, 4.0, 21);
+            let len = match attach {
+                Attach::Span => 180.0,
+                Attach::Edge(_) => 100.0,
+                _ => 0.0,
+            };
+            let anchor = if matches!(attach, Attach::Edge(Side::N)) {
+                (120, 10)
+            } else {
+                (120, 74)
+            };
+            let item = make_item(kind, attach, len, !matches!(attach, Attach::Edge(_)), 4.0, 21);
             let mut pb_a = PixelBuffer::new(240, 148);
             let mut pb_b = PixelBuffer::new(240, 148);
             pb_a.clear(bg);
             pb_b.clear(bg);
-            draw(&mut pb_a, &item, &make_draw((120, 74), 4.0, ALPHA_MAX, -1.0, theme));
-            draw(&mut pb_b, &item, &make_draw((120, 74), 4.0, ALPHA_MAX, 1.0, theme));
+            draw(&mut pb_a, &item, &make_draw(anchor, 4.0, ALPHA_MAX, -1.0, theme));
+            draw(&mut pb_b, &item, &make_draw(anchor, 4.0, ALPHA_MAX, 1.0, theme));
             assert_ne!(pb_a.pixels(), pb_b.pixels(), "{kind:?} should respond to sway");
+        }
+    }
+
+    #[test]
+    fn short_corridor_spans_stay_clean_at_28_px() {
+        let bg = (82, 84, 88);
+        for &(kind, theme, attach) in &ALL_KINDS {
+            if !matches!(attach, Attach::Span) {
+                continue;
+            }
+            for &horizontal in &[true, false] {
+                let item = make_item(kind, Attach::Span, 28.0, horizontal, 5.0, 17);
+                let mut pb = PixelBuffer::new(200, 200);
+                pb.clear(bg);
+                let d = ForeDraw {
+                    screen: (100, 100),
+                    shadow: (110, 114),
+                    scale: 5.0,
+                    alpha: ALPHA_MAX,
+                    sway: 0.25,
+                    theme,
+                    toward_centre: (0, 1),
+                };
+                draw(&mut pb, &item, &d);
+                let touched = pb.pixels().iter().filter(|&&p| p != bg).count();
+                assert!(
+                    touched > 40,
+                    "short 28 px corridor span {kind:?} (horiz={horizontal}) painted too little ({touched})"
+                );
+            }
         }
     }
 }
