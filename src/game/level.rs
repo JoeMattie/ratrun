@@ -1,11 +1,11 @@
 //! Level data model: theme, palette, the tile grid, rooms and level objects.
 //!
 //! A level is a **200 × 160 cell** lattice of 16 px tiles
-//! ([`collision::TileMap`]) — ten times today's arena area — plus the
-//! generator's named regions ([`Room`]), the maze sections ([`MazeSection`]),
-//! the interactive objects ([`LevelObjects`]: traps, one-way doors, rat-holes,
-//! maze rewards) and the legacy `props` (themed furniture, drawn by
-//! `art_props.rs`).
+//! ([`collision::TileMap`]) — ten times the old hand-built arena's area — plus
+//! the generator's named regions ([`Room`]), the maze sections
+//! ([`MazeSection`]), the interactive objects ([`LevelObjects`]: traps,
+//! one-way doors, rat-holes, maze rewards) and the legacy `props` (themed
+//! furniture, drawn by `art_props.rs`).
 //!
 //! Everything here is generated from `(theme, seed)` by
 //! [`Level::generate`] — see `CONTENT_PLAN.md` for the generator's stages and
@@ -19,7 +19,7 @@
 //! enemies, bullets, lobs and spawn checks all query the tile grid and
 //! `art_walls::wall_colliders`, so what is drawn and what blocks can never
 //! disagree. There is no rectangle list of walls to iterate, which is what
-//! keeps a 200 × 160 map as cheap per tick as the old 1020 × 800 arena.
+//! keeps a 200 × 160 map as cheap per tick as the old 160 × 125 arena build.
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -35,12 +35,17 @@ use super::collision::{cell_of, SizeClass, TileMap, TILE, TILE_F};
 use super::levelgen;
 use super::nav::NavGrid;
 
-/// Level width in 16 px cells (10× the old arena's area).
+/// Level width in 16 px cells.
 pub const MAP_COLS: i32 = 200;
 /// Level height in 16 px cells.
 pub const MAP_ROWS: i32 = 160;
 /// Level size in world pixels (`MAP_COLS × TILE` by `MAP_ROWS × TILE`).
 pub const MAP_SIZE: Vec2 = Vec2 { x: 3200.0, y: 2560.0 };
+
+/// The rectangle a boss fight happens in, in cells: the size the removed
+/// arena's room had (34 × 28), clamped to the map and centred on the rat when
+/// the boss arrives ([`Level::fight_rect_around`]).
+pub const BOSS_FIGHT_TILES: (i32, i32) = (34, 28);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -468,7 +473,7 @@ pub enum RoomKind {
 
 /// A named region of the map. Rooms are axis-aligned cell rectangles; the
 /// generator may carve them into irregular shapes later, but everything that
-/// consumes them (spawn placement, boss arena, HUD) only needs the rect.
+/// consumes them (spawn placement, HUD, minimap) only needs the rect.
 #[derive(Clone, Copy, Debug)]
 pub struct Room {
     pub rect: TileRect,
@@ -593,7 +598,8 @@ pub enum ShopHoleRole {
     /// wall that looks onto a fork on the way to an ordinary room.
     #[default]
     Fork,
-    /// The second hole: on a different approach toward the boss arena.
+    /// The second hole: on a different approach toward the map's far hall (the
+    /// footprint the boss arena used to take).
     Approach,
 }
 
@@ -1052,48 +1058,42 @@ pub struct Level {
     pub mazes: Vec<MazeSection>,
     /// Traps, doors, rat-holes and maze rewards.
     pub objects: LevelObjects,
-    /// What the boss arena furnishes for its fight (the central clear floor,
-    /// the Lab's bumpers and charging dock, the Sewer's escape rat-hole).
+    /// Empty on every generated map: batch 12 removed the boss arena, so no
+    /// theme furnishes one. The field survives because the Flatbed's own
+    /// generator and the sandbox [`Level`] literals in `render::library` build
+    /// it; `levelgen::generate` clears whatever a theme's generator left here.
+    /// The boss's fight rectangle is built when the boss arrives, around the
+    /// rat ([`Level::fight_rect_around`]).
     pub boss: BossArena,
     /// The flatbed's bed, pits, wind stretches and sliding cargo. Empty on
     /// every theme but [`Theme::Trailer`].
     pub trailer: TrailerDeck,
 }
 
-/// The fight furniture inside the boss arena, exported by the generator so the
-/// boss framework, the art and the validator agree on one place instead of
-/// re-deriving it (`DESIGN_REVIEW.md` §5).
+/// The fight furniture a boss arena used to carry (`DESIGN_REVIEW.md` §5).
 ///
-/// Every theme gets a `floor`; the rest is theme-specific:
-///
-/// - **Lab** (mower): two `bumpers` flanking the floor, so a 135 px charge
-///   always has a solid to flip onto within a screenful, and a `dock` pad
-///   against a wall away from the mouth.
-/// - **Sewer** (jaguar): an `escape_hole` in the wall ring, the rat-hole the
-///   rat ducks through so the pounce overshoots.
-/// - **Kitchen** (human with a broom): just the 96 × 80 px clear floor; the
-///   barrels/counter ends stay at the perimeter.
+/// **Batch 12 removed the boss arena.** No generator fills this any more: a
+/// generated level's `boss` field is [`BossArena::default`] and no room has
+/// [`RoomKind::Boss`]. The type stays only because the Flatbed's cab-hold
+/// generator and the Library's sandbox `Level` literals still build one; the
+/// boss's dock is now derived from the tile map at arrival time, and the fight
+/// rectangle is recentred on the rat.
 #[derive(Clone, Debug)]
 pub struct BossArena {
-    /// The clear encounter floor at the arena's centre. For the Lab every cell
-    /// of it has a solid within [`levelgen::layout::SOLID_REACH_PX`] in at
-    /// least two cardinal directions — the mower's flip is always on offer
-    /// from here.
+    /// The clear encounter floor at the arena's centre (always empty now).
     pub floor: TileRect,
-    /// World position of the charging dock pad's centre (Lab only): the art's
-    /// [`crate::game::art_boss_mower::draw_dock_pad`] footprint is 32 × 30 px
-    /// around it, so the pad sits against the wall without overlapping one.
+    /// World position of the charging dock pad's centre (Lab only), as the art's
+    /// [`crate::game::art_boss_mower::draw_dock_pad`] footprint wants it (32 ×
+    /// 30 px around this point).
     pub dock: Option<Vec2>,
-    /// The dock pad's cell (same place as [`Self::dock`]; for the minimap and
-    /// the generator's own checks).
+    /// The dock pad's cell (same place as [`Self::dock`]).
     pub dock_cell: Option<(i32, i32)>,
     /// Solid bumper cells (Lab only), each a 1 × 3 or 3 × 1 bar.
     pub bumpers: Vec<TileRect>,
-    /// The rat-hole in the arena's wall ring that leads out through a duct
+    /// The rat-hole in the arena's wall ring that led out through a duct
     /// (Sewer only).
     pub escape_hole: Option<(i32, i32)>,
-    /// The arena's mouth cells: the doorway cells in its wall ring. Nothing
-    /// the arena furnishes may block them.
+    /// The arena's mouth cells: the doorway cells in its wall ring.
     pub mouths: Vec<(i32, i32)>,
 }
 
@@ -1107,20 +1107,6 @@ impl Default for BossArena {
             escape_hole: None,
             mouths: Vec::new(),
         }
-    }
-}
-
-impl BossArena {
-    /// The charging dock's world position (Lab only).
-    pub fn dock_pos(&self) -> Option<Vec2> {
-        self.dock
-    }
-
-    /// Where the boss framework should put the mower's dock: the exported pad
-    /// in the Lab, the arena's centre on the other maps (the dock is unused
-    /// there).
-    pub fn dock_or_centre(&self, centre: Vec2) -> Vec2 {
-        self.dock.unwrap_or(centre)
     }
 }
 
@@ -1184,34 +1170,35 @@ impl Level {
         self.rooms.iter().find(|r| r.kind == RoomKind::Start)
     }
 
-    /// The boss arena, if the map has one.
+    /// The boss arena's room, if the map has one.
+    ///
+    /// **Always `None` on a generated map since batch 12**: the boss arrives
+    /// where the rat is, and the footprint the arena used to take is an ordinary
+    /// [`RoomKind::Hall`]. Kept because the art and render captures stage a
+    /// boss against `boss_room()` when a hand-built level provides one.
     pub fn boss_room(&self) -> Option<&Room> {
         self.rooms.iter().find(|r| r.kind == RoomKind::Boss)
     }
 
-    /// The boss arena's fight furniture, when the map has an arena.
-    pub fn boss_arena(&self) -> Option<&BossArena> {
-        self.boss_room().map(|_| &self.boss)
-    }
-
-    /// The Lab's charging dock pad centre (see [`BossArena::dock`]).
-    pub fn boss_dock(&self) -> Option<Vec2> {
-        self.boss_arena().and_then(|a| a.dock)
-    }
-
-    /// The clear encounter floor at the arena's centre.
-    pub fn boss_clear_floor(&self) -> Option<TileRect> {
-        self.boss_arena().map(|a| a.floor)
-    }
-
-    /// The Lab's solid bumpers (empty on the other maps).
-    pub fn boss_bumpers(&self) -> &[TileRect] {
-        self.boss_arena().map_or(&[], |a| a.bumpers.as_slice())
-    }
-
-    /// The Sewer's escape rat-hole in the arena's wall ring.
-    pub fn boss_escape_hole(&self) -> Option<(i32, i32)> {
-        self.boss_arena().and_then(|a| a.escape_hole)
+    /// The rectangle a boss fight happens in: the nominal fight size
+    /// ([`BOSS_FIGHT_TILES`], the old arena's) centred on `pos` and clamped
+    /// inside the map.
+    ///
+    /// This is the whole of what the arena used to provide, and the scheduled
+    /// arrival (15:00) and the console's `boss <kind> here` both use it, so a
+    /// boss fights where it caught the rat.
+    pub fn fight_rect_around(&self, pos: Vec2) -> TileRect {
+        let cols = self.tiles.cols().max(1);
+        let rows = self.tiles.rows().max(1);
+        let w = BOSS_FIGHT_TILES.0.clamp(1, cols);
+        let h = BOSS_FIGHT_TILES.1.clamp(1, rows);
+        let (cx, cy) = crate::game::collision::cell_of(pos);
+        TileRect::new(
+            (cx - w / 2).clamp(0, (cols - w).max(0)),
+            (cy - h / 2).clamp(0, (rows - h).max(0)),
+            w,
+            h,
+        )
     }
 
     /// Every room of one kind, in generation order.
@@ -1293,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_level_has_a_border_start_and_boss_arena() {
+    fn placeholder_level_has_a_border_and_a_start_room() {
         for theme in Theme::all() {
             let level = Level::new(theme);
             assert_eq!(level.arena, MAP_SIZE);
@@ -1307,8 +1294,19 @@ mod tests {
             let start = level.start_room().expect("start room");
             assert_eq!(start.kind, RoomKind::Start);
             assert!(start.rect.contains_world(level.start));
-            let boss = level.boss_room().expect("boss arena");
-            assert!(boss.rect.area() >= 20 * 20, "boss arena is too small");
+            // No boss arena (batch 12): the map is still a map without one, and
+            // the fight rectangle is built around the rat when a boss arrives.
+            assert!(level.boss_room().is_none(), "{theme:?}: a boss arena");
+            let fight = level.fight_rect_around(level.start);
+            assert_eq!(
+                (fight.w, fight.h),
+                BOSS_FIGHT_TILES,
+                "{theme:?}: the fight rectangle is not the nominal size"
+            );
+            assert!(
+                fight.contains_world(level.start),
+                "{theme:?}: the fight rectangle does not hold the rat"
+            );
             // The start room is clear of walls around the spawn point.
             let spawn = Rectf::new(level.start.x - 12.0, level.start.y - 12.0, 24.0, 24.0);
             assert!(level.is_open_floor(spawn), "{theme:?}: spawn is blocked");

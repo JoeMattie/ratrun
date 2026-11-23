@@ -38,8 +38,12 @@
 //!
 //! The director no longer spawns one. At `director::BOSS_TIME` it raises the
 //! `BossDue` resource ([`director::raise_boss_due`]) and the boss framework
-//! spawns the level's boss in its arena; the shake, the arrival VFX and
-//! `Sfx::Boss` belong to that arrival now, not to the ring.
+//! spawns the level's boss **out of sight, using this file's own rule**
+//! ([`spawn_point_reachable`], on the boss's private rng stream) so the boss
+//! appears no more suddenly than a straggler; the shake, the arrival VFX and
+//! `Sfx::Boss` belong to that arrival, not to the ring. Its fight is a
+//! rectangle centred on the rat at the moment it arrives (batch 12 removed the
+//! arena), never a room this stage has to keep clear.
 //!
 //! ## Port notes
 //!

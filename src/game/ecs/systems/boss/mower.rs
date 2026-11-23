@@ -991,7 +991,7 @@ mod tests {
 
     /// Carve a sealed room into the boss arena; returns the interior rect.
     fn carve_room(w: &mut World, cells: (i32, i32)) -> TileRect {
-        let arena = w.level.boss_room().expect("the Lab has a boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let x = arena.x + 2;
         let y = arena.y + 2;
         w.level.tiles.fill_cells(
@@ -1741,7 +1741,7 @@ mod tests {
             b.hp = 1600.0;
             b.max_hp = 1600.0;
         });
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let arena_world = arena.to_world();
         let boss = boss_of(&mut w).unwrap();
         w.player.pos = boss.pos + Vec2::new(70.0, 0.0);
@@ -1934,42 +1934,6 @@ mod tests {
              ({at_mouth} set-ups were beside the arena mouth, where there is no \
              wall for a lane to end on)"
         );
-    }
-
-    #[test]
-    fn mower_home_move_is_available_from_the_clear_floor_with_the_bumpers() {
-        // The arena worker's contract: the Lab's clear floor has a solid within
-        // 64 px on both sides, so a boss standing on it always has a charge lane
-        // that ends on a bumper a screenful from the rat. Before the bumpers
-        // the same measurement from the geometric arena centre was 0 of 96.
-        let mut near = 0;
-        let mut total = 0;
-        for seed in 0..8u64 {
-            let mut w = lab_world(seed);
-            let boss = spawn_mower(&mut w);
-            let floor = w
-                .level
-                .boss_clear_floor()
-                .expect("the Lab exports its clear encounter floor");
-            let centre = floor.center_world();
-            let _ = boss;
-            // The rat in every cell of the arena worker's clear fighting floor
-            // (the 4 × 3 central floor), the mower on it: 12 set-ups per seed.
-            for cy in floor.y..floor.y + floor.h {
-                for cx in floor.x..floor.x + floor.w {
-                    let rat = crate::game::collision::TileMap::tile_rect(cx, cy).center();
-                    with_boss(&mut w, |b| b.pos = centre);
-                    w.player.pos = rat;
-                    total += 1;
-                    if let Some(lane) = lane_for(&mut w) {
-                        if lane.wall && lane.near_rat {
-                            near += 1;
-                        }
-                    }
-                }
-            }
-        }
-        assert_eq!(near, total, "the flip was on offer in {near}/{total} setups");
     }
 
     // ---- determinism -----------------------------------------------------

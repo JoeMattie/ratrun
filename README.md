@@ -237,7 +237,7 @@ Movement, menus and preferences are the same in all three schemes:
 | `O` | options |
 | `U` | toggle auto-pick level-ups |
 | `L` | story crawl on the title, Library in a run |
-| `Enter` | confirm · `Esc` back |
+| `Enter` | confirm · `Esc` or right click back in any menu |
 | `B` | the Nest (from the pause screen, the incident report and the victory screen) |
 | `Q` | quit from the title; back to the menu from pause and the end screens |
 | `R` | refund every Nest track (on the Nest); reset the scheme (on Controls) |
@@ -250,7 +250,7 @@ Where the schemes differ:
 | Aim | nearest enemy (auto). The pointer *steers* the rat | the pointer | right stick, when deflected |
 | Move | `WASD` / arrows, or the pointer | `WASD` / arrows (eight directions) | left stick or d-pad (analog speed) |
 | Dash | `Ctrl` (or left click; `Space` also dashes without lone-Ctrl reporting) | right click (or `Ctrl`) | `RB` |
-| Fire charged actives | `Space` (or left click) | left click (or `Space`) | `X` |
+| Fire charged actives | `Space` (or right click) | left click (or `Space`) | `X` |
 
 **Super Dash** changes the dash: once you own that weapon, *hold* the dash input
 to charge it (about 0.9 s to full, faster as it levels) and *release* to fire a
@@ -259,9 +259,14 @@ without the weapon the dash fires on the press as always. A key can only be held
 on a terminal that reports key releases (the Kitty protocol); the mouse button
 and the gamepad can always charge.
 
-In **Classic** a left click is the whole "do the thing" gesture (dash plus any
-ready actives). In **Mouse aim** the clicks split, so a left click never spends
-your dash.
+In **Classic** a left click is the dash (it also releases a charged active when
+the dash goes off) and a right click fires the charged actives. The same right
+click is **Back** in every menu, so it never opens one. In **Mouse aim** the
+clicks split, so a left click never spends your dash.
+
+The dash's cooldown has no read-out on the rat: the HUD's `DASH` module carries
+it (and flashes when the dash is back). Holding the dash for a Super Dash does
+draw a ring and a lane preview around the rat while it charges.
 
 Gamepad defaults: d-pad/left stick move, right stick aims, `RB` dash, `X` fires
 actives, `Start` pauses, `View` opens the map, `Y` toggles the cursor, `LB`

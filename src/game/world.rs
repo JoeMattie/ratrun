@@ -69,8 +69,8 @@ use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
 use super::ecs::components::{
-    AcidDrop, CheeseString, ChestSpawn, CorrosiveChannel, EchoSpoke, FairyRing, Infection,
-    MilkTooth, SpawnId,
+    AcidDrop, BiteSnap, CheeseString, ChestSpawn, CorrosiveChannel, EchoSpoke, FairyRing,
+    FondueTine, Infection, MilkTooth, SpawnId, WhipCrack,
 };
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP, PLAYER_RADIUS};
 use super::ecs::resources::{
@@ -253,12 +253,12 @@ pub struct World {
     /// terminal's capabilities and the `RATRUN_SUBCELL` pin. There is no
     /// setting: zoomed out it is always on.
     pub subcell: crate::render::subcell::SubcellSet,
-    /// EPX edge smoothing of the 1x (and zoomed-in) picture: the sub-cell
-    /// frame that [`World::detail`] hands back is built by upscaling the
-    /// half-block picture with the Scale2x corner rule. Render-only, on by
-    /// default; the App sets it from `RATRUN_SMOOTH` and the console's
+    /// Edge treatment of the 1x (and zoomed-in) picture: off, the EPX corner
+    /// rounding, or (the default) antialiasing with part-cell glyphs — the
+    /// sub-cell frame that [`World::detail`] hands back at those zooms.
+    /// Render-only; the App sets it from `RATRUN_SMOOTH` and the console's
     /// `smooth` command.
-    pub smooth: bool,
+    pub smooth: crate::render::subcell::Smooth,
     /// The zoomed-out picture at sub-cell resolution, when the last `draw`
     /// produced one (see [`World::detail`]). Held for the run like `world_buf`.
     detail: crate::render::subcell::DetailFrame,
@@ -266,6 +266,15 @@ pub struct World {
     /// The resampled screen picture before the damage digits and the ink pass
     /// stamped it: the difference is what the detail frame carries over.
     detail_base: PixelBuffer,
+    /// The parallax foreground layer ([`crate::render::foreground`]): overhead
+    /// objects drawn after the lighting pass and under the hostile layer. The
+    /// item list is built from the finished level once per level and kept here
+    /// as **render state** — never a resource, never in the determinism trace.
+    pub foreground_layer: crate::render::foreground::ForeLayer,
+    /// Whether the foreground layer draws. Render-only, on by default
+    /// (`RATRUN_FOREGROUND=0` pins it off for a session; the console's
+    /// read-only `foreground on|off` is the in-run switch).
+    pub foreground: bool,
     /// SFX events emitted this tick; drained by the app after `update`.
     pub sfx: Vec<Sfx>,
 
@@ -276,6 +285,9 @@ pub struct World {
     /// never read by the schedule: the tail is drawn from `player.loadout` and
     /// only the *crossing* needs remembering (`art_rat::tail_ready_flash`).
     tail_ready_at: f32,
+    /// Render-only Verlet physics whip chain for Spiked Tail / Barbed Wire.
+    /// Never simulated, never round-tripped, never reads `World::rng`.
+    whip_chain: art_rat::WhipChain,
 
     // ---- Facade round-trip placeholders ----------------------------------
     rng_spare: Option<StdRng>,
@@ -514,12 +526,15 @@ impl World {
             zoom_scale: Vec2::new(1.0, 1.0),
             world_buf: None,
             subcell: crate::render::subcell::SubcellSet::Off,
-            smooth: true,
+            smooth: crate::render::subcell::Smooth::Strong,
             detail: crate::render::subcell::DetailFrame::new(),
             detail_live: false,
             detail_base: PixelBuffer::new(0, 0),
+            foreground_layer: crate::render::foreground::ForeLayer::new(),
+            foreground: crate::render::foreground::enabled_from_env(),
             sfx: Vec::new(),
             tail_ready_at: f32::NEG_INFINITY,
+            whip_chain: art_rat::WhipChain::new(),
 
             // Unused twin of each round-tripped value. `swap_in` leaves the
             // facade holding this while the real value lives in the ECS
@@ -2057,7 +2072,20 @@ impl World {
             if let Some(grid) =
                 crate::render::subcell::grid_for_frame(self.subcell, z, self.smooth)
             {
-                if self.detail.smooth_from(grid, sw, sh / 2, pb) {
+                let filled = if self.smooth == crate::render::subcell::Smooth::Strong {
+                    // Antialiasing reads the picture at world resolution: `pb`
+                    // itself when unzoomed, else the world buffer this draw
+                    // just resampled it from (zoomed in, an edge then sits at
+                    // its true place inside a cell).
+                    let src = match self.world_buf.as_ref() {
+                        Some(buf) if (z - 1.0).abs() >= 0.002 => buf,
+                        _ => &*pb,
+                    };
+                    self.detail.antialias_from(self.subcell, sw, sh / 2, src, pb)
+                } else {
+                    self.detail.smooth_from(grid, sw, sh / 2, pb)
+                };
+                if filled {
                     self.detail_base.copy_from(pb);
                     self.detail_live = true;
                 }
@@ -2237,21 +2265,17 @@ impl World {
         // spawn order, exactly like the legacy `Vec`).
         {
             let mut query = self.ecs.query::<(&SpawnId, &Pool)>();
-            for (_, p) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            for (sid, p) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(p.pos, cam);
                 if !on_screen(s, p.radius + 2.0, viewport) {
                     continue;
                 }
-                let glow = palette::scale(p.color, (p.life / 2.6).clamp(0.2, 1.0));
-                let r = p.radius as i32;
-                for dy in -r..=r {
-                    for dx in -r..=r {
-                        if dx * dx + dy * dy <= r * r && (dx + dy) % 2 == 0 {
-                            pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(glow, 0.4));
-                        }
-                    }
-                }
+                art_wave3a::draw_acid_pool(pb, p, s, self.elapsed, sid.0);
+                let ri = (p.radius.round() as i32).clamp(3, 24);
                 self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                for &(ox, oy) in &[(ri, 0), (-ri, 0), (0, ri), (0, -ri)] {
+                    self.light_map.mark_emissive_rect(pb, s.0 + ox, s.1 + oy, 1, 1);
+                }
             }
         }
 
@@ -2263,6 +2287,7 @@ impl World {
                 let mid = self.w2s(ch.centre(), cam);
                 if on_screen(mid, ch.length * 0.5 + 8.0, viewport) {
                     art_wave3a::draw_corrosive_channel(pb, ch, cam, self.elapsed);
+                    self.light_map.mark_emissive_rect(pb, mid.0 - 1, mid.1 - 1, 2, 2);
                 }
             }
         }
@@ -2272,23 +2297,26 @@ impl World {
                 let s = self.w2s(ring.pos, cam);
                 if on_screen(s, ring.radius + 8.0, viewport) {
                     art_wave3a::draw_fairy_ring(pb, ring, cam, self.elapsed);
+                    let ri = ring.radius.round() as i32;
+                    for &(ox, oy) in &[(ri, 0), (-ri, 0), (0, ri), (0, -ri)] {
+                        self.light_map.mark_emissive_rect(pb, s.0 + ox, s.1 + oy - 1, 1, 1);
+                    }
                 }
             }
         }
 
         // Acid Rain's locked drops, over the pools and under everything that
-        // stands on the floor: the mark must sit *on* the ground the splash
-        // will cover, and the falling strokes read better with bodies in front
-        // of them (the design keeps hostile warnings above friendly effects).
+        // stands on the floor: thin vertical blue-green streaks falling onto
+        // compact shadow dots with small ripple rings (never a big pool).
         {
             let mut query = self.ecs.query::<(&SpawnId, &AcidDrop)>();
             for (_, d) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(d.pos, cam);
-                if !on_screen(s, d.radius + 14.0, viewport) {
+                if !on_screen(s, d.radius + 22.0, viewport) {
                     continue;
                 }
                 art_wave3a::draw_acid_drop(pb, d, s);
-                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 2, 2);
             }
         }
 
@@ -2422,36 +2450,79 @@ impl World {
         // [`Self::draw_hostile_layer`]) — above overhangs, smoke, friendly
         // sparks and the lighting pass.
         {
+            let spore_evolved = self
+                .player
+                .loadout
+                .weapons
+                .iter()
+                .any(|w| w.kind == WeaponKind::SporeOrbit && w.evolved);
+            let ppos = self.player.pos;
             let mut query = self.ecs.query::<(&SpawnId, &Bullet, Option<&EchoSpoke>)>();
-            for (_, b, echo) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            // Visible dotted orbit track drawn once when Spore Orbit is active.
+            let orbit_radius = query
+                .iter(&self.ecs)
+                .find_map(|(_, b, _)| (b.faction == Faction::Player).then_some(b.orbit).flatten())
+                .map(|o| o.radius);
+            if let Some(r) = orbit_radius {
+                art_wave3a::draw_spore_orbit_track(pb, ppos, r, self.elapsed, spore_evolved, cam);
+            }
+            for (sid, b, echo) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 if b.faction == Faction::Enemy {
                     continue;
                 }
                 let s = self.w2s(b.pos, cam);
+                if !on_screen(s, 22.0, viewport) {
+                    continue;
+                }
                 if let Some(spoke) = echo {
                     art_wave3a::draw_echo_spoke(pb, s, b.vel, spoke.reflected);
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
                 } else if b.weapon == Some(WeaponKind::TailThrash) {
                     art_wave3a::draw_flywheel_dart(pb, s, b.vel);
-                } else if b.orbit.is_some()
-                    && self
-                        .player
-                        .loadout
-                        .weapons
-                        .iter()
-                        .any(|w| w.kind == WeaponKind::SporeOrbit && w.evolved)
-                {
-                    art_wave3a::draw_evolved_spore_orbiter(pb, s, self.elapsed);
-                } else if b.lob.is_some() {
-                    // Lobbed acid: bright core plus a fading drip trail behind it.
-                    pb.filled_circle(s.0, s.1, 1, palette::scale(b.color, 1.2));
-                    let trail = self.w2s(b.prev_pos, cam);
-                    pb.plot_add(trail.0, trail.1, palette::scale(b.color, 0.5));
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                } else if b.orbit.is_some() {
+                    if spore_evolved {
+                        art_wave3a::draw_evolved_spore_orbiter(pb, s, self.elapsed);
+                    } else {
+                        art_wave3a::draw_spore_orbiter(pb, s, self.elapsed);
+                    }
+                    self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 2, 2);
+                } else if let Some(lob) = b.lob {
+                    // Single large green blob on a parabolic arc above its travelling ground shadow.
+                    art_wave3a::draw_acid_glob(pb, b.pos, lob.target, ppos, b.vel, b.color, cam);
+                    let dist_left = b.pos.dist(lob.target);
+                    let span = ppos.dist(lob.target).max(dist_left).max(16.0);
+                    let u = (1.0 - dist_left / span).clamp(0.0, 1.0);
+                    let lift = (4.0 * u * (1.0 - u) * (span * 0.22).clamp(6.0, 18.0)).round() as i32;
+                    self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - lift - 1, 2, 2);
+                } else if b.weapon == Some(WeaponKind::CheeseSpray) {
+                    // Fat tumbling warm yellow-orange triangular wedges.
+                    let spin = (sid.0 as f32 * 1.73) + self.elapsed * 7.5;
+                    art_wave3a::draw_cheese_wedge(pb, s, b.vel, spin, b.life);
+                    self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 2, 2);
+                } else if b.weapon == Some(WeaponKind::SpikedTail) {
+                    // Razor steel-grey broken-off spike shards (L4+).
+                    art_wave3a::draw_spike_shard(pb, s, b.vel);
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
                 } else if b.size >= 2 {
                     pb.filled_circle(s.0, s.1, 1, b.color);
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
                 } else {
                     pb.plot_add(s.0, s.1, b.color);
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
                 }
-                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+            }
+        }
+
+        // Fondue Fork outer tines in flight (before both plant their CheeseString).
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &FondueTine)>();
+            for (_, tine) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(tine.pos, cam);
+                if on_screen(s, 6.0, viewport) {
+                    art_wave3a::draw_fondue_tine(pb, s, tine.vel);
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                }
             }
         }
 
@@ -2464,6 +2535,7 @@ impl World {
                 let margin = line.a.dist(line.b) * 0.5 + 10.0;
                 if on_screen(mid, margin, viewport) {
                     art_wave3a::draw_cheese_string(pb, line, cam, self.elapsed);
+                    self.light_map.mark_emissive_rect(pb, mid.0, mid.1, 1, 1);
                 }
             }
         }
@@ -2475,12 +2547,48 @@ impl World {
                 let ps = self.w2s(ppos, cam);
                 if on_screen(s, 10.0, viewport) || on_screen(ps, 10.0, viewport) {
                     art_wave3a::draw_milk_tooth(pb, dart, ppos, cam);
+                    self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 2, 2);
                 }
             }
         }
 
         // Player rat.
         self.draw_player(pb, cam);
+
+        // Instant melee weapon visuals anchored to the rat: Gnaw's closing white
+        // tooth crescents (`BiteSnap`) and Tail Whip's frontal pink half-circle
+        // crescent swipe (`WhipCrack`). Both are spawned without `SpawnId`
+        // (decorations), so query the components directly.
+        {
+            let mut query = self.ecs.query::<&BiteSnap>();
+            for snap in query.iter(&self.ecs) {
+                let s = self.w2s(snap.pos + snap.dir * 4.5, cam);
+                if on_screen(s, 12.0, viewport) {
+                    art_rat::draw_gnaw_bite(pb, snap, cam);
+                    self.light_map.mark_emissive_highlights(pb, s, 6);
+                }
+            }
+        }
+        {
+            let mut query = self.ecs.query::<&WhipCrack>();
+            for crack in query.iter(&self.ecs) {
+                let sf = self.w2s(crack.from, cam);
+                let st = self.w2s(crack.to, cam);
+                let span = crack.to - crack.from;
+                let reach = span.len();
+                if on_screen(sf, reach + 8.0, viewport) {
+                    art_rat::draw_tail_whip_crack(pb, crack, cam);
+                    self.light_map.mark_emissive_highlights(pb, st, 4);
+                    if reach > 1.0 {
+                        let dir = span * (1.0 / reach);
+                        for side in [-0.75f32, 0.75] {
+                            let flank = self.w2s(crack.from + dir.rotate(side) * reach, cam);
+                            self.light_map.mark_emissive_highlights(pb, flank, 3);
+                        }
+                    }
+                }
+            }
+        }
 
         // The cat's airborne pounce passes visibly overhead.
         self.draw_boss_body(pb, cam, true);
@@ -2503,6 +2611,39 @@ impl World {
         _s = crate::prof::scope(crate::prof::Stage::SceneParticles);
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
+
+        // Squeak Nova (concentric pale-cyan expanding rings) & Sonic Squeak
+        // (directional forward wedge of nested pure-white chevrons). Drawn here
+        // before lighting, with tight emissive apex/rim marks so they cut cleanly
+        // through the 60%-ambient floor without repainting wide areas.
+        {
+            let fx = *self.ecs.resource::<ActiveFx>();
+            if fx.nova_active() {
+                let s = self.w2s(fx.nova_pos, cam);
+                if on_screen(s, fx.nova_max_r + 6.0, viewport) {
+                    art_wave3a::draw_squeak_nova_ring(pb, &fx, cam);
+                    let ri = fx.nova_r.round() as i32;
+                    if ri >= 2 {
+                        for &(ox, oy) in &[(ri, 0), (-ri, 0), (0, ri), (0, -ri)] {
+                            self.light_map.mark_emissive_rect(pb, s.0 + ox, s.1 + oy, 1, 1);
+                        }
+                    }
+                }
+            }
+            if fx.squeak_active() {
+                let s = self.w2s(fx.squeak_pos, cam);
+                if on_screen(s, fx.squeak_max_r + 6.0, viewport) {
+                    art_wave3a::draw_sonic_cone(pb, &fx, cam);
+                    let dir = if fx.squeak_facing.len_sq() > 1e-4 {
+                        fx.squeak_facing.normalized()
+                    } else {
+                        Vec2::new(1.0, 0.0)
+                    };
+                    let tip = self.w2s(fx.squeak_pos + dir * fx.squeak_r, cam);
+                    self.light_map.mark_emissive_highlights(pb, tip, 5);
+                }
+            }
+        }
 
         // Super Dash blue-white kinetic comb over the swept corridor (above
         // enemy hit-flashes so the comb teeth visibly cut through crossed bodies).
@@ -2579,6 +2720,23 @@ impl World {
         // they never scale and are never darkened by the ambient.
         _s = crate::prof::scope(crate::prof::Stage::Lighting);
         self.apply_lighting(pb, cam, ambience_cost);
+
+        // Parallax foreground layer: overhead things nearer the eye than the
+        // floor, drawn at world resolution (so it works at every zoom) after
+        // the lighting pass — a fixed darkening instead of a per-pixel light —
+        // and **before** the hostile layer below, so a pellet, a telegraph or a
+        // tell can never be hidden by it. See `render::foreground`.
+        if self.foreground {
+            let mut scene = crate::render::foreground::ForeScene {
+                ecs: &mut self.ecs,
+                level: &self.level,
+                cam,
+                size: (pb.w as f32, pb.h as f32),
+                rat: self.player.pos,
+                elapsed: self.elapsed,
+            };
+            crate::render::foreground::draw(pb, &mut self.foreground_layer, &mut scene);
+        }
 
         // Hostile information wins the frame: pellets, telegraphs, tells and
         // status pips are drawn **after** the lighting pass (so they are
@@ -3021,16 +3179,61 @@ impl World {
         // charged" flash needs the crossing remembered between frames, and this
         // is the only place that has a frame stream.
         let charge = art_rat::tail_charge(&self.player);
-        // The Spiked Tail's lash rides on that same tail: the bristle and the
-        // snap are drawn by `art_rat` on the rat's real chain, so the weapon is
-        // visibly the rat's own tail and not a second sprite.
+        // The Spiked Tail's lash rides on that same tail via a render-only
+        // Verlet physics chain (`self.whip_chain`), stepped deterministically
+        // against the simulation's `Lash` clock so the tip lands squarely on
+        // the target at the exact crack tick.
+        let live_lash: Option<(u64, crate::game::ecs::components::Lash, Option<Vec2>)> = {
+            use crate::game::ecs::components::{Lash, LashTarget};
+            let mut q = self.ecs.query::<(&SpawnId, &Lash)>();
+            let mut best: Option<(u64, Lash)> = None;
+            for (id, lash) in q.iter(&self.ecs) {
+                if best.is_none_or(|(b, _)| id.0 < b) {
+                    best = Some((id.0, *lash));
+                }
+            }
+            best.map(|(id, lash)| {
+                let catch_pos = if lash.barbed_wire() {
+                    match lash.primary {
+                        Some(LashTarget::Enemy(e)) => self
+                            .ecs
+                            .get::<Enemy>(e)
+                            .filter(|enemy| enemy.alive())
+                            .map(|enemy| enemy.pos),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                (id, lash, catch_pos)
+            })
+        };
+        self.whip_chain.sync(
+            &self.player,
+            self.elapsed,
+            live_lash.as_ref().map(|(id, l, c)| (*id, l, *c)),
+        );
         let lash = self.lash_visual();
         let flash = art_rat::tail_ready_flash(
             charge,
             self.elapsed,
             &mut self.tail_ready_at,
         );
-        art_rat::draw_rat_lashed(pb, &self.player, self.elapsed, cam, flash, lash);
+        art_rat::draw_rat_with_whip(
+            pb,
+            &self.player,
+            self.elapsed,
+            cam,
+            flash,
+            lash,
+            Some(&self.whip_chain),
+        );
+        if self.whip_chain.is_active() {
+            let tip_s = self.w2s(self.whip_chain.tip(), cam);
+            self.light_map.mark_emissive_highlights(pb, tip_s, 5);
+            let mid_s = self.w2s(self.whip_chain.mid(), cam);
+            self.light_map.mark_emissive_highlights(pb, mid_s, 3);
+        }
         if charge.is_some_and(|charge| charge.ready) {
             self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 15);
         }
@@ -3038,10 +3241,20 @@ impl World {
         if self.player.buffs.shield > 0.0 {
             art_wave3a::draw_bottle_cap_rim(pb, self.player.pos, self.elapsed, cam);
         }
-        // Wave 3: Laser Eyes' twin muzzle dots and its blinking beam, drawn
-        // over the rat so the eyes read as the source.
+        // Wave 3: Laser Eyes' twin muzzle dots and its steady sweeping beam(s),
+        // drawn over the rat so the eyes read as the source. At L4+ (`fx.twin`),
+        // also draw the mirrored second beam (`angle_b`, `beam_b`).
         if let Some(beam) = self.laser_visual() {
             art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
+            let fx = *self.ecs.resource::<LaserFx>();
+            if fx.twin && fx.beam_b > 1.0 {
+                let twin_beam = art_rat::LaserBeam {
+                    angle: fx.angle_b,
+                    len: fx.beam_b,
+                    ..beam
+                };
+                art_rat::draw_laser_eyes(pb, &self.player, twin_beam, cam);
+            }
             self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 9);
         }
     }

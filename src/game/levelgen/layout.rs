@@ -1,7 +1,7 @@
 //! **Stage A — the map's skeleton.** One open world: a great hall around the
 //! spawn, a sprawl of plazas and medium rooms that merge into each other
-//! through wide openings, the boss arena on the far side, the maze slot, and
-//! the partitions, stubs and pillars that give the floor its cover.
+//! through wide openings, one more great hall on the far side, the maze slot,
+//! and the partitions, stubs and pillars that give the floor its cover.
 //!
 //! Owner: *generator worker A*. The signatures, the [`Layout`] it returns and
 //! the invariants below are final.
@@ -11,8 +11,11 @@
 //! - The start area is centred on the map: `start_room.center_world()` is the
 //!   rat's spawn point and equals `MAP_SIZE * 0.5`, and the 3 × 3 cells around
 //!   it stay open.
-//! - Exactly one [`RoomKind::Boss`] room exists (a large, wide-mouthed open
-//!   arena for the map's boss) and the large size class can reach its centre.
+//! - There is **no** [`RoomKind::Boss`] room: the boss used to own a dedicated
+//!   arena, and batch 12 removed it (the boss hunts the rat where it is — see
+//!   `game::ecs::systems::boss`). The footprint that arena occupied is an
+//!   ordinary large [`RoomKind::Hall`], so maps keep their size and their
+//!   connectivity and the hall is furnished and lit like every other one.
 //! - [`Layout::maze_slots`] is at most one open, wall-free cell rectangle
 //!   reserved for stage B (about one map in eight), with a one-cell ring of
 //!   open floor around it and no solid, prop or partition inside that ring.
@@ -49,18 +52,19 @@
 //! 4. extra **loop links**: areas that ended up 1–3 cells apart are joined by
 //!    more wide openings, so the area graph carries several independent cycles
 //!    and the player can always circle away from a horde;
-//! 5. the **boss arena** (34–40 × 28–34) is attached to the area farthest from
-//!    the spawn through a 6–10-cell mouth;
+//! 5. a second **great hall** (34–40 × 28–34) — the footprint the boss arena
+//!    used to take — is placed far from the spawn and joined to the sprawl by
+//!    ordinary wide openings like any other area; it is never a special case;  
 //! 6. **cover and texture** ([`scatter_cover`]): notched corners, free-standing
 //!    partitions of 10–26 cells (long ones are recorded in
 //!    [`Layout::partitions`] so stage B can pierce them with the rat-holes that
 //!    make ducking through one worth it), wall stubs and pillars;
 //! 7. a final flood fill that stitches any orphaned region back onto the rest
 //!    of the map, so the connectivity promise is proven, not assumed;
-//! 8. the arena's fight furniture ([`furnish_arena`]) — the clear central
-//!    floor, the Lab's two bumpers, its charging dock and the Sewer's escape
-//!    rat-hole — exported as [`crate::game::level::BossArena`] so the boss
-//!    framework, the art and the validator all read the same cells.
+//!
+//! The far hall is exported as [`Layout::boss_arena`] only because the shop-hole
+//! placement still ranks its second hole by distance to the map's far room;
+//! nothing about it is a boss arena any more.
 //!
 //! [`Level::start`]: crate::game::level::Level::start
 
@@ -69,7 +73,7 @@ use rand::RngExt;
 
 use crate::game::art_walls::{WallAxis, WallKind};
 use crate::game::collision::{TileKind, TileMap, TILE_F};
-use crate::game::level::{theme_props, BossArena, Prop, Rectf, Room, RoomKind, Theme, TileRect};
+use crate::game::level::{theme_props, BossArena, Prop, Room, RoomKind, Theme, TileRect};
 use crate::math::Vec2;
 
 /// Solid cells kept between the playable field and the map edge: the wall art
@@ -99,17 +103,18 @@ const PLAZA_H: (i32, i32) = (24, 38);
 const ROOM_W: (i32, i32) = (16, 30);
 const ROOM_H: (i32, i32) = (12, 24);
 
-/// The boss arena: bigger than the old 26–32 × 25–30 room, so the jaguar's
-/// pounce, the human's sweep and the mower's charge all have room.
-const BOSS_W: (i32, i32) = (34, 40);
-const BOSS_H: (i32, i32) = (28, 34);
+/// The far great hall's footprint, in cells. It is the size the boss arena
+/// used to be, kept so the map keeps the room the removal freed (batch 12):
+/// 34–40 × 28–34 cells of ordinary hall on the side of the map away from the
+/// spawn.
+const FAR_HALL_W: (i32, i32) = (34, 40);
+const FAR_HALL_H: (i32, i32) = (28, 34);
+
+/// The smallest far hall the layout test accepts, in cells.
+const FAR_HALL_MIN_CELLS: i32 = 900;
 
 /// Width of the opening two areas share, in cells (the owner's "4 to 10").
 const OPENING_W: (i32, i32) = (4, 10);
-
-/// The boss arena's mouth is never narrower than this: a 28 px boss has to walk
-/// through it.
-const BOSS_MOUTH_MIN: i32 = 6;
 
 /// Cells of bedrock a link may leave between two areas. `0` means the areas
 /// merge (they overlap); `1..=3` gets a wide opening punched through the rock.
@@ -138,10 +143,6 @@ const LARGE_AREA_CELLS: i32 = 620;
 /// in: the space rescue pass widens it whatever the floor cost.
 const RESCUE_SPACE_CELLS: i32 = 900;
 
-/// The boss arena's index in the `areas` list built by [`build_layout`]: the
-/// start area is 0, the arena is placed second and is never a growth parent.
-const BOSS_AREA: usize = 1;
-
 /// A free-standing partition's length in cells. Long enough to be worth a
 /// rat-hole (stage B wants an 8-cell saving), short enough to walk around.
 const PARTITION_LEN: (i32, i32) = (10, 26);
@@ -154,53 +155,6 @@ const ROOM_MARGIN: i32 = 2;
 
 /// A free-standing room wall (`WallKind::Solid`).
 const SOLID: TileKind = TileKind::Wall(WallKind::Solid);
-
-/// The smallest boss arena the validator accepts
-/// ([`super::validate::BOSS_ARENA_MIN_CELLS`]) — the generator asks for far
-/// more than this, but tests compare against the contract constant.
-pub const BOSS_ARENA_CELLS: i32 = 400;
-
-/// A solid within this many pixels counts as **in reach** for a boss that has to
-/// steer a charge into one: the Lab mower's flip lane only lands where the art's
-/// charge (135 px) meets a wall, prop or bumper, and the framework only prefers
-/// an impact within 88 px of the rat. From every cell of the Lab's exported
-/// central floor a solid is this close in at least two cardinal directions
-/// (`DESIGN_REVIEW.md` §5: "a useful target exists within a screenful").
-pub const SOLID_REACH_PX: f32 = 90.0;
-
-/// The outer band of the arena, in cells, that may hold furniture. Everything
-/// further in is the encounter floor: the Kitchen needs 96 × 80 px clear at the
-/// centre, the Sewer needs the pounce's landing lane, and the Lab's bumpers are
-/// the only solids that live there (they are placed as an explicit exception).
-pub const ARENA_PERIMETER_CELLS: i32 = 2;
-
-/// Length of each Lab steel bumper in cells: the designer's "two short steel
-/// bumpers, each about 3 cells long".
-pub const BUMPER_LEN: i32 = 3;
-
-/// The lane the mower's framework insists on beside an impact
-/// (`mower::IMPACT_SIDE_LANE`), in pixels. Every bumper keeps it open on both
-/// long sides.
-const BUMPER_SIDE_LANE_PX: f32 = 32.0;
-
-/// Clear cells the Lab's dock cell keeps from every mouth cell, so the pad is
-/// "against a wall away from the mouth".
-const DOCK_MOUTH_CLEAR: i32 = 6;
-
-/// Clear cells the dock **cell** keeps from the arena ring: the art's pad
-/// footprint is 32 × 30 px ([`crate::game::art_boss_mower::DOCK_HALF_SIZE`]),
-/// so one clear cell between pad and wall keeps the pad off the wall art.
-const DOCK_WALL_INSET: i32 = 2;
-
-/// Clear cells the Sewer's escape rat-hole keeps from the arena mouth: the hole
-/// is an escape route, not a second front door beside the first.
-const ESCAPE_MOUTH_CLEAR: i32 = 5;
-
-/// Longest duct the Sewer's escape hole may carve through bedrock to reach open
-/// floor outside the arena's wall ring. The search always takes the nearest
-/// floor, so most maps need a handful of cells; the arena is the map's
-/// outermost room by design, so the cap keeps a pathological case bounded.
-const ESCAPE_DUCT_MAX: i32 = 64;
 
 /// One map in this many carries a maze: the owner's "about one in eight".
 ///
@@ -231,9 +185,13 @@ pub struct Layout {
     pub start: Vec2,
     /// The start room's cells.
     pub start_room: TileRect,
-    /// The boss arena's cells.
+    /// The far great hall's cells (the footprint the boss arena used to take).
+    /// Nothing fights here any more; the shop-hole placement and the hazard
+    /// keep-clear list read it as "the map's far room".
     pub boss_arena: TileRect,
-    /// What the arena furnishes for its fight (the exported [`BossArena`]).
+    /// Unused since the arena was removed: no generated layout furnishes a
+    /// [`BossArena`]. Kept as a field so the Flatbed's own generator and the
+    /// tests that build a [`Layout`] literal keep compiling.
     pub boss: BossArena,
     /// The maze reservation, if this map has one: at most one slot, on about
     /// one map in eight (`MAZE_ONE_IN`). Stage B carves every slot it is given.
@@ -253,8 +211,8 @@ impl Layout {
         self.maze_slots.get(index).copied()
     }
 
-    /// The rooms stage B furnishes or traps (everything but the start room,
-    /// the boss arena and the corridors).
+    /// The rooms stage B furnishes or traps (everything but the start room
+    /// and the corridors).
     pub fn is_furnishable(&self, room: &Room) -> bool {
         matches!(room.kind, RoomKind::Hall | RoomKind::Room)
     }
@@ -320,22 +278,23 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     }];
     let mut corridors: Vec<TileRect> = Vec::new();
     // The area graph's edges, by construction: one per growth step plus every
-    // loop opening and the boss arena's mouth(s).
+    // loop opening.
     let mut linked: Vec<(usize, usize)> = Vec::new();
 
-    // ---- 3. the boss arena: one big room far from the spawn -------------
-    // Placed first, because the sprawl is not allowed to touch it: the arena
-    // keeps its own wall ring (the Sewer's escape rat-hole, the Lab's dock and
-    // the Kitchen's clear centre all need it) and never grows a prop.
-    let boss_w = even(rng.random_range(BOSS_W.0..=BOSS_W.1));
-    let boss_h = even(rng.random_range(BOSS_H.0..=BOSS_H.1));
+    // ---- 3. the far great hall: one big room away from the spawn --------
+    // The footprint the boss arena used to take (batch 12 removed the arena; the
+    // boss now arrives where the rat is). It is carved first and is otherwise an
+    // ordinary hall: the sprawl may merge with it, grow wings off it, furnish it
+    // and light it, and the shop-hole placement reads it as the map's far room.
+    let far_w = even(rng.random_range(FAR_HALL_W.0..=FAR_HALL_W.1));
+    let far_h = even(rng.random_range(FAR_HALL_H.0..=FAR_HALL_H.1));
     let centre = start_room.center_world();
     let far = |rect: &TileRect| rect.center_world().dist(centre) >= 48.0 * TILE_F;
-    let boss_arena = pick_rect(rng, field, ROOM_MARGIN, boss_w, boss_h, 2, |rect| {
+    let boss_arena = pick_rect(rng, field, ROOM_MARGIN, far_w, far_h, 2, |rect| {
         far(&rect) && !rect.inflate(6).intersects(&start_room)
     })
     .or_else(|| {
-        pick_rect(rng, field, ROOM_MARGIN, boss_w, boss_h, 2, |rect| {
+        pick_rect(rng, field, ROOM_MARGIN, far_w, far_h, 2, |rect| {
             !rect.inflate(6).intersects(&start_room)
         })
     })
@@ -343,19 +302,19 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         // Deterministic last resort: the field's far corner. It cannot overlap
         // the centred start area at this map size.
         TileRect::new(
-            room_area.right() - boss_w,
-            room_area.bottom() - boss_h,
-            boss_w,
-            boss_h,
+            room_area.right() - far_w,
+            room_area.bottom() - far_h,
+            far_w,
+            far_h,
         )
     });
     carve_count(tiles, boss_arena);
-    let boss_index = areas.len();
+    let far_index = areas.len();
     areas.push(Area {
         rect: boss_arena,
-        kind: RoomKind::Boss,
+        kind: RoomKind::Hall,
     });
-    debug_assert_eq!(boss_index, BOSS_AREA);
+    debug_assert_eq!(far_index, 1);
     // Links per area, kept while the sprawl grows so the next area can be hung
     // off whichever one still has only one way in: that is what turns the
     // growth tree into a looped network of areas rather than a chain.
@@ -383,22 +342,16 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     let mut attempts = 0;
     while (open as f64) < target_cells && areas.len() < MAX_AREAS && attempts < 700 {
         attempts += 1;
-        // The boss arena is area 1 and never grows a wing: its mouth is punched
-        // once, wide, by the loop pass below. Everything else prefers a parent
-        // that still has only one way in, so the sprawl keeps looping back on
-        // itself instead of running away in a chain.
+        // Every area may grow a wing, the far hall included; everything prefers
+        // a parent that still has only one way in, so the sprawl keeps looping
+        // back on itself instead of running away in a chain.
         let starved: Vec<usize> = (0..areas.len())
-            .filter(|&index| index != BOSS_AREA && degree[index] < 2)
+            .filter(|&index| degree[index] < 2)
             .collect();
         let parent = if !starved.is_empty() && rng.random_bool(0.65) {
             starved[rng.random_range(0..starved.len())]
         } else {
-            let pick = rng.random_range(0..areas.len() - 1);
-            if pick == 0 {
-                0
-            } else {
-                pick + 1
-            }
+            rng.random_range(0..areas.len())
         };
         // Every map grows at least two plazas, whatever the theme's bias says:
         // the horde needs great halls to surround the rat in.
@@ -486,16 +439,17 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         }
     }
 
-    // ---- 4. the arena's mouth, and loops: a second way round -------------
+    // ---- 4. loops: a second way round -----------------------------------
     // The growth tree is a tree; an open world needs cycles, or every area
     // hangs off the rest by one opening. Every pair of areas that ended up
     // 1-3 cells apart gets a wide opening of its own — starting with the pairs
-    // that give an area its second way out — and the boss arena gets its own
-    // wide mouth.
+    // that give an area its second way out. The far hall is linked first, so the
+    // big room the spawn is farthest from is never the one behind a single
+    // choke point.
     degree.resize(areas.len(), 0);
-    let mut arena_links = 0;
-    for other in 0..boss_index {
-        if arena_links >= 2 {
+    let mut far_links = 0;
+    for other in 0..far_index {
+        if far_links >= 2 {
             break;
         }
         if link_areas(
@@ -503,20 +457,20 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
             rng,
             &areas,
             other,
-            boss_index,
-            BOSS_MOUTH_MIN,
+            far_index,
+            OPENING_W.0,
             &mut corridors,
             &mut degree,
             &mut linked,
         ) {
-            arena_links += 1;
+            far_links += 1;
         }
     }
-    // No area came within reach of the arena (it sits in the bedrock ring
-    // beyond the sprawl): carve one wide link from the arena to the nearest
-    // area, so "the boss arena is connected" is structural, not luck.
-    if arena_links == 0 {
-        let nearest = (0..boss_index)
+    // No area came within reach of the far hall (it sits in the bedrock ring
+    // beyond the sprawl): carve one wide link from it to the nearest area, so
+    // "the far hall is connected" is structural, not luck.
+    if far_links == 0 {
+        let nearest = (0..far_index)
             .min_by_key(|&index| {
                 let rect = areas[index].rect;
                 let dx = (rect.x - boss_arena.right())
@@ -533,14 +487,14 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
             field,
             areas[nearest].rect,
             boss_arena,
-            BOSS_MOUTH_MIN,
+            OPENING_W.0,
             &areas,
         ) {
             corridors.push(leg);
         }
         degree[nearest] += 1;
-        degree[boss_index] += 1;
-        linked.push((nearest.min(boss_index), nearest.max(boss_index)));
+        degree[far_index] += 1;
+        linked.push((nearest.min(far_index), nearest.max(far_index)));
     }
 
     let mut pairs: Vec<(usize, usize)> = Vec::new();
@@ -587,8 +541,7 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     while rescued < MAX_RESCUE_LINKS {
         let starved = (0..areas.len())
             .filter(|&index| {
-                index != BOSS_AREA
-                    && areas[index].rect.area() >= LARGE_AREA_CELLS
+                areas[index].rect.area() >= LARGE_AREA_CELLS
                     && degree[index] < 2
                     && !hopeless.contains(&index)
             })
@@ -701,23 +654,16 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     }
     let seen = connect_orphans(tiles, field, &targets, start_cell);
 
-    // ---- 8. the arena's fight furniture ---------------------------------
-    // After every opening (so the mouths are known and the Sewer's escape duct
-    // can reach real floor) and after the repair pass (so the duct lands on
-    // floor that is actually reachable).
-    let boss = furnish_arena(tiles, theme, boss_arena, field);
-
     let start_cell = (
         (start_room.center_world().x / TILE_F) as i32,
         (start_room.center_world().y / TILE_F) as i32,
     );
     // The owner's promise, measured on the grid that was just carved: every
     // named area has a route at least [`WIDE_ENOUGH`] cells wide. A map that
-    // fails it (a merge neck, a bumper, a partition too near a mouth) gets one
-    // wide corridor, so the promise is structural and not a hope.
-    let skip_boss = matches!(theme, Theme::Laundry | Theme::Printworks);
+    // fails it (a merge neck, a partition too near an opening) gets one wide
+    // corridor, so the promise is structural and not a hope.
     for _ in 0..MAX_WIDENINGS {
-        let Some(rect) = narrow_area(tiles, &areas, start_cell, &maze_slots, skip_boss) else {
+        let Some(rect) = narrow_area(tiles, &areas, start_cell, &maze_slots) else {
             break;
         };
         let partner = nearest_other(tiles, &areas, rect);
@@ -785,7 +731,7 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         start: start_room.center_world(),
         start_room,
         boss_arena,
-        boss,
+        boss: BossArena::default(),
         maze_slots,
         partitions,
     }
@@ -985,7 +931,7 @@ fn punch_arch(
 ///
 /// This is the only corridor an open map grows besides the short galleries a
 /// two- or three-cell wall leaves behind, and it is never narrower than
-/// `width` (the owner's "at least 4 cells": the boss arena asks for 6).
+/// `width` (the owner's "at least 4 cells").
 fn carve_free_link(
     tiles: &mut TileMap,
     field: TileRect,
@@ -1335,22 +1281,12 @@ fn narrow_area(
     areas: &[Area],
     start: (i32, i32),
     slots: &[TileRect],
-    skip_boss: bool,
 ) -> Option<TileRect> {
     let best = widest_paths(tiles, start);
     let cols = tiles.cols();
     let index = |cx: i32, cy: i32| (cy * cols + cx) as usize;
     let mut worst: Option<(i32, TileRect)> = None;
     for area in areas {
-        // The boss arena is furnished for its fight (the Lab's bumpers, the
-        // mower's dock); a wide repair corridor carved into it would cut the
-        // very furniture the fight needs. The wave 3 floors opt out entirely
-        // (`skip_boss`), because their halls hold more floor furniture than the
-        // original themes' and the arena came out narrowest too often. The
-        // original three themes keep the historical behaviour byte for byte.
-        if area.kind == RoomKind::Boss && (skip_boss || area.rect.area() < BOSS_ARENA_CELLS) {
-            continue;
-        }
         let mut floor = 0;
         let mut reachable = 0;
         let mut enough = 0;
@@ -1501,9 +1437,7 @@ fn scatter_cover(
         .collect();
     for area in areas {
         let rect = area.rect;
-        // The boss arena is furnished by `furnish_arena` and the validator
-        // insists on its clear encounter floor; the sprawl does not touch it.
-        if area.kind == RoomKind::Boss || rect.w < 16 || rect.h < 16 {
+        if rect.w < 16 || rect.h < 16 {
             continue;
         }
         // Interior work keeps four cells from the wall ring: an opening lives
@@ -1699,9 +1633,6 @@ fn laundry_floor(
 ) {
     let guard = theme_guard(areas, slots, start_cell);
     for area in areas {
-        if area.kind == RoomKind::Boss {
-            continue;
-        }
         let rect = area.rect;
         // Three cells clear of the ring: an opening lives on the ring, and the
         // cell inside it has to stay walkable.
@@ -1774,9 +1705,6 @@ fn printworks_floor(
     const LANE: i32 = 3;
     let guard = theme_guard(areas, slots, start_cell);
     for area in areas {
-        if area.kind == RoomKind::Boss {
-            continue;
-        }
         let rect = area.rect;
         let inner = rect.inflate(-3);
         if inner.w < 16 || inner.h < 14 || inner.area() < 340 {
@@ -2070,21 +1998,11 @@ pub fn furnish(tiles: &mut TileMap, layout: &Layout, rng: &mut StdRng, theme: Th
             }
         }
     }
-    // ---- the arena's fight furniture ------------------------------------
-    // The boss arena is not a hall: it is the room a specific fight happens in,
-    // and each of the three fights needs something from it (`DESIGN_REVIEW.md`
-    // §5). Rooms are furnished first so the arena's perimeter props can stay
-    // out of every doorway, rat-hole and one-way door (`keeps_openings_clear`).
-    furnish_arena_perimeter(tiles, layout, rng, theme, &mut props, &mut taken);
     // Furniture is cover, never a plug: if a prop has pinched an area's only
     // route to one or two cells, open a wide corridor so the owner's "no
     // required route through a passage narrower than 3 cells" still holds on
     // the finished map.
-    widen_pinched_areas(
-        tiles,
-        layout,
-        matches!(theme, Theme::Laundry | Theme::Printworks),
-    );
+    widen_pinched_areas(tiles, layout);
     // A widening corridor may have cut through a prop's own cells: that prop is
     // no longer there, so it is not reported (the grid is the truth the art and
     // the collision both read).
@@ -2104,7 +2022,7 @@ pub fn furnish(tiles: &mut TileMap, layout: &Layout, rng: &mut StdRng, theme: Th
 
 /// Carve up to [`MAX_WIDENINGS`] wide links into any area that furnishing left
 /// behind a narrow seam.
-fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout, skip_boss: bool) {
+fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout) {
     let field = TileRect::new(
         BORDER,
         BORDER,
@@ -2114,7 +2032,7 @@ fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout, skip_boss: bool) {
     let areas: Vec<Area> = layout
         .rooms
         .iter()
-        .filter(|room| matches!(room.kind, RoomKind::Start | RoomKind::Boss | RoomKind::Hall | RoomKind::Room))
+        .filter(|room| matches!(room.kind, RoomKind::Start | RoomKind::Hall | RoomKind::Room))
         .map(|room| Area {
             rect: room.rect,
             kind: room.kind,
@@ -2125,7 +2043,7 @@ fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout, skip_boss: bool) {
         (layout.start.y / TILE_F) as i32,
     );
     for _ in 0..MAX_WIDENINGS {
-        let Some(rect) = narrow_area(tiles, &areas, start, &layout.maze_slots, skip_boss) else {
+        let Some(rect) = narrow_area(tiles, &areas, start, &layout.maze_slots) else {
             break;
         };
         let Some(partner) = nearest_other(tiles, &areas, rect) else {
@@ -2136,539 +2054,19 @@ fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout, skip_boss: bool) {
 }
 
 // ============================================================================
-// Arena furniture
+// The fight's nominal floor
 // ============================================================================
 
-/// The clear encounter floor every arena keeps at its centre, in cells.
+/// The nominal clear floor a boss fight keeps, in cells.
 ///
-/// - **Kitchen**: the designer's `96 × 80 px` encounter floor
-///   (`DESIGN_REVIEW.md` §5) — the human's sweeps are read from it and the
-///   pocket under its boots has to stay approachable.
-/// - **Sewer**: `96 × 80 px`, the jaguar's pounce landing with room for the
-///   escape lane that leads to the rat-hole.
-/// - **Lab**: `64 × 48 px` between the two bumpers. It is exactly the strip
-///   where both steel bars are within [`SOLID_REACH_PX`] on opposite sides, so
-///   every cell of it guarantees the mower a lane that ends on a real solid.
-///
-/// Every floor below fits inside [`super::placement::in_boss_fight_floor`]'s
-/// 6 × 5-cell trap-free fighting floor, so a trap can never sit on it.
-pub fn boss_floor_cells(theme: Theme) -> (i32, i32) {
-    match theme {
-        Theme::Sewer => (6, 5),
-        Theme::Kitchen => (6, 5),
-        Theme::Lab => (4, BUMPER_LEN),
-        // Laundry borrows the broom's arena (a clear 96 x 80 px pocket).
-        Theme::Laundry => (6, 5),
-        // The Night Edition's press bed: the same clear 96 x 80 px pocket. It
-        // is a stamp fight — the sheet is 36 x 30 px and the carriage rule is
-        // 54 px long, both drawn at wherever the rat stands — so the fight is
-        // won and lost on open floor, and the only furniture is the press bed
-        // the art lays under the boss itself.
-        Theme::Printworks => (6, 5),
-        Theme::Trailer => (6, 5),
-    }
-}
-
-/// Furnish the boss arena for its fight and return the exported
-/// [`BossArena`]. No rng draws: the furniture is a *property* of the arena's
-/// geometry, so every seed gets the most deterministic arrangement that fits.
-///
-/// This runs late in stage A, after every corridor, so the arena's mouth cells
-/// are painted and the Sewer's escape duct can reach real floor.
-fn furnish_arena(tiles: &mut TileMap, theme: Theme, arena: TileRect, field: TileRect) -> BossArena {
-    let (fw, fh) = boss_floor_cells(theme);
-    let centre = arena.center_world();
-    let centre_cell = ((centre.x / TILE_F) as i32, (centre.y / TILE_F) as i32);
-    // Even arena dimensions put the exact centre on a cell boundary: build the
-    // floor around the cell that contains it so the centre is always on it.
-    let floor = TileRect::new(centre_cell.0 - fw / 2, centre_cell.1 - fh / 2, fw, fh);
-    let mouths = arena_mouths(tiles, arena);
-    let mut boss = BossArena {
-        floor,
-        mouths: mouths.clone(),
-        ..BossArena::default()
-    };
-    match theme {
-        Theme::Lab => furnish_lab(tiles, arena, floor, &mouths, &mut boss, false),
-        Theme::Sewer => {
-            boss.escape_hole = carve_escape_hole(tiles, arena, &mouths, field);
-        }
-        // The Kitchen's requirement is a constraint (clear centre, furniture at
-        // the perimeter), enforced by `furnish_arena_perimeter` and the
-        // validator: nothing else has to be placed inside the arena.
-        Theme::Kitchen => {}
-        // Wave 3 routes, same mapping as `BossKind::for_theme`: the Laundry's
-        // boss is the Mangle (a clear pocket) and the
-        // Printworks' is the Night Edition, whose arena is a clear press bed.
-        // Neither wants the Lab's steel bumpers or its charging dock.
-        Theme::Laundry => {}
-        Theme::Printworks => {}
-        // The flatbed's cab hold is empty plate.
-        Theme::Trailer => {}
-    }
-    boss
-}
-
-/// The arena's mouth cells: the doorway cells in its one-cell wall ring.
-fn arena_mouths(tiles: &TileMap, arena: TileRect) -> Vec<(i32, i32)> {
-    crate::game::levelgen::maze::ring_border(arena.inflate(1))
-        .filter(|&(cx, cy)| {
-            matches!(
-                tiles.get(cx, cy),
-                TileKind::Wall(WallKind::Doorway { .. } | WallKind::OneWayDoor { .. })
-            )
-        })
-        .collect()
-}
-
-/// The Lab's two steel bumpers and its charging dock.
-///
-/// The bumpers are 1 × [`BUMPER_LEN`] solid bars immediately west and east of
-/// the central floor, so from any floor cell the −x and +x rays both end on a
-/// solid (at most `2 × (floor width)` px away, always inside
-/// [`SOLID_REACH_PX`]). They are free-standing: a three-cell bar in a 26-cell
-/// room can neither block the mouth nor isolate floor, and the validator proves
-/// the interior stays connected.
-fn furnish_lab(
-    tiles: &mut TileMap,
-    arena: TileRect,
-    floor: TileRect,
-    mouths: &[(i32, i32)],
-    boss: &mut BossArena,
-    sweep: bool,
-) {
-    let bars = [
-        TileRect::new(floor.x - 1, floor.y, 1, BUMPER_LEN),
-        TileRect::new(floor.right(), floor.y, 1, BUMPER_LEN),
-    ];
-    for bar in bars {
-        // Only a bar that sits wholly on arena floor is a bumper; anything else
-        // would be a property the validator cannot promise.
-        if !bars_fit(tiles, bar, arena, floor) {
-            continue;
-        }
-        tiles.fill_cells(bar.x, bar.y, bar.w, bar.h, SOLID);
-        boss.bumpers.push(bar);
-    }
-    if let Some((cell, pos)) = lab_dock(tiles, arena, floor, mouths, sweep) {
-        boss.dock = Some(pos);
-        boss.dock_cell = Some(cell);
-    }
-}
-
-/// Is `bar` a legal bumper: inside the arena, clear of the floor, and with the
-/// framework's 32 px side lane open along at least one long side?
-fn bars_fit(tiles: &TileMap, bar: TileRect, arena: TileRect, floor: TileRect) -> bool {
-    if !within(bar, arena) || bar.intersects(&floor) {
-        return false;
-    }
-    // The impact lane runs along the bar's long face; the framework probes a
-    // 32 px escape segment from a chassis 13 px off that face, so the two cells
-    // beside the bar have to be floor for the whole bar length.
-    let lane_cells = (BUMPER_SIDE_LANE_PX / TILE_F).ceil() as i32;
-    [-1, 1].iter().any(|&side| {
-        (0..lane_cells).all(|k| {
-            (0..bar.h).all(|row| {
-                let cx = if side < 0 {
-                    bar.x - 1 - k
-                } else {
-                    bar.right() + k
-                };
-                tiles.get(cx, bar.y + row).is_open()
-            })
-        })
-    })
-}
-
-/// The Lab's charging dock: a floor cell `DOCK_WALL_INSET` cells in from the
-/// wall ring on the side farthest from the mouth, with the art's 32 × 30 px pad
-/// footprint clear.
-fn lab_dock(
-    tiles: &TileMap,
-    arena: TileRect,
-    floor: TileRect,
-    mouths: &[(i32, i32)],
-    sweep: bool,
-) -> Option<((i32, i32), Vec2)> {
-    let mid_x = arena.x + arena.w / 2;
-    let mid_y = arena.y + arena.h / 2;
-    let candidates = [
-        (mid_x, arena.y + DOCK_WALL_INSET - 1),          // north wall
-        (arena.right() - DOCK_WALL_INSET, mid_y),        // east wall
-        (mid_x, arena.bottom() - DOCK_WALL_INSET),       // south wall
-        (arena.x + DOCK_WALL_INSET - 1, mid_y),          // west wall
-    ];
-    let mut best: Option<(i32, (i32, i32), Vec2)> = None;
-    for (cx, cy) in candidates {
-        if !arena.contains(cx, cy) || floor.contains(cx, cy) {
-            continue;
-        }
-        if !tiles.get(cx, cy).is_open() {
-            continue;
-        }
-        let pos = TileMap::tile_rect(cx, cy).center();
-        let pad = Rectf::new(
-            pos.x - crate::game::art_boss_mower::DOCK_HALF_SIZE.x,
-            pos.y - crate::game::art_boss_mower::DOCK_HALF_SIZE.y,
-            2.0 * crate::game::art_boss_mower::DOCK_HALF_SIZE.x,
-            2.0 * crate::game::art_boss_mower::DOCK_HALF_SIZE.y,
-        );
-        if !tiles.rect_clear(pad, crate::game::collision::SizeClass::Large) {
-            continue;
-        }
-        let gap = mouths
-            .iter()
-            .map(|&(mx, my)| (mx - cx).abs().max((my - cy).abs()))
-            .min()
-            .unwrap_or(i32::MAX);
-        if gap < DOCK_MOUTH_CLEAR {
-            continue;
-        }
-        if best.is_none_or(|(bg, _, _)| gap > bg) {
-            best = Some((gap, (cx, cy), pos));
-        }
-    }
-    if best.is_none() && sweep {
-        // The wave 3 floors (`sweep`) never ship an arena without its dock: if a
-        // corridor happens to open one of the four wall midpoints, the whole
-        // perimeter band is searched in a deterministic order for any cell that
-        // satisfies the same constraints. The original three themes keep the
-        // four-candidate behaviour byte for byte.
-        let band = ARENA_PERIMETER_CELLS;
-        for cy in (arena.y + 1)..(arena.bottom() - 1) {
-            for cx in (arena.x + 1)..(arena.right() - 1) {
-                let on_band = cx < arena.x + band
-                    || cx >= arena.right() - band
-                    || cy < arena.y + band
-                    || cy >= arena.bottom() - band;
-                if !on_band || floor.contains(cx, cy) {
-                    continue;
-                }
-                if !tiles.get(cx, cy).is_open() {
-                    continue;
-                }
-                let pos = TileMap::tile_rect(cx, cy).center();
-                let pad = Rectf::new(
-                    pos.x - crate::game::art_boss_mower::DOCK_HALF_SIZE.x,
-                    pos.y - crate::game::art_boss_mower::DOCK_HALF_SIZE.y,
-                    2.0 * crate::game::art_boss_mower::DOCK_HALF_SIZE.x,
-                    2.0 * crate::game::art_boss_mower::DOCK_HALF_SIZE.y,
-                );
-                if !tiles.rect_clear(pad, crate::game::collision::SizeClass::Large) {
-                    continue;
-                }
-                let gap = mouths
-                    .iter()
-                    .map(|&(mx, my)| (mx - cx).abs().max((my - cy).abs()))
-                    .min()
-                    .unwrap_or(i32::MAX);
-                if gap < DOCK_MOUTH_CLEAR {
-                    continue;
-                }
-                if best.is_none_or(|(bg, _, _)| gap > bg) {
-                    best = Some((gap, (cx, cy), pos));
-                }
-            }
-        }
-    }
-    best.map(|(_, cell, pos)| (cell, pos))
-}
-
-/// The Sewer's escape rat-hole: a hole in the arena wall ring that leads, via a
-/// short duct, onto real floor outside.
-///
-/// The jaguar's pounce is answered by ducking through a hole so the cat
-/// overshoots (`DESIGN_REVIEW.md` 5). The hole is chosen deterministically:
-///
-/// 1. only a solid ring cell at least [`ESCAPE_MOUTH_CLEAR`] cells from the
-///    mouth, with arena floor open behind it, is a candidate;
-/// 2. a multi-source breadth-first search runs from every candidate outward
-///    through bare bedrock (never along the ring, never through a threshold) to
-///    the nearest open floor;
-/// 3. the nearest candidate wins and the search path is carved as a one-cell
-///    duct.
-///
-/// A straight outward ray is not enough: the arena is the map's outermost room
-/// by design, so on some seeds every ray leaves the field or runs 30+ cells
-/// before it hits floor, while a duct that turns once reaches the mouth corridor
-/// in a handful of cells.
-fn carve_escape_hole(
-    tiles: &mut TileMap,
-    arena: TileRect,
-    mouths: &[(i32, i32)],
-    field: TileRect,
-) -> Option<(i32, i32)> {
-    let ring = arena.inflate(1);
-    let cols = tiles.cols();
-    let index = |cx: i32, cy: i32| (cy * cols + cx) as usize;
-
-    // 1. Candidate ring cells: a solid side cell, clear of the mouth, with the
-    // arena's own floor open behind it.
-    let mut sources: Vec<(i32, i32)> = Vec::new();
-    for (cx, cy) in crate::game::levelgen::maze::ring_border(ring) {
-        let vertical_wall = cx == ring.x || cx == ring.right() - 1;
-        let horizontal_wall = cy == ring.y || cy == ring.bottom() - 1;
-        if vertical_wall == horizontal_wall || !tiles.is_full_solid(cx, cy) {
-            continue; // a corner, or a mouth/doorway/hole already lives here
-        }
-        let gap = mouths
-            .iter()
-            .map(|&(mx, my)| (mx - cx).abs().max((my - cy).abs()))
-            .min()
-            .unwrap_or(i32::MAX);
-        if gap < ESCAPE_MOUTH_CLEAR {
-            continue;
-        }
-        let (dx, dy) = if vertical_wall {
-            (if cx == ring.x { -1 } else { 1 }, 0)
-        } else {
-            (0, if cy == ring.y { -1 } else { 1 })
-        };
-        let inner = (cx - dx, cy - dy);
-        if !arena.contains(inner.0, inner.1) || !tiles.get(inner.0, inner.1).is_open() {
-            continue;
-        }
-        sources.push((cx, cy));
-    }
-    if sources.is_empty() {
-        return None;
-    }
-
-    // 2. BFS outward through bedrock. The ring itself is excluded so a duct can
-    // never run along the arena wall, and only `Solid` cells are walked so no
-    // doorway, one-way door, rat-hole or maze partition is ever eaten.
-    let cells = (cols * tiles.rows()) as usize;
-    let mut parent: Vec<i32> = vec![-1; cells];
-    let mut seen = vec![false; cells];
-    let mut queue: std::collections::VecDeque<(i32, i32, i32)> = std::collections::VecDeque::new();
-    for &(cx, cy) in &sources {
-        let i = index(cx, cy);
-        seen[i] = true;
-        parent[i] = -2; // a source: the path ends here
-        queue.push_back((cx, cy, 0));
-    }
-    let mut landing: Option<(i32, i32)> = None;
-    while let Some((cx, cy, depth)) = queue.pop_front() {
-        if depth > ESCAPE_DUCT_MAX {
-            break; // BFS pops by depth, so every remaining path is longer
-        }
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let (nx, ny) = (cx + dx, cy + dy);
-            if !field.contains(nx, ny) || ring.contains(nx, ny) || seen[index(nx, ny)] {
-                continue;
-            }
-            match tiles.get(nx, ny) {
-                TileKind::Open => {
-                    landing = Some((cx, cy));
-                    break;
-                }
-                SOLID => {
-                    let i = index(nx, ny);
-                    seen[i] = true;
-                    parent[i] = index(cx, cy) as i32;
-                    queue.push_back((nx, ny, depth + 1));
-                }
-                _ => {}
-            }
-        }
-        if landing.is_some() {
-            break;
-        }
-    }
-    let mut cur = landing?;
-
-    // 3. Walk the parents back to the chosen ring cell and carve the path.
-    let mut duct = Vec::new();
-    loop {
-        let p = parent[index(cur.0, cur.1)];
-        if p == -2 {
-            break;
-        }
-        duct.push(cur);
-        cur = ((p as usize % cols as usize) as i32, (p as usize / cols as usize) as i32);
-    }
-    duct.reverse();
-    let cell = cur;
-    for (nx, ny) in duct {
-        tiles.set(nx, ny, TileKind::Open);
-    }
-    let vertical_wall = cell.0 == ring.x || cell.0 == ring.right() - 1;
-    let axis = if vertical_wall {
-        WallAxis::Vertical
-    } else {
-        WallAxis::Horizontal
-    };
-    tiles.set(cell.0, cell.1, TileKind::Wall(WallKind::RatHole { axis }));
-    Some(cell)
-}
-
-/// Is every open cell of the arena interior reachable from its centre for the
-/// small class? The promise "never isolating any floor" is exactly this, and it
-/// is cheap at arena size (≈ 900 cells).
-fn arena_interior_connected(tiles: &TileMap, arena: TileRect) -> bool {
-    use crate::game::collision::SizeClass;
-    let centre = arena.center_world();
-    let start = ((centre.x / TILE_F) as i32, (centre.y / TILE_F) as i32);
-    if !tiles.passable(start.0, start.1, SizeClass::Small) {
-        return false;
-    }
-    let mut seen = vec![false; (arena.w * arena.h) as usize];
-    let index = |cx: i32, cy: i32| ((cy - arena.y)
-        * arena.w
-        + (cx - arena.x)) as usize;
-    seen[index(start.0, start.1)] = true;
-    let mut queue = vec![start];
-    while let Some((cx, cy)) = queue.pop() {
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let (nx, ny) = (cx + dx, cy + dy);
-            if !arena.contains(nx, ny) || !tiles.passable(nx, ny, SizeClass::Small) {
-                continue;
-            }
-            let i = index(nx, ny);
-            if !seen[i] {
-                seen[i] = true;
-                queue.push((nx, ny));
-            }
-        }
-    }
-    arena.cells().all(|(cx, cy)| {
-        !tiles.passable(cx, cy, SizeClass::Small) || seen[index(cx, cy)]
-    })
-}
-
-/// Furniture against the arena's walls: the Kitchen's barrels and counter ends,
-/// the Sewer's pipes and barriers.
-///
-/// The owner's rule is "barrels or counter ends only at the perimeter" (§5), so
-/// a prop has to sit in the outer [`ARENA_PERIMETER_CELLS`] band of the arena,
-/// clear of the central floor's approach, the dock, the escape hole and every
-/// opening. A placement that would isolate arena floor is reverted, so the
-/// fight floor is connected by construction, not by luck.
-fn furnish_arena_perimeter(
-    tiles: &mut TileMap,
-    layout: &Layout,
-    rng: &mut StdRng,
-    theme: Theme,
-    props: &mut Vec<Prop>,
-    taken: &mut Vec<TileRect>,
-) {
-    let kinds: &[crate::game::level::PropKind] = match theme {
-        Theme::Kitchen => &[
-            crate::game::level::PropKind::Barrel,
-            crate::game::level::PropKind::Counter,
-        ],
-        Theme::Sewer => &[
-            crate::game::level::PropKind::Barrier,
-            crate::game::level::PropKind::PipeV,
-            crate::game::level::PropKind::PipeH,
-        ],
-        // The Lab's furniture is its bumpers and dock; nothing else competes
-        // with the charge lanes.
-        Theme::Lab => return,
-        // The Laundry dresses its arena with linen trolleys and white goods.
-        Theme::Laundry => &[
-            crate::game::level::PropKind::TowelRoll,
-            crate::game::level::PropKind::Washer,
-        ],
-        // The Printworks borrows the mower's arena: nothing may compete with
-        // its charge lanes.
-        Theme::Printworks => return,
-        // The flatbed furnishes its deck from its own generator.
-        Theme::Trailer => return,
-    };
-    let arena = layout.boss_arena;
-    if arena.w < 8 || arena.h < 8 {
-        return;
-    }
-    let count = 2 + rng.random_range(0..=1);
-    for _ in 0..count {
-        let kind = kinds[rng.random_range(0..kinds.len())];
-        // The room scatter runs first, so its props are already on the map:
-        // an arena prop keeps the same one-cell gap from them (a pipe against
-        // a pipe reads as one wall, not two props).
-        let candidates: Vec<TileRect> = arena_prop_sites(tiles, layout, arena, kind)
-            .into_iter()
-            .filter(|rect| !taken.iter().any(|other| other.inflate(1).intersects(rect)))
-            .collect();
-        if candidates.is_empty() {
-            continue;
-        }
-        let rect = candidates[rng.random_range(0..candidates.len())];
-        let before: Vec<TileKind> = rect.cells().map(|(x, y)| tiles.get(x, y)).collect();
-        tiles.fill_cells(rect.x, rect.y, rect.w, rect.h, SOLID);
-        if !arena_interior_connected(tiles, arena) {
-            for (i, (cx, cy)) in rect.cells().enumerate() {
-                tiles.set(cx, cy, before[i]);
-            }
-            continue;
-        }
-        props.push(Prop {
-            kind,
-            rect: rect.to_world(),
-        });
-        taken.push(rect);
-    }
-}
-
-/// Every cell-aligned site in the arena's perimeter band where `kind` may go.
-///
-/// A site is inside the arena, wholly within the outer
-/// [`ARENA_PERIMETER_CELLS`] band, clear of the central floor's approach ring,
-/// the dock and the escape hole, and never in front of an opening. Placed props
-/// become `Solid`, so later candidates see them as occupied through the
-/// "all cells open" test.
-fn arena_prop_sites(
-    tiles: &TileMap,
-    layout: &Layout,
-    arena: TileRect,
-    kind: crate::game::level::PropKind,
-) -> Vec<TileRect> {
-    let (w, h) = kind.cells();
-    let mut sites = Vec::new();
-    if w > arena.w || h > arena.h {
-        return sites;
-    }
-    // Only the outer band qualifies: anything that touches this core is out.
-    let core = arena.inflate(-ARENA_PERIMETER_CELLS);
-    let clear_of_floor = layout.boss.floor.inflate(1);
-    for cy in arena.y..=arena.bottom() - h {
-        for cx in arena.x..=arena.right() - w {
-            let rect = TileRect::new(cx, cy, w, h);
-            if rect.intersects(&core) || rect.inflate(1).intersects(&clear_of_floor) {
-                continue;
-            }
-            if layout
-                .boss
-                .dock_cell
-                .is_some_and(|d| rect.inflate(3).contains(d.0, d.1))
-            {
-                continue;
-            }
-            if layout
-                .boss
-                .escape_hole
-                .is_some_and(|hole| rect.inflate(2).contains(hole.0, hole.1))
-            {
-                continue;
-            }
-            if layout
-                .boss
-                .bumpers
-                .iter()
-                .any(|bar| rect.inflate(1).intersects(bar))
-            {
-                continue;
-            }
-            if !rect.cells().all(|(x, y)| tiles.get(x, y).is_open()) {
-                continue;
-            }
-            if keeps_openings_clear(tiles, rect) {
-                continue;
-            }
-            sites.push(rect);
-        }
-    }
-    sites
+/// Batch 12 removed the boss arena, so no generator lays this out any more: the
+/// fight's rectangle is recentred on the rat when the boss arrives
+/// (`Level::fight_rect_around`), and its controller degrades over whatever
+/// walls that rectangle happens to hold. The Flatbed's cab-hold generator still
+/// asks for it, which is why the function stays.
+pub fn boss_floor_cells(_theme: Theme) -> (i32, i32) {
+    // 96 × 80 px: the one clear pocket every boss fight was measured against.
+    (6, 5)
 }
 
 /// A random top-left cell for a `w × h` block inside `within`, or `None` when it
@@ -2870,38 +2268,32 @@ mod tests {
                     "{ctx}: the 3x3 around the spawn is not clear"
                 );
 
-                // Exactly one boss arena, big, with a clear central floor.
+                // No arena (batch 12), but its footprint is still an ordinary
+                // hall: the map keeps the room and nothing is furnished for a
+                // boss that now arrives wherever the rat stands.
                 let bosses: Vec<&Room> = layout
                     .rooms
                     .iter()
                     .filter(|r| r.kind == RoomKind::Boss)
                     .collect();
-                assert_eq!(bosses.len(), 1, "{ctx}");
-                assert_eq!(bosses[0].rect, layout.boss_arena, "{ctx}");
+                assert!(bosses.is_empty(), "{ctx}: the map still has a boss arena");
+                assert_eq!(layout.boss.floor, TileRect::new(0, 0, 0, 0), "{ctx}");
+                assert!(layout.boss.bumpers.is_empty(), "{ctx}");
+                assert!(layout.boss.mouths.is_empty(), "{ctx}");
+                assert!(layout.boss.dock.is_none(), "{ctx}");
+                assert!(layout.boss.escape_hole.is_none(), "{ctx}");
                 assert!(
-                    layout.boss_arena.area() >= BOSS_ARENA_CELLS,
-                    "{ctx}: the boss arena is {} cells",
+                    layout.boss_arena.area() >= FAR_HALL_MIN_CELLS,
+                    "{ctx}: the far hall is only {} cells",
                     layout.boss_arena.area()
                 );
                 assert!(
                     layout
-                        .boss
-                        .floor
-                        .cells()
-                        .all(|(x, y)| tiles.get(x, y).is_open()),
-                    "{ctx}: the arena's central floor is not clear"
+                        .rooms
+                        .iter()
+                        .any(|r| r.rect == layout.boss_arena && r.kind == RoomKind::Hall),
+                    "{ctx}: the far hall is not an ordinary hall"
                 );
-                let core = layout.boss_arena.inflate(-ARENA_PERIMETER_CELLS);
-                for (x, y) in layout.boss_arena.cells() {
-                    if tiles.get(x, y).is_open() {
-                        continue;
-                    }
-                    let bumper = layout.boss.bumpers.iter().any(|b| b.contains(x, y));
-                    assert!(
-                        bumper || !core.contains(x, y),
-                        "{ctx}: an unfurnished solid at ({x}, {y}) inside the arena"
-                    );
-                }
 
                 // The solid border is at least two cells thick.
                 for cx in 0..MAP_COLS {
@@ -3126,20 +2518,14 @@ mod tests {
                         w,
                         h,
                     );
-                    // Painted solid, and inside a furnishable room or the boss
-                    // arena's perimeter band.
+                    // Painted solid, and inside a furnishable room.
                     assert!(cell.cells().all(|(x, y)| tiles.get(x, y).is_wall()));
                     let in_room = layout.rooms.iter().any(|r| {
                         layout.is_furnishable(r) && r.rect.inflate(1).contains(cell.x, cell.y)
                     });
-                    let in_arena_band = layout.boss_arena.contains(cell.x, cell.y)
-                        && !layout
-                            .boss_arena
-                            .inflate(-ARENA_PERIMETER_CELLS)
-                            .intersects(&cell);
                     assert!(
-                        in_room || in_arena_band,
-                        "{theme:?} seed {seed}: a prop at {cell:?} is not in a room or at the arena's perimeter"
+                        in_room,
+                        "{theme:?} seed {seed}: a prop at {cell:?} is not in a room"
                     );
                     // Never in a maze slot, never adjacent to another prop.
                     assert!(!layout.maze_slots.iter().any(|s| s.intersects(&cell)));
@@ -3222,13 +2608,13 @@ mod tests {
                 assert_eq!(level.arena, MAP_SIZE, "{ctx}");
                 assert_eq!(
                     level.rooms.iter().filter(|r| r.kind == RoomKind::Boss).count(),
-                    1,
-                    "{ctx}"
+                    0,
+                    "{ctx}: the map still has a boss arena"
                 );
-                let Some(boss) = level.boss_room() else {
-                    panic!("{ctx}: no boss arena");
-                };
-                assert!(boss.rect.area() >= BOSS_ARENA_CELLS, "{ctx}");
+                assert!(
+                    level.boss_room().is_none(),
+                    "{ctx}: boss_room() still reports an arena"
+                );
                 let start_room_ok = level
                     .start_room()
                     .is_some_and(|r| r.rect.contains_world(level.start));
@@ -3355,9 +2741,9 @@ mod tests {
                 halls.push(h);
                 plain.push(p);
                 rooms.push(h + p);
-                if let Some(boss) = level.boss_room() {
-                    boss_area.push(boss.rect.area() as f64);
-                    boss_dist.push(cell_len(boss.rect.center_world()));
+                if let Some(far) = level.rooms_of(RoomKind::Hall).max_by_key(|r| r.rect.area()) {
+                    boss_area.push(far.rect.area() as f64);
+                    boss_dist.push(cell_len(far.rect.center_world()));
                 }
                 mazes_per_map[level.mazes.len().min(2)] += 1;
                 for section in &level.mazes {
@@ -3431,8 +2817,8 @@ mod tests {
         print_stats("corridor legs", &mut corridor_legs);
         print_stats("corridor leg length (cells)", &mut corridor_len);
         print_stats("corridor cells per map", &mut corridor_cells);
-        print_stats("boss arena (cells)", &mut boss_area);
-        print_stats("boss arena distance from start (cells)", &mut boss_dist);
+        print_stats("largest hall (cells)", &mut boss_area);
+        print_stats("largest hall distance from start (cells)", &mut boss_dist);
         print_stats("maze reward distance from start (cells)", &mut maze_dist);
         print_stats("maze entrance distance (cells)", &mut maze_entry);
         print_stats("maze entrance distance (s, straight line)", &mut maze_entry_secs);

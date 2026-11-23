@@ -39,6 +39,8 @@ pub enum Shape {
     Ember,
     /// Soft alpha-blended billowing dust, smoke, or steam cloud (3×3 -> 2×2 -> 1×1).
     Puff,
+    /// Crisp velocity-aligned forward-pointing `>` chevron (Sonic Squeak cone).
+    Chevron,
 }
 
 #[derive(Clone, Copy)]
@@ -681,6 +683,27 @@ impl Particles {
                         }
                     }
                 }
+                Shape::Chevron => {
+                    // Crisp velocity-aligned `>` wedge pointing along travel direction.
+                    let dir = if p.vel.len_sq() > 1.0 {
+                        p.vel.normalized()
+                    } else {
+                        Vec2::new(1.0, 0.0)
+                    };
+                    let perp = dir.perp();
+                    let tip_col = palette::mix(c, (255, 255, 255), (1.0 - t) * 0.55);
+                    plot_mode(pb, x, y, tip_col, p.additive);
+                    for side in [-1.0f32, 1.0] {
+                        let w1x = (p.pos.x - dir.x * 1.1 + perp.x * side * 1.2 - cam.x).round() as i32;
+                        let w1y = (p.pos.y - dir.y * 1.1 + perp.y * side * 1.2 - cam.y).round() as i32;
+                        plot_mode(pb, w1x, w1y, c, p.additive);
+                        if t < 0.62 {
+                            let w2x = (p.pos.x - dir.x * 2.1 + perp.x * side * 2.2 - cam.x).round() as i32;
+                            let w2y = (p.pos.y - dir.y * 2.1 + perp.y * side * 2.2 - cam.y).round() as i32;
+                            plot_mode(pb, w2x, w2y, palette::scale(c, 0.70), p.additive);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1170,6 +1193,44 @@ mod tests {
         // Zero-size buffer must never panic.
         let mut zero = PixelBuffer::new(0, 0);
         ps.draw_stains(&mut zero, Vec2::ZERO);
+        ps.draw(&mut zero, Vec2::ZERO);
+    }
+
+    #[test]
+    fn chevron_shape_renders_directional_wedge() {
+        let mut ps = Particles::new(16);
+        ps.push(Particle {
+            pos: Vec2::new(20.0, 20.0),
+            vel: Vec2::new(80.0, 0.0),
+            life: 0.25,
+            max_life: 0.30,
+            drag: 2.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((255, 255, 255), (180, 224, 255)),
+            additive: true,
+            shape: Shape::Chevron,
+        });
+        ps.push(Particle {
+            pos: Vec2::new(36.0, 20.0),
+            vel: Vec2::ZERO,
+            life: 0.10,
+            max_life: 0.30,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((255, 255, 255), (180, 224, 255)),
+            additive: false,
+            shape: Shape::Chevron,
+        });
+        let mut pb = PixelBuffer::new(48, 40);
+        let bg = (16, 20, 22);
+        pb.clear(bg);
+        ps.draw(&mut pb, Vec2::ZERO);
+        let lit = (0..pb.h)
+            .flat_map(|y| (0..pb.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| pb.pixel_at(x, y) != bg)
+            .count();
+        assert!(lit >= 6, "chevron particles should paint tip + wings, got {lit}");
+        let mut zero = PixelBuffer::new(0, 0);
         ps.draw(&mut zero, Vec2::ZERO);
     }
 }

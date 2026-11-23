@@ -78,8 +78,8 @@ pub struct InkView<'a> {
     /// The screen buffer's size in pixels.
     pub size: (i32, i32),
     pub elapsed: f32,
-    /// A card plate with no rat (`World::hide_rat`): skip the rat's core and
-    /// its dash arc. Always `false` in a run.
+    /// A card plate with no rat (`World::hide_rat`): skip the rat's core.
+    /// Always `false` in a run.
     pub hide_rat: bool,
 }
 
@@ -360,9 +360,11 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         );
     }
 
-    // 8. The rat itself, and the dash arc that tells you whether you can
-    //    escape: both keep a minimum screen size so "where am I" and "can I
-    //    dash" survive a 2×2 box filter.
+    // 8. The rat itself keeps a minimum screen size so "where am I" survives a
+    //    2×2 box filter. The dash arc that used to be stamped with it is
+    //    **gone** (batch 12, the owner's call): nothing is drawn under the rat
+    //    any more, at any zoom, and the HUD's dash module is the one cooldown
+    //    read-out.
     if !v.hide_rat {
         let s = screen(v.player.pos, v.cam, v.scale);
         if on(s, 2) {
@@ -372,7 +374,6 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
             pb.plot(s.0, s.1, (255, 240, 244));
             pb.plot(s.0, s.1 - 1, (255, 196, 210));
         }
-        draw_dash_arc(pb, &*v, s, unit);
     }
 }
 
@@ -382,40 +383,6 @@ fn pellet(pb: &mut PixelBuffer, s: (i32, i32), c: Rgb) {
         pb.plot(s.0 + dx, s.1 + dy, BORDER);
     }
     pb.plot(s.0, s.1, c);
-}
-
-/// The dash cooldown as a screen-space arc under the rat, at a minimum radius.
-fn draw_dash_arc(pb: &mut PixelBuffer, v: &InkView, centre: (i32, i32), unit: f32) {
-    let max = v.player.loadout.stats.dash_cd.max(0.1);
-    let ready = v.player.dash_cd <= 0.0;
-    let dashing = v.player.dash_active > 0.0;
-    let fill = if ready || dashing {
-        1.0
-    } else {
-        (1.0 - v.player.dash_cd / max).clamp(0.0, 1.0)
-    };
-    let denied = v.player.dash_denied > 0.0 && !ready;
-    let r = ((10.0 / unit).round() as i32).max(4);
-    // Five pips on the same shallow arc `art_rat::draw_dash_gauge` uses
-    // (0.70π → 0.30π, left to right on screen).
-    const PIPS: i32 = 5;
-    for i in 0..PIPS {
-        let t = i as f32 / (PIPS - 1) as f32;
-        let a = std::f32::consts::PI * (0.70 + (0.30 - 0.70) * t);
-        let x = centre.0 + (a.cos() * r as f32).round() as i32;
-        let y = centre.1 + (a.sin() * r as f32).round() as i32;
-        let lit = (t <= fill + 1e-3) || dashing;
-        let c = if denied {
-            (238, 74, 84)
-        } else if ready || dashing {
-            (255, 246, 214)
-        } else if lit {
-            (236, 172, 108)
-        } else {
-            (86, 62, 84)
-        };
-        pb.plot(x, y, c);
-    }
 }
 
 /// Outline a miniboss signature shape at a minimum screen thickness: a
@@ -780,6 +747,72 @@ mod tests {
             "the ink pass re-drew a pellet at 1x"
         );
         assert_eq!(lit_between(&pb, 0, 0, SIZE.0 as i32, SIZE.1 as i32), 0);
+    }
+
+    /// **No dash arc is stamped any more** (batch 12: the owner asked for the
+    /// charge read-out under the rat to go, in every state and at every zoom).
+    /// The pass still stamps the rat's own two-pixel core when it is zoomed out
+    /// and, exactly as before, nothing at all at 1:1 — what it never does again
+    /// is put a pip under the rat, cooling, ready, dashing or refused.
+    #[test]
+    fn no_dash_arc_is_stamped_at_any_zoom() {
+        for z in [1.0f32, 1.5, 2.0] {
+            for (cd, denied, dashing) in [
+                (0.9f32, 0.0f32, 0.0f32), // cooling
+                (0.0, 0.0, 0.0),          // ready
+                (1.2, 0.2, 0.0),          // a refused press
+                (0.0, 0.0, 0.16),         // mid-dash
+            ] {
+                let mut w = World::new(Theme::Sewer, 7);
+                w.player.pos = Vec2::new(80.0, 74.0);
+                w.player.dash_cd = cd;
+                w.player.dash_denied = denied;
+                w.player.dash_active = dashing;
+                let pb = render(&mut w, Vec2::new(z, z));
+                // Every pixel the pass wrote (the buffer starts black).
+                let mut lit: Vec<(i32, i32)> = Vec::new();
+                for y in 0..SIZE.1 as i32 {
+                    for x in 0..SIZE.0 as i32 {
+                        if lum(&pb, x, y) > 0 {
+                            lit.push((x, y));
+                        }
+                    }
+                }
+                // The rat's core, and only that, when zoomed out.
+                let core = ((80.0 / z).round() as i32, (74.0 / z).round() as i32);
+                let mut want: Vec<(i32, i32)> = Vec::new();
+                if z > ZOOMED_OUT {
+                    want.push((core.0, core.1 - 1));
+                    want.push(core);
+                }
+                want.sort();
+                assert_eq!(
+                    lit, want,
+                    "z={z} cd={cd} denied={denied} dashing={dashing}: the pass stamped ink under the rat"
+                );
+            }
+        }
+        // `InkView::hide_rat` (the Library's plates) still silences the core.
+        let mut w = World::new(Theme::Sewer, 7);
+        w.player.pos = Vec2::new(80.0, 74.0);
+        let mut pb = PixelBuffer::new(SIZE.0, SIZE.1);
+        pb.clear((0, 0, 0));
+        let mut view = InkView {
+            ecs: &mut w.ecs,
+            level: &w.level,
+            player: &w.player,
+            cam: Vec2::ZERO,
+            scale: Vec2::new(2.0, 2.0),
+            size: (SIZE.0 as i32, SIZE.1 as i32),
+            elapsed: 1.0,
+            hide_rat: true,
+        };
+        draw(&mut pb, &mut view);
+        assert_eq!(
+            lit_between(&pb, 0, 0, SIZE.0 as i32, SIZE.1 as i32),
+            0,
+            "hide_rat no longer silences the rat's core"
+        );
     }
 
     /// Gems, coins, pocket finds and chests are four **different shapes** at 1x

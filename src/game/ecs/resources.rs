@@ -273,10 +273,16 @@ impl NextSpawnId {
     }
 }
 
-// ---- Active (player-triggered) weapons -----------------------------------
+// ---- Active (player-triggered) weapons and the Squeak Nova --------------
 
 /// Live state of the two **active** weapons (`WeaponKind::TailThrash`,
-/// `WeaponKind::SonicSqueak`).
+/// `WeaponKind::SonicSqueak`) plus the **Squeak Nova**'s expanding ring.
+///
+/// Batch 12 turned the Sonic Squeak from a ring into a forward **cone** and the
+/// Squeak Nova from a ring of darts into the expanding **ring** the squeak used
+/// to be, so the `squeak_*` fields now describe the cone (the names stay, so
+/// `world::squeak_visual`, the lighting pass and the art keep compiling) and the
+/// new `nova_*` fields describe the ring.
 ///
 /// An active weapon's `Weapon::timer` is its charge meter (the same field every
 /// auto-firing weapon uses as a cooldown), so nothing here decides *when* a
@@ -305,17 +311,50 @@ pub struct ActiveFx {
     pub thrash_dmg: f32,
     /// Sweeps already resolved in this burst.
     pub thrash_done: u32,
-    /// Seconds left of the squeak ring's expansion (0 = idle).
+    /// Seconds left of the squeak cone (0 = idle).
+    ///
+    /// Batch 12: the Sonic Squeak is a forward **cone**, not a ring. The damage,
+    /// the stun and the shove all land on the press tick; the fields below are
+    /// what the drawn push animates and what the render side reads
+    /// (`world::squeak_visual` returns `(squeak_pos, squeak_r)`).
     pub squeak_left: f32,
-    /// Ring radius last tick and now; the damage band is `prev..now`, which is
-    /// what makes each enemy get hit exactly once per ring.
+    /// How far the chevron front has pushed out, last tick and now (`0` →
+    /// `squeak_max_r` over `SQUEAK_EXPAND`). Art only: nothing damages here.
     pub squeak_prev_r: f32,
     pub squeak_r: f32,
-    /// Final radius and per-enemy damage of the current ring.
+    /// Cone length and per-body damage of the press.
     pub squeak_max_r: f32,
     pub squeak_dmg: f32,
-    /// Ring origin (the rat's position on the trigger tick).
+    /// Cone apex (the rat's position on the press tick).
     pub squeak_pos: Vec2,
+    /// Cone half-angle in radians (`SQUEAK_CONE_HALF`).
+    pub squeak_half: f32,
+    /// Cone axis (unit vector: the aim, else the facing, on the press tick).
+    pub squeak_facing: Vec2,
+
+    // ---- Squeak Nova: the expanding ring (batch 12) ----------------------
+    //
+    // Batch 12 turned the nova from a ring of radial darts into a true
+    // shockwave: one ring that damages every body its front passes. The fields
+    // are the ring's whole life; `nova_left > 0` means a ring is playing.
+
+    /// Seconds left of the ring (0 = idle). With **Echo Chamber** the ring also
+    /// contracts, so the life is 2 x `NOVA_EXPAND`.
+    pub nova_left: f32,
+    /// Seconds since the ring started.
+    pub nova_age: f32,
+    /// Radius of the ring's front last tick and now: the damage band is
+    /// `prev..now`, which is what makes each body get hit exactly once per
+    /// pass.
+    pub nova_prev_r: f32,
+    pub nova_r: f32,
+    /// Final radius and per-body damage of this cast.
+    pub nova_max_r: f32,
+    pub nova_dmg: f32,
+    /// Ring centre (the rat's position on the cast).
+    pub nova_pos: Vec2,
+    /// Does the ring come back in after it peaks (**Echo Chamber**)?
+    pub nova_echo: bool,
 
     // ---- Evolutions (WAVE3_DESIGN.md §3) --------------------------------
     //
@@ -396,10 +435,24 @@ impl ActiveFx {
         self.thrash_left > 0.0
     }
 
-    /// Is a squeak ring still expanding?
+    /// Is a squeak cone still playing?
     #[inline]
     pub fn squeak_active(&self) -> bool {
         self.squeak_left > 0.0
+    }
+
+    /// Is a **Squeak Nova** ring playing?
+    #[inline]
+    pub fn nova_active(&self) -> bool {
+        self.nova_left > 0.0
+    }
+
+    /// Total life of a nova cast: one sweep out, or out-and-back for Echo
+    /// Chamber.
+    #[inline]
+    pub fn nova_total(&self) -> f32 {
+        let passes = if self.nova_echo { 2.0 } else { 1.0 };
+        passes * crate::game::weapon::NOVA_EXPAND
     }
 
     /// Burst progress in `0..=1` (1 when idle), for the art's fade.
@@ -666,74 +719,206 @@ impl BossDue {
 // `ActiveFx`), because none of them is a facade field: they are per-tick state
 // whose readers are systems, `World::draw` (the laser art) and tests.
 
-/// Live state of one **Laser Eyes** burst.
+/// Live state of one **Laser Eyes** sweep.
 ///
 /// Laser Eyes is an ordinary auto-firing weapon (not an active one: it has no
-/// charge gauge and Space does not spend it) whose shot is a *burst* of pulses
-/// over the following ticks. `weapons_wave3b::laser_eyes_system` charges the
-/// weapon's `Weapon::timer` and owns the burst; `fire_weapons_system` skips the
-/// kind entirely (`WeaponKind::fires_outside_fire_one`).
+/// charge gauge and Space does not spend it) whose shot is a **sweep**: one
+/// continuous beam pivoting through an arc over `laser_sweep_secs`, cutting
+/// what it crosses once (a per-sweep hit set), then a new sweep the next cycle
+/// from the other edge. `weapons_wave3b::laser_eyes_system` charges the weapon's
+/// `Weapon::timer` and owns the sweep; `fire_weapons_system` skips the kind
+/// entirely (`WeaponKind::fires_outside_fire_one`).
 ///
-/// The facing is **locked at the trigger tick** (design §4: "Lock last facing
-/// at burst start"), so a rat that turns mid-burst does not drag the sweep with
-/// it — the pulses fan out around the direction it was looking when it fired.
-#[derive(Resource, Default, Clone, Copy, Debug)]
+/// The facing is **locked at the trigger tick**, so a rat that turns mid-sweep
+/// does not drag it — the arc is centred on where it was looking when it fired.
+#[derive(Resource, Clone, Copy, Debug)]
 pub struct LaserFx {
-    /// Seconds left in the current burst (0 = idle).
+    /// Seconds left in the current sweep (0 = idle).
     pub left: f32,
-    /// Seconds elapsed since the trigger tick (drives the pulse schedule).
+    /// Seconds elapsed since the trigger tick (drives the sweep).
     pub age: f32,
-    /// Pulses already resolved in this burst.
+    /// [`LaserHits`] entries used by this sweep (mirrors `hits.len()`, kept for
+    /// the art and for tests that want a count).
     pub fired: u32,
-    /// Pulses this burst will make at the owning weapon's level.
+    /// The old burst's pulse count at this level: the **damage multiplier** of
+    /// a sweep hit (one body takes `pulses x damage` per sweep), not a cadence.
     pub pulses: u32,
-    /// The facing locked at the trigger tick (unit vector).
+    /// The facing the sweep is centred on (unit vector).
     pub facing: Vec2,
     /// The beam's origin (the rat's eye line at the trigger tick).
     pub origin: Vec2,
     /// Nominal beam length in px before the wall stop (Lens Cap applied).
     pub reach: f32,
-    /// Per-pulse damage at the owning weapon's level (Sharp Teeth applied).
+    /// Per-**hit** damage at the owning weapon's level (Sharp Teeth applied):
+    /// the whole old burst's damage, so dps per body is unchanged.
     pub dmg: f32,
-    /// World angle of the pulse resolved most recently (art).
+    /// Half the sweep's arc in radians.
+    pub half: f32,
+    /// `+1.0` / `-1.0`: the edge this sweep started from. Flips every cycle, so
+    /// consecutive sweeps alternate direction.
+    pub dir: f32,
+    /// Is a second, mirrored beam sweeping at the same time (L4+)?
+    pub twin: bool,
+    /// World angle of the live beam, and the length it reached after the wall
+    /// stop (art; `beam` is the value `laser_visual` draws).
     pub angle: f32,
-    /// Beam length the last pulse actually reached after the wall stop (art).
     pub beam: f32,
-    /// Seconds since the last pulse was resolved (drives the blink: the bar is
-    /// lit for the first part of the interval and dark for the rest).
+    /// The second beam's angle and wall-stopped length (`twin` only).
+    pub angle_b: f32,
+    pub beam_b: f32,
+    /// The angles both beams held on the previous resolution: the swept band is
+    /// `prev_angle..angle`, so a fast tick cannot step over a body.
+    pub prev_angle: f32,
+    pub prev_angle_b: f32,
+    /// Bodies already cut this sweep (once per sweep each).
+    pub hits: LaserHits,
+    /// Was the boss already cut this sweep? (It is not an `Enemy`, so it has no
+    /// `SpawnId` in the hit set.)
+    pub boss_hit: bool,
+    /// Seconds since the beam last *started* a sweep: kept at 0 for the whole
+    /// sweep, so the two render readers that blink the beam see a steady bar.
     pub since_pulse: f32,
-    /// Full length of the burst in seconds (`0` when idle), set at trigger.
+    /// Full length of the sweep in seconds (`0` when idle), set at trigger.
     pub total: f32,
-    /// Was the burst in flight fired by the evolved (**Carbon Copy**) weapon?
-    /// Only such a burst replays the kept sweep and records itself.
+    /// Was the sweep in flight fired by the evolved (**Carbon Copy**) weapon?
+    /// Only such a sweep replays the kept one and records itself.
     pub evolved: bool,
-    /// The last **completed** sweep, kept for **Carbon Copy** (design §3: "keep
-    /// one copy"). `None` until the evolved weapon has finished its first
-    /// burst.
+    /// The last **completed** sweep, kept for **Carbon Copy**. `None` until the
+    /// evolved weapon has finished its first sweep.
     pub copy: Option<LaserCopy>,
     /// Seconds left of the afterimage replay (0 = not replaying).
     pub copy_left: f32,
     /// Seconds elapsed since the afterimage started replaying.
     pub copy_age: f32,
-    /// Afterimage pulses already resolved.
+    /// Afterimage hits already resolved (mirrors `copy_hits.len()`).
     pub copy_fired: u32,
+    /// The replay's own arc half-width, duration and sweep direction (mirrored
+    /// from the live sweep, so the copy runs backwards).
+    pub copy_half: f32,
+    pub copy_secs: f32,
+    pub copy_dir: f32,
+    /// Bodies the replay has already cut, and the boss.
+    pub copy_hits: LaserHits,
+    pub copy_boss_hit: bool,
+    /// Angles the replay's beams held on the previous resolution.
+    pub copy_prev_angle: f32,
+}
+
+/// Bodies one Laser Eyes sweep may remember as already cut.
+///
+/// The sweep is a per-cast "each body once" set, the same rule Super Dash uses
+/// per dash. A beam reaches 54 px through an arc, so a full horde screens a
+/// bounded number of bodies; the fixed set keeps the tick allocation-free. A
+/// sweep that somehow overflows simply stops recording new bodies (the extra
+/// ones can be cut again by a later tick of the same sweep), which cannot
+/// happen in play and cannot break a replay.
+pub const LASER_HIT_CAP: usize = 128;
+
+/// A fixed-size set of `SpawnId`s: "the bodies this sweep has already cut".
+#[derive(Clone, Copy)]
+pub struct LaserHits {
+    ids: [u64; LASER_HIT_CAP],
+    n: u16,
+}
+
+impl Default for LaserHits {
+    fn default() -> Self {
+        Self { ids: [0; LASER_HIT_CAP], n: 0 }
+    }
+}
+
+impl std::fmt::Debug for LaserHits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LaserHits({})", self.n)
+    }
+}
+
+impl LaserHits {
+    /// How many bodies the sweep has cut.
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.n as u32
+    }
+
+    /// Has this `SpawnId` already been cut this sweep?
+    #[inline]
+    pub fn contains(&self, id: u64) -> bool {
+        self.ids[..self.n as usize].contains(&id)
+    }
+
+    /// Record a body. Returns `false` when it was already there or the set is
+    /// full (the caller then leaves the body alone this tick).
+    pub fn insert(&mut self, id: u64) -> bool {
+        if self.contains(id) || (self.n as usize) >= LASER_HIT_CAP {
+            return false;
+        }
+        self.ids[self.n as usize] = id;
+        self.n += 1;
+        true
+    }
 }
 
 /// One recorded Laser Eyes sweep: the exact geometry a **Carbon Copy**
 /// afterimage replays on the next sweep (design §3: "Record the facing and
 /// origin of a completed sweep").
+///
+/// Batch 12's sweep is continuous, so the replay's own arc width, duration and
+/// direction live on [`LaserFx`] (`copy_half`, `copy_secs`, `copy_dir`) rather
+/// than here: the recorded sweep is only *where* and *what*, and the copy runs
+/// it the other way round.
 #[derive(Clone, Copy, Debug)]
 pub struct LaserCopy {
     /// Where the recorded burst fired from.
     pub origin: Vec2,
     /// The facing it locked (unit vector).
     pub facing: Vec2,
-    /// Pulses it made, so the replay is the same fan.
+    /// The pulse count it was worth: the damage multiplier of one sweep hit.
     pub pulses: u32,
     /// Beam length it used (already Lens Cap-stretched).
     pub reach: f32,
-    /// Per-pulse damage it dealt; the afterimage deals half.
+    /// Per-hit damage it dealt; the afterimage deals half.
     pub dmg: f32,
+}
+
+impl Default for LaserFx {
+    fn default() -> Self {
+        Self {
+            left: 0.0,
+            age: 0.0,
+            fired: 0,
+            pulses: 0,
+            facing: Vec2::ZERO,
+            origin: Vec2::ZERO,
+            reach: 0.0,
+            dmg: 0.0,
+            half: 0.0,
+            // The first sweep of a run starts from the negative edge; every
+            // trigger flips it, so consecutive sweeps alternate.
+            dir: 1.0,
+            twin: false,
+            angle: 0.0,
+            beam: 0.0,
+            angle_b: 0.0,
+            beam_b: 0.0,
+            prev_angle: 0.0,
+            prev_angle_b: 0.0,
+            hits: LaserHits::default(),
+            boss_hit: false,
+            since_pulse: 0.0,
+            total: 0.0,
+            evolved: false,
+            copy: None,
+            copy_left: 0.0,
+            copy_age: 0.0,
+            copy_fired: 0,
+            copy_half: 0.0,
+            copy_secs: 0.0,
+            copy_dir: -1.0,
+            copy_hits: LaserHits::default(),
+            copy_boss_hit: false,
+            copy_prev_angle: 0.0,
+        }
+    }
 }
 
 impl LaserFx {

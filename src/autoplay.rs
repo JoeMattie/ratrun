@@ -173,16 +173,18 @@ impl AutoOpts {
 
     /// The getaway ride: the flatbed level alone, as a practice floor.
     ///
-    /// It is not a campaign step (`campaign::getaway_theme`), so this is the
-    /// only way the batch harness plays it: `start_level` is the sector after
-    /// the last campaign level.
+    /// Since batch twelve the ride is also the campaign's **fourth** level, so
+    /// its level index is `campaign::LEVEL_COUNT - 1`; this constructor is the
+    /// **practice** ride (`--practice --route flatbed`). `--level 4` without
+    /// `--practice` is the campaign's own fourth level, which is the same floor
+    /// played at its campaign difficulty.
     pub fn getaway(skill: Skill) -> AutoOpts {
         AutoOpts {
-            start_level: campaign::LEVEL_COUNT,
+            start_level: campaign::LEVEL_COUNT - 1,
             campaign: false,
             skill,
             carry: CarryPreset::None,
-            route: None,
+            route: Some(campaign::getaway_theme()),
         }
     }
 
@@ -868,10 +870,10 @@ pub struct AutoRun {
 impl AutoRun {
     /// A fresh, seeded run.
     pub fn new(run_seed: u64, opts: AutoOpts) -> AutoRun {
-        // The sector row's last entry is the getaway ride, which is always a
-        // practice floor (it is not a campaign step).
-        let start_level = opts.start_level.min(campaign::SECTOR_COUNT - 1);
-        let getaway = campaign::is_getaway_sector(start_level);
+        // Every campaign level is a level index now, the ride included, so the
+        // clamp is the campaign's own length (there is no "practice sector"
+        // one past it any more).
+        let start_level = opts.start_level.min(campaign::LEVEL_COUNT - 1);
         let mut start_loadout = opts.carry.loadout();
         // `--bot-batch --meta mid|max`: the nest stage this batch measures. The
         // batch never reads a player's profile — the stage is a process-wide
@@ -881,37 +883,29 @@ impl AutoRun {
             start_loadout.set_meta(mods);
         }
         // `--route`: play the start level on a side-route floor (Laundry,
-        // Printworks) instead of the original route's own.
+        // Printworks, or the Flatbed) instead of the original route's own.
         //
         // A practice run plays `start_level` on that floor whatever the index
         // (it used to be dropped at level 1, so `--practice --route flatbed`
         // quietly played the Sewer). A campaign applies the pick to the floor's
-        // **own stage**, so `--route laundry` from level 1 plays Sewer →
-        // Laundry → Lab (it used to call `choose_route`, which only ever
-        // names the *next* stage, and so never took effect).
-        let route = opts.route.filter(|_| !getaway);
-        let (campaign, world) = if getaway {
-            (None, {
-                let mut world = World::new_level_with_theme(
-                    start_level,
-                    campaign::getaway_theme(),
-                    campaign::level_seed(run_seed, start_level),
-                    start_loadout,
-                    campaign::CampaignTotals::default(),
-                );
-                world.carried = campaign::CampaignTotals::default();
-                world
-            })
-        } else if opts.campaign {
+        // **own level**, so `--route laundry` from level 1 plays Sewer →
+        // Laundry → Lab → Flatbed (it used to call `choose_route`, which only
+        // ever names the *next* stage, and so never took effect). `--route
+        // flatbed` names the finale, which every campaign reaches anyway.
+        let route = opts.route;
+        let (campaign, world) = if opts.campaign {
             let mut state = CampaignState::new(run_seed);
             state.level = start_level;
             state.loadout = start_loadout;
             if let Some(theme) = route {
-                let _ = state.route.choose(theme.stage(), theme);
+                let _ = state.route.choose(campaign::theme_sector(theme), theme);
             }
             let world = state.world();
             (Some(state), world)
         } else {
+            // A practice run: the picked floor alone (the ride is a campaign
+            // level now, so its theme comes from `level_theme` when no route
+            // was named).
             let seed = campaign::level_seed(run_seed, start_level);
             let world = match route {
                 Some(theme) => World::new_level_with_theme(
@@ -2477,13 +2471,13 @@ mod tests {
         }
     }
 
-    /// The getaway ride is on the autoplay theme list as the sector after the
-    /// last campaign level: a flatbed practice floor, not a campaign step.
+    /// The getaway ride is on the autoplay theme list as the campaign's fourth
+    /// level: a Flatbed practice floor (`--practice --route flatbed`).
     #[test]
     fn the_getaway_ride_runs_on_the_flatbed() {
         let mut run = AutoRun::new(7, AutoOpts::getaway(Skill::Expert));
         assert_eq!(run.world().level.theme, Theme::Trailer);
-        assert_eq!(run.world().level_index, campaign::LEVEL_COUNT);
+        assert_eq!(run.world().level_index, campaign::LEVEL_COUNT - 1);
         assert!(!run.opts().campaign, "the getaway is a practice floor");
         for _ in 0..900 {
             run.step(1.0 / 60.0);
@@ -2512,8 +2506,11 @@ mod tests {
 
     /// The campaign's between-levels path (keep three → next `World`) and the
     /// final-level victory, driven without waiting for a real boss kill.
+    ///
+    /// Four levels since batch twelve: the Flatbed is the last one, so the run
+    /// is won by its boss and not by the Lab's.
     #[test]
-    fn a_campaign_advances_through_three_levels_and_wins() {
+    fn a_campaign_advances_through_four_levels_and_wins() {
         let mut run = AutoRun::new(31, AutoOpts::campaign(0, Skill::Expert));
         for _ in 0..120 {
             run.step(1.0 / 60.0);
@@ -2535,14 +2532,24 @@ mod tests {
         run.world_mut().mark_level_complete();
         run.step(1.0 / 60.0);
         assert_eq!(run.world().level_index, 2, "campaign advanced to Lab");
-        assert!(!run.finished());
+        assert!(!run.finished(), "stage three does not end the run any more");
+
+        run.world_mut().mark_level_complete();
+        run.step(1.0 / 60.0);
+        assert_eq!(
+            run.world().level_index,
+            campaign::LEVEL_COUNT - 1,
+            "campaign advanced to the Flatbed"
+        );
+        assert_eq!(run.world().level.theme, Theme::Trailer);
+        assert!(!run.finished(), "the ride is not finished until its boss dies");
 
         run.world_mut().mark_level_complete();
         run.step(1.0 / 60.0);
         assert!(run.finished());
         assert!(matches!(run.status(), AutoStatus::Won { .. }));
         assert!(run.stats().won);
-        assert_eq!(run.stats().levels.len(), 3);
+        assert_eq!(run.stats().levels.len(), campaign::LEVEL_COUNT);
     }
 
     /// The owner's beatability instrument has to run whole expert campaigns to

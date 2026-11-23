@@ -3758,8 +3758,8 @@ mod tests {
                     "{tw}x{th} muted={muted}: the controls legend is gone: {text}"
                 );
                 assert!(
-                    text.contains("click dash"),
-                    "{tw}x{th} muted={muted}: the click's two jobs are not named: {text}"
+                    text.contains("LMB dash") && text.contains("RMB actives"),
+                    "{tw}x{th} muted={muted}: the pointer's two buttons are not named: {text}"
                 );
                 if muted {
                     assert!(
@@ -3975,14 +3975,20 @@ mod tests {
     }
     #[test]
     fn the_levelup_header_states_the_levels_damage() {
+        // Four percent a level since batch twelve (the level pace quartered):
+        // level 12 is worth +44 %, level 14 +52 %.
         assert_eq!(
             levelup_header(12),
-            " LEVEL UP   /   LV 12   /   +11% WEAPON DAMAGE "
+            " LEVEL UP   /   LV 12   /   +44% WEAPON DAMAGE "
         );
-        assert!(levelup_header(2).contains("+1% WEAPON DAMAGE"));
+        assert!(levelup_header(2).contains("+4% WEAPON DAMAGE"));
+        assert!(levelup_header(1).contains("+0% WEAPON DAMAGE"));
+        // The header reads the live constant, never `level - 1`.
+        assert!(levelup_header(14).contains("+52% WEAPON DAMAGE"));
         // The widest header still fits the narrowest plate (57 columns less
         // the frame).
         assert!(levelup_header(199).chars().count() <= 55);
+        assert!(levelup_header(1000).chars().count() <= 55);
     }
 
 }

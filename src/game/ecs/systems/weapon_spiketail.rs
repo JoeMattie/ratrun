@@ -834,6 +834,7 @@ mod tests {
     use super::*;
     use crate::game::art_walls::WallKind;
     use crate::game::collision::{TileKind, TileMap};
+    use crate::game::ecs::components::LashPhase;
     use crate::game::ecs::resources::{DamageLedger, EnemyIndex};
     use crate::game::ecs::systems::boss::BossKind;
     use crate::game::ecs::systems::weapons::fire_weapons_system;
@@ -1610,5 +1611,190 @@ mod tests {
             out.contains(&want),
             "the dragged body is filed at its new position"
         );
+    }
+
+    // ---- Batch 12: the Spiked Tail's contract (mechanic FROZEN) ----------
+
+    /// The Spiked Tail is an ordinary auto-firing weapon: it is in
+    /// `WeaponKind::all()`, the level-up pool offers it as a new kind, and an
+    /// owned copy gets rank-up cards — nothing about batch 12 changed that.
+    #[test]
+    fn spiked_tail_is_offered_like_every_other_weapon() {
+        use crate::game::loadout::Loadout;
+        assert!(WeaponKind::all().contains(&WeaponKind::SpikedTail));
+        assert!(!WeaponKind::SpikedTail.is_active());
+        assert!(!WeaponKind::SpikedTail.fires_outside_fire_one());
+
+        // A fresh rack can be dealt the weapon (over enough draws that the
+        // shuffle cannot hide it).
+        let empty = Loadout::from_parts(Vec::new(), Vec::new());
+        let mut saw_new = false;
+        for seed in 0..64u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            for card in empty.generate_choices(&mut rng) {
+                if matches!(card, Upgrade::NewWeapon(WeaponKind::SpikedTail)) {
+                    saw_new = true;
+                }
+            }
+        }
+        assert!(saw_new, "the level-up pool must offer the Spiked Tail");
+
+        // An owned, un-maxed copy is a rank-up card.
+        let mut owned = Weapon::new(WeaponKind::SpikedTail);
+        owned.level = 3;
+        let rack = Loadout::from_parts(vec![owned], Vec::new());
+        let mut saw_rank = false;
+        for seed in 0..64u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            for card in rack.generate_choices(&mut rng) {
+                if matches!(card, Upgrade::LevelWeapon(0)) {
+                    saw_rank = true;
+                }
+            }
+        }
+        assert!(saw_rank, "an owned Spiked Tail must get rank-up cards");
+    }
+
+    /// Auto-aim is reliable: with a crowd all around it, the Spiked Tail takes a
+    /// target on **every ready cycle** (never a dud retry) and so fires at its
+    /// own cadence — 1.3 s at L1, 0.85 s at L5.
+    #[test]
+    fn spiked_tail_fires_every_ready_cycle_in_a_crowd() {
+        for level in [1u8, 5] {
+            let mut w = arena(150, level);
+            let p = w.player.pos;
+            // A ring of bodies all round the rat, well inside the reach
+            // (L1 44 px), including behind it: auto-aim may take any of them.
+            for k in 0..12 {
+                let a = k as f32 / 12.0 * std::f32::consts::TAU;
+                w.spawn_enemy(
+                    EnemyKind::Skitterer,
+                    p + Vec2::from_angle(a) * 24.0,
+                    1000.0,
+                );
+            }
+            let mut want = Weapon::new(WeaponKind::SpikedTail);
+            want.level = level;
+            let cooldown = want.cooldown();
+            let seconds = 10.0f32;
+            let ticks = (seconds / DT) as usize;
+            let mut fires = 0usize;
+            let mut duds = 0usize;
+            for _ in 0..ticks {
+                let ready = w.player.loadout.weapons[0].timer <= 0.0;
+                let before = w.player.loadout.weapons[0].timer;
+                w.begin_tick(DT, Vec2::ZERO, false);
+                w.ecs
+                    .run_system_cached(fire_weapons_system)
+                    .expect("the weapon pass");
+                w.ecs
+                    .run_system_cached(spiked_tail_system)
+                    .expect("the lash pass");
+                w.end_tick();
+                if w.player.loadout.weapons[0].timer > before {
+                    fires += 1;
+                } else if ready {
+                    duds += 1;
+                }
+                // Keep every body alive and planted: this measures the fire
+                // cadence, not the damage.
+                let mut q = w.ecs.query::<&mut Enemy>();
+                for mut e in q.iter_mut(&mut w.ecs) {
+                    e.hp = e.max_hp;
+                    e.vel = Vec2::ZERO;
+                }
+            }
+            let expected = (seconds / cooldown) as usize;
+            assert_eq!(duds, 0, "L{level}: a ready lash found no target in a crowd");
+            assert!(
+                fires + 1 >= expected,
+                "L{level}: only {fires} lashes in {seconds} s, the {cooldown} s cadence allows {expected}"
+            );
+        }
+    }
+
+    /// The art contract: one lash walks through `WindUp → Crack → Recoil`
+    /// exposing its base point, its followed target, a progress in `0..1` for
+    /// each beat, the exact crack tick, and the Barbed Wire flags.
+    #[test]
+    fn a_lash_exposes_its_phases_base_and_tip_to_the_art() {
+        let mut w = arena(151, 1);
+        let p = w.player.pos;
+        let body = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(20.0, 0.0), 1000.0);
+        assert!(run_fire(&mut w), "the lash must have a target");
+        let crack_tick = lashes(&mut w)[0].crack_tick(DT);
+        assert_eq!(
+            crack_tick,
+            (LASH_WINDUP / DT).ceil() as u32,
+            "the crack tick is the wind-up measured in ticks"
+        );
+
+        // The wind-up: bristling, target followed, a countdown to the crack.
+        run_lash(&mut w, DT);
+        let lash = lashes(&mut w)[0];
+        assert_eq!(lash.base(), w.player.pos, "the base is the rat's rump");
+        assert_eq!(lash.phase(), LashPhase::WindUp);
+        assert!(lash.progress() > 0.0 && lash.progress() < 1.0);
+        assert!(lash.phase_progress() > 0.0 && lash.phase_progress() < 1.0);
+        assert!(!lash.cracked());
+        assert!(lash.ticks_to_crack(DT) > 0);
+        assert!(!lash.barbed_wire());
+        assert_eq!(lash.drag_tick(DT), None);
+        assert!((lash.crack_time() - LASH_WINDUP).abs() < 1e-6);
+
+        // The body walks during the wind-up: the tip follows it every tick.
+        w.ecs.get_mut::<Enemy>(body).unwrap().pos = p + Vec2::new(24.0, 4.0);
+        run_lash(&mut w, DT);
+        assert!(
+            lashes(&mut w)[0].tip().dist(p + Vec2::new(24.0, 4.0)) < 1e-3,
+            "the tip must follow the target body"
+        );
+
+        // The crack tick: `cracked_now` is true on exactly that one frame.
+        let mut crack_frame = None;
+        for i in 0..(LASH_WINDUP / DT).ceil() as usize + 6 {
+            run_lash(&mut w, DT);
+            let lash = lashes(&mut w)[0];
+            if lash.cracked_now(DT) {
+                crack_frame = Some(i);
+                assert_eq!(lash.phase(), LashPhase::Crack);
+                assert_eq!(lash.ticks_to_crack(DT), 0);
+            }
+        }
+        assert!(crack_frame.is_some(), "the crack never reported itself");
+        // …and every beat after it is the crack or the recoil, through to the
+        // despawn at `LASH_TOTAL`.
+        while !lashes(&mut w).is_empty() {
+            run_lash(&mut w, DT);
+            if let Some(lash) = lashes(&mut w).first().copied() {
+                assert_ne!(lash.phase(), LashPhase::WindUp);
+                assert!(lash.progress() > 0.0 && lash.progress() <= 1.0);
+            }
+        }
+    }
+
+    /// Barbed Wire: the same exposure names the drag beat and reports it once.
+    #[test]
+    fn a_barbed_wire_lash_exposes_its_drag_tick() {
+        let mut w = arena(152, 1);
+        let p = w.player.pos;
+        w.player.loadout.weapons[0].evolved = true;
+        // Out of the swing's own arc reach, so it is hooked and reeled in.
+        let _ = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(40.0, 0.0), 1000.0);
+        assert!(run_fire(&mut w), "the hooking lash must have a target");
+        let lash = lashes(&mut w)[0];
+        assert!(lash.barbed_wire());
+        assert!(lash.drag_tick(DT).is_some());
+        let mut dragged_frames = 0;
+        while !lashes(&mut w).is_empty() {
+            run_lash(&mut w, DT);
+            if let Some(lash) = lashes(&mut w).first().copied() {
+                if lash.dragged_now(DT) {
+                    dragged_frames += 1;
+                    assert_eq!(lash.drag_tick(DT), Some((LASH_RECOIL_AT / DT).ceil() as u32));
+                }
+            }
+        }
+        assert_eq!(dragged_frames, 1, "the drag reports exactly one frame");
     }
 }

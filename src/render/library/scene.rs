@@ -79,6 +79,26 @@
 //!   floor's planks, joints, rails and slipstream are anchored to the map's own
 //!   deck rectangle, not to wherever a small patch happens to sit, so a Flatbed
 //!   body is shown on its own floor and the Gravel Tick's tailgate drift reads.
+//! * A boss's plate frames the **union of its drawn body over a whole loop**
+//!   ([`LibraryScene::probe_boss_union`]): every state of the controller is
+//!   measured once when the card is built, the camera is pinned on the middle
+//!   of that union and the downscale is chosen so the union keeps a 10 % margin.
+//!   The walk-in a boss spends its first second on clipped the top of the
+//!   Sweeper and SUBJECT R-01; a moving camera on a body that lunges, stomps and
+//!   coils could not be right for every state, and a union can.
+//! * **KING COBRA** is framed on the head, the hood and the **nearest coil**
+//!   ([`boss_body_bounds`]) instead of the whole laid ring: the ring is the
+//!   arena's breadth and the animal's face is the card.
+//! * **THE REDTAIL** is fought at hover height (a scripted state cue), not
+//!   overhead: while it circles, the art gives it no hit shape at all and the
+//!   plate showed a shadow and nothing else.
+//! * A **floor's** card is the real generated map lit by its real lighting and
+//!   framed on a furnished room ([`floor_window`]) — walls, props, a lamp and a
+//!   wall sconce — with the floor's two fodder kinds wandering through it and
+//!   no rat: the rat pinned at the edge of an empty floor was not a sector.
+//! * A **tiny body** (a radius under 4 px: the Bell Flea, the Wick Moth, the
+//!   Lilliputians, the Ink Blot) is drawn at 2 ×, which is what makes it a body
+//!   and not a speck; its practice dummy stands at least 14 px off.
 //! * The animation gate is the **caller's** rule, never this module's:
 //!   `render::library::catalogued` (seen, and for a weapon, passive or
 //!   evolution *owned*) decides whether a card runs at all, so a locked card
@@ -88,13 +108,22 @@
 
 use bevy_ecs::entity::Entity;
 
+use crate::game::art_boss_broom;
+use crate::game::art_boss_cat;
+use crate::game::art_boss_cobra;
+use crate::game::art_boss_hawk;
+use crate::game::art_boss_horseshoe_crab;
+use crate::game::art_boss_magpie;
+use crate::game::art_boss_megarat;
+use crate::game::art_boss_mower;
+use crate::game::art_boss_night_edition;
 use crate::game::art_traps::{MazeRewardView, MousetrapView, RatHoleView, StickyTrapView};
 use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::campaign::CampaignTotals;
 use crate::game::collision::{SizeClass, TileKind, TileMap};
 use crate::game::ecs::resources::{spawn_with_id, DashHold};
-use crate::game::ecs::systems::boss::{Boss, BossKind};
+use crate::game::ecs::systems::boss::{Boss, BossArtView, BossHitShape, BossKind, BossState};
 use crate::game::ecs::systems::miniboss::{
     Miniboss, MinibossKind, MinibossShape, SIGNATURE_GAP, TELL_TIME,
 };
@@ -102,8 +131,8 @@ use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Gold, Pickup, PickupKind};
 use crate::game::hazards::{InkPad, SteamGrate};
 use crate::game::level::{
-    BossArena, Level, LevelObjects, OneWayDoor, Palette, Pit, PitKind, RatHole, ShopHole,
-    ShopHoleRole, SlidingCargo, Theme, TileRect, TrailerDeck,
+    BossArena, Level, LevelObjects, LightFixtureKind, OneWayDoor, Palette, Pit, PitKind, RatHole,
+    RoomKind, ShopHole, ShopHoleRole, SlidingCargo, Theme, TileRect, TrailerDeck,
 };
 use crate::game::library::{self, Key, ObjectKind};
 use crate::game::loadout::{Loadout, PassiveKind};
@@ -162,12 +191,73 @@ const FIT_MARGIN: f32 = 0.88;
 /// The narrowest span a fitted stage assumes, so the plate does not start tight
 /// on a body and then pull back when the tell opens.
 const FIT_MIN_SPAN: Vec2 = Vec2 { x: 54.0, y: 38.0 };
-/// Zoom bounds for the fitted stages (world pixels per plate pixel). The upper
-/// bound is set by the travelling rings (a 42 px rim either side of the body is
-/// a 92 px footprint on a 30 px plate, so the plate has to show 3.5× its own
-/// height); the body is small there, but the ring is what that card is about.
+/// The closest a fitted stage may zoom in (world pixels per plate pixel): the
+/// travelling rings (a 42 px rim either side of the body is a 92 px footprint
+/// on a 30 px plate) pin how much floor a plate may show, and a plate that
+/// zoomed in past this would lose the body it is a portrait of.
+///
+/// There is no upper bound: a footprint larger than `zoom::MAX × plate` is drawn
+/// oversized into a scratch buffer and box-filtered down (`Script::shrink`), so
+/// a wide tell — or a boss's whole loop — can always be held.
 const FIT_ZOOM_MIN: f32 = 0.55;
-const FIT_ZOOM_MAX: f32 = 3.8;
+
+/// How much of a **boss** plate the body's loop-long union is allowed to take:
+/// the task's 10 % margin (a boss is framed from the union of its drawn bounds
+/// over a whole loop, so no state of the fight can leave the plate).
+const BOSS_MARGIN: f32 = 0.90;
+/// How far behind the head KING COBRA's **nearest coil** is framed. The laid
+/// ring is the arena's breadth (74 px radius); the card is the hood, the neck
+/// and the coil closest to them, not the whole loop.
+const COBRA_COIL_VIEW: f32 = 58.0;
+
+/// A body under this collision radius is a **tiny subject** on its card: at the
+/// plate's 1:1 zoom it is a two- or three-pixel speck, so its plate is drawn at
+/// 2 × ([`TINY_ZOOM`]) and its practice dummy stands [`TINY_DUMMY_GAP`] px off.
+const TINY_BODY_RADIUS: f32 = 4.0;
+/// The zoom a tiny body's card is drawn at: `0.5` shows half the world the
+/// plate would at 1:1, i.e. every world pixel is 2 × 2 plate pixels.
+const TINY_ZOOM: f32 = 0.5;
+/// How far a tiny body's practice dummy stands from the subject's rest
+/// position (px): the smallest gap the task allows, which leaves the pair
+/// inside a 2 × plate.
+const TINY_DUMMY_GAP: f32 = 15.0;
+/// The margin a subject's lap is clamped inside by (px): the Type Slug's lap
+/// used to run off the plate's edge.
+const LAP_MARGIN: f32 = 6.0;
+
+/// The arsenal targets' sandbox hp: high enough that no weapon kills one inside
+/// a loop (a body a card re-spawns would read as a different target).
+const ARSENAL_HP: f32 = 4000.0;
+/// The Tail Thrash's and the Flywheel's targets: ×50 the ordinary sandbox hp.
+/// A max-rank thrash kills a 4,000 hp fodder body on its **first** sweep, so
+/// the card showed the arc and an empty floor for the rest of the loop.
+const SWEEP_TARGET_HP: f32 = ARSENAL_HP * 50.0;
+/// The charged Super Dash's travel in world px (58 px/s × 3.2 × 0.32 s), with a
+/// little slack: the lane the dash card lays its targets along and frames.
+const DASH_LANE: f32 = 62.0;
+/// The window a floor card is framed on: 12 × 8 tiles around a furnished room.
+const FLOOR_WINDOW: (i32, i32) = (12, 8);
+/// How much world a floor card shows (world px per plate pixel). Two thirds of
+/// the window, so the camera has room to pan across it and back.
+const FLOOR_ZOOM: f32 = 2.0;
+
+/// The Redtail's card loop: hover, one dive, the landing, hover again.
+const HAWK_LOOP: f32 = 6.0;
+/// When inside its loop the Redtail's card sends the bird down the one dive.
+const HAWK_DIVE_AT: f32 = 3.7;
+
+/// A shooter pellet's self-lit trail, nearest the pellet first: a 3 px streak
+/// in a colour no floor and no pellet art draws, so a 1 px shot reads as a shot.
+const PELLET_TRAIL: [Rgb; 3] = [(255, 246, 214), (255, 186, 120), (196, 104, 62)];
+
+/// The chest card's open lid and its reward burst.
+const CHEST_WOOD: Rgb = (158, 78, 34);
+const CHEST_WOOD_HI: Rgb = (206, 118, 50);
+const CHEST_MOUTH: Rgb = (40, 20, 12);
+const CHEST_BRASS: Rgb = (255, 226, 102);
+const CHEST_GLOW: Rgb = (255, 232, 128);
+/// How long the chest's opening burst runs (seconds).
+const BURST_SECS: f32 = 0.85;
 
 /// How an entry's card moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,6 +380,27 @@ struct Script {
     /// towards its standing targets, so the rat, the targets and the hit
     /// digits above them all sit inside the frame instead of at its edge.
     lean: Vec2,
+    /// A [`Framing::Pan`] plate's travel either side of its point (world px):
+    /// a floor card pans the whole window it was cut from.
+    pan: Vec2,
+    /// Frame the plate on the **union of the boss's drawn body over one loop**
+    /// ([`LibraryScene::probe_boss_union`]) instead of following it.
+    boss_fit: bool,
+    /// Draw the shooter pellet's short self-lit trail (a card-only overlay).
+    trail: bool,
+    /// Clamp the subject inside the plate by this margin (the Type Slug's lap).
+    clamp_subject: Option<f32>,
+    /// Hold the hidden rat at this point every tick, so a signature's knockback
+    /// cannot walk the practice dummy off its mark (the Murder Hornet's card).
+    pin: Option<Vec2>,
+    /// The chest card's point: the lid opens, and the reward bursts, there.
+    chest: Option<Vec2>,
+    /// A wandering waypoint for the hidden rat (a floor card's fodder follows
+    /// it through the window): `(centre, amplitude)` in world px.
+    wander: Option<(Vec2, Vec2)>,
+    /// The 12 × 8-tile window a floor card was cut from (for the pan and the
+    /// card's own tests).
+    window: Option<TileRect>,
 }
 
 fn idle(_: f32) -> Input {
@@ -308,8 +419,16 @@ impl Script {
             cue: None,
             dummy: false,
             lean: Vec2::ZERO,
+            pan: Vec2::new(30.0, 10.0),
             fit: false,
             lead: 0.0,
+            boss_fit: false,
+            trail: false,
+            clamp_subject: None,
+            pin: None,
+            chest: None,
+            wander: None,
+            window: None,
         }
     }
 }
@@ -341,6 +460,11 @@ pub struct LibraryScene {
     floor_plate: PixelBuffer,
     /// The widest subject footprint a fitted stage has had to hold this loop.
     fit_span: Vec2,
+    /// The world rectangle a boss card must hold: the union of the boss's drawn
+    /// body over one whole loop, measured once when the card is built.
+    boss_union: Option<(Vec2, Vec2)>,
+    /// Seconds since the chest card's chest opened (`None` before it does).
+    opened: Option<f32>,
 }
 
 impl LibraryScene {
@@ -369,7 +493,13 @@ impl LibraryScene {
             floor_mid: PixelBuffer::new(1, 1),
             floor_plate: PixelBuffer::new(1, 1),
             fit_span: FIT_MIN_SPAN,
+            boss_union: None,
+            opened: None,
         };
+        if scene.script.boss_fit {
+            let union = scene.probe_boss_union();
+            scene.boss_union = union;
+        }
         scene.focus = scene.focus_target();
         Some(scene)
     }
@@ -432,6 +562,14 @@ impl LibraryScene {
         if let Some(feed) = self.script.feed {
             self.feed(feed, t);
         }
+        if let Some((centre, amp)) = self.script.wander {
+            // A floor card's hidden rat drifts a slow figure of eight inside
+            // the window it was cut from: the floor's two fodder kinds follow
+            // it, which is what walks them through the picture.
+            let a = t / self.script.loop_secs * std::f32::consts::TAU;
+            self.world.player.pos =
+                centre + Vec2::new(a.sin() * amp.x, (a * 2.0).sin() * amp.y);
+        }
         if let Some(cue) = self.script.cue {
             cue(&mut self.world, self.subject, self.tick);
         }
@@ -451,20 +589,41 @@ impl LibraryScene {
         if self.world.player.hp < floor {
             self.world.player.hp = floor;
         }
+        if let Some(pin) = self.script.pin {
+            // A pinned dummy: the Murder Hornet's signature shoves a body, and
+            // a card's target is a mark on the floor, not a thing to wind up
+            // somewhere else.
+            self.world.player.pos = pin;
+            self.world.player.vel = Vec2::ZERO;
+        }
         // No audio, and no plate: the card must never come back as a level-up,
         // a chest or the shelf. The queue is dropped on the floor.
         self.world.sfx.clear();
         self.world.pending_levelups = 0;
+        if self.script.chest.is_some() && self.opened.is_none() && self.world.pending_chests > 0 {
+            // The real collection happened on this tick (the chest is gone and
+            // the plate was raised): the card starts its own open-and-burst,
+            // and the pending flag is dropped below like every other plate.
+            self.opened = Some(0.0);
+        }
+        if let Some(age) = self.opened.as_mut() {
+            *age += TICK;
+        }
         self.world.pending_chests = 0;
         self.world.pending_shop = false;
         self.tick += 1;
         self.pending = self.pending.saturating_add(1);
         // The camera eases toward what the plate frames. A fitted stage snaps
         // its own centre on every draw (the footprint it must hold can grow at
-        // the tell), so easing here would fight it.
-        if !self.script.fit {
+        // the tell), so easing here would fight it; so does a 2 x tiny-subject
+        // plate, whose 22 px view is narrow enough that a lunge outran the ease.
+        if !self.script.fit && !self.script.boss_fit {
             let target = self.focus_target();
-            self.focus += (target - self.focus) * 0.12;
+            if self.script.zoom <= TINY_ZOOM {
+                self.focus = target;
+            } else {
+                self.focus += (target - self.focus) * 0.12;
+            }
         }
     }
 
@@ -482,6 +641,9 @@ impl LibraryScene {
         self.view = view;
         self.focus = self.focus_target();
         self.fit_span = FIT_MIN_SPAN;
+        // The measured boss union survives the rebuild (it is a property of the
+        // loop, not of this instance of it); the chest's burst does not.
+        self.opened = None;
         self.pending = self.pending.saturating_add(2);
     }
 
@@ -589,8 +751,14 @@ impl LibraryScene {
             }
             Framing::Point(p) => p,
             Framing::Pan(p) => {
+                // A slow sweep across the plate's window and back: the x leg is
+                // one full period a loop, the y leg two (a shallow figure of
+                // eight, so a pan never retraces a straight line).
                 let t = self.clock() / self.script.loop_secs * std::f32::consts::TAU;
-                p + Vec2::new(t.sin() * 30.0, (t * 2.0).sin() * 10.0)
+                p + Vec2::new(
+                    t.sin() * self.script.pan.x,
+                    (t * 2.0).sin() * self.script.pan.y,
+                )
             }
         }
     }
@@ -615,22 +783,31 @@ impl LibraryScene {
                     self.fit_span.x.max(span.x),
                     self.fit_span.y.max(span.y),
                 );
-                // World pixels per plate pixel that hold the footprint.
-                let total = (self.fit_span.x / (w as f32 * FIT_MARGIN))
-                    .max(self.fit_span.y / (h as f32 * FIT_MARGIN))
-                    .clamp(FIT_ZOOM_MIN, FIT_ZOOM_MAX);
-                // `World::draw` honours a zoom only inside the ladder
-                // (`zoom::clamp`), so a footprint wider than the ladder's top
-                // shows is drawn oversized and box-filtered down, the way a
-                // boss plate is (`Script::shrink`).
-                k = ((total / crate::render::zoom::MAX).ceil() as usize).max(1);
-                zoom = total / k as f32;
+                let (nk, nz) = fit_zoom(self.fit_span, w, h, FIT_MARGIN);
+                k = nk;
+                zoom = nz;
                 self.script.shrink = k;
                 // Centred on the midpoint of body + footprint (`fit_bounds`).
                 self.focus = (lo + hi) * 0.5;
             }
+        } else if let Some((lo, hi)) = self.boss_union {
+            // A boss: the union of its drawn body over a whole loop, measured
+            // when the card was built ([`LibraryScene::probe_boss_union`]). The
+            // camera sits on the middle of that union and the downscale holds
+            // it with a 10 % margin, so every state of the fight is in frame.
+            let (nk, nz) = fit_zoom(hi - lo, w, h, BOSS_MARGIN);
+            k = nk;
+            zoom = nz;
+            self.script.shrink = k;
+            self.focus = (lo + hi) * 0.5;
         }
         self.view = Vec2::new((w * k) as f32 * zoom, (h * k) as f32 * zoom);
+        if let Some(margin) = self.script.clamp_subject {
+            // A subject whose own lap runs wide (the Type Slug) is held inside
+            // the plate it is drawn on: the clamp is a property of the card's
+            // frame, so it is applied where the frame is known.
+            self.clamp_subject(margin);
+        }
         self.world.zoom = zoom;
         self.world.zoom_view = zoom;
         self.world.cam_focus = Some(self.focus);
@@ -656,6 +833,18 @@ impl LibraryScene {
             // The floor reference is only needed where the cork can land.
             let bare = self.floor_plate(w, h);
             draw_practice_dummy(art, bare, (sx, sy), r);
+        }
+        if self.script.trail {
+            self.pellet_trails(art);
+        }
+        if let (Some(age), Some(chest)) = (self.opened, self.script.chest) {
+            let scale = (self.script.shrink.max(1) as f32) * zoom;
+            let cam = self.world.cam;
+            let s = (
+                ((chest.x - cam.x) / scale).round() as i32,
+                ((chest.y - cam.y) / scale).round() as i32,
+            );
+            draw_open_chest(art, s, age);
         }
     }
 
@@ -702,11 +891,15 @@ impl LibraryScene {
             let body = self.world.ecs.get::<Enemy>(e)?;
             (body.pos, body.radius)
         };
-        // A named body's sprite is 2.5-3 × its collision radius (the art draws
-        // the body, not the hit disc).
-        let r = (radius * 3.0).max(6.0);
-        let mut lo = pos - Vec2::new(r, r);
-        let mut hi = pos + Vec2::new(r, r);
+        // A named body's sprite is 2.5-3 × its collision radius to the sides and
+        // **taller than that upwards**: the art draws a 30-34 px animal from a
+        // 7 px hit disc (a stamp hoisted on its plunger, a carton on its feet),
+        // and a symmetric 3 × disc cut the top of the first frame.
+        let side = (radius * 3.0).max(6.0);
+        let up = (radius * 4.6).max(10.0);
+        let down = (radius * 1.8).max(6.0);
+        let mut lo = pos - Vec2::new(side, up);
+        let mut hi = pos + Vec2::new(side, down);
         let shape = self
             .world
             .ecs
@@ -722,6 +915,277 @@ impl LibraryScene {
         lo = Vec2::new(lo.x.min(aim.x), lo.y.min(aim.y));
         hi = Vec2::new(hi.x.max(aim.x), hi.y.max(aim.y));
         Some((lo, hi))
+    }
+
+    /// Measure the union of the boss's drawn body over **one whole loop**, by
+    /// running that loop once when the card is built.
+    ///
+    /// A boss plate used to follow the fight with an easing camera, which is
+    /// what clipped the Sweeper's and SUBJECT R-01's tops, cut the Night
+    /// Edition's plinth off the bottom and lost the King Cobra almost entirely:
+    /// every controller's body leaves a fixed frame sooner or later. The union
+    /// of the frames it *does* occupy cannot. The probe ends on the loop's
+    /// boundary (`step` restarts the scene there), so the card's first drawn
+    /// loop starts from a fresh world and is the same loop that was measured.
+    ///
+    /// The scene has its own seed and no director, so the probe is a fixture:
+    /// it cannot reach a run, a golden or the map pin.
+    fn probe_boss_union(&mut self) -> Option<(Vec2, Vec2)> {
+        let ticks = (self.script.loop_secs / TICK).ceil() as u32 + 2;
+        let loops = self.loops;
+        let mut union: Option<Bounds> = None;
+        for _ in 0..ticks {
+            self.record_boss_bounds(&mut union);
+            self.step();
+            if self.loops != loops {
+                break;
+            }
+        }
+        union.map(Bounds::get)
+    }
+
+    /// Fold the boss's drawn body (and the dummy it is attacking) into
+    /// `union`, if the fight has started.
+    fn record_boss_bounds(&mut self, union: &mut Option<Bounds>) {
+        // The dummy is on the other end of every attack: a plate that framed
+        // the body alone could lose the mark it is aimed at. Copy it out before
+        // the ECS query borrows the world's ECS field.
+        let aim = self.world.player.pos;
+        let mut q = self.world.ecs.query::<&Boss>();
+        for boss in q.iter(&self.world.ecs) {
+            let (lo, hi) = boss_body_bounds(boss);
+            union.get_or_insert_with(|| Bounds::new(lo)).grow(lo, hi);
+            union
+                .get_or_insert_with(|| Bounds::new(aim))
+                .point(aim, DUMMY_R + 2.0);
+        }
+    }
+
+    /// Hold the subject inside the plate the last [`draw`](Self::draw) set up
+    /// (the Type Slug's lap), `margin` px in from every edge.
+    fn clamp_subject(&mut self, margin: f32) {
+        let Some(e) = self.subject else {
+            return;
+        };
+        let half = self.view * 0.5 - Vec2::splat(margin);
+        if half.x <= 0.0 || half.y <= 0.0 {
+            return;
+        }
+        let lo = self.focus - half;
+        let hi = self.focus + half;
+        if let Some(mut body) = self.world.ecs.get_mut::<Enemy>(e) {
+            body.pos = body.pos.clamp_box(lo, hi);
+        }
+    }
+
+    /// A shooter pellet's short self-lit trail: the ink pass keeps a hostile
+    /// mark at a minimum size, but a 1-2 px pellet still read as a dot. Drawn
+    /// by the card, over the picture, and never by the simulation.
+    fn pellet_trails(&mut self, art: &mut PixelBuffer) {
+        if art.w == 0 || art.h == 0 {
+            return;
+        }
+        let scale = self.view.x / art.w as f32;
+        if scale <= 0.0 {
+            return;
+        }
+        let cam = self.world.cam;
+        let mut q = self.world.ecs.query::<&Bullet>();
+        for b in q.iter(&self.world.ecs) {
+            if b.faction != Faction::Enemy {
+                continue;
+            }
+            let dir = b.vel.normalized();
+            if dir.len_sq() < 0.5 {
+                continue;
+            }
+            for (i, c) in PELLET_TRAIL.iter().enumerate() {
+                let p = b.pos - dir * (i as f32 + 1.0);
+                let x = ((p.x - cam.x) / scale).round() as i32;
+                let y = ((p.y - cam.y) / scale).round() as i32;
+                if x >= 0 && y >= 0 && (x as usize) < art.w && (y as usize) < art.h {
+                    art.plot(x, y, *c);
+                }
+            }
+        }
+    }
+}
+
+/// `(k, zoom)` for a plate that must hold `span` world px: the downscale
+/// `World::draw` honours (its zoom ladder stops at 2.0) and the zoom that goes
+/// with it, keeping `margin` of the plate free.
+fn fit_zoom(span: Vec2, w: usize, h: usize, margin: f32) -> (usize, f32) {
+    let total = (span.x / (w as f32 * margin))
+        .max(span.y / (h as f32 * margin))
+        .max(FIT_ZOOM_MIN);
+    // `World::draw` honours a zoom only inside the ladder (`zoom::clamp`), so a
+    // plate that must show more than the ladder's top shows is drawn oversized
+    // and box-filtered down by `k`.
+    let k = ((total / crate::render::zoom::MAX).ceil() as usize).max(1);
+    (k, total / k as f32)
+}
+
+/// A growing world rectangle (see [`boss_body_bounds`]).
+#[derive(Clone, Copy)]
+struct Bounds {
+    lo: Vec2,
+    hi: Vec2,
+    any: bool,
+}
+
+impl Bounds {
+    fn new(at: Vec2) -> Bounds {
+        Bounds {
+            lo: at,
+            hi: at,
+            any: false,
+        }
+    }
+
+    fn grow(&mut self, lo: Vec2, hi: Vec2) {
+        self.lo = Vec2::new(self.lo.x.min(lo.x), self.lo.y.min(lo.y));
+        self.hi = Vec2::new(self.hi.x.max(hi.x), self.hi.y.max(hi.y));
+        self.any = true;
+    }
+
+    fn point(&mut self, at: Vec2, r: f32) {
+        self.grow(at - Vec2::splat(r), at + Vec2::splat(r));
+    }
+
+    fn get(self) -> (Vec2, Vec2) {
+        (self.lo, self.hi)
+    }
+}
+
+/// The world rectangle a boss's **drawn body** occupies right now: its art's
+/// own hit shapes, plus the overshoot each art module documents past them (the
+/// cat's tail, the broom's rising trousers, the crab's telson, the hawk's
+/// wings and its hover lift, the cobra's nearest coil).
+///
+/// A hit-shape bound is all a plate needs to keep the body *on* the plate; the
+/// overshoot is what makes it a portrait rather than a crop.
+fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
+    let mut b = Bounds::new(boss.pos);
+    for shape in boss.hit_shapes().iter() {
+        match *shape {
+            BossHitShape::Circle { center, radius, .. } => b.point(center, radius),
+            BossHitShape::Box {
+                center,
+                facing,
+                half,
+                half_perp,
+                ..
+            } => {
+                let f = if facing.len_sq() > 1e-6 {
+                    facing.normalized()
+                } else {
+                    Vec2::new(1.0, 0.0)
+                };
+                let p = f.perp();
+                let ex = half * f.x.abs() + half_perp * p.x.abs();
+                let ey = half * f.y.abs() + half_perp * p.y.abs();
+                b.grow(
+                    center - Vec2::new(ex, ey),
+                    center + Vec2::new(ex, ey),
+                );
+            }
+        }
+    }
+    match boss.view() {
+        BossArtView::Cat(v) => {
+            // The banded tail trails a third of a body behind the rump.
+            let f = facing_of(v.facing);
+            b.point(
+                v.pos - f * art_boss_cat::TAIL_LENGTH * 0.6,
+                art_boss_cat::TAIL_LENGTH * 0.22,
+            );
+        }
+        BossArtView::Broom(v) => {
+            // The Sweeper is legs: the trouser legs rise ~30 px above the
+            // slippers (`draw_sock_and_trouser`), and the broom head is out at
+            // its own jab reach. Both were cut off the top of the plate.
+            b.point(
+                v.pos - Vec2::new(0.0, 30.0),
+                art_boss_broom::STANCE_HALF_WIDTH + 4.0,
+            );
+            b.point(
+                art_boss_broom::broom_head_pos(&v),
+                art_boss_broom::JAB_HEAD_RADIUS,
+            );
+        }
+        BossArtView::Mower(v) => {
+            // Deck, bumper and the hazard-striped wrap.
+            b.point(v.pos, art_boss_mower::BODY_RADIUS + 12.0);
+        }
+        BossArtView::Mangle(v) => {
+            // The frame box plus the loose crank (the hit shapes) and the
+            // roller cheeks' own thickness.
+            b.point(
+                v.pos,
+                crate::game::art_boss_mangle::ROLLER_HALF_WIDTH
+                    + crate::game::art_boss_mangle::BODY_HALF_LEN,
+            );
+        }
+        BossArtView::NightEdition(v) => {
+            // The slab is a hit box; the ribbon spool stands off its flank.
+            b.point(
+                art_boss_night_edition::ribbon_pos(v.pos, v.facing),
+                art_boss_night_edition::RIBBON_WINDOW_RADIUS,
+            );
+        }
+        BossArtView::Magpie(v) => {
+            b.point(art_boss_magpie::beak_tip(&v), 4.0);
+        }
+        BossArtView::HorseshoeCrab(v) => {
+            // The telson is longer than the dome's hit box.
+            b.point(art_boss_horseshoe_crab::telson_tip(&v), 5.0);
+        }
+        BossArtView::MegaRat(v) => {
+            let f = facing_of(v.facing);
+            b.point(
+                v.pos - f * (art_boss_megarat::TAIL_OFFSET + art_boss_megarat::TAIL_RADIUS),
+                8.0,
+            );
+        }
+        BossArtView::Hawk(v) => {
+            // The bird is drawn above its ground point by its altitude; the
+            // overhead lift is allowed to leave the plate (the shadow is still
+            // the boss there), but the hover height is part of the body.
+            let lift = art_boss_hawk::altitude(v.state, v.phase, v.progress)
+                .min(art_boss_hawk::HOVER_LIFT + 6.0);
+            b.point(
+                v.pos - Vec2::new(0.0, lift),
+                art_boss_hawk::WING_SPAN * 0.5,
+            );
+        }
+        BossArtView::Cobra(v) => {
+            // KING COBRA: the head, the hood (the hit circles) and the
+            // **nearest coil** — never the whole laid ring, whose radius is the
+            // arena's breadth.
+            let head = v.pos;
+            let mut chain = [Vec2::ZERO; 96];
+            let n = art_boss_cobra::draw_chain(&v, &mut chain);
+            for p in chain.iter().take(n) {
+                if p.dist(head) <= COBRA_COIL_VIEW {
+                    b.point(*p, art_boss_cobra::COIL_BODY_HALF + 3.0);
+                }
+            }
+        }
+    }
+    if !b.any {
+        // The overhead hawk has no hit shape at all: frame its ground point
+        // with the body's own size so a shadow still has a body over it.
+        b.point(boss.pos, boss.kind.body_radius() * 2.5);
+    }
+    b.get()
+}
+
+/// A unit facing vector, defensively (a view's facing may be unset).
+fn facing_of(facing: Vec2) -> Vec2 {
+    if facing.len_sq() > 1e-6 {
+        facing.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
     }
 }
 
@@ -1139,6 +1603,13 @@ fn stage_chaser(theme: Theme, kind: EnemyKind) -> Staged {
         Lap::Hole => hole_lap_cue,
     };
     script.cue = Some(cue);
+    if kind == EnemyKind::TypeSlug {
+        // The slug's own rule is a ruled line: it holds its heading at a pipe
+        // end instead of turning, so the far leg of its lap ran off the plate.
+        // The lap is clamped inside the frame the card actually drew, 6 px in
+        // from every edge.
+        script.clamp_subject = Some(LAP_MARGIN);
+    }
     (world, script, Some(e))
 }
 
@@ -1197,6 +1668,9 @@ fn stage_shooter(theme: Theme, kind: EnemyKind) -> Staged {
     };
     script.cue = Some(strafe);
     script.dummy = true;
+    // A shooter's pellet is a 1-2 px dot on the hostile layer: the card draws a
+    // short self-lit trail behind each one so the flight reads (card-only).
+    script.trail = true;
     if leads {
         // The pellet crosses 22 px past the dummy before it is retired.
         script.lead = SHOT_LEAD;
@@ -1287,16 +1761,26 @@ fn stage_trick(theme: Theme, kind: EnemyKind) -> Staged {
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
     let aim = world.player.pos;
+    // A body under 4 px is a speck at the plate's 1:1 zoom: its card is drawn at
+    // 2 × and its dummy stands the minimum gap off the body's rest position, so
+    // the pair fills the tighter frame instead of leaving the body lost in it.
+    let tiny = kind.radius() < TINY_BODY_RADIUS;
+    let gap = if tiny { TINY_DUMMY_GAP } else { 20.0 };
     // Close enough that the body's own rule starts inside the loop, far enough
     // that the dummy reads as a target and not as a hat.
-    let e = world.spawn_enemy(kind, aim + Vec2::new(-20.0, -3.0), 1.0);
+    let e = world.spawn_enemy(kind, aim + Vec2::new(-gap, -gap * 0.15), 1.0);
     if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
         body.hp = 6000.0;
         body.max_hp = 6000.0;
     }
-    let mut script = Script::new(5.0, 1.5);
+    let mut script = Script::new(5.0, if tiny { TINY_ZOOM } else { 1.5 });
     script.framing = Framing::Pair;
     script.dummy = true;
+    if kind == EnemyKind::MurderHornet {
+        // Its lane shoves a body: the card's target is a mark, so the rat (and
+        // with it the dummy) is held where it was staged.
+        script.pin = Some(aim);
+    }
     (world, script, Some(e))
 }
 
@@ -1327,15 +1811,17 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
     let aim = world.player.pos;
-    let e = world.spawn_miniboss(kind, 0, aim + Vec2::new(-34.0, -2.0));
+    // The body starts **at its mark**, a hair outside its own engage range: it
+    // no longer walks in from 34 px (which clipped its top on the first frames
+    // of every loop), and the hair means the loop's first frame is the idle
+    // approach pose before the tell opens on the next tick.
+    let mark = aim + Vec2::new(-(kind.engage_range() + 1.5), -2.0);
+    let e = world.spawn_miniboss(kind, 0, mark);
     // A named body's whole encounter is tell → strike → recovery, so a loop
-    // exactly that long starts and ends in the same state. The extra leg is the
-    // walk in to its own engage range, which is where the body begins; the 2.6 s
-    // gap to the *next* tell is cut (a plate that sat out the whole gap was
-    // still for more than a third of its loop).
-    // A named body walks at 48 px/s (a Brute's 16 × `MINIBOSS_SPEED_SCALE`).
-    let walk = (34.0 - kind.engage_range()).max(0.0) / 48.0;
-    let cycle = TELL_TIME + kind.active_duration() + walk + SIGNATURE_GAP * 0.2;
+    // exactly that long starts and ends in the same state. There is no walk-in
+    // leg any more; the 2.6 s gap to the *next* tell is cut (a plate that sat
+    // out the whole gap was still for more than a third of its loop).
+    let cycle = TELL_TIME + kind.active_duration() + SIGNATURE_GAP * 0.2;
     let mut script = Script::new(cycle.clamp(3.4, 6.0), 2.0);
     script.framing = Framing::Pair;
     script.dummy = true;
@@ -1371,7 +1857,70 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
     // only, and every boss sprite is 26–84 px long against a 44 px plate.
     script.shrink = 2;
     script.dummy = true;
+    // The plate frames the union of the body's drawn bounds over one loop
+    // (`LibraryScene::probe_boss_union`), not a camera that follows the fight:
+    // a stomp, a pounce, a coil and a hoisted stamp all left a moving frame.
+    script.boss_fit = true;
+    if kind == BossKind::Hawk {
+        // The Redtail circles overhead, and while it is up there the art gives
+        // it no hit shape at all — the card was a shadow on empty planks. Its
+        // loop is the part of the fight that is on the deck: a hover, one dive
+        // and the landing, then the hover again.
+        script.loop_secs = HAWK_LOOP;
+        script.cue = Some(hawk_hover_cue);
+    }
     (world, script, None)
+}
+
+/// The Redtail's card script: keep the bird in the low fight (the hover and its
+/// grounded attacks), and send it down **one** dive a loop so the landing — the
+/// only frame that is unarguably the bird and not the shadow — is shown.
+///
+/// A state pinned here is the art's own state with the art's own duration, so
+/// the controller's transitions, hazards and poses stay its own; the card only
+/// chooses which of them the loop spends its time in.
+fn hawk_hover_cue(world: &mut World, _subject: Option<Entity>, tick: u32) {
+    let dive_tick = (HAWK_DIVE_AT / TICK).round() as u32;
+    let rat = world.player.pos;
+    let mut q = world.ecs.query::<&mut Boss>();
+    for mut boss in q.iter_mut(&mut world.ecs) {
+        if boss.kind != BossKind::Hawk {
+            continue;
+        }
+        let state = match boss.state {
+            BossState::Hawk(s) => s,
+            _ => return,
+        };
+        let slot = (boss.phase.clamp(1, 3) - 1) as usize;
+        match state {
+            // The states the plate cannot show: the bird is high (or coming
+            // back up), so only a shadow is on the deck. Take the low fight.
+            art_boss_hawk::HawkState::Circle
+            | art_boss_hawk::HawkState::Wheel
+            | art_boss_hawk::HawkState::Climb => {
+                boss.flags = 0;
+                boss.pounce_origin = boss.pos;
+                boss.set_state(
+                    BossState::Hawk(art_boss_hawk::HawkState::Hover),
+                    art_boss_hawk::HOVER_DURATION[slot],
+                );
+            }
+            // One dive a loop, on its own tick so the loop always has exactly
+            // one (a card that waited for a settled hover could spend the loop
+            // inside a windup and never show the landing). A windup it
+            // interrupts is cancelled, exactly as a phase change cancels one.
+            _ if tick == dive_tick => {
+                boss.flags = 0;
+                boss.pounce_origin = boss.pos;
+                boss.target = rat;
+                boss.set_state(
+                    BossState::Hawk(art_boss_hawk::HawkState::Dive),
+                    art_boss_hawk::DIVE_DURATION[slot],
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---- Arsenal, passives, pickups, floors -----------------------------------
@@ -1412,6 +1961,35 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
     // keeps the active weapons charged so a charge of 6-10 s can still fire
     // several times inside a five-second loop.
     script.cue = Some(arsenal_cue);
+    let sweep = matches!(kind, WeaponKind::TailThrash);
+    if sweep {
+        // A max-rank Tail Thrash sweeps an 84 px arc round the rat: the card
+        // showed a white streak leaving the top of the plate and targets that
+        // died on the first sweep. Its frame is the whole sweep radius, its
+        // targets are x50 hp (`SWEEP_TARGET_HP`) so all three survive the loop.
+        let reach = world
+            .player
+            .loadout
+            .weapons
+            .last()
+            .map_or(84.0, |w| w.active_reach());
+        let total = (2.0 * (reach + 6.0) * 1.05) / 30.0;
+        script.shrink = ((total / crate::render::zoom::MAX).ceil() as usize).max(1);
+        script.zoom = total / script.shrink as f32;
+        script.lean = Vec2::ZERO;
+        script.cue = Some(arsenal_sweep_cue);
+    }
+    if kind == WeaponKind::SuperDash {
+        // The dash leaves the fan of targets behind it. Its targets are laid
+        // along the lane the charged dash runs, and the camera holds the lane's
+        // midpoint so the whole dash and every hit on it are in frame.
+        let total = (DASH_LANE + 16.0) / 44.0;
+        script.shrink = ((total / crate::render::zoom::MAX).ceil() as usize).max(1);
+        script.zoom = total / script.shrink as f32;
+        script.framing = Framing::Point(world.level.start + Vec2::new(DASH_LANE * 0.5, 0.0));
+        script.lean = Vec2::ZERO;
+        script.cue = Some(arsenal_lane_cue);
+    }
     script.input = match kind {
         // A thrash burst lasts a second, so its presses are 1.4 s apart (three
         // bursts a loop, each with its own sweep and hit flashes); a squeak ring
@@ -1424,16 +2002,20 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
             active: (t % 0.8) < TICK * 1.5 && t > 0.4,
             ..Input::default()
         },
-        WeaponKind::SuperDash => |t| {
-            let c = t % 2.5;
-            Input {
-                mv: Vec2::new(if t < 2.5 { 1.0 } else { -1.0 }, 0.0),
-                hold: (0.5..1.5).contains(&c),
-                ..Input::default()
-            }
+        WeaponKind::SuperDash => |t| Input {
+            // Charge in place, then one charged dash down the lane. The rat
+            // does not walk back: the camera is fixed on the lane's midpoint
+            // and a rat strolling home across it would leave the frame.
+            hold: (0.05..0.9).contains(&t),
+            ..Input::default()
         },
         _ => idle,
     };
+    if kind == WeaponKind::SuperDash {
+        // The lane is a fixed picture: a shorter loop than the other weapons'
+        // (charge, dash, and the sway of what was hit).
+        script.loop_secs = 3.0;
+    }
     (world, script, None)
 }
 
@@ -1444,13 +2026,33 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
 /// five-second card could only ever show one of them. The charge is the cost a
 /// card's facts state, not the thing the card demonstrates, so the plate holds
 /// the timer at zero and the effect itself is the weapon's own.
-fn arsenal_cue(world: &mut World, subject: Option<Entity>, tick: u32) {
+fn arsenal_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    keep_actives_ready(world);
+    arsenal_dummies(world, &dummy_homes(world.player.pos), ARSENAL_HP);
+}
+
+/// The Tail Thrash's and the Flywheel's plate: the same standing targets, with
+/// enough sandbox hp to survive the loop (a first sweep used to kill them).
+fn arsenal_sweep_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    keep_actives_ready(world);
+    arsenal_dummies(world, &dummy_homes(world.player.pos), SWEEP_TARGET_HP);
+}
+
+/// The Super Dash's and the Ripcord's plate: the targets lie along the dash
+/// lane, so the charge, the dash and its hits all happen on the picture.
+fn arsenal_lane_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    keep_actives_ready(world);
+    arsenal_dummies(world, &dash_lane_homes(world.level.start), ARSENAL_HP);
+}
+
+/// Hold every active weapon's charge at zero: the cost a card's facts state,
+/// not the thing the card demonstrates.
+fn keep_actives_ready(world: &mut World) {
     for w in world.player.loadout.weapons.iter_mut() {
         if w.kind.is_active() {
             w.timer = 0.0;
         }
     }
-    arsenal_dummies(world, subject, tick);
 }
 
 /// Where the arsenal plate's three targets stand: a fan in front of the rat, so
@@ -1465,13 +2067,22 @@ fn dummy_homes(rat: Vec2) -> [Vec2; 3] {
     homes
 }
 
+/// Where the dash card's three targets lie: along the charged dash's lane, at
+/// three points the sweep crosses.
+fn dash_lane_homes(start: Vec2) -> [Vec2; 3] {
+    let mut homes = [start; 3];
+    for (i, home) in homes.iter_mut().enumerate() {
+        *home = start + Vec2::new(DASH_LANE * (0.3 + 0.3 * i as f32), 0.0);
+    }
+    homes
+}
+
 /// The arsenal plate's targets: three real bodies (a weapon can only hit an
 /// entity) stood still at arm's length, refreshed if a max-level evolution
 /// finishes one off inside the loop. The standing bodies are found by their
 /// zero gait, so a knocked-about dummy is not replaced by a duplicate.
-fn arsenal_dummies(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+fn arsenal_dummies(world: &mut World, homes: &[Vec2; 3], hp: f32) {
     let kind = roster::fodder_kind(world.level.theme);
-    let homes = dummy_homes(world.player.pos);
     let mut standing = 0usize;
     {
         let mut q = world.ecs.query::<&Enemy>();
@@ -1485,8 +2096,8 @@ fn arsenal_dummies(world: &mut World, _subject: Option<Entity>, _tick: u32) {
         let e = world.spawn_enemy(kind, *home, 2.0);
         if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
             body.speed_scale = 0.0;
-            body.hp = 4000.0;
-            body.max_hp = 4000.0;
+            body.hp = hp;
+            body.max_hp = hp;
         }
     }
 }
@@ -1576,23 +2187,180 @@ fn stage_pickup(theme: Theme, kind: PickupKind) -> Staged {
     (world, script, None)
 }
 
-/// A floor's card: the real generated map with the floor's two fodder kinds
-/// walking through the start room while the plate pans.
+/// A floor's card: the real generated map, lit by the floor's own lighting,
+/// cropped (by camera) on a furnished room and panned across it, with the
+/// floor's two fodder kinds wandering through. No rat: the sector is the
+/// subject, and a rat pinned at the edge of an empty floor was neither.
 fn stage_floor(theme: Theme) -> Staged {
     let level = Level::generate(theme, SEED);
-    let start = level.start;
+    let window = floor_window(&level);
+    let centre = window.center_world();
+    // The crop's own middle may be the room's wall face (the window was shifted
+    // to hold its sconce): the card stands its bodies and its pan on the
+    // nearest open floor instead.
+    let open = level
+        .tiles
+        .nearest_open_center(centre, SizeClass::Small, 16)
+        .unwrap_or(centre);
     let mut world = sandbox(level);
+    // A floor's card is not a portrait of one body: the lighting is the
+    // floor's real lighting (`sandbox` force-flat-lights every other card) and
+    // the rat is taken out of the picture (it still wanders, hidden, so the
+    // fodder has something to follow).
+    world.flat_lit = false;
+    hide_rat(&mut world);
+    world.player.pos = open;
     for (i, slot) in [Slot::A, Slot::B].into_iter().enumerate() {
         let kind = roster::kind(theme, slot);
-        let side = if i == 0 { -1.0 } else { 1.0 };
-        let e = world.spawn_enemy(kind, start + Vec2::new(side * 30.0, 26.0), 1.0);
-        if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
-            body.speed_scale = 0.7;
+        for k in 0..3 {
+            let a = (i * 3 + k) as f32 * 1.9;
+            let at = open + Vec2::from_angle(a) * 10.0 + Vec2::new(0.0, (k as f32 - 1.0) * 8.0);
+            let e = world.spawn_enemy(kind, at, 1.0);
+            if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
+                // A slow wander, not a chase, and bodies that survive the loop:
+                // the card is about the floor, and a thinned-out pack is not.
+                body.speed_scale = 0.55;
+                body.hp = 800.0;
+                body.max_hp = 800.0;
+            }
         }
     }
-    let mut script = Script::new(10.0, 1.5);
-    script.framing = Framing::Pan(start + Vec2::new(0.0, 14.0));
+    let mut script = Script::new(10.0, FLOOR_ZOOM);
+    script.framing = Framing::Pan(open);
+    // The window is 12 × 8 tiles (192 × 128 px); at `FLOOR_ZOOM` the plate
+    // shows 88 × 60 of them, so the pan travels the rest of the window and back.
+    let view = Vec2::new(44.0 * FLOOR_ZOOM, 30.0 * FLOOR_ZOOM);
+    script.pan = Vec2::new(
+        ((window.w as f32 * crate::game::collision::TILE_F - view.x) * 0.5).max(0.0),
+        ((window.h as f32 * crate::game::collision::TILE_F - view.y) * 0.5).max(0.0),
+    );
+    script.window = Some(window);
+    script.wander = Some((open, Vec2::new(20.0, 10.0)));
     (world, script, None)
+}
+
+/// The 12 × 8-tile window a floor's card is cut from: the most furnished room
+/// on the floor — wall faces, props, a hanging light and a wall sconce — with
+/// the window shifted off the room's centre as little as possible.
+///
+/// The candidate is scored on what the card must show, so the choice is data
+/// (the generator's own room and furniture lists), never a retyped guess. A
+/// sconce is the anchor: the generator mounts one on the first wall face of the
+/// start room and of every other furnished room (`levelgen::lights`), and the
+/// room a sconce stands in is furnished by `levelgen::layout::furnish`.
+fn floor_window(level: &Level) -> TileRect {
+    let (w, h) = FLOOR_WINDOW;
+    let (cols, rows) = (level.tiles.cols(), level.tiles.rows());
+    let clamp = |x: i32, y: i32| {
+        TileRect::new(
+            x.clamp(1, (cols - w - 1).max(1)),
+            y.clamp(1, (rows - h - 1).max(1)),
+            w,
+            h,
+        )
+    };
+    let mut best: Option<(i32, TileRect)> = None;
+    let mut consider = |window: TileRect, bonus: i32| {
+        let score = bonus + floor_crop_score(level, window);
+        if best.is_none_or(|(b, _)| score > b) {
+            best = Some((score, window));
+        }
+    };
+    // Anchor on every sconce: the window holds the sconce and as much of its
+    // room's middle (where the props are) as it can.
+    for light in &level.objects.lights {
+        if light.kind != LightFixtureKind::Sconce {
+            continue;
+        }
+        let (sx, sy) = crate::game::collision::cell_of(light.pos);
+        let room = level.rooms.iter().find(|r| r.rect.contains(sx, sy));
+        let (mut wx, mut wy) = match room {
+            Some(room) => (
+                room.rect.x + room.rect.w / 2 - w / 2,
+                room.rect.y + room.rect.h / 2 - h / 2,
+            ),
+            None => (sx - w / 2, sy - h / 2),
+        };
+        // Shift only as far as the sconce has to be inside the window.
+        wx = wx.min(sx).max(sx - (w - 1));
+        wy = wy.min(sy).max(sy - (h - 1));
+        let bonus = match room.map(|r| r.kind) {
+            Some(RoomKind::Room | RoomKind::Hall) => 6,
+            Some(RoomKind::Start) => 4,
+            Some(RoomKind::Boss) => 3,
+            Some(RoomKind::Corridor) => 1,
+            _ => 0,
+        };
+        consider(clamp(wx, wy), bonus);
+    }
+    // And on every room's centre, in case a floor's sconces all landed in
+    // corridors: a furnished room with no lamp of its own still reads.
+    for room in &level.rooms {
+        if matches!(room.kind, RoomKind::Maze | RoomKind::Corridor) {
+            continue;
+        }
+        consider(
+            clamp(
+                room.rect.x + room.rect.w / 2 - w / 2,
+                room.rect.y + room.rect.h / 2 - h / 2,
+            ),
+            0,
+        );
+    }
+    match best {
+        Some((_, window)) => window,
+        // A map with no rooms at all (never a generated one): the start room.
+        None => {
+            let (cx, cy) = crate::game::collision::cell_of(level.start);
+            clamp(cx - w / 2, cy - h / 2)
+        }
+    }
+}
+
+/// What a floor's 12 × 8-tile window holds, as one number: walls are the room's
+/// frame, props are the furniture, lights and especially sconces are the
+/// floor's own lighting, and a window with no wall has nothing to show.
+fn floor_crop_score(level: &Level, window: TileRect) -> i32 {
+    let mut walls = 0;
+    for (cx, cy) in window.cells() {
+        if level.tiles.get(cx, cy).is_wall() {
+            walls += 1;
+        }
+    }
+    if walls < 2 {
+        return -100;
+    }
+    let props = level
+        .props
+        .iter()
+        .filter(|p| window.contains_world(p.rect.center()))
+        .count();
+    let mut lights = 0;
+    let mut sconces = 0;
+    for light in &level.objects.lights {
+        if !window.contains_world(light.pos) {
+            continue;
+        }
+        lights += 1;
+        if light.kind == LightFixtureKind::Sconce {
+            sconces += 1;
+        }
+    }
+    // A window with **both** a prop and a wall sconce is the card the task
+    // describes, so it outranks any window with only one of them (the boss
+    // arena's ring of six sconces is a wall with no furniture in it); among
+    // those, more furniture and more lamps win.
+    let mut score = walls.min(24) + lights.min(6);
+    if sconces > 0 {
+        score += 40;
+    }
+    if props > 0 {
+        score += 30;
+    }
+    if props > 0 && sconces > 0 {
+        score += 200;
+    }
+    score + props.min(6) as i32 * 2 + sconces.min(3) * 2
 }
 
 // ---- Field guide ----------------------------------------------------------
@@ -1673,8 +2441,22 @@ fn stage_chest(theme: Theme) -> Staged {
     for (dx, dy) in [(-10.0, 12.0), (14.0, -14.0), (26.0, 16.0)] {
         world.spawn_gem(Gem::new(chest + Vec2::new(dx, dy), 1));
     }
-    let mut script = Script::new(4.5, 2.0);
-    script.framing = Framing::Point(chest - Vec2::new(8.0, 0.0));
+    // The rat walks up and **takes** the chest (the real collection: the chest
+    // despawns and `pending_chests` rises, then the card drops the plate on the
+    // floor like every other pending screen). What the run shows next is its
+    // chest screen; what the card shows is its own open lid and the payout
+    // burst, painted over the spot.
+    let mut script = Script::new(3.6, 2.0);
+    script.framing = Framing::Point(chest - Vec2::new(4.0, 0.0));
+    script.input = |t| Input {
+        mv: if (0.4..0.95).contains(&t) {
+            Vec2::new(1.0, 0.0)
+        } else {
+            Vec2::ZERO
+        },
+        ..Input::default()
+    };
+    script.chest = Some(chest);
     (world, script, None)
 }
 
@@ -2132,6 +2914,62 @@ fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32),
 /// Every colour the card's dummy paints (its shadow included).
 #[cfg(test)]
 const DUMMY_INK: [Rgb; 6] = [CORK, CORK_LIT, CORK_RIND, RIND, CHALK, CORK_SHADOW];
+
+/// The chest card's reward: the lid thrown open, the golden mouth and the burst
+/// the collection pays out, painted by the card itself.
+///
+/// The simulation's chest is consumed on contact (`treasure_system` despawns it
+/// and raises `pending_chests`), so the run has no open frame to show: the card
+/// keeps the moment and paints it, the way it paints its practice target.
+fn draw_open_chest(pb: &mut PixelBuffer, s: (i32, i32), age: f32) {
+    let (cx, cy) = s;
+    let burst = (age / BURST_SECS).clamp(0.0, 1.0);
+    // The box, four rows tall so the open lid reads above it.
+    for dy in 0..4 {
+        for dx in -5..=5 {
+            let c = if dy == 0 { CHEST_WOOD_HI } else { CHEST_WOOD };
+            pb.plot(cx + dx, cy + 1 + dy, c);
+        }
+    }
+    // The mouth, and the gold inside it.
+    for dx in -3..=3 {
+        pb.plot(cx + dx, cy, CHEST_MOUTH);
+    }
+    for x in [cx - 2, cx + 2] {
+        pb.plot(x, cy, CHEST_GLOW);
+    }
+    // The lid, thrown up and back, with its brass studs.
+    for dx in -5..=5 {
+        pb.plot(cx + dx, cy - 2, CHEST_WOOD_HI);
+        pb.plot(cx + dx, cy - 3, CHEST_WOOD);
+    }
+    for x in [cx - 4, cx + 4] {
+        pb.plot(x, cy - 3, CHEST_BRASS);
+        pb.plot(x, cy, CHEST_BRASS);
+    }
+    // The reward burst: a ring opening out of the mouth.
+    let r = 3.0 + burst * 9.0;
+    let steps = 22;
+    for i in 0..steps {
+        let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+        if a.sin() <= -0.05 {
+            continue;
+        }
+        let x = cx + (a.cos() * r).round() as i32;
+        let y = cy - 2 + (a.sin() * r * 0.7).round() as i32;
+        pb.plot(x, y, if burst < 0.6 { CHEST_GLOW } else { CHEST_BRASS });
+    }
+    // Coins riding the burst up and out.
+    if burst < 1.0 {
+        for i in 0..3 {
+            let a = -1.9 + i as f32 * 0.6;
+            let d = 4.0 + burst * (10.0 + i as f32 * 3.0);
+            let x = cx + (a.cos() * d).round() as i32;
+            let y = cy - 3 + (a.sin() * d * 0.9).round() as i32;
+            pb.plot(x, y, CHEST_BRASS);
+        }
+    }
+}
 
 /// The world rectangle one signature footprint covers, straight from the
 /// shape's own numbers. A fitted plate asks the shape rather than guessing from

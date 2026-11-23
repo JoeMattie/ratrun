@@ -49,10 +49,92 @@ mod sewer;
 
 use crate::game::level::Theme;
 
-pub use synth::SongSynth;
+pub use synth::{SongSynth, SynthMode};
 
 /// One generated note: `(delta_steps, midi, gate_steps, velocity)`.
 pub type Note = (u8, u8, u8, u8);
+
+/// 16-bit procedural instrument patch assigned per role in [`Style::patches`].
+///
+/// [`Patch::Chip`] reproduces the legacy chiptune oscillator voice for that role
+/// (the default in [`Style::base`]). Every other variant selects a 16-bit
+/// FM, wavetable, Karplus-Strong plucked-string, or filtered FX engine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Patch {
+    /// Legacy oscillator voice (square/saw/triangle + simple filter).
+    Chip,
+    /// Deep warm 2/4-op FM sub/finger bass (Sewer, Lab).
+    FmDarkBass,
+    /// Bouncy Mega Drive FM slap bass with velocity-sensitive pop (Kitchen, Printworks).
+    FmSlapBass,
+    /// Warm acoustic upright / boom-bap FM bass (Laundry).
+    FmUprightBass,
+    /// Aggressive picked rock FM bass with subtle grit (Flatbed).
+    FmPickedBass,
+    /// Glassy DX7-style electric piano tine chords (Lab, Printworks).
+    FmEpiano,
+    /// Bright wooden FM marimba pluck (Kitchen).
+    FmMarimba,
+    /// Snappy metallic-woody FM clavinet lead (Printworks).
+    FmClav,
+    /// Hard inharmonic glassy FM bell for alarm chimes (Lab).
+    FmHardBell,
+    /// Lush 4-op FM brass swells (Sewer, Flatbed).
+    FmWarmBrass,
+    /// Snappy Genesis-style FM brass stabs (Kitchen, Printworks).
+    FmPunchBrass,
+    /// Overdriven FM electric guitar lead with soft-clip drive & delayed vibrato (Flatbed).
+    FmOverdriveGuitar,
+    /// Slow lush SNES wavetable string ensemble (Sewer).
+    WtStrings,
+    /// Soft chamber wavetable strings (Laundry).
+    WtSoftStrings,
+    /// Cold formant-shaped SNES choir pad (Lab).
+    WtColdChoir,
+    /// Hollow ocarina / flute wavetable lead with breath chiff & delayed vibrato (Sewer).
+    WtHollowFlute,
+    /// Bright airy whistle wavetable lead with delayed vibrato (Kitchen).
+    WtWhistle,
+    /// Clarinet / accordion reed wavetable lead with musette unison (Laundry).
+    WtClarinetAccordion,
+    /// Thin glassy sine wavetable lead with delayed vibrato (Lab).
+    WtThinSine,
+    /// Hammond / power-chord rock organ wavetable pad (Flatbed).
+    WtRockOrgan,
+    /// Karplus-Strong plucked harp / muted noir guitar (Sewer).
+    KsHarp,
+    /// Karplus-Strong crisp orchestral pizzicato strings (Kitchen).
+    KsPizzicato,
+    /// Karplus-Strong upright-piano chords with hammer thump (Laundry).
+    KsUprightPiano,
+    /// Karplus-Strong snappy clavinet / funk guitar pluck (Printworks).
+    KsClavinet,
+    /// Karplus-Strong picked electric guitar arpeggio (Flatbed).
+    KsRockGuitar,
+    /// 16-bit filtered air/noise transition sweep.
+    Fx16,
+}
+
+/// 16-bit sampled-style drum kit assigned per floor in [`Style::drum_kit`].
+///
+/// [`DrumKit::Chip`] reproduces the legacy drum voices.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum DrumKit {
+    /// Legacy chip drums.
+    Chip,
+    /// Deep sparse trip-hop kit (Sewer).
+    Deep,
+    /// Tight bright polka/chase kit with woodblocks & timpani (Kitchen).
+    TightBright,
+    /// Soft brushed waltz kit (Laundry).
+    Brushed,
+    /// Clicky electronic kit with metallic hats & sonar cowbell (Lab).
+    Electronic,
+    /// Mechanical tight funk kit with prominent clap & rim (Printworks).
+    Mechanical,
+    /// Big arena rock kit with resonant toms (Flatbed).
+    BigRock,
+}
 
 /// The ten parts a song is sequenced in. The order is fixed: the generated
 /// tables and [`Song::parts`] both index by [`Role::index`].
@@ -184,6 +266,24 @@ pub struct Style {
     /// Enables v2 voice/drum shaping (band-passed noise drums, open hat,
     /// woodblock/timpani, 1-pole bright LP, kick transient, FX sweep).
     pub enhanced_drums: bool,
+    /// 16-bit patch per role (`Patch::Chip` reproduces the legacy chip voice).
+    pub patches: [Patch; N_ROLES],
+    /// 16-bit drum kit (`DrumKit::Chip` reproduces the legacy chip drums).
+    pub drum_kit: DrumKit,
+    /// Optional per-role mix gains for the 16-bit palette (all zero => use `mix`).
+    pub mix_16: [f32; N_ROLES],
+    /// Optional bus drive for the 16-bit palette (`0.0` => use `drive`).
+    pub drive_16: f32,
+    /// Global SNES-style echo delay time, ms (`0.0` => disabled).
+    pub echo_ms: f32,
+    /// Global echo feedback ratio (`0.0..=0.45`).
+    pub echo_feedback: f32,
+    /// One-pole low-pass cutoff inside the echo feedback loop, Hz.
+    pub echo_lp_hz: f32,
+    /// Per-role send level into the global echo bus.
+    pub echo_send: [f32; N_ROLES],
+    /// Soft Gaussian-style master low-pass cutoff, Hz (`0.0` => bypassed).
+    pub master_lp_hz: f32,
 }
 
 impl Style {
@@ -216,6 +316,15 @@ impl Style {
             lead_vib_depth: 0.0065,
             stab_decay_ms: 240.0,
             enhanced_drums: false,
+            patches: [Patch::Chip; N_ROLES],
+            drum_kit: DrumKit::Chip,
+            mix_16: [0.0; N_ROLES],
+            drive_16: 0.0,
+            echo_ms: 0.0,
+            echo_feedback: 0.0,
+            echo_lp_hz: 2800.0,
+            echo_send: [0.0; N_ROLES],
+            master_lp_hz: 0.0,
         }
     }
 }
@@ -314,11 +423,18 @@ pub fn song_by_floor(floor: &str) -> Option<&'static Song> {
     theme_by_floor(floor).map(song_for)
 }
 
-/// Whether the main engine should use the song synth. `RATRUN_MUSIC=classic`
-/// keeps the pre-MIDI synth (the `MusicSynth` path) for comparison and for the
+/// Whether the main engine should use the classic pre-MIDI synth.
+/// `RATRUN_MUSIC=classic` keeps the `MusicSynth` path for comparison and for
 /// tests that reach into its internals.
 pub fn classic_requested() -> bool {
     matches!(std::env::var("RATRUN_MUSIC").as_deref(), Ok("classic"))
+}
+
+/// Whether the song synth should use the legacy chip oscillator palette.
+/// The 16-bit instrument palette is the default; `RATRUN_MUSIC=chip` plays the
+/// chip palette.
+pub fn chip_requested() -> bool {
+    matches!(std::env::var("RATRUN_MUSIC").as_deref(), Ok("chip"))
 }
 
 #[cfg(test)]
@@ -463,5 +579,59 @@ mod tests {
         assert_eq!(song_by_floor("trailer").map(|s| s.floor), Some("Flatbed"));
         assert!(song_by_floor("kitchen").is_some());
         assert!(song_by_floor("submarine").is_none());
+    }
+
+    #[test]
+    fn every_song_has_a_valid_16bit_palette() {
+        // Style::base() defaults to the legacy chip palette.
+        let base = Style::base();
+        assert_eq!(base.drum_kit, DrumKit::Chip);
+        assert!(base.patches.iter().all(|&p| p == Patch::Chip));
+        assert_eq!(base.echo_ms, 0.0);
+
+        // Every floor song defines its own 16-bit kit, pitched patches, echo, and mix.
+        for song in SONGS {
+            let st = song.style;
+            assert_ne!(st.drum_kit, DrumKit::Chip, "{} missing 16-bit drum kit", song.name);
+            for role in [Role::Bass, Role::Pad, Role::Arp, Role::Lead, Role::Stab, Role::Fx] {
+                assert_ne!(
+                    st.patches[role.index()],
+                    Patch::Chip,
+                    "{} {} still on Chip patch",
+                    song.name,
+                    role.name()
+                );
+            }
+            for role in Role::ALL {
+                if !song.parts[role.index()].is_empty() {
+                    let g = st.mix_16[role.index()];
+                    assert!(
+                        g > 0.0 && g <= 1.5,
+                        "{} {}: unrealistic 16-bit mix gain {g}",
+                        song.name,
+                        role.name()
+                    );
+                }
+                assert!(
+                    (0.0..=1.0).contains(&st.echo_send[role.index()]),
+                    "{} {}: echo send out of range",
+                    song.name,
+                    role.name()
+                );
+            }
+            assert!(
+                (160.0..=260.0).contains(&st.echo_ms),
+                "{}: echo_ms {} out of [160, 260]",
+                song.name,
+                st.echo_ms
+            );
+            assert!(
+                (0.15..=0.45).contains(&st.echo_feedback),
+                "{}: echo_feedback {} out of [0.15, 0.45]",
+                song.name,
+                st.echo_feedback
+            );
+            assert!(st.master_lp_hz > 6_000.0, "{}: master_lp_hz too low", song.name);
+        }
     }
 }

@@ -886,10 +886,7 @@ mod tests {
     }
 
     fn arena_centre(w: &World) -> Vec2 {
-        w.level
-            .boss_room()
-            .map(|r| r.rect.center_world())
-            .expect("generated level has a boss room")
+        w.level.fight_rect_around(w.player.pos).center_world()
     }
 
     fn place(w: &mut World, pos: Vec2, rat: Vec2) {
@@ -923,11 +920,7 @@ mod tests {
         w: &'a World,
         rng: &'a mut rand::rngs::StdRng,
     ) -> BossContext<'a> {
-        let arena = w
-            .level
-            .boss_room()
-            .map(|r| r.rect)
-            .unwrap_or_else(|| crate::game::level::TileRect::new(0, 0, 20, 20));
+        let arena = w.level.fight_rect_around(w.player.pos);
         BossContext {
             dt: DT,
             time: 0.0,
@@ -1148,7 +1141,7 @@ mod tests {
         place(&mut w, c, c - Vec2::new(24.0, 0.0));
         set_state(&mut w, CrabState::Dome, 5.0);
         // Call the real commit function through the system's context.
-        let arena = w.level.boss_room().unwrap().rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let mut rng = rand::rngs::StdRng::seed_from_u64(3);
         // A freshly built boss: a cloned one carries no spare hazard capacity,
         // which is irrelevant to the fight but not to a narrow test.
@@ -1179,7 +1172,7 @@ mod tests {
         spawn_crab(&mut w);
         // Use the arena's left wall: put the crab near the middle and the rat
         // between it and that wall.
-        let arena = w.level.boss_room().unwrap().rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let left = arena.x as f32 * crate::game::collision::TILE_F;
         // The crab 120 px off the left wall, the rat 60 px further in: a lane
         // long enough to commit and a wall at the end of it.
@@ -1414,7 +1407,7 @@ mod tests {
     fn it_never_surfaces_where_its_own_body_does_not_fit() {
         let mut w = crab_world(CRAB_SEED);
         spawn_crab(&mut w);
-        let arena = w.level.boss_room().unwrap().rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let tile = crate::game::collision::TILE_F;
         let left = arena.x as f32 * tile;
         let fits = |w: &World, p: Vec2, r: f32| w.level.tiles.circle_clear(p, r, SizeClass::Large);
@@ -1567,7 +1560,7 @@ mod tests {
     fn it_follows_the_rat_out_of_the_arena() {
         let mut w = crab_world(CRAB_SEED);
         spawn_crab(&mut w);
-        let arena = w.level.boss_room().unwrap().rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let c = arena.center_world();
         // The rat stands well outside the arena, on connected floor.
         let rat = w.player.pos;

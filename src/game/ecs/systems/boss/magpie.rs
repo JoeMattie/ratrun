@@ -860,10 +860,7 @@ mod tests {
 
     /// The arena's centre: the cab hold, which is flat open deck.
     fn arena_centre(w: &World) -> Vec2 {
-        w.level
-            .boss_room()
-            .map(|r| r.rect.center_world())
-            .expect("the trailer has a cab hold")
+        w.level.fight_rect_around(w.player.pos).center_world()
     }
 
     /// Put the bird at `pos` and the rat at `rat`, both inside the hold.
@@ -899,11 +896,8 @@ mod tests {
         rng: &'a mut rand::rngs::StdRng,
         arena: crate::game::level::TileRect,
     ) -> BossContext<'a> {
-        let boss_arena = w
-            .level
-            .boss_room()
-            .map(|r| r.rect)
-            .unwrap_or(arena);
+        let _ = arena;
+        let boss_arena = w.level.fight_rect_around(w.player.pos);
         BossContext {
             dt: DT,
             time: 0.0,
@@ -963,7 +957,7 @@ mod tests {
         assert!(w.boss_time_reached());
         let boss = boss_of(&mut w).expect("the schedule spawned the boss");
         assert_eq!(boss.kind, BossKind::Magpie);
-        let arena = w.level.boss_room().expect("hold").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         assert!(
             arena.contains_world(boss.pos),
             "the bird spawns in the cab hold ({:?})",
@@ -1091,7 +1085,7 @@ mod tests {
         // A cargo column right behind the bird: it can lunge but it cannot get
         // any purchase to pull its bill back out.
         let centre = arena_centre(&w);
-        let arena = w.level.boss_room().expect("hold").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         w.level.tiles.fill_cells(
             arena.x + 2,
             arena.y + 2,
@@ -1264,7 +1258,7 @@ mod tests {
         let mut w = trailer_world(17);
         spawn_magpie(&mut w);
         let centre = arena_centre(&w);
-        let arena = w.level.boss_room().expect("hold").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         // A one-cell slot: walls north and south of the rat, so there is no
         // sidestep off the line.
         w.level.tiles.fill_cells(
@@ -1352,7 +1346,7 @@ mod tests {
     fn a_lane_that_loses_its_fit_is_never_flown() {
         let mut w = trailer_world(21);
         spawn_magpie(&mut w);
-        let arena = w.level.boss_room().expect("hold").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let row = arena_centre(&w).y;
         // 40 px short of the lane's east end with the rat further east still:
         // the only run left is shorter than `STRAFE_MIN_LEN`, so `lane_plan`

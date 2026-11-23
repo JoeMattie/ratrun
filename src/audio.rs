@@ -12469,6 +12469,17 @@ struct VoiceSlot {
 /// One bank of pre-synthesized variants per `Sfx`, indexed by `Sfx::index`.
 type SfxBank = Vec<Vec<Arc<[f32]>>>;
 
+/// Which music synth backend [`AudioEngine`] chooses for menus and floor runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MusicSelection {
+    /// 16-bit procedural song synth (default everywhere: title, menus, floors).
+    Song16Bit,
+    /// Legacy chip oscillator palette (`RATRUN_MUSIC=chip`).
+    SongChip,
+    /// Legacy pre-MIDI pattern synth (`RATRUN_MUSIC=classic`).
+    Classic,
+}
+
 pub struct AudioEngine {
     stream: MixerDeviceSink,
     music: Player,
@@ -12548,14 +12559,31 @@ impl AudioEngine {
         cache
     }
 
-    /// The title and menu track: always the classic chiptune at the calm
-    /// tier, whatever `RATRUN_MUSIC` says. The floor songs belong to a run.
+    /// The title and menu track: plays the selected floor's song in the 16-bit
+    /// palette at the calm tier with a soft intro (`RATRUN_MUSIC=chip` selects
+    /// the chip oscillator palette; `RATRUN_MUSIC=classic` keeps the pre-MIDI
+    /// pattern synth everywhere, menus included).
     pub fn play_menu_music(&mut self, theme: Theme) {
         self.intensity.store(0, Ordering::Relaxed);
         self.music.clear();
-        self.music.append(MusicSynth::new(theme, self.intensity.clone()));
+        if crate::music::classic_requested() {
+            self.music.append(MusicSynth::new(theme, self.intensity.clone()));
+        } else {
+            self.music
+                .append(crate::music::SongSynth::new_menu(theme, self.intensity.clone()));
+        }
         self.apply_volumes();
         self.music.play();
+    }
+
+    /// Resolve which synth backend handles menu and floor tracks for a given
+    /// `RATRUN_MUSIC` value (`None` = default 16-bit everywhere).
+    pub fn music_selection_for_env(env: Option<&str>) -> MusicSelection {
+        match env {
+            Some("classic") => MusicSelection::Classic,
+            Some("chip") => MusicSelection::SongChip,
+            _ => MusicSelection::Song16Bit,
+        }
     }
 
     pub fn play_music(&mut self, theme: Theme, intensity: u32) {
@@ -14187,6 +14215,39 @@ mod tests {
                     "BENCH {:?} int={}: {:.2} ns/sample ({:.3}% of 1 core @44.1kHz) [acc={:.1}]",
                     theme, lvl, best_ns, cpu_pct, acc
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn menu_and_floor_music_default_to_16bit_song_synth() {
+        // Default (unset or unknown) uses 16-bit SongSynth everywhere; chip and
+        // classic overrides stay selectable via RATRUN_MUSIC.
+        assert_eq!(
+            AudioEngine::music_selection_for_env(None),
+            MusicSelection::Song16Bit
+        );
+        assert_eq!(
+            AudioEngine::music_selection_for_env(Some("16bit")),
+            MusicSelection::Song16Bit
+        );
+        assert_eq!(
+            AudioEngine::music_selection_for_env(Some("chip")),
+            MusicSelection::SongChip
+        );
+        assert_eq!(
+            AudioEngine::music_selection_for_env(Some("classic")),
+            MusicSelection::Classic
+        );
+        // Every floor's menu track constructs a 16-bit SongSynth by default
+        // (unless the test runner explicitly set RATRUN_MUSIC=chip).
+        if !crate::music::chip_requested() {
+            for theme in Theme::playable() {
+                let mut menu =
+                    crate::music::SongSynth::new_menu(theme, Arc::new(AtomicU32::new(0)));
+                assert_eq!(menu.mode(), crate::music::SynthMode::Bit16);
+                let sample = menu.next().unwrap();
+                assert!(sample.is_finite());
             }
         }
     }

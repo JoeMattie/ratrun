@@ -101,11 +101,14 @@ pub struct Player {
     pub speed_mult: f32,
 }
 
-/// First card's cost, in XP. Six XP is the design's "first card in 12-20 s"
-/// anchor: the opening horde hands that over in about fifteen seconds.
-/// Weapon damage gained per character level above the first: +1 %, so level
-/// 31 hits ×1.30 and level 51 ×1.50. No cap.
-pub const LEVEL_DAMAGE_PER_LEVEL: f32 = 0.01;
+/// Weapon damage gained per character level above the first: +4 %, so level 14
+/// hits ×1.52 and level 30 ×2.16. No cap.
+///
+/// Batch twelve quartered the level pace (one level now costs the XP of four
+/// old levels, see [`xp_for_level`]) and multiplied this by four, so the bonus
+/// a surviving rat carries at any given minute is the one it always did
+/// (×1.19 by 3:00, ×1.55 by the boss) and no enemy pool had to move for it.
+pub const LEVEL_DAMAGE_PER_LEVEL: f32 = 0.04;
 
 /// The character level's weapon-damage multiplier
 /// (`1 + LEVEL_DAMAGE_PER_LEVEL × (level − 1)`). The level restarts at 1 on
@@ -114,9 +117,10 @@ pub fn level_damage_mult(level: u32) -> f32 {
     1.0 + LEVEL_DAMAGE_PER_LEVEL * level.saturating_sub(1) as f32
 }
 
-/// The same bonus as a whole percentage, for the screens (`+11` at level 12).
+/// The same bonus as a whole percentage, for the screens (`+44` at level 12,
+/// `+152` at level 39). Read from the constant, never from the level alone.
 pub fn level_damage_percent(level: u32) -> u32 {
-    level.saturating_sub(1)
+    (level_damage_mult(level) * 100.0).round() as u32 - 100
 }
 
 pub const XP_BASE: f64 = 6.0;
@@ -133,22 +137,58 @@ pub const XP_BASE: f64 = 6.0;
 /// (level 20 costs 37 XP, level 40 costs 247, level 50 costs 640) and no flat
 /// cap.
 ///
+/// Those are **old** levels: batch twelve charges four of them per card
+/// ([`OLD_LEVELS_PER_LEVEL`]), so the same economy now buys ~14 cards, not
+/// ~55. The fine curve itself — and every measurement below — is unchanged.
+///
 /// Fitted against the measured per-checkpoint XP curve of the pre-change batch
 /// (skilled, 8 campaigns: 24 XP at 1:00, 100 at 2:00, 257 at 3:00, 1 613 at
 /// 6:00, 4 556 at 9:00, 8 946 at 12:00, 12 307 at 14:00). See
 /// `scratchpad/w3/balance/LOG.md`.
 pub const XP_GROWTH: f64 = 1.10;
 
-/// XP needed to go from `level` to `level + 1`.
+/// Old levels whose XP one character level now costs ([`xp_for_level`]).
 ///
-/// `round(XP_BASE * XP_GROWTH^(level-1))`, with no cap. The curve is cheap in
-/// the teaching band (6, 7, 7, 8, 9, 10 …) so the first cards land within a
-/// minute, and grows geometrically from there, so each later level takes
-/// noticeably longer than the one before it.
-pub fn xp_for_level(level: u32) -> u32 {
+/// The owner: *"it feels like we level up way too fast. Maybe level up 1/4 as
+/// often but increase DPS by 4x the current amount."* So a level costs what
+/// four levels used to, and [`LEVEL_DAMAGE_PER_LEVEL`] went 0.01 → 0.04: the
+/// same bonus lands on the same minute, with four times fewer cards.
+pub const OLD_LEVELS_PER_LEVEL: u32 = 4;
+
+/// **One old level's cost**, in XP: `round(XP_BASE * XP_GROWTH^(level-1))`, with
+/// no cap. This is the fine geometric curve the whole economy was tuned
+/// against (6, 7, 7, 8, 9, 10 … 37 at level 20, 640 at level 50); batch twelve
+/// keeps it, and [`xp_for_level`] simply charges four of them at a time.
+///
+/// It is also the measuring stick the batch reports use through
+/// [`xp_to_reach`], so the old level a run would have reached stays readable.
+pub fn base_xp_for_level(level: u32) -> u32 {
     let n = level.max(1).saturating_sub(1) as i32;
     let cost = XP_BASE * XP_GROWTH.powi(n);
     cost.round().clamp(1.0, u32::MAX as f64) as u32
+}
+
+/// XP needed to go from `level` to `level + 1`.
+///
+/// One level costs what **four** old levels did: the sum of
+/// [`base_xp_for_level`] over old levels `4(level-1)+1` through `4·level`. So
+/// reaching level `n` takes exactly the XP the old curve took to reach old
+/// level `4(n-1)+1`, and the old band of ~56 picks by the boss becomes ~14
+/// (`xp_to_reach(15)` is 12 404 XP — about what a fifteen-minute floor pays).
+///
+/// **The opening is discounted**: level 1 costs old levels 1-2 only (13 XP),
+/// because the first card has to offer the second weapon and four old levels
+/// of XP would have pushed it to ~45 s. Nothing else is shifted; level 2 costs
+/// old levels 5-8 as the rule says.
+pub fn xp_for_level(level: u32) -> u32 {
+    let level = level.max(1);
+    if level == 1 {
+        return (1..=2).map(base_xp_for_level).sum();
+    }
+    let first = OLD_LEVELS_PER_LEVEL * (level - 1) + 1;
+    (first..first + OLD_LEVELS_PER_LEVEL)
+        .map(base_xp_for_level)
+        .fold(0u32, |acc, cost| acc.saturating_add(cost))
 }
 
 /// Cumulative XP banked to reach `level` from level 1 (the sum of every card's
@@ -158,8 +198,12 @@ pub fn xp_for_level(level: u32) -> u32 {
 /// This is the balance pass's measuring stick: a run's total XP income is
 /// `xp_to_reach(player.level) + player.xp`, so the batch report can plot the
 /// economy against the cost curve without adding a counter to the simulation.
+/// Saturating, because the four-old-level curve passes `u32::MAX` cumulative
+/// at level 49 and a report must not panic on a level nobody reaches.
 pub fn xp_to_reach(level: u32) -> u32 {
-    (1..level.max(1)).map(xp_for_level).sum()
+    (1..level.max(1)).map(xp_for_level).fold(0u32, |acc, cost| {
+        acc.saturating_add(cost)
+    })
 }
 
 impl Player {
@@ -341,24 +385,77 @@ mod tests {
         assert_eq!(plain.hp, hp - 10.0);
     }
 
+    /// The fine curve the whole economy is tuned against, unchanged by batch
+    /// twelve: `round(6 × 1.10^(k-1))` per old level, no cap.
     #[test]
-    fn xp_curve_is_geometric_and_uncapped() {
-        // First card 6 XP, then ×1.10 per card, rounded, with no flat cap.
-        assert_eq!(xp_for_level(1), 6);
-        assert_eq!(xp_for_level(2), 7);
-        assert_eq!(xp_for_level(3), 7);
-        assert_eq!(xp_for_level(10), 14);
-        assert_eq!(xp_for_level(20), 37);
-        assert_eq!(xp_for_level(30), 95);
-        assert_eq!(xp_for_level(40), 247);
-        assert_eq!(xp_for_level(50), 640);
-        // Cumulative anchors: the design's 50-56 pick band by 14:00 needs
-        // ≈3.9k-11.3k collected XP, which the measured economy supplies.
-        assert_eq!(xp_to_reach(45), 3919);
-        assert_eq!(xp_to_reach(50), 6346);
-        assert_eq!(xp_to_reach(55), 10254);
-        // No cap: the cost keeps growing past the old 100 ceiling.
-        assert!(xp_for_level(60) > xp_for_level(50));
+    fn the_old_fine_curve_is_geometric_and_uncapped() {
+        assert_eq!(base_xp_for_level(0), 6);
+        assert_eq!(base_xp_for_level(1), 6);
+        assert_eq!(base_xp_for_level(2), 7);
+        assert_eq!(base_xp_for_level(3), 7);
+        assert_eq!(base_xp_for_level(10), 14);
+        assert_eq!(base_xp_for_level(20), 37);
+        assert_eq!(base_xp_for_level(30), 95);
+        assert_eq!(base_xp_for_level(40), 247);
+        assert_eq!(base_xp_for_level(50), 640);
+        assert!(base_xp_for_level(60) > base_xp_for_level(50));
+    }
+
+    /// Batch twelve: one level costs four old levels' XP (the opening level
+    /// costs two, by design), so the ~56 old-level cards by the boss become
+    /// ~14 and the level-up pace is a quarter of what it was.
+    #[test]
+    fn a_level_costs_four_old_levels() {
+        // The opening discount: old levels 1-2 only, so the second weapon
+        // still arrives in the first minute.
+        assert_eq!(xp_for_level(1), base_xp_for_level(1) + base_xp_for_level(2));
+        assert_eq!(xp_for_level(1), 13);
+
+        // Every later level is exactly the block of four old levels from
+        // 4(level-1)+1: 9+10+11+12, then 13+14+16+17, …
+        for level in 2..=60 {
+            let first = OLD_LEVELS_PER_LEVEL * (level - 1) + 1;
+            let block: u32 = (first..first + OLD_LEVELS_PER_LEVEL)
+                .map(base_xp_for_level)
+                .fold(0, |a, c| a.saturating_add(c));
+            assert_eq!(xp_for_level(level), block, "level {level}");
+        }
+        assert_eq!(xp_for_level(2), 42);
+        assert_eq!(xp_for_level(3), 60);
+        assert_eq!(xp_for_level(10), 860);
+        assert_eq!(xp_for_level(12), 1845);
+        assert_eq!(xp_for_level(20), 38959);
+    }
+
+    /// Cumulative anchors: the cumulative curve is the old one, four times
+    /// slower — reaching new level `n` = the old XP for old level `4(n-1)+1`
+    /// — shifted by the opening discount (13 XP instead of 28 for the first).
+    #[test]
+    fn xp_to_reach_is_the_old_cumulative_curve_at_a_quarter_pace() {
+        assert_eq!(xp_to_reach(0), 0);
+        assert_eq!(xp_to_reach(1), 0);
+        assert_eq!(xp_to_reach(2), 13, "the discounted opening level");
+        assert_eq!(xp_to_reach(3), 55);
+        assert_eq!(xp_to_reach(5), 203);
+        assert_eq!(xp_to_reach(9), 1195);
+        assert_eq!(xp_to_reach(11), 2643);
+        // The measured XP of a fifteen-minute floor (~12.3k) buys level 15:
+        // ×1.56 weapon damage at the boss, where the old curve's level 56 read
+        // ×1.55. This is the whole point of the quarter pace.
+        assert_eq!(xp_to_reach(15), 12404);
+        // Old level 4(n-1)+1: the identity, less the 15 XP the opening saved.
+        let old_reach = |old_level: u32| -> u32 {
+            (1..old_level).map(base_xp_for_level).fold(0, |a, c| a.saturating_add(c))
+        };
+        for level in 2..=20u32 {
+            assert_eq!(
+                xp_to_reach(level),
+                old_reach(OLD_LEVELS_PER_LEVEL * (level - 1) + 1) - 15,
+                "new level {level}"
+            );
+        }
+        // Saturating, not wrapping: the curve passes u32::MAX at level 49.
+        assert_eq!(xp_to_reach(80), u32::MAX);
     }
 
     #[test]
@@ -374,15 +471,36 @@ mod tests {
         }
     }
     #[test]
-    fn the_level_bonus_is_one_percent_a_level_with_no_cap() {
+    fn the_level_bonus_is_four_percent_a_level_with_no_cap() {
         assert_eq!(level_damage_mult(0), 1.0);
         assert_eq!(level_damage_mult(1), 1.0);
-        assert!((level_damage_mult(2) - 1.01).abs() < 1e-6);
-        assert!((level_damage_mult(31) - 1.30).abs() < 1e-6);
-        assert!((level_damage_mult(51) - 1.50).abs() < 1e-6);
-        assert!((level_damage_mult(201) - 3.0).abs() < 1e-5);
+        assert!((level_damage_mult(2) - 1.04).abs() < 1e-6);
+        assert!((level_damage_mult(14) - 1.52).abs() < 1e-6);
+        assert!((level_damage_mult(31) - 2.20).abs() < 1e-5);
+        assert!((level_damage_mult(51) - 3.0).abs() < 1e-5);
         assert_eq!(level_damage_percent(1), 0);
-        assert_eq!(level_damage_percent(12), 11);
+        assert_eq!(level_damage_percent(2), 4);
+        assert_eq!(level_damage_percent(14), 52);
+        assert_eq!(level_damage_percent(40), 156);
+        // The bonus a typical rat carries does not move: the mapping old level
+        // -> new level is (old + 3) / 4, and 0.04 × (new − 1) = 0.01 × (old −
+        // 1), which is exactly how `director`'s `LEVEL_BONUS_HP` knots were
+        // built — so those knots stay where they are.
+        for (old_level, typical_new, knot) in [
+            (5.0f32, 2.0f32, 1.04f32),
+            (13.0, 4.0, 1.12),
+            (20.0, 5.75, 1.19),
+            (35.0, 9.5, 1.34),
+            (45.0, 12.0, 1.44),
+            (52.0, 13.75, 1.51),
+            (56.0, 14.75, 1.55),
+        ] {
+            let new = (old_level + 3.0) / 4.0;
+            assert!((new - typical_new).abs() < 1e-6, "old {old_level} -> {new}");
+            let bonus = 1.0 + LEVEL_DAMAGE_PER_LEVEL * (new - 1.0);
+            assert!((bonus - knot).abs() < 1e-4, "old {old_level}: {bonus} vs {knot}");
+        }
+        assert_eq!(level_damage_percent(12), 44);
         // A fresh rat (every floor starts one) is at level 1: no bonus.
         let p = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
         assert_eq!(p.damage_mult(), p.loadout.stats.damage_mult);

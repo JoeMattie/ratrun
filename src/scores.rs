@@ -107,8 +107,13 @@ pub struct CampaignProgress {
     /// Stage-keyed records written by the three-stage build. Loaded into
     /// [`Self::floors`] by [`Self::migrate_legacy`] and never written back
     /// (`skip_serializing_if`), so a migrated file is a floors-only file.
+    ///
+    /// A `Vec`, not `[LevelBestEntry; LEVEL_COUNT]`: files on disk carry the
+    /// **three** records of the three-level campaign, and a fixed array of four
+    /// would refuse to deserialise them. (Batch twelve: the Flatbed joined the
+    /// campaign as its fourth level.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub levels: Option<[LevelBestEntry; LEVEL_COUNT]>,
+    pub levels: Option<Vec<LevelBestEntry>>,
 }
 
 impl CampaignProgress {
@@ -137,6 +142,12 @@ impl CampaignProgress {
     /// record 0 was the Sewer, 1 the Kitchen, 2 the Lab (the original route;
     /// `campaign::level_theme` is that same mapping). Idempotent: the legacy
     /// array is taken, so a second call does nothing.
+    ///
+    /// A three-level file therefore folds onto Sewer/Kitchen/Lab, exactly as
+    /// before the ride joined the campaign: a save whose campaign was complete
+    /// at three levels has the Lab cleared, which opens the Flatbed's card
+    /// (stage four unlocks on a cleared stage three) **without** inventing a
+    /// clear for the ride itself. See `campaign::Route::options`.
     fn migrate_legacy(&mut self) {
         let Some(levels) = self.levels.take() else {
             return;
@@ -610,13 +621,14 @@ impl ScoreTable {
     /// The rule: **a floor unlocks when its campaign stage is reachable.**
     /// Stage one is always open; a later stage is reachable once every earlier
     /// stage has been cleared on at least one of its floors (so clearing the
-    /// Laundry opens stage three exactly like clearing the Kitchen does). The
-    /// getaway ride is a bonus practice floor and is always open (it always
-    /// was).
+    /// Laundry opens stage three exactly like clearing the Kitchen does).
+    ///
+    /// Since batch twelve the Flatbed is the campaign's **fourth** level, so it
+    /// follows the same rule as every other floor: it opens when a stage-three
+    /// floor (the Lab or the Printworks) has been cleared. It stays reachable as
+    /// a practice floor — the sector select starts it as a practice run — and it
+    /// is never cleared until its own boss dies.
     pub fn floor_unlocked(&self, theme: Theme) -> bool {
-        if theme == campaign::getaway_theme() {
-            return true;
-        }
         let stage = campaign::theme_stage(theme);
         (0..stage).all(|earlier| {
             campaign::Route::options(earlier)
@@ -639,8 +651,8 @@ impl ScoreTable {
 
     // ---- Legacy stage-indexed view --------------------------------------
 
-    /// Has the original route's stage `level` (0 Sewer, 1 Kitchen, 2 Lab) been
-    /// cleared?
+    /// Has the original route's stage `level` (0 Sewer, 1 Kitchen, 2 Lab,
+    /// 3 the Flatbed ride) been cleared?
     ///
     /// Kept for older call sites: a stage is not a floor, so anything the
     /// sector select reads should use [`Self::floor_cleared`].
@@ -995,8 +1007,46 @@ mod tests {
         assert_eq!(t.level_best(0).map(|b| b.score), Some(1000));
         assert_eq!(t.level_best(1).map(|b| b.score), Some(2000));
         assert!(t.floor_unlocked(Theme::Lab));
-        assert!(!t.level_unlocked(3), "stage 3 does not exist");
+        assert!(!t.level_unlocked(3), "no stage-three floor is cleared yet");
+        assert!(!t.level_cleared(3));
         assert!(t.level_best(3).is_none());
+    }
+
+    /// A file written by the **three-level** build (its `levels` array holds
+    /// three records) still loads, and a campaign that was complete at three
+    /// levels reaches the Flatbed: its card is open and **not cleared**.
+    #[test]
+    fn a_three_level_save_loads_and_reaches_the_flatbed_open() {
+        // The old campaign was won: Sewer, an S2 floor and an S3 floor cleared.
+        let json = r#"{"entries":[],"progress":{"levels":[
+            {"cleared":true,"score":6420,"time":252.0},
+            {"cleared":true,"score":4180,"time":198.0},
+            {"cleared":true,"score":5210,"time":264.0}
+        ]}}"#;
+        let t = ScoreTable::parse(json);
+        assert_eq!(t.floor_best(Theme::Lab).map(|b| b.score), Some(5210));
+        // Stage four is now reachable and not yet cleared.
+        assert!(
+            t.floor_unlocked(Theme::Trailer),
+            "a complete three-level campaign reaches the ride"
+        );
+        assert!(!t.floor_cleared(Theme::Trailer));
+        assert_eq!(t.floor_best(Theme::Trailer), None, "nothing is invented");
+        // The ride is a level index of its own, and clearing it records it.
+        let mut t = t;
+        t.record_level(crate::game::campaign::LEVEL_COUNT - 1, 7000, 300.0);
+        assert!(t.floor_cleared(Theme::Trailer));
+        assert_eq!(t.level_best(3).map(|b| b.score), Some(7000));
+        assert_eq!(t.floor_best(Theme::Lab).map(|b| b.score), Some(5210));
+        // And an *incomplete* old save keeps the ride locked.
+        let partial = ScoreTable::parse(
+            r#"{"entries":[],"progress":{"levels":[
+                {"cleared":true,"score":6420,"time":252.0},
+                {"cleared":true,"score":4180,"time":198.0},
+                {"cleared":false,"score":0,"time":0.0}
+            ]}}"#,
+        );
+        assert!(!partial.floor_unlocked(Theme::Trailer));
     }
 
     /// A cleared floor stays unlocked even when its score entry has been pushed

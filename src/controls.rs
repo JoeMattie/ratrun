@@ -5,8 +5,9 @@
 //!
 //! * **Classic** — the game as it shipped: WASD/arrows move, or the mouse
 //!   steers the rat toward the pointer; weapons auto-aim; Ctrl dashes (Space
-//!   on a terminal that cannot report a lone modifier); Space releases the
-//!   charged active weapons; a left click is both.
+//!   on a terminal that cannot report a lone modifier); Space or a right click
+//!   releases the charged active weapons; a left click is the dash, and it
+//!   releases a charged active when the dash actually goes off.
 //! * **Mouse aim** — WASD/arrows move (eight directions, diagonals unit
 //!   length), the pointer **aims** and never steers; auto-firing weapons keep
 //!   their timers and aim at the reticle; left click releases the charged
@@ -17,7 +18,7 @@
 //!   A confirm and B back.
 //!
 //! Bindings are per scheme and split into a keyboard/mouse set (with a primary
-//! and a secondary slot, so "Ctrl or right click" is one action) and a
+//! and a secondary slot, so "Ctrl or left click" is one action) and a
 //! gamepad set. Every binding is a plain value, so a conflict is resolved by
 //! **swapping** the two actions' bindings, and a whole scheme can be reset to
 //! its defaults.
@@ -845,10 +846,15 @@ impl Bindings {
 
         match scheme {
             Scheme::Classic | Scheme::Gamepad => {
+                // Ctrl or the left click dashes; Space or the right click fires
+                // the charged actives. The left click also releases a charged
+                // active when the dash it starts actually goes off (the app's
+                // click path), so it stays the pair the mouse player expects
+                // while a right click is the actives on their own.
                 b.kbm[Action::Dash.index()] = Binding::Key(KeyBind::Ctrl);
                 b.alt[Action::Dash.index()] = Binding::Mouse(MouseBind::Left);
                 b.kbm[Action::FireActives.index()] = Binding::Key(KeyBind::Space);
-                b.alt[Action::FireActives.index()] = Binding::Mouse(MouseBind::Left);
+                b.alt[Action::FireActives.index()] = Binding::Mouse(MouseBind::Right);
             }
             Scheme::MouseAim => {
                 // Right click dashes, Ctrl is the keyboard alternate; left
@@ -903,9 +909,9 @@ impl Bindings {
     ///   swaps the two slots (the old primary becomes the alternate) instead of
     ///   leaving the same binding in both and dropping the old one;
     /// * the defaults share a binding between a pair of actions on purpose
-    ///   (`Esc` is Pause and Back, the left click is Dash and Fire actives), so
-    ///   every slot that held `new` receives the old binding and the pair stays
-    ///   paired. The last such action is the one reported;
+    ///   (`Esc` is Pause and Back), so every slot that held `new` receives the
+    ///   old binding and the pair stays paired. The last such action is the one
+    ///   reported;
     /// * when `action` had **no** binding there is nothing to hand back, so a
     ///   holder that is menu-critical ([`Action::is_menu_critical`]) and has no
     ///   other slot keeps the key and shares it rather than going unbound.
@@ -1298,17 +1304,47 @@ impl Controls {
         // lone-modifier reporting (the pre-Ctrl mapping). Say exactly that.
         let share = b.get(Action::Dash) == Binding::Key(KeyBind::Space)
             || (b.get(Action::Dash) == Binding::Key(KeyBind::Ctrl) && !self.lone_ctrl_hint);
+        // The mouse's own jobs, read from the live bindings: a mouse player can
+        // rebind either button, so the legend prints the button that really
+        // fires the actives (the right click on the default tables) instead of
+        // hard-coding `click`.
+        let mouse_job = |a: Action| -> String {
+            b.kbm_slots(a)
+                .into_iter()
+                .find_map(|slot| match slot {
+                    Binding::Mouse(m) => Some(m.label().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let mut mouse_jobs: Vec<String> = Vec::new();
+        let dash_mouse = mouse_job(Action::Dash);
+        let active_mouse = mouse_job(Action::FireActives);
+        if !dash_mouse.is_empty() {
+            mouse_jobs.push(format!("{dash_mouse} dash"));
+        }
+        if !active_mouse.is_empty() {
+            mouse_jobs.push(format!("{active_mouse} actives"));
+        }
+        let click_job = mouse_jobs.join(" · ");
+        // The segments that follow the jobs: empty (never a dangling dot) when
+        // the scheme has no mouse button bound at all.
+        let click_tail = if click_job.is_empty() {
+            String::new()
+        } else {
+            format!("{click_job} · ")
+        };
         let dash_line = if share {
-            format!(
-                "WASD/mouse move · {dash} dash + actives · click = dash + ready actives · {pause} pause"
-            )
+            format!("WASD/mouse move · {dash} dash + actives · {click_tail}{pause} pause")
         } else if mouse_aim {
+            // The two clicks are the dash and the actives already, so naming
+            // them twice would only pad the line.
             format!(
                 "WASD/arrows move · mouse aims · {dash} dash · {actives} actives · {pause} pause"
             )
         } else {
             format!(
-                "WASD/mouse move · {dash} dash · {actives} actives · click = dash + ready actives · {pause} pause"
+                "WASD/mouse move · {dash} dash · {actives} actives · {click_tail}{pause} pause"
             )
         };
         self.title_wide = vec![
@@ -1341,7 +1377,7 @@ impl Controls {
         };
         self.title_narrow = vec![
             narrow_first,
-            format!("click = dash + actives · {pause} pause"),
+            format!("{click_tail}{pause} pause"),
             format!(
                 "wheel or {} zoom · {} reset · {} map · {} minimap",
                 key(Action::ZoomIn),
@@ -1356,15 +1392,14 @@ impl Controls {
                 key(Action::Mute)
             ),
         ];
-        let click_job = if self.scheme == Scheme::MouseAim {
-            "LMB actives · RMB dash"
-        } else {
-            "click = dash + actives"
-        };
+        let mut pause_first =
+            format!("WASD/mouse move · {dash} dash · {actives} actives");
+        if !mouse_aim && !click_job.is_empty() {
+            pause_first.push_str(" · ");
+            pause_first.push_str(&click_job);
+        }
         self.pause_wide = vec![
-            format!(
-                "WASD/mouse move · {dash} dash · {actives} actives · {click_job}"
-            ),
+            pause_first,
             format!(
                 "{} {} music · {} {} effects · {} options · {pause} unpause · {} quit",
                 key(Action::MusicDown),
@@ -1375,14 +1410,9 @@ impl Controls {
                 key(Action::Quit)
             ),
         ];
-        let narrow_click = if self.scheme == Scheme::MouseAim {
-            "LMB actives · RMB dash"
-        } else {
-            "click dash+actives"
-        };
         self.pause_narrow = vec![
             format!("move WASD · dash {dash} · actives {actives}"),
-            format!("{narrow_click} · {pause} unpause"),
+            format!("{click_tail}{pause} unpause"),
         ];
     }
 
@@ -1497,13 +1527,29 @@ impl Controls {
                         }
                     }
                 }
+                // Batch 12 moved the actives' alternate off the left click
+                // (which stays the dash's) onto the right click. A file that
+                // still holds the exact old stock pairing was never edited by
+                // the player — left click was both the dash's and the actives'
+                // second button — so it takes the new default. A file where
+                // either slot says anything else is the player's own choice and
+                // is left alone.
+                let stock = Bindings::defaults(*scheme);
+                let left = Binding::Mouse(MouseBind::Left);
+                let fire_alt = Action::FireActives.index();
+                if *scheme != Scheme::MouseAim
+                    && set.alt[Action::Dash.index()] == left
+                    && set.alt[fire_alt] == left
+                    && stock.alt[fire_alt] != left
+                {
+                    set.alt[fire_alt] = stock.alt[fire_alt];
+                }
                 // An action newer than the file takes its default key only
                 // when the player has not already given that key to something
                 // else; otherwise it starts unbound, never double-bound. A key
                 // an older action holds *by default* is not the player's doing:
                 // the defaults share it on purpose (Esc is Pause and Back), so
                 // it does not count as taken.
-                let stock = Bindings::defaults(*scheme);
                 for a in ACTIONS {
                     let idx = a.index();
                     if idx < s.kbm.len() {
@@ -1811,8 +1857,10 @@ mod tests {
                         continue;
                     }
                     let holders = kbm_holders(&b, slot);
-                    let shared_on_purpose = slot == Binding::Key(KeyBind::Esc)
-                        || (slot == Binding::Mouse(MouseBind::Left) && scheme != Scheme::MouseAim);
+                    // `Esc` is Pause *and* Back: the one pair the defaults
+                    // share on purpose (the click's two jobs were split in
+                    // batch 12: left dashes, right fires the actives).
+                    let shared_on_purpose = slot == Binding::Key(KeyBind::Esc);
                     if shared_on_purpose {
                         assert_eq!(holders, 2, "{scheme:?} {a:?} {slot:?}");
                     } else {
@@ -1827,6 +1875,143 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The owner's mapping: **right click fires the actives**. Classic and
+    /// Gamepad keep Space as the primary and the left click as the dash
+    /// (alternate of `Dash`), and Mouse aim keeps its split — right dashes,
+    /// left fires.
+    #[test]
+    fn classic_and_gamepad_fire_the_actives_on_the_right_click() {
+        for scheme in [Scheme::Classic, Scheme::Gamepad] {
+            let b = Bindings::defaults(scheme);
+            assert_eq!(b.get(Action::FireActives), Binding::Key(KeyBind::Space), "{scheme:?}");
+            assert_eq!(
+                b.alt_of(Action::FireActives),
+                Binding::Mouse(MouseBind::Right),
+                "{scheme:?}: the right click does not fire the actives"
+            );
+            assert_eq!(b.get(Action::Dash), Binding::Key(KeyBind::Ctrl), "{scheme:?}");
+            assert_eq!(
+                b.alt_of(Action::Dash),
+                Binding::Mouse(MouseBind::Left),
+                "{scheme:?}: the left click must keep its dash"
+            );
+        }
+        // Mouse aim is untouched: right dashes, left fires.
+        let b = Bindings::defaults(Scheme::MouseAim);
+        assert_eq!(b.get(Action::Dash), Binding::Mouse(MouseBind::Right));
+        assert_eq!(b.alt_of(Action::FireActives), Binding::Key(KeyBind::Space));
+        assert_eq!(b.get(Action::FireActives), Binding::Mouse(MouseBind::Left));
+    }
+
+    /// Every legend that names the pointer names the button that really does
+    /// the job, in all three schemes.
+    #[test]
+    fn the_legends_name_the_right_click_as_the_actives() {
+        for scheme in SCHEMES {
+            let mut c = Controls::default();
+            c.set_scheme(scheme);
+            c.set_lone_ctrl_hint(true);
+            c.note_device(Device::Keyboard);
+            for wide in [true, false] {
+                let lines = c
+                    .title_legend_lines(wide)
+                    .iter()
+                    .chain(c.pause_legend_lines(wide))
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(" ");
+                // Whichever mouse button fires the actives, the legend names
+                // it with the word `actives` (and the dash's button with
+                // `dash`), so a rebind or a scheme change cannot leave the old
+                // wording behind.
+                for (action, verb) in [(Action::FireActives, "actives"), (Action::Dash, "dash")] {
+                    let label = c.active().kbm_slots(action).into_iter().find_map(|slot| match slot {
+                        Binding::Mouse(m) => Some(m.label()),
+                        _ => None,
+                    });
+                    let Some(label) = label else {
+                        continue;
+                    };
+                    assert!(
+                        lines.contains(&format!("{label} {verb}")),
+                        "{scheme:?} wide={wide}: {label} {verb} is not named: {lines}"
+                    );
+                }
+                assert!(!lines.contains("click ="), "{scheme:?}: the vague `click` is back: {lines}");
+            }
+        }
+    }
+
+    /// A save written before batch 12 still holds the old stock pairing (the
+    /// left click in both the dash's and the actives' alternate slot). It is
+    /// upgraded to the right click, because nobody chose that pairing — it was
+    /// the default.
+    #[test]
+    fn an_untouched_old_save_gains_the_right_click() {
+        let mut saved = Controls::default().to_saved();
+        for scheme in saved.schemes.iter_mut().flatten() {
+            scheme.alt[Action::FireActives.index()] = "mouse:left".into();
+            scheme.alt[Action::Dash.index()] = "mouse:left".into();
+        }
+        let c = Controls::from_saved(&saved);
+        for scheme in SCHEMES {
+            if scheme == Scheme::MouseAim {
+                continue;
+            }
+            let b = &c.sets[scheme.index()];
+            assert_eq!(b.alt_of(Action::Dash), Binding::Mouse(MouseBind::Left), "{scheme:?}");
+            assert_eq!(
+                b.alt_of(Action::FireActives),
+                Binding::Mouse(MouseBind::Right),
+                "{scheme:?}: an untouched old save kept the left click for the actives"
+            );
+        }
+    }
+
+    /// A binding the player really did change by hand wins: only the exact old
+    /// stock pairing is migrated.
+    #[test]
+    fn a_hand_changed_save_keeps_its_own_mouse_bindings() {
+        let mut saved = Controls::default().to_saved();
+        {
+            let scheme = saved.schemes[Scheme::Classic.index()].as_mut().unwrap();
+            scheme.alt[Action::FireActives.index()] = "mouse:middle".into();
+            scheme.alt[Action::Dash.index()] = "mouse:left".into();
+        }
+        let c = Controls::from_saved(&saved);
+        assert_eq!(
+            c.active().alt_of(Action::FireActives),
+            Binding::Mouse(MouseBind::Middle),
+            "a hand-picked actives button was overwritten"
+        );
+        // …and a hand-picked dash button clears the migration on its own.
+        let mut saved = Controls::default().to_saved();
+        {
+            let scheme = saved.schemes[Scheme::Gamepad.index()].as_mut().unwrap();
+            scheme.alt[Action::FireActives.index()] = "mouse:left".into();
+            scheme.alt[Action::Dash.index()] = "mouse:right".into();
+        }
+        let c = Controls::from_saved(&saved);
+        assert_eq!(
+            c.active().alt_of(Action::FireActives),
+            Binding::Mouse(MouseBind::Left),
+            "the actives' own button was migrated although the dash was rebound"
+        );
+        // Mouse aim is never migrated: its right click is the dash.
+        let mut saved = Controls::default().to_saved();
+        {
+            let scheme = saved.schemes[Scheme::MouseAim.index()].as_mut().unwrap();
+            scheme.alt[Action::FireActives.index()] = "mouse:left".into();
+            scheme.alt[Action::Dash.index()] = "mouse:left".into();
+        }
+        let c = Controls::from_saved(&saved);
+        assert_eq!(
+            c.active().alt_of(Action::FireActives),
+            Binding::Mouse(MouseBind::Left),
+            "mouse aim's saved table was rewritten"
+        );
     }
 
     /// Swap is an involution: taking another action's binding and then taking
@@ -2216,7 +2401,8 @@ mod tests {
             "Ctrl dash",
             "dash",
             "actives",
-            "click",
+            "LMB dash",
+            "RMB actives",
             "zoom",
             "reset zoom",
             "Tab map",

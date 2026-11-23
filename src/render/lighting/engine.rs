@@ -19,8 +19,9 @@
 //! `TAIL_SHARE * (1 - u²)²` with `u = d / reach`, so it is exactly zero at the
 //! end of the reach (no edge, no ring) and is skippable: `TAIL_SHARE` is a
 //! share of the core, so 60 % of the reach already carries under 8 % of it.
-//! Large lights — the Arena fixtures, the sun and the rat's own aura — keep
-//! their size and their own curves.
+//! Large lights — the sun, the rat's own aura and a boss presence — keep their
+//! size and their own curves. (The Arena fixture family is dormant since batch
+//! 12 removed the boss arena; no map places one.)
 //!
 //! The tail is not free: a moving halo is what makes the terminal repaint
 //! cells, and a tail that creeps with every flicker would repaint a whole room
@@ -399,7 +400,7 @@ pub(super) const TAIL_SHARE: f32 = 0.19;
 pub(super) const TAIL_REACH: f32 = 1.7;
 /// The largest stated radius a _point_ light may have and still count as a
 /// small pool. Above it the source is a room-scale light (the rat's aura, a
-/// boss presence, a nuke, an arena fixture) and keeps its own size.
+/// boss presence, a nuke) and keeps its own size.
 const SMALL_LIGHT_MAX: f32 = 52.0;
 /// A contribution smaller than this, in `Q8.8` multiplier units, is exactly
 /// zero, and a small light's tail is painted in flat steps of this size. It is
@@ -425,6 +426,8 @@ pub(super) fn zone_gain(zone: Option<LightZoneKind>) -> f32 {
         Some(LightZoneKind::Start) => 0.95,
         Some(LightZoneKind::Room) => 0.80,
         Some(LightZoneKind::Corridor) => 0.56,
+        // Unreachable since batch 12 (no map has an Arena zone); the arm stays
+        // because the enum variant is matched exhaustively here.
         Some(LightZoneKind::Arena) => 0.64,
         Some(LightZoneKind::Blackout) => 0.26,
         Some(LightZoneKind::Maze) => 0.25,
@@ -789,9 +792,22 @@ impl LightMap {
                     crate::prof::count(crate::prof::Stage::CStaticBakeMiss, 1);
                 }
             }
+            let shadow: &ShadowProfile = shadow;
             let _p = crate::prof::scope(crate::prof::Stage::LStaticSplat);
             self.grid
                 .splat(light, Some(shadow), scene.mode, scene.elapsed, theme);
+            // A wall lamp also washes the face it hangs on and the floor at its
+            // foot (batch 12): a second, very small and very bright source at
+            // the mount, sharing the fan's cached bake so it cannot leak
+            // through its own wall. One more splat per sconce in view, with no
+            // second bake.
+            if fixture.kind == LightFixtureKind::Sconce {
+                let wash = fixtures::sconce_wash(&light);
+                if self.grid.overlaps(wash) {
+                    self.grid
+                        .splat(wash, Some(shadow), scene.mode, scene.elapsed, theme);
+                }
+            }
         }
         drop(_pstatic);
         let _prank = crate::prof::scope(crate::prof::Stage::LRank);
@@ -834,7 +850,7 @@ impl LightMap {
             };
             push_shaped(&mut self.shaped, light, p.priority);
         }
-        // Prefer the rat, then active arena lights and foreground flashes.
+        // Prefer the rat, then the brighter lights and foreground flashes.
         self.shaped.sort_unstable_by(|a, b| {
             b.1.cmp(&a.1).then_with(|| {
                 a.0.pos

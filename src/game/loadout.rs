@@ -134,6 +134,13 @@ pub fn set_slot_caps(weapons: usize, passives: usize) -> (usize, usize) {
 /// Gold a `Purse` level-up card hands over. The design's §2 said 8, but the
 /// card is the fallback once a build is full, and a fifteen-minute floor
 /// draws about 24 of them: at 8 it was a fifth of a floor's gold.
+///
+/// Batch twelve quartered the level pace (a level costs four old levels' XP,
+/// `player::xp_for_level`), so a floor now deals about a quarter of the cards
+/// — roughly six purses on a full build instead of about 24. The fighting
+/// falls back on `Bandage` far less often for the same reason. Both numbers are
+/// left for the coordinator's measurement pass: this batch deliberately does
+/// not compensate the build's size for the smaller card count.
 pub const PURSE_GOLD: u32 = 3;
 /// Gold a chest hands over when there is nothing left to upgrade (design §7).
 pub const CHEST_GOLD: u32 = 24;

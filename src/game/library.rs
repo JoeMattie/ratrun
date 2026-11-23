@@ -1175,10 +1175,10 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
         ),
         BossKind::Cobra => (
             "Lab · 15:00 — one of two bosses",
-            "An escaped specimen twenty-two feet long in a room eleven wide, so the \
+            "An escaped specimen twenty-two feet long wherever it catches you, so the \
              coils are the room's walls. Step off the marked strike line and hit the \
              spectacle mark on the open hood; leave the loop through its one gap, or \
-             dash over the coil; and when it lays the arena out as a spiral lane, run \
+             dash over the coil; and when it lays the floor out as a spiral lane, run \
              it — the head is spent at the end of it.",
         ),
         BossKind::Magpie => (
@@ -2203,16 +2203,13 @@ fn prop_facts(k: PropKind, f: &mut Facts) {
 fn floor_facts(t: Theme, f: &mut Facts) {
     f.push(
         "SECTOR",
-        if Theme::all().contains(&t) {
-            format!(
-                "{} of {}",
-                t.stage() + 1,
-                crate::game::campaign::LEVEL_COUNT
-            )
-        } else {
-            // The Flatbed is never a campaign step.
-            "practice only".to_string()
-        },
+        // Every floor is a campaign level now, the Flatbed included (batch
+        // twelve: the ride is the fourth and last one).
+        format!(
+            "{} of {}",
+            crate::game::campaign::theme_stage(t) + 1,
+            crate::game::campaign::LEVEL_COUNT
+        ),
     );
     // A pooled floor fields one of its bosses per run: name every one, a row
     // each, so the card does not promise the fight `for_theme` lists first.

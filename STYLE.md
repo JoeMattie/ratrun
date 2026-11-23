@@ -42,7 +42,7 @@ Use **one name per concept** everywhere:
 | Experience | **XP** (`gem XP`, `XP` bar) | exp, points (for XP) |
 | Health & defense | **HP**, **max HP**, **HP/s regen**, **armor** | health points, flat dmg cut |
 | Knockback | **knockback**, **melee shove** | weapon shove |
-| Triggered weapons | **ACTIVE** weapons (fired with `Space` or left-click when charged) | actives (alone without context), abilities, skills |
+| Triggered weapons | **ACTIVE** weapons (fired with `Space` or right-click when charged) | actives (alone without context), abilities, skills |
 | Evolved weapons | **Evolution** (`✦EVO` / `EVOLVED`) | signature, ultimate, awakened |
 | Shop | **The Blind Spot / Gene Splice Shelf** (marked on floor by spoon + mouse hole) | vendor, store |
 | Shop upgrades | **Splices** (`SPLICES 0/2`, max 2 per run) | splice sockets, mutations, perks |

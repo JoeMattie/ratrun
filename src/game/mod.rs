@@ -47,3 +47,4 @@ pub mod art_roster_kitchen;
 pub mod art_roster_lab;
 pub mod art_roster_sewer;
 pub mod art_roster_flatbed;
+pub mod art_foreground;

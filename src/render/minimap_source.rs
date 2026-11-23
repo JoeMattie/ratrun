@@ -7,17 +7,17 @@
 //!
 //! * [`MinimapSource`] is implemented for the [`World`] facade from the
 //!   fog-of-war bitset and the authoritative tile grid, allocation-free;
-//! * [`minimap_cell`] maps a tile cell (plus traps and the boss arena) to the
-//!   art's [`MinimapCell`];
+//! * [`minimap_cell`] maps a tile cell (plus traps) to the art's
+//!   [`MinimapCell`];
 //! * [`MinimapFrame`] rebuilds the per-frame marker/label lists into reused
 //!   buffers (no per-frame allocation) and produces the [`MinimapView`].
 //!
 //! Discovery rules (game designer's review) live here because they are data,
 //! not style: an undiscovered maze contributes nothing, a found maze keeps a
 //! hollow cache marker at its breach until the cache is claimed, a rat-hole's
-//! far mouth is only "known" once it has been seen or crossed, and the boss
-//! arena bearing starts at [`ARENA_BEARING_AFTER_SECS`] on the fog boundary
-//! without revealing the route.
+//! far mouth is only "known" once it has been seen or crossed. The old boss
+//! arena bearing is gone (batch 12 removed the arena): [`boss_bearing_dir`]
+//! always answers `None`.
 //!
 //! **Ink lives in the art module.** Nothing here names a colour, so the corner
 //! radar and the expanded Tab map cannot drift apart: both paint the unseen
@@ -35,8 +35,9 @@ use crate::render::minimap::{
     MinimapMode, MinimapPalette, MinimapSize, MinimapSource, MinimapView, PickupTag,
 };
 
-/// Seconds into the run when the boss arena starts showing as a bearing on the
-/// fog boundary (the boss itself only appears at `director::BOSS_TIME`).
+/// **Retired (batch 12).** The old arena bearing appeared this many seconds
+/// into a run. Kept only because `App`'s HUD tests still name it; delete it with
+/// [`boss_bearing_dir`].
 pub const ARENA_BEARING_AFTER_SECS: f32 = 180.0;
 
 /// Up to this many pickup blips are marked per frame (the buffers are reused,
@@ -121,28 +122,6 @@ impl MinimapFrame {
                 cy: cy as f32,
                 kind: MarkerKind::Miniboss,
             });
-        }
-
-        // Boss arena: only once part of it has been seen. The anchor is the
-        // first explored cell of the arena (the art skips a marker/label whose
-        // own cell is still dark).
-        if world.boss_arena_marker().is_some() {
-            if let Some(room) = world.level.boss_room() {
-                if let Some(anchor) = first_seen_cell(world, room.rect.x, room.rect.y, room.rect.w, room.rect.h) {
-                    self.markers.push(MapMarker {
-                        cx: anchor.0 as f32,
-                        cy: anchor.1 as f32,
-                        kind: MarkerKind::BossArena,
-                    });
-                    self.labels.push(MapLabel {
-                        cx: anchor.0 as f32,
-                        cy: anchor.1 as f32,
-                        text: "BOSS ARENA",
-                        kind: LabelKind::BossArena,
-                        discovered: true,
-                    });
-                }
-            }
         }
 
         // Mazes: nothing at all until the breach is seen; then a persistent
@@ -308,9 +287,9 @@ impl MinimapFrame {
         let maze_discovered = world
             .maze_markers()
             .any(|m| m.entrance_seen || m.reward_seen);
-        // Mirror `overlay::draw_boss_compass`: the HUD compass already points
-        // at the arena during the 25 s warning window and at the living boss
-        // once spawned, so `Hidden` mode does not duplicate that cue.
+        // Mirror `overlay::draw_boss_compass`: the HUD edge compass already
+        // points at the living boss once it is off screen, so `Hidden` mode does
+        // not duplicate that cue.
         let hud_compass_active = world.boss_offset().is_some()
             || (!world.director.boss_spawned
                 && world.elapsed
@@ -351,23 +330,13 @@ impl MinimapFrame {
     }
 }
 
-/// Bearing from the player toward the still-undiscovered boss arena, once the
-/// run is old enough. The art projects it onto the fog boundary; nothing is
-/// revealed.
-///
-/// Returns `None` before [`ARENA_BEARING_AFTER_SECS`] and as soon as any part
-/// of the arena has been seen (the arena marker takes over).
-pub fn boss_bearing_dir(world: &World) -> Option<(f32, f32)> {
-    if world.elapsed < ARENA_BEARING_AFTER_SECS || world.boss_arena_marker().is_some() {
-        return None;
-    }
-    let room = world.level.boss_room()?;
-    let to = room.center() - world.player.pos;
-    let len = to.len();
-    if len < 1.0 {
-        return None;
-    }
-    Some((to.x / len, to.y / len))
+/// **Retired (batch 12).** The old pre-boss bearing pointed at the map's boss
+/// arena from 3:00 until it was discovered. There is no arena any more — the
+/// boss arrives where the rat is — so there is nothing to point at and this
+/// always returns `None`. It is kept only because `App`'s HUD tests still call
+/// it and read [`ARENA_BEARING_AFTER_SECS`]; delete both once those tests go.
+pub fn boss_bearing_dir(_world: &World) -> Option<(f32, f32)> {
+    None
 }
 
 /// The compact panel rect for a play field (`render/minimap.rs` owns the
@@ -469,18 +438,6 @@ fn trap_at(level: &Level, p: crate::math::Vec2) -> Option<MinimapCell> {
     None
 }
 
-/// First explored cell of a rectangle, scanning rows then columns (stable).
-fn first_seen_cell(world: &World, x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32)> {
-    for cy in y..y + h {
-        for cx in x..x + w {
-            if world.explored(cx, cy) {
-                return Some((cx, cy));
-            }
-        }
-    }
-    None
-}
-
 /// Which spoon key a seen mouse-hole shop gets on the map.
 ///
 /// A hole whose shelf has never been opened reads as a plain `Shop` (the rat
@@ -560,7 +517,9 @@ impl MinimapSource for World {
 #[allow(dead_code)]
 fn label_for_room(kind: RoomKind) -> Option<LabelKind> {
     match kind {
-        RoomKind::Boss => Some(LabelKind::BossArena),
+        // No generated map has one since batch 12; a staged arena room in a
+        // capture is just a room.
+        RoomKind::Boss => Some(LabelKind::Hall),
         RoomKind::Hall => Some(LabelKind::Hall),
         RoomKind::Maze => Some(LabelKind::Maze),
         RoomKind::Start => Some(LabelKind::Start),
@@ -625,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn traps_and_the_boss_arena_have_their_own_cell_kind() {
+    fn traps_have_their_own_cell_kind() {
         let mut level = blank(40, 30);
         let mut trap = crate::game::art_traps::StickyTrapView::new(
             TileMap::tile_rect(6, 6).center(),
@@ -639,11 +598,6 @@ mod tests {
         assert_eq!(minimap_cell(&level, 5, 6), MinimapCell::Trap);
         assert_eq!(minimap_cell(&level, 7, 6), MinimapCell::Trap);
         assert_eq!(minimap_cell(&level, 6, 7), MinimapCell::Floor);
-        level.rooms.push(crate::game::level::Room::new(
-            crate::game::level::TileRect::new(20, 20, 6, 6),
-            RoomKind::Boss,
-        ));
-        assert_eq!(minimap_cell(&level, 22, 22), MinimapCell::BossFloor);
         assert_eq!(minimap_cell(&level, 6, 7), MinimapCell::Floor);
     }
 
@@ -712,43 +666,35 @@ mod tests {
             0,
             "a maze is marked before it is found"
         );
-        assert!(w.boss_arena_marker().is_none());
         assert!(boss_bearing_dir(&w).is_none(), "no bearing at t=0");
     }
 
+    /// Batch 12: there is no arena and no bearing, at any time.
     #[test]
-    fn the_bearing_starts_after_three_minutes_and_stops_when_the_arena_is_found() {
+    fn the_map_never_draws_an_arena_or_a_bearing() {
         let mut w = World::new(Theme::Sewer, 11);
         for _ in 0..20 {
             w.update(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
         }
-        w.elapsed = ARENA_BEARING_AFTER_SECS - 1.0;
-        assert!(boss_bearing_dir(&w).is_none(), "bearing too early");
-        w.elapsed = ARENA_BEARING_AFTER_SECS + 1.0;
-        let dir = boss_bearing_dir(&w).expect("no bearing after three minutes");
-        // The bearing points at the arena.
-        let arena = w.level.boss_room().unwrap().center();
-        let to = arena - w.player.pos;
-        assert!(
-            dir.0 * to.x + dir.1 * to.y > 0.0,
-            "the bearing does not point toward the arena"
-        );
-        // Discovering the arena replaces the bearing with the marker.
-        let level = Level::generate(Theme::Sewer, 11);
-        let (acx, acy) = cell_of(arena);
-        w.fog.reveal_cell(&level, (acx, acy));
-        assert!(w.boss_arena_marker().is_some());
-        assert!(boss_bearing_dir(&w).is_none());
-        let mut frame = MinimapFrame::new();
-        frame.refresh(&w);
-        assert!(frame
-            .markers
-            .iter()
-            .any(|m| m.kind == MarkerKind::BossArena));
-        assert!(frame
-            .labels
-            .iter()
-            .any(|l| l.kind == LabelKind::BossArena && l.discovered));
+        for t in [0.0, ARENA_BEARING_AFTER_SECS - 1.0, ARENA_BEARING_AFTER_SECS + 1.0, 890.0] {
+            w.elapsed = t;
+            assert!(boss_bearing_dir(&w).is_none(), "a bearing at t={t}");
+            let mut frame = MinimapFrame::new();
+            frame.refresh(&w);
+            assert!(
+                !frame.markers.iter().any(|m| m.kind == MarkerKind::BossArena
+                    || m.kind == MarkerKind::ArenaBearing),
+                "an arena marker at t={t}"
+            );
+            assert!(
+                !frame
+                    .labels
+                    .iter()
+                    .any(|l| l.kind == LabelKind::BossArena
+                        || l.text.to_uppercase().contains("ARENA")),
+                "an arena label at t={t}"
+            );
+        }
     }
 
     #[test]

@@ -65,28 +65,29 @@ impl DashKey {
     ///
     /// Both modes name their dash key, because the binding really is different:
     /// in the Ctrl mode Space *only* fires the active weapons, so calling it
-    /// "dash+active" would be a lie.
+    /// "dash+active" would be a lie. The pointer's two buttons are named the
+    /// same way: the left click dashes, the right click fires the actives.
     pub fn title_legend_lines(self, wide: bool) -> &'static [&'static str] {
         match (self, wide) {
             (DashKey::Ctrl, true) => &[
-                "WASD/mouse move · Ctrl dash · Space actives · click = dash + ready actives · Esc/P pause",
+                "WASD/mouse move · Ctrl dash · Space actives · LMB dash · RMB actives · Esc/P pause",
                 "wheel or Z/X zoom · Tab map · N minimap · C cursor · O options · M mute",
                 "[ ] music · - = effects · L story · Q quit",
             ],
             (DashKey::Ctrl, false) => &[
                 "WASD/mouse move · Ctrl dash · Space actives",
-                "click = dash + ready actives · Esc/P pause",
+                "LMB dash · RMB actives · Esc/P pause",
                 "wheel or Z/X zoom · Tab map · N minimap · C cursor",
                 "O options · M mute · [ ] - = volume · Q quit",
             ],
             (DashKey::Space, true) => &[
-                "WASD/mouse move · Space dash + actives · click = dash + ready actives · Esc/P pause",
+                "WASD/mouse move · Space dash + actives · LMB dash · RMB actives · Esc/P pause",
                 "wheel or Z/X zoom · Tab map · N minimap · C cursor · O options · M mute",
                 "[ ] music · - = effects · L story · Q quit",
             ],
             (DashKey::Space, false) => &[
                 "WASD/mouse move · Space dash + actives",
-                "click = dash + ready actives · Esc/P pause",
+                "LMB dash · RMB actives · Esc/P pause",
                 "wheel or Z/X zoom · Tab map · N minimap · C cursor",
                 "O options · M mute · [ ] - = volume · Q quit",
             ],
@@ -106,20 +107,20 @@ impl DashKey {
     pub fn pause_legend_lines(self, wide: bool) -> &'static [&'static str] {
         match (self, wide) {
             (DashKey::Ctrl, true) => &[
-                "WASD/mouse move · Ctrl dash · Space actives · click = dash + actives",
+                "WASD/mouse move · Ctrl dash · Space actives · LMB dash · RMB actives",
                 "[ ] music · - = effects · O options · Esc/P unpause · Q quit",
             ],
             (DashKey::Space, true) => &[
-                "WASD/mouse move · Space dash + actives · click = dash + actives",
+                "WASD/mouse move · Space dash + actives · LMB dash · RMB actives",
                 "[ ] music · - = effects · O options · Esc/P unpause · Q quit",
             ],
             (DashKey::Ctrl, false) => &[
                 "move WASD · dash Ctrl · actives Space",
-                "click dash+actives · Esc/P unpause",
+                "LMB dash · RMB actives · Esc/P unpause",
             ],
             (DashKey::Space, false) => &[
                 "move WASD · dash+actives Space",
-                "click dash+actives · Esc/P unpause",
+                "LMB dash · RMB actives · Esc/P unpause",
             ],
         }
     }
@@ -501,13 +502,22 @@ impl InputState {
             .any(|slot| matches!(slot, Binding::Mouse(m) if m.button() == Some(button)))
     }
 
-    /// Was the active-weapon release asked for this frame? Always Space: in the
-    /// Ctrl mode that is Space's only job, and without lone-Ctrl reporting
-    /// Space dashes at the same time (the press is shared, as it always was).
+    /// Was the active-weapon release asked for this frame?
+    ///
+    /// Any device: the key (Space by default), the pad button, or a mouse
+    /// button bound to the action — the right click on the Classic and Gamepad
+    /// tables, the left click in Mouse aim. A left click on the Classic field
+    /// is the dash gesture and is handled by the app's click path (which also
+    /// releases a charged active when the dash goes off), so it is not
+    /// duplicated here.
     pub fn active_pressed(&self) -> bool {
-        // Keyboard and pad only: a mouse click is routed through the hit map,
-        // where the app decides whether it also dashes.
-        self.action_kbm_or_pad(Action::FireActives)
+        self.action_pressed(Action::FireActives)
+    }
+
+    /// Did a right click land this frame? The second **Back** gesture: every
+    /// menu and overlay leaves on it exactly as it does on Esc.
+    pub fn right_clicked(&self) -> bool {
+        self.mouse_tapped(MouseBind::Right)
     }
 
     /// Decay held-key grace timers (no-op when the protocol's release events
@@ -907,9 +917,13 @@ impl InputState {
         self.action_pressed(Action::Confirm)
     }
 
-    /// Esc / pad B.
+    /// Esc / pad B / a right click.
+    ///
+    /// The right click is the pointer's Back: in any menu or overlay it does
+    /// what Esc does there and never clicks the item under the pointer (only a
+    /// left press activates a hit target).
     pub fn back_pressed(&self) -> bool {
-        self.action_pressed(Action::Back)
+        self.action_pressed(Action::Back) || self.right_clicked()
     }
 
     /// Any of the four menu directions this frame, as `(dx, dy)`.
@@ -943,6 +957,7 @@ impl InputState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controls::Scheme;
     use crossterm::event::{KeyModifiers, MouseButton};
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
@@ -1132,6 +1147,59 @@ mod tests {
         assert!(!s.mouse_down, "focus loss must clear held mouse button");
     }
 
+    /// The right click is the second Back: it leaves a menu exactly as Esc does,
+    /// and it is never a left press (only a left press activates a menu target).
+    #[test]
+    fn a_right_click_is_back_and_never_the_left_click() {
+        let mut s = InputState::new(false);
+        assert!(!s.back_pressed());
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 3, 3));
+        assert!(s.back_pressed(), "a right click must act as Back");
+        assert!(s.right_clicked());
+        // The release is not a second Back.
+        s.begin_frame();
+        s.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Right), 3, 3));
+        assert!(!s.back_pressed() && !s.right_clicked());
+        // A left press is not Back (the menus take it as the pointer's click).
+        s.begin_frame();
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 3));
+        assert!(!s.back_pressed());
+        // The bound key still is.
+        s.begin_frame();
+        s.handle_key(key(KeyCode::Esc, KeyEventKind::Press));
+        assert!(s.back_pressed(), "Esc must keep its Back");
+    }
+
+    /// Classic and Gamepad: the right click fires the charged actives. Mouse aim
+    /// keeps its split (right dashes) — and a right click never dashes in
+    /// Classic, where the left click owns that.
+    #[test]
+    fn the_right_click_fires_the_actives_in_classic_and_dashes_in_mouse_aim() {
+        let mut s = InputState::new(false);
+        assert_eq!(s.controls.scheme(), Scheme::Classic);
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 2, 2));
+        assert!(s.active_pressed(), "the right click must fire the actives");
+        assert!(!s.dash_pressed(), "the right click must not dash in Classic");
+        assert!(!s.dash_held(), "the right click is not a Classic dash hold");
+
+        // The left click keeps its Classic job: the dash.
+        s.begin_frame();
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        assert!(s.dash_pressed() && s.dash_held());
+        assert!(!s.active_pressed(), "the left click is not the actives' button");
+
+        // Mouse aim: the buttons swap jobs, and a right click is the dash.
+        let mut m = InputState::new(false);
+        m.controls.set_scheme(Scheme::MouseAim);
+        m.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 2, 2));
+        assert!(m.dash_pressed() && m.dash_held());
+        assert!(!m.active_pressed());
+        m.begin_frame();
+        m.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        assert!(m.active_pressed());
+        assert!(!m.dash_pressed(), "a left click must not spend the aim dash");
+    }
+
     #[test]
     fn unmodified_char_ignores_ctrl_c() {
         let mut s = InputState::new(false);
@@ -1247,15 +1315,16 @@ mod tests {
         assert_eq!(DashKey::Ctrl.name(), "CTRL");
         assert_eq!(DashKey::Space.name(), "SPACE");
         // Both legends must name the live key and what Space does, and the
-        // click's two jobs (`WAVE3 review`, "Controls and full racks").
+        // pointer's two buttons (`WAVE3 review`, "Controls and full racks";
+        // batch 12 moved the actives onto the right click).
         for wide in [true, false] {
             let ctrl = DashKey::Ctrl.title_legend_lines(wide).join(" ");
             assert!(ctrl.contains("Ctrl dash"), "{ctrl}");
             assert!(ctrl.contains("Space actives"), "{ctrl}");
-            assert!(ctrl.contains("click = dash + ready actives"), "{ctrl}");
+            assert!(ctrl.contains("RMB actives"), "{ctrl}");
             let space = DashKey::Space.title_legend_lines(wide).join(" ");
             assert!(space.contains("Space dash + actives"), "{space}");
-            assert!(space.contains("click = dash + ready actives"), "{space}");
+            assert!(space.contains("RMB actives"), "{space}");
         }
         // Every live control is named by the title legend and by the pause one.
         for mode in [DashKey::Ctrl, DashKey::Space] {
@@ -1264,7 +1333,8 @@ mod tests {
                 "move",
                 "dash",
                 "actives",
-                "click",
+                "LMB dash",
+                "RMB actives",
                 "zoom",
                 "Tab map",
                 "N minimap",
@@ -1284,7 +1354,8 @@ mod tests {
                 "move",
                 "dash",
                 "actives",
-                "click",
+                "LMB dash",
+                "RMB actives",
                 "[ ] music",
                 "- = effects",
                 "O options",
@@ -1298,10 +1369,17 @@ mod tests {
         assert!(DashKey::Ctrl.title_legend_lines(false)[0].contains("move"));
         assert!(DashKey::Space.title_legend_lines(false)[0].contains("move"));
         // The narrow pause legend still names movement, the dash, the actives,
-        // the click and the way back out of mute.
+        // the pointer's two buttons and the way back out of mute.
         for mode in [DashKey::Ctrl, DashKey::Space] {
             let narrow = mode.pause_legend_lines(false).join(" ");
-            for needle in ["move", "dash", "actives", "click", "Esc/P unpause"] {
+            for needle in [
+                "move",
+                "dash",
+                "actives",
+                "LMB dash",
+                "RMB actives",
+                "Esc/P unpause",
+            ] {
                 assert!(narrow.contains(needle), "narrow pause legend misses {needle:?}: {narrow}");
             }
             // …and every legend line fits the 58-column card's inner width.

@@ -717,7 +717,9 @@ pub fn apply(stats: &mut Stats, mods: &RunModifiers) {
 pub const FLOOR_BONUS: u32 = 25;
 /// Banked for every boss or named miniboss the run put down.
 pub const APEX_BONUS: u32 = 6;
-/// Banked for winning the run (the campaign cleared, or a practice floor).
+/// Banked for winning the run (the campaign cleared — which now means the
+/// **Flatbed's** boss went down, the ride being the campaign's finale — or a
+/// practice floor).
 pub const WIN_BONUS: u32 = 75;
 /// A practice run banks at half rate: it is repeatable on any unlocked floor
 /// and its boss is the only stake.
@@ -730,7 +732,8 @@ pub struct RunEnd {
     pub purse: u32,
     /// Gold spent in the gene-splice shops during the run.
     pub spent: u32,
-    /// Campaign floors cleared (`0..=3`).
+    /// Campaign floors cleared (`0..=4`: the four campaign levels, the ride
+    /// included).
     pub floors: u8,
     /// Bosses and named minibosses killed.
     pub apex: u8,
@@ -842,7 +845,11 @@ pub fn bank(profile: &mut MetaProfile, end: &RunEnd) -> BankTally {
             ..BankTally::default()
         };
     }
-    let mut floor_bonus = FLOOR_BONUS.saturating_mul(u32::from(end.floors.min(3)));
+    // One `FLOOR_BONUS` per cleared campaign level: four floors now that the
+    // Flatbed's boss ends the run (batch twelve), so the cap follows the
+    // campaign's own length instead of a stale literal.
+    let mut floor_bonus = FLOOR_BONUS
+        .saturating_mul(u32::from(end.floors.min(crate::game::campaign::LEVEL_COUNT as u8)));
     let mut apex_bonus = APEX_BONUS.saturating_mul(u32::from(end.apex));
     let mut win_bonus = if end.won { WIN_BONUS } else { 0 };
     let mut purse = end.purse;
@@ -1365,7 +1372,7 @@ mod tests {
         let run = RunEnd {
             purse: 40,
             spent: 90,
-            floors: 3,
+            floors: 4,
             apex: 4,
             won: true,
             ..RunEnd::default()
@@ -1373,11 +1380,17 @@ mod tests {
         let tally = bank(&mut profile, &run);
         assert_eq!(tally.raised, 130, "the run raised purse + spent");
         assert_eq!(tally.spent, 90);
-        assert_eq!(tally.floor_bonus, FLOOR_BONUS * 3);
+        assert_eq!(tally.floor_bonus, FLOOR_BONUS * 4);
         assert_eq!(tally.apex_bonus, APEX_BONUS * 4);
         assert_eq!(tally.win_bonus, WIN_BONUS);
-        assert_eq!(tally.banked, 40 + FLOOR_BONUS * 3 + APEX_BONUS * 4 + WIN_BONUS);
+        assert_eq!(tally.banked, 40 + FLOOR_BONUS * 4 + APEX_BONUS * 4 + WIN_BONUS);
         assert_eq!(profile.bank, tally.banked);
+        // A clear pays for four floors; a corrupt counter cannot pay for more.
+        assert_eq!(
+            bank(&mut MetaProfile::default(), &RunEnd { floors: 200, ..run })
+                .floor_bonus,
+            FLOOR_BONUS * crate::game::campaign::LEVEL_COUNT as u32
+        );
         // The next run adds to it rather than replacing it.
         let second = bank(&mut profile, &end(10));
         assert_eq!(second.total, tally.banked + 10);

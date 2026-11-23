@@ -1093,10 +1093,7 @@ mod tests {
 
     /// The boss arena's centre: the Kitchen's encounter floor.
     fn arena_centre(w: &World) -> Vec2 {
-        w.level
-            .boss_room()
-            .map(|r| r.rect.center_world())
-            .expect("the Kitchen has a boss room")
+        w.level.fight_rect_around(w.player.pos).center_world()
     }
 
     /// Put the boss at `pos` and the rat at `rat` (both usually in the arena).
@@ -1132,7 +1129,7 @@ mod tests {
         rng: &'a mut rand::rngs::StdRng,
         arena: crate::game::level::TileRect,
     ) -> BossContext<'a> {
-        let boss_arena = w.level.boss_room().map(|r| r.rect).unwrap_or(arena);
+        let boss_arena = w.level.fight_rect_around(w.player.pos);
         BossContext {
             dt: DT,
             time: 0.0,
@@ -1198,7 +1195,7 @@ mod tests {
         w.update(DT, Vec2::ZERO, false);
         let boss = boss_of(&mut w).expect("the schedule spawned the boss");
         assert_eq!(boss.kind, BossKind::MegaRat);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         assert!(arena.contains_world(boss.pos), "it spawns in its arena");
         // The pool is the framework's: art pool × scale × the director curve.
         let expect = art::BOSS_BASE_HP
@@ -1353,7 +1350,7 @@ mod tests {
         let mut w = kitchen_world(13);
         spawn_megarat(&mut w);
         let centre = arena_centre(&w);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         // A solid column east of the boss: the teeth go into it.
         let col = arena.x + arena.w - 4;
         w.level.tiles.fill_cells(
@@ -1804,7 +1801,7 @@ mod tests {
         let mut w = kitchen_world(21);
         spawn_megarat(&mut w);
         let centre = arena_centre(&w);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         // The rat out west of the arena, on real Kitchen floor (snapped onto a
         // cell the small class can stand in).
         let west = Vec2::new(
@@ -1844,7 +1841,7 @@ mod tests {
         let mut w = kitchen_world(22);
         spawn_megarat(&mut w);
         let centre = arena_centre(&w);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         // A corridor one tile tall: the rat has nowhere to step off the line.
         w.level.tiles.fill_cells(
             arena.x + 2,
@@ -1878,7 +1875,7 @@ mod tests {
         let mut w = kitchen_world(23);
         spawn_megarat(&mut w);
         let centre = arena_centre(&w);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         // Wall the boss in from behind: the only safe floor the ring leaves is
         // a solid cabinet.
         w.level.tiles.fill_cells(

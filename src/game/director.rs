@@ -25,8 +25,9 @@
 //!
 //! ## Campaign levels
 //!
-//! A campaign is three levels on a branching route (Sewer → Kitchen or
-//! Laundry → Lab or Printworks — see [`crate::game::campaign`]) and the director takes the campaign level index
+//! A campaign is **four** levels on a branching route (Sewer → Kitchen or
+//! Laundry → Lab or Printworks → the Flatbed ride, see
+//! [`crate::game::campaign`]) and the director takes the campaign level index
 //! every system tick (`resources::LevelIndex`). The owner found the later
 //! levels far too hard on the old 300 s curves, so the wave-3 re-base is
 //! deliberately gentle: **no clock offset** (every stage opens with the same
@@ -104,7 +105,7 @@ pub fn near_appointment(elapsed: f32) -> bool {
 /// kind, elite cadence and a shallow damage/speed ramp, not by a head start.
 /// [`curve_clock`] still adds the offset, so a future tuning pass can bias a
 /// single stage without touching the tables.
-pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 0.0, 0.0];
+pub const LEVEL_CLOCK_OFFSET: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 /// The horde's movement multiplier from the run clock, before the per-stage
 /// ramp ([`enemy_mods_for`]).
@@ -154,8 +155,9 @@ pub fn horde_speed_mult(elapsed: f32) -> f32 {
 /// **Batch seven** (measured, 96 campaigns): the design's +5 % / +10 % left
 /// the Skilled bot at 16/16 wins and the Casual one at 9/16. The rows are now
 /// +20 % / +45 % / +70 %, stage one included (its damage and speed stay at
-/// base: see [`enemy_mods_for`]).
-pub const LEVEL_HP_EXTRA: [f32; 3] = [1.2, 1.45, 1.7];
+/// base: see [`enemy_mods_for`]). **Batch twelve** adds the ride's row, one
+/// step further along the same ramp: +90 % by its boss.
+pub const LEVEL_HP_EXTRA: [f32; 4] = [1.2, 1.45, 1.7, 1.9];
 /// Run-clock second after which a later stage's extra hp starts to apply.
 pub const LEVEL_HP_EXTRA_AFTER: f32 = 180.0;
 
@@ -174,7 +176,10 @@ pub const LEVEL_HP_EXTRA_AFTER: f32 = 180.0;
 /// [`crate::game::roster`]). These are the base intervals the running system
 /// uses when the curve's elite chance is zero; [`elite_interval_at`] follows
 /// the §1 elite-chance column instead.
-pub const LEVEL_ELITE_INTERVAL: [f32; 3] = [ELITE_INTERVAL, 27.0, 20.0];
+///
+/// Batch twelve adds the ride's row (16 s) so the fourth level's cadence keeps
+/// stepping down the same series.
+pub const LEVEL_ELITE_INTERVAL: [f32; 4] = [ELITE_INTERVAL, 27.0, 20.0, 16.0];
 
 // The old per-level kind weighting (`LEVEL_MIX` / `KIND_ORDER`) lived here.
 // Kind selection is per floor now: see [`crate::game::roster`]. The campaign
@@ -343,6 +348,15 @@ pub fn hp_mult_at(curve: f32) -> f32 {
 /// curve clock (`player::level_damage_mult` at the measured mean level: 5 at
 /// 1:00, 13 at 2:00, 20 at 3:00, 35 at 6:00, 45 at 9:00, 52 at 12:00, 56 at
 /// the boss — 48 mixed-skill campaigns, batch eight).
+///
+/// **Batch twelve moves no knot here.** The character level now takes four
+/// times the XP (`player::xp_for_level`) and `LEVEL_DAMAGE_PER_LEVEL` went
+/// 0.01 → 0.04, so the same rat reads level 2 / 4 / 5.75 / 9.5 / 12 / 13.75 /
+/// 14.75 at those minutes (the mapping is `(old + 3) / 4`) and
+/// `1 + 0.04 × (level − 1)` is `1 + 0.01 × (old − 1)` to the digit:
+/// ×1.04 / ×1.12 / ×1.19 / ×1.34 / ×1.44 / ×1.51 / ×1.55. The knots below are
+/// therefore unchanged, and so is every pool sized against them
+/// (`miniboss::appointment_hp` included).
 ///
 /// Every pool that is sized against the rat's damage is multiplied by it (the
 /// horde and the boss through [`hp_mult_at`], the named minibosses through
@@ -722,17 +736,19 @@ pub const ELITE_INTERVAL_MAX: f32 = 45.0;
 /// the floor's roster (more visible heavies, a real ranged line) instead.
 ///
 /// **Batch seven**: ×1.12 / ×1.20 did not register on a build with a few
-/// armour stacks (a flat point off every hit). Stages two and three now reach
+/// armour stacks (a flat point off every hit). Stages two and three reach
 /// ×1.6 / ×1.9 at the boss; stage one stays at base, as the design asks.
-const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 1.6, 1.9];
+/// **Batch twelve** adds the ride: ×2.1, one step further up the same ramp.
+const LEVEL_DAMAGE_TOP: [f32; 4] = [1.0, 1.6, 1.9, 2.1];
 
 /// The horde's speed multiplier at the top of a level's ramp. The Lab's swarm
-/// stays the quickest, but only just: a faster horde walks into melee-range
-/// weapons on the merged build, so the measured cliff lives well above this.
-const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.08, 1.15];
+/// stays the quickest of the facility floors, but only just: a faster horde
+/// walks into melee-range weapons on the merged build, so the measured cliff
+/// lives well above this. The ride's row (×1.2) is the fourth stage's step.
+const LEVEL_SPEED_TOP: [f32; 4] = [1.0, 1.08, 1.15, 1.2];
 
 /// Shape of the ramp: `t^exp` over the level, so a lower exponent bites sooner.
-const LEVEL_RAMP_EXP: [f32; 3] = [1.0, 1.0, 1.0];
+const LEVEL_RAMP_EXP: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// How a campaign level's horde differs from the base kinds right now.
 ///
@@ -1034,6 +1050,54 @@ mod tests {
         for level in LEVEL_COUNT..LEVEL_COUNT + 4 {
             assert_eq!(curve_clock(level, 10.0), curve_clock(LEVEL_COUNT - 1, 10.0));
         }
+    }
+
+    /// The campaign's **fourth** level — the Flatbed ride — has its own row in
+    /// every per-level table, and each row continues its own progression by one
+    /// step (hp 1.9, damage 2.1, speed 1.2, elites every 16 s).
+    ///
+    /// It must be strictly harder than stage three at every instant past the
+    /// hp grace window, and it must not move a single number for levels 0–2
+    /// (the determinism goldens are 60 s floors on those levels).
+    #[test]
+    fn the_fourth_level_is_the_ride_and_harder_than_stage_three() {
+        use crate::game::campaign::{getaway_theme, theme_sector, LEVEL_COUNT};
+        assert_eq!(LEVEL_COUNT, 4);
+        assert_eq!(theme_sector(getaway_theme()), 3);
+        // One row per campaign level in every table.
+        assert_eq!(LEVEL_HP_EXTRA.len(), LEVEL_COUNT);
+        assert_eq!(LEVEL_DAMAGE_TOP.len(), LEVEL_COUNT);
+        assert_eq!(LEVEL_SPEED_TOP.len(), LEVEL_COUNT);
+        assert_eq!(LEVEL_ELITE_INTERVAL.len(), LEVEL_COUNT);
+        assert_eq!(LEVEL_RAMP_EXP.len(), LEVEL_COUNT);
+        assert_eq!(LEVEL_CLOCK_OFFSET.len(), LEVEL_COUNT);
+        // The rows themselves: each table keeps its own progression going.
+        assert_eq!(LEVEL_HP_EXTRA[3], 1.9);
+        assert_eq!(LEVEL_DAMAGE_TOP[3], 2.1);
+        assert_eq!(LEVEL_SPEED_TOP[3], 1.2);
+        assert!(LEVEL_ELITE_INTERVAL[3] < LEVEL_ELITE_INTERVAL[2]);
+        assert_eq!(LEVEL_CLOCK_OFFSET[3], 0.0, "the ride opens with the grace");
+        // Strictly harder than the Printworks/Lab at every real clock second
+        // past the grace, and never softer in damage or speed at any instant.
+        for t in [0.0f32, 30.0, 180.0, 181.0, 480.0, BOSS_TIME, BOSS_TIME + 60.0] {
+            if t >= LEVEL_HP_EXTRA_AFTER {
+                assert!(
+                    horde_hp_mult_for(3, t) > horde_hp_mult_for(2, t),
+                    "the ride's horde hp is not above stage three at {t}s"
+                );
+            }
+            let ride = enemy_mods_for(3, t);
+            let stage3 = enemy_mods_for(2, t);
+            assert!(ride.damage >= stage3.damage && ride.speed >= stage3.speed);
+            assert!(ride.damage >= 1.0 && ride.speed >= 1.0);
+        }
+        // The boss pool follows the ride's clock, never the horde's extra.
+        assert_eq!(
+            boss_hp_mult_for(3, BOSS_TIME),
+            hp_mult_for(3, BOSS_TIME) * BOSS_POOL_SCALE
+        );
+        assert_eq!(level_hp_extra(3, BOSS_TIME), LEVEL_HP_EXTRA[3]);
+        assert_eq!(elite_interval_for(3), LEVEL_ELITE_INTERVAL[3]);
     }
 
     /// The elite cadence scales too: the first brute arrives as soon as the

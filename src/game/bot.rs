@@ -1069,8 +1069,9 @@ impl Bot {
                     continue;
                 }
                 // The bearing to the boss matters even from across the map
-                // (the arena is where the level ends), so it is recorded
-                // before the neighbourhood filter.
+                // (the fight is where the level ends, and since batch 12 it
+                // starts wherever the rat is), so it is recorded before the
+                // neighbourhood filter.
                 self.boss_pos = Some(boss.pos);
                 self.boss_kind = Some(boss.kind);
                 if !self.sees(w, p, boss.pos) {
@@ -1690,7 +1691,7 @@ impl Bot {
         }
         danger += thin * self.params.crowd;
 
-        // Drifting into the arena border funnels a kite into a corner.
+        // Drifting into the map border funnels a kite into a corner.
         let edge = self.edge_gap(w, end);
         if edge < 90.0 {
             danger += (1.0 - edge / 90.0) * 3.0;
@@ -1819,8 +1820,9 @@ impl Bot {
             bonus += want * (1.0 - d / 190.0) * dir.dot((ppos - p).normalized());
         }
         // Boss: close enough for the weapons, not inside the body. The pull is
-        // strongest from far away (the arena has to be reached) and fades to a
-        // slow orbit once the rat is in the fight.
+        // strongest from far away (the boss arrives out of sight, a screen
+        // off) and fades to a slow orbit once the rat is in the fight. There is
+        // no arena to walk to any more: the fight starts where the rat stands.
         if let Some(bpos) = self.boss_pos {
             let d = bpos.dist(p);
             let toward = (bpos - p).normalized();
@@ -2051,14 +2053,34 @@ impl Bot {
         }
         let p = w.player.pos;
         let mut reach = 0.0f32;
+        // Batch 12: the Sonic Squeak is a forward cone now, so only what stands
+        // in front of the rat is worth the charge. A charged Tail Thrash covers
+        // the whole disc, so it makes the cone irrelevant.
+        let mut cone: Option<f32> = None;
+        let mut round = false;
         for weapon in &w.player.loadout.weapons {
             if weapon.kind.is_active() && weapon.timer <= 0.0 {
+                match weapon.kind {
+                    crate::game::weapon::WeaponKind::SonicSqueak => {
+                        cone = Some(crate::game::weapon::SQUEAK_CONE_HALF);
+                    }
+                    crate::game::weapon::WeaponKind::TailThrash => round = true,
+                    _ => {}
+                }
                 reach = reach.max(weapon.active_reach());
             }
         }
         if reach <= 0.0 {
             return false;
         }
+        // The cone's axis is the rat's facing (the bot never aims with a
+        // reticle).
+        let cone_half = cone.filter(|_| !round);
+        let facing = if w.player.face.len_sq() > 1e-4 {
+            w.player.face.normalized()
+        } else {
+            Vec2::new(0.0, -1.0)
+        };
         let mut in_reach = 0u32;
         let mut heavy_on_rat = false;
         for t in &self.threats {
@@ -2071,6 +2093,13 @@ impl Bot {
             {
                 if pos.dist(p) > reach + radius {
                     continue;
+                }
+                if let Some(half) = cone_half {
+                    if !crate::game::ecs::systems::weapons::cone_hits_circle(
+                        p, facing, reach, half, pos, radius,
+                    ) {
+                        continue;
+                    }
                 }
                 in_reach += 1;
                 if damage >= 9.0 && pos.dist(p) < radius + R + 10.0 {
@@ -2165,7 +2194,7 @@ impl Bot {
         self.goal_timer = 2.4 + self.rng.random::<f32>() * 0.8;
         self.shop_leg = false;
 
-        // In a boss fight, orbit the arena around the boss instead of roaming.
+        // In a boss fight, orbit the boss instead of roaming.
         if let Some(bpos) = self.boss_pos {
             let ang = (p - bpos).angle() + self.orbit_sign * 1.1;
             // Close enough for the short-range weapons (Tail Whip, Squeak

@@ -2120,8 +2120,6 @@ fn draw_expanded_sidebar(
         ("▸", palette::to_color(theme.accent), "Breach", "Maze Breach", true),
         ("◇", palette::to_color(CACHE_GOLD_RGB), "Cache", "Unclaimed Cache", true),
         ("◆", palette::to_color(CLAIMED_MINT_RGB), "Claimed", "Claimed Cache", true),
-        ("◈", palette::to_color(BOSS_ROSE_RGB), "Boss", "Boss Arena", false),
-        ("◤", palette::to_color(WARN_AMBER_RGB), "Bearing", "Arena Bearing", false),
         // The mouse-hole shop's bent spoon (seen once, remembered after).
         ("☌", palette::to_color(SHOP_SPOON_RGB), "Shop", "Splice Shop", false),
     ];
@@ -2199,7 +2197,7 @@ fn draw_expanded_sidebar(
         }
     }
 
-    // Status telemetry (caches & boss arena / bearing).
+    // Status telemetry (caches and the living boss).
     if y + 2 < bottom {
         y += 1;
         let total_caches = caches_unclaimed + caches_claimed;
@@ -2238,16 +2236,6 @@ fn draw_expanded_sidebar(
             (
                 if compact { "APEX ACTIVE" } else { "◆ APEX ACTIVE" },
                 palette::to_color(BOSS_ROSE_RGB),
-            )
-        } else if boss_arena_discovered {
-            (
-                if compact { "ARENA FOUND" } else { "◈ ARENA LOCATED" },
-                palette::to_color(BOSS_ROSE_RGB),
-            )
-        } else if bearing_active {
-            (
-                if compact { "BEARING ON" } else { "◤ BEARING LOCKED" },
-                palette::to_color(WARN_AMBER_RGB),
             )
         } else {
             (
@@ -3004,7 +2992,8 @@ mod tests {
             m.fill_rect(43, 92, 4, 4, MinimapCell::Floor);
             m.set(44, 92, MinimapCell::Doorway);
 
-            // 6. North Corridor toward Boss Arena (North-West, >= 400 cell chamber).
+            // 6. North corridor into the old arena room (North-West): the sample
+            //    map still has one so the arena tiles' art stays exercised.
             m.fill_rect(48, 36, 4, 30, MinimapCell::Floor);
             m.set(49, 65, MinimapCell::Doorway);
             m.fill_rect(22, 16, 28, 22, MinimapCell::BossFloor);
@@ -3124,7 +3113,7 @@ mod tests {
             MapMarker { cx: 125.0, cy: 82.0, kind: MarkerKind::Pickup(PickupTag::Heal) },
         ];
         if boss_discovered {
-            markers.push(MapMarker { cx: 36.0, cy: 27.0, kind: MarkerKind::BossArena });
+            // Batch 12: no arena blip any more, only the living boss.
             markers.push(MapMarker { cx: 40.0, cy: 29.0, kind: MarkerKind::Boss });
         }
         markers
@@ -3133,7 +3122,6 @@ mod tests {
     fn sample_labels(boss_discovered: bool) -> Vec<MapLabel<'static>> {
         vec![
             MapLabel { cx: 100.0, cy: 80.0, text: "START", kind: LabelKind::Start, discovered: true },
-            MapLabel { cx: 36.0, cy: 27.0, text: "BOSS ARENA", kind: LabelKind::BossArena, discovered: boss_discovered },
             MapLabel { cx: 108.0, cy: 128.0, text: "SECRET MAZE", kind: LabelKind::Maze, discovered: false },
         ]
     }
@@ -3162,11 +3150,8 @@ mod tests {
             },
             markers,
             labels,
-            boss_bearing_dir: if boss_discovered {
-                None
-            } else {
-                Some((-0.855, -0.518))
-            },
+            // Batch 12 retired the arena bearing: the sample never sets one.
+            boss_bearing_dir: None,
             palette,
             sector_name: sector,
             clock: 185.4,
@@ -3490,17 +3475,23 @@ mod tests {
             "undiscovered maze label leaked onto map"
         );
         assert!(
-            !full_text.contains("BOSS ARENA"),
-            "undiscovered boss arena label leaked onto map"
+            !full_text.to_uppercase().contains("ARENA"),
+            "an arena label leaked onto the map"
         );
         assert!(canvas_text.contains('◇'), "seen hollow cache symbol missing on map canvas");
         assert!(canvas_text.contains('◆'), "claimed cache symbol missing on map canvas");
-        assert!(canvas_text.contains('◤'), "fog-edge northwest bearing missing on map canvas");
+        assert!(
+            !canvas_text.contains('◤'),
+            "the retired arena bearing chevron is still drawn"
+        );
         assert!(
             full_text.contains("CACHES: 1 / 2 CLAIMED"),
             "sidebar should count both seen caches (1 claimed, 1 unclaimed)"
         );
-        assert!(full_text.contains("BEARING"), "fog-edge boss bearing status missing");
+        assert!(
+            !full_text.contains("BEARING"),
+            "the retired arena bearing status is still printed"
+        );
     }
 
     #[test]
@@ -3561,7 +3552,8 @@ mod tests {
         let mut scratch = MinimapScratch::new();
 
         // 1. Sidebar layout (120×40): maze_discovered = false omits all 5 maze
-        //    legend rows and closes the vertical gap (Boss Arena directly below Rat-Hole).
+        //    legend rows and closes the vertical gap (the Splice Shop row sits
+        //    directly below Rat-Hole).
         let mut view_no_maze = make_view(
             MinimapMode::Expanded,
             MinimapPalette::SEWER,
@@ -3596,14 +3588,20 @@ mod tests {
             .iter()
             .position(|r| r.contains("Rat-Hole"))
             .expect("Rat-Hole legend row missing");
-        let boss_row = rows_no
+        // Batch 12 removed the arena's legend row; the Splice Shop row is the
+        // one that follows Rat-Hole now.
+        let shop_row = rows_no
             .iter()
-            .position(|r| r.contains("Boss Arena"))
-            .expect("Boss Arena legend row missing");
+            .position(|r| r.contains("Splice Shop"))
+            .expect("Splice Shop legend row missing");
         assert_eq!(
-            boss_row,
+            shop_row,
             hole_row + 1,
-            "omitting maze rows must close the gap (Rat-Hole on {hole_row}, Boss Arena on {boss_row})"
+            "omitting maze rows must close the gap (Rat-Hole on {hole_row}, Splice Shop on {shop_row})"
+        );
+        assert!(
+            !text_no.contains("Boss Arena") && !text_no.contains("Arena Bearing"),
+            "the arena legend rows are still drawn: {text_no}"
         );
 
         // 2. Sidebar layout (120×40): maze_discovered = true renders all 5 maze rows.

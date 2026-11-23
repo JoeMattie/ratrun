@@ -24,8 +24,11 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale, Rgb};
 
 use super::collision::TileMap;
+use super::ecs::components::{BiteSnap, Lash, LashPhase, WhipCrack};
 use super::player::Player;
-use super::weapon::WeaponKind;
+use super::weapon::{
+    WeaponKind, LASH_DRAG_GAP, LASH_RECOIL_AT, LASH_TOTAL, LASH_WINDUP, WHIP_ARC_HALF,
+};
 
 /// Collision radius of the rat in world pixels (the sim's `PLAYER_RADIUS`).
 /// The sprite may extend past it (tail, ears, whiskers) but the body should
@@ -383,6 +386,547 @@ pub struct LashVisual {
     pub point: Vec2,
 }
 
+/// Number of point masses in the render-only Spiked Tail Verlet whip chain.
+pub const WHIP_NODES: usize = 16;
+
+/// Fixed integration sub-step (s) for [`WhipChain`]. Divides `LASH_WINDUP`
+/// (0.12 = 30 steps), `LASH_RECOIL_AT` (0.20 = 50 steps) and `LASH_TOTAL`
+/// (0.34 = 85 steps) cleanly so the chain is frame-rate independent and
+/// deterministic for single-frame captures.
+const WHIP_FIXED_DT: f32 = 0.004;
+const WHIP_CONSTRAINT_ITERS: usize = 8;
+const WHIP_MAX_SUBSTEPS: usize = 110;
+const WHIP_MAX_STEP_MOVE: f32 = 10.0;
+const WHIP_SETTLE_SECS: f32 = 0.16;
+
+/// Render-only position-based / Verlet chain simulation for **Spiked Tail**
+/// (and its **Barbed Wire** evolution).
+///
+/// Lives on `World` alongside `tail_ready_at`: never touched by the simulation
+/// schedule, never draws from `World::rng`, and uses fixed-size arrays (zero
+/// per-frame allocation). Reset deterministically whenever a new `Lash` starts
+/// (`SpawnId` changes), stepped with fixed sub-steps to `lash.elapsed()`, and
+/// smoothly settled back into the resting tail curl once the lash ends.
+#[derive(Clone, Debug)]
+pub struct WhipChain {
+    active_id: Option<u64>,
+    active: bool,
+    settling: bool,
+    sim_time: f32,
+    settle_t: f32,
+    last_elapsed: f32,
+    pos: [Vec2; WHIP_NODES],
+    prev: [Vec2; WHIP_NODES],
+    /// Two recent chain snapshots for supersonic whip-crack motion smear.
+    ghost_a: [Vec2; WHIP_NODES],
+    ghost_b: [Vec2; WHIP_NODES],
+    ghost_count: u8,
+    swing_side: f32,
+    seg_len: f32,
+    barbed: bool,
+    bristle: f32,
+    flash: f32,
+    smear: f32,
+    star: f32,
+    shock_t: f32,
+    radius: f32,
+    point: Vec2,
+    drag_progress: f32,
+    catch_pos: Option<Vec2>,
+}
+
+impl Default for WhipChain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WhipChain {
+    pub fn new() -> Self {
+        Self {
+            active_id: None,
+            active: false,
+            settling: false,
+            sim_time: 0.0,
+            settle_t: 0.0,
+            last_elapsed: 0.0,
+            pos: [Vec2::ZERO; WHIP_NODES],
+            prev: [Vec2::ZERO; WHIP_NODES],
+            ghost_a: [Vec2::ZERO; WHIP_NODES],
+            ghost_b: [Vec2::ZERO; WHIP_NODES],
+            ghost_count: 0,
+            swing_side: 1.0,
+            seg_len: 1.0,
+            barbed: false,
+            bristle: 0.0,
+            flash: 0.0,
+            smear: 0.0,
+            star: 0.0,
+            shock_t: 0.0,
+            radius: 0.0,
+            point: Vec2::ZERO,
+            drag_progress: 0.0,
+            catch_pos: None,
+        }
+    }
+
+    /// True while a lash is in flight or the chain is settling back into the
+    /// rat's normal idle tail curl.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// World position of the whip's tip node.
+    #[inline]
+    pub fn tip(&self) -> Vec2 {
+        self.pos[WHIP_NODES - 1]
+    }
+
+    /// World position of the whip's midpoint node.
+    #[inline]
+    pub fn mid(&self) -> Vec2 {
+        self.pos[WHIP_NODES / 2]
+    }
+
+    /// World positions of all simulated nodes (for tests & inspection).
+    #[inline]
+    pub fn nodes(&self) -> &[Vec2; WHIP_NODES] {
+        &self.pos
+    }
+
+    /// Inverse mass for node `i`: node 0 is pinned (`0.0`), mass tapers down
+    /// toward the tip so a travelling wave accelerates into the crack.
+    #[inline]
+    fn inv_mass(i: usize) -> f32 {
+        if i == 0 {
+            return 0.0;
+        }
+        let u = i as f32 / (WHIP_NODES - 1) as f32;
+        let mass = (1.0 - 0.85 * u).powf(1.8).max(0.05);
+        1.0 / mass
+    }
+
+    /// Synchronise and sub-step the render-only Verlet chain against the live
+    /// `Lash` component (if any). `catch_pos` is the live position of the
+    /// caught body for an evolved Barbed Wire lash.
+    pub fn sync(
+        &mut self,
+        player: &Player,
+        elapsed: f32,
+        lash: Option<(u64, &Lash, Option<Vec2>)>,
+    ) {
+        let pose = pose_of(player, elapsed);
+        let tail = tail_charge(player);
+        let rest_len = tail.map_or(TAIL_LEN, |t| t.tail_len()) + 3.0 * pose.dash;
+        let rest_pts = sample_rest_tail(&pose, player.vel, elapsed, rest_len);
+        let rump = rest_pts[0];
+
+        let Some((lash_id, lash, catch_pos)) = lash else {
+            // No live lash: if we were active, transition into a short damped
+            // settle back into the rat's procedural idle tail curl.
+            if self.active {
+                if self.active_id.is_some() {
+                    self.active_id = None;
+                    self.settling = true;
+                    self.settle_t = 0.0;
+                    self.flash = 0.0;
+                    self.smear = 0.0;
+                    self.star = 0.0;
+                    self.shock_t = 0.0;
+                    self.drag_progress = 0.0;
+                    self.catch_pos = None;
+                }
+                let dt = if elapsed >= self.last_elapsed {
+                    (elapsed - self.last_elapsed).clamp(0.0, 0.1)
+                } else {
+                    // Clock jumped backwards (reset/capture seek): snap clean.
+                    self.active = false;
+                    self.settling = false;
+                    self.last_elapsed = elapsed;
+                    return;
+                };
+                self.last_elapsed = elapsed;
+                self.step_settle(dt, &rest_pts, rest_len);
+            } else {
+                self.last_elapsed = elapsed;
+            }
+            return;
+        };
+
+        let target = lash.tip();
+        let to_target = target - rump;
+        let dist = to_target.len().max(6.0);
+        let dir = if to_target.len_sq() > 1e-4 {
+            to_target * (1.0 / dist)
+        } else {
+            pose.face
+        };
+
+        // Reset deterministically whenever a brand-new lash begins (or if a
+        // harness rewinds the lash clock).
+        let lash_t = lash.elapsed().clamp(0.0, LASH_TOTAL);
+        if self.active_id != Some(lash_id) || lash_t + 1e-4 < self.sim_time {
+            self.active_id = Some(lash_id);
+            self.active = true;
+            self.settling = false;
+            self.sim_time = 0.0;
+            self.settle_t = 0.0;
+            self.pos = rest_pts;
+            self.prev = rest_pts;
+            self.ghost_a = rest_pts;
+            self.ghost_b = rest_pts;
+            self.ghost_count = 0;
+            self.seg_len = (rest_len / (WHIP_NODES - 1) as f32).max(0.5);
+            // Pick the throw flank on the same side as the resting tail curl
+            // relative to `dir`, so the loop swings cleanly AROUND the rat.
+            let rest_tip_rel = rest_pts[WHIP_NODES - 1] - rump;
+            let side_dot = rest_tip_rel.dot(dir.perp());
+            self.swing_side = if side_dot.abs() > 0.25 {
+                side_dot.signum()
+            } else {
+                let back_cross = (-pose.face).x * dir.y - (-pose.face).y * dir.x;
+                if back_cross >= 0.0 { 1.0 } else { -1.0 }
+            };
+        }
+
+        self.last_elapsed = elapsed;
+        self.barbed = lash.barbed_wire();
+        self.radius = lash.radius;
+        self.point = target;
+        self.catch_pos = catch_pos;
+
+        // Snapshot previous frame positions for motion smear before stepping.
+        let need_steps = lash_t > self.sim_time + WHIP_FIXED_DT * 0.45;
+        if need_steps {
+            self.ghost_b = self.ghost_a;
+            self.ghost_a = self.pos;
+            self.ghost_count = self.ghost_count.saturating_add(1).min(2);
+        }
+
+        // Fixed-dt sub-stepping: deterministic at any frame rate and even when
+        // a capture harness jumps directly to a later tick without drawing in
+        // between.
+        let mut steps = 0usize;
+        while self.sim_time + WHIP_FIXED_DT * 0.45 < lash_t && steps < WHIP_MAX_SUBSTEPS {
+            self.sim_time = (self.sim_time + WHIP_FIXED_DT).min(LASH_TOTAL);
+            self.step_lash_substep(self.sim_time, rump, target, dir, dist, rest_len, &rest_pts);
+            // Refresh ghost snapshots during jump-ahead so a single-frame
+            // crack capture still has crisp whip-speed smear behind it.
+            if steps > 0 && steps % 3 == 0 {
+                self.ghost_b = self.ghost_a;
+                self.ghost_a = self.pos;
+                self.ghost_count = self.ghost_count.saturating_add(1).min(2);
+            }
+            steps += 1;
+        }
+
+        // Guarantee exact tip landing on the crack beat (even if `lash_t` is
+        // right on `LASH_WINDUP` or `lash.cracked()` just became true).
+        let phase = lash.phase();
+        let pp = lash.phase_progress();
+        if lash.cracked() && phase == LashPhase::Crack && pp < 0.45 {
+            self.pos[0] = rump;
+            self.pos[WHIP_NODES - 1] = target;
+            self.solve_constraints(true);
+        }
+
+        // Update visual cues from the simulation's own lash clock so the white
+        // crack flash, tiny tip shock ring, spikes and Barbed Wire drag never
+        // drift from the hit tick.
+        let total = LASH_TOTAL.max(1e-4);
+        let t_norm = (lash_t / total).clamp(0.0, 1.0);
+        let after = |window: f32| -> f32 {
+            if !lash.cracked() && lash_t < LASH_WINDUP - 1e-4 {
+                0.0
+            } else {
+                (1.0 - (lash_t - LASH_WINDUP).max(0.0) / window.max(1e-4)).clamp(0.0, 1.0)
+            }
+        };
+        self.bristle = match phase {
+            LashPhase::WindUp => (0.25 + 0.75 * pp).clamp(0.0, 1.0),
+            LashPhase::Crack => 1.0,
+            LashPhase::Recoil => {
+                if self.barbed {
+                    (1.0 - pp * 0.35).clamp(0.0, 1.0)
+                } else {
+                    (1.0 - (t_norm - 0.80).max(0.0) / 0.20).clamp(0.0, 1.0)
+                }
+            }
+            LashPhase::Over => 0.0,
+        };
+        self.flash = after(0.10);
+        self.shock_t = if lash.cracked() || lash_t >= LASH_WINDUP - 1e-4 {
+            ((lash_t - LASH_WINDUP).max(0.0) / 0.11).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.star = after(0.16);
+        self.smear = if phase == LashPhase::WindUp && pp > 0.65 {
+            ((pp - 0.65) / 0.35).clamp(0.0, 1.0) * 0.85
+        } else {
+            after(0.075)
+        };
+        self.drag_progress = if self.barbed && phase == LashPhase::Recoil {
+            pp
+        } else {
+            0.0
+        };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_lash_substep(
+        &mut self,
+        t: f32,
+        rump: Vec2,
+        target: Vec2,
+        dir: Vec2,
+        dist: f32,
+        rest_len: f32,
+        rest_pts: &[Vec2; WHIP_NODES],
+    ) {
+        let dt = WHIP_FIXED_DT;
+        let dt2 = dt * dt;
+        let segs = (WHIP_NODES - 1) as f32;
+        let flank = dir.perp() * self.swing_side;
+        let smooth = |x: f32| {
+            let u = x.clamp(0.0, 1.0);
+            u * u * (3.0 - 2.0 * u)
+        };
+
+        let in_windup = t < LASH_WINDUP;
+        let in_crack = t >= LASH_WINDUP && t < LASH_RECOIL_AT;
+        let wu = (t / LASH_WINDUP.max(1e-4)).clamp(0.0, 1.0);
+        let cu = ((t - LASH_WINDUP) / (LASH_RECOIL_AT - LASH_WINDUP).max(1e-4)).clamp(0.0, 1.0);
+        let ru = ((t - LASH_RECOIL_AT) / (LASH_TOTAL - LASH_RECOIL_AT).max(1e-4)).clamp(0.0, 1.0);
+
+        // Segment length: unfurls with slight loop slack during wind-up, snaps
+        // taut to exact target distance at crack, then reels back in recoil.
+        let chain_len = if in_windup {
+            let grow = smooth(wu / 0.52);
+            let slack = 1.0 + 0.12 * (1.0 - smooth((wu - 0.58) / 0.42));
+            rest_len + (dist * slack - rest_len) * grow
+        } else if in_crack {
+            dist
+        } else if self.barbed {
+            // Barbed Wire reels the caught target smoothly back toward the rat.
+            let reel = smooth(ru / 0.88);
+            let end_len = (LASH_DRAG_GAP + 3.0).max(rest_len * 0.85).min(dist);
+            dist + (end_len - dist) * reel
+        } else {
+            let retract = smooth(ru);
+            dist + (rest_len - dist) * retract
+        };
+        self.seg_len = (chain_len / segs).max(0.5);
+
+        // Handle (node 0) throw motion: cocks back/outward, throws hard forward
+        // toward target and checks back on the rump to launch a travelling loop.
+        let handle = if in_windup {
+            if wu < 0.42 {
+                let c = (wu / 0.42 * std::f32::consts::FRAC_PI_2).sin();
+                rump - dir * (2.2 * c) + flank * (3.4 * c)
+            } else if wu < 0.74 {
+                let th = smooth((wu - 0.42) / 0.32);
+                let cock = -dir * 2.2 + flank * 3.4;
+                let fwd = dir * 2.6 - flank * 1.4;
+                rump + cock + (fwd - cock) * th
+            } else {
+                let chk = smooth((wu - 0.74) / 0.26);
+                let fwd = dir * 2.6 - flank * 1.4;
+                rump + fwd * (1.0 - chk)
+            }
+        } else {
+            rump
+        };
+
+        let damp = if in_windup {
+            0.986
+        } else if in_crack {
+            0.972
+        } else {
+            0.952
+        };
+
+        // Verlet integration for nodes 1..WHIP_NODES.
+        for i in 1..WHIP_NODES {
+            let u = i as f32 / segs;
+            let mut vel = (self.pos[i] - self.prev[i]) * damp;
+            if !vel.x.is_finite() || !vel.y.is_finite() {
+                vel = Vec2::ZERO;
+            }
+            vel = vel.clamp_len(WHIP_MAX_STEP_MOVE);
+
+            let mut acc = Vec2::ZERO;
+            if in_windup {
+                if wu < 0.44 {
+                    // Cock the chain out onto the throw flank to load a wide loop.
+                    let w = (1.0 - 0.55 * u).max(0.25);
+                    acc += (-dir * 4200.0 + flank * 12500.0) * w;
+                } else {
+                    // Snap the proximal base straight toward the target while
+                    // the distal loop rolls forward and accelerates!
+                    let th = ((wu - 0.44) / 0.56).clamp(0.0, 1.0);
+                    let base_drive = (1.0 - u / 0.55).clamp(0.0, 1.0) * (1.0 - th * 0.5);
+                    acc += (dir * 22000.0 - flank * 7500.0) * base_drive;
+                    // Subtle travelling-wave kick peaking as the wave passes `u`.
+                    let wave_front = 0.25 + 0.85 * th;
+                    let wave_env = (1.0 - ((u - wave_front) / 0.22).abs()).clamp(0.0, 1.0);
+                    acc += dir * (11000.0 * wave_env * u);
+                }
+            } else if in_crack {
+                if cu >= 0.45 {
+                    // Organic rebound off the impact after the brief taut crack hold.
+                    acc += (-dir * 2600.0 - flank * 3200.0) * u;
+                }
+            } else if self.barbed {
+                // Barbed Wire: stay tensioned along the reel axis with gritty pull.
+                let reel = smooth(ru / 0.88);
+                let end_len = (LASH_DRAG_GAP + 3.0).max(rest_len * 0.85).min(dist);
+                let cur_len = dist + (end_len - dist) * reel;
+                let jitter = (ru * 26.0 + u * 5.0).sin() * 1.1 * (1.0 - ru) * u;
+                let goal = rump + dir * (cur_len * u) + flank * jitter;
+                acc += (goal - self.pos[i]) * 2600.0;
+            } else {
+                // Smooth recoil back into the rat's live resting tail curl.
+                let spring = 900.0 + 3800.0 * ru * ru;
+                acc += (rest_pts[i] - self.pos[i]) * spring;
+            }
+
+            let next = self.pos[i] + vel + acc * dt2;
+            self.prev[i] = self.pos[i];
+            self.pos[i] = if next.x.is_finite() && next.y.is_finite() {
+                next
+            } else {
+                rump + dir * (self.seg_len * i as f32)
+            };
+        }
+
+        self.pos[0] = handle;
+        self.prev[0] = handle;
+
+        // Distance constraint satisfaction (symmetric Gauss-Seidel passes).
+        let pin_tip = in_crack && cu < 0.45;
+        if pin_tip {
+            self.pos[WHIP_NODES - 1] = target;
+            self.prev[WHIP_NODES - 1] = target;
+        } else if self.barbed && !in_windup && !in_crack {
+            let reel = smooth(ru / 0.88);
+            let end_len = (LASH_DRAG_GAP + 3.0).max(rest_len * 0.85).min(dist);
+            let reel_pt = rump + dir * (dist + (end_len - dist) * reel);
+            self.pos[WHIP_NODES - 1] =
+                self.pos[WHIP_NODES - 1] + (reel_pt - self.pos[WHIP_NODES - 1]) * 0.65;
+        }
+
+        self.solve_constraints(pin_tip);
+
+        // Final-frames target arrival blend (last ~3 frames of wind-up) so the
+        // whipping tip NEVER visibly misses the simulation's crack target!
+        if in_windup && wu > 0.70 {
+            let k = ((wu - 0.70) / 0.30).clamp(0.0, 1.0);
+            let pull = k * k * 0.62;
+            let tip_i = WHIP_NODES - 1;
+            self.pos[tip_i] = self.pos[tip_i] + (target - self.pos[tip_i]) * pull;
+            if wu >= 0.96 {
+                self.pos[tip_i] = target;
+            }
+            self.solve_constraints(wu >= 0.96);
+        }
+    }
+
+    fn step_settle(&mut self, dt: f32, rest_pts: &[Vec2; WHIP_NODES], rest_len: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        let segs = (WHIP_NODES - 1) as f32;
+        self.seg_len = (rest_len / segs).max(0.5);
+        let dt2 = WHIP_FIXED_DT * WHIP_FIXED_DT;
+        let steps = ((dt / WHIP_FIXED_DT).round() as usize).clamp(1, 32);
+        for _ in 0..steps {
+            self.settle_t += WHIP_FIXED_DT;
+            let u = (self.settle_t / WHIP_SETTLE_SECS).clamp(0.0, 1.0);
+            for i in 1..WHIP_NODES {
+                let vel = ((self.pos[i] - self.prev[i]) * 0.90).clamp_len(WHIP_MAX_STEP_MOVE);
+                let acc = (rest_pts[i] - self.pos[i]) * (2200.0 + 4800.0 * u);
+                let next = self.pos[i] + vel + acc * dt2;
+                self.prev[i] = self.pos[i];
+                self.pos[i] = next + (rest_pts[i] - next) * (u * u * 0.35);
+            }
+            self.pos[0] = rest_pts[0];
+            self.prev[0] = rest_pts[0];
+            self.solve_constraints(false);
+        }
+        if self.settle_t >= WHIP_SETTLE_SECS {
+            self.active = false;
+            self.settling = false;
+        }
+    }
+
+    fn solve_constraints(&mut self, pin_tip: bool) {
+        let rest = self.seg_len;
+        let last_seg = WHIP_NODES - 1;
+        for iter in 0..WHIP_CONSTRAINT_ITERS {
+            let forward = iter % 2 == 0;
+            for k in 0..last_seg {
+                let i = if forward { k } else { last_seg - 1 - k };
+                let j = i + 1;
+                let a = self.pos[i];
+                let b = self.pos[j];
+                let delta = b - a;
+                let d_len = delta.len();
+                if d_len <= 1e-4 {
+                    continue;
+                }
+                let w_a = Self::inv_mass(i);
+                let w_b = if pin_tip && j == last_seg {
+                    0.0
+                } else {
+                    Self::inv_mass(j)
+                };
+                let w_sum = w_a + w_b;
+                if w_sum <= 1e-6 {
+                    continue;
+                }
+                let diff = (d_len - rest) / d_len;
+                let corr = delta * diff;
+                if w_a > 0.0 {
+                    self.pos[i] += corr * (w_a / w_sum);
+                }
+                if w_b > 0.0 {
+                    self.pos[j] -= corr * (w_b / w_sum);
+                }
+            }
+        }
+    }
+}
+
+/// Sample `WHIP_NODES` world-space points along the rat's procedural resting /
+/// running tail curl (matching `draw_tail` so whip reset and settle are seamless).
+fn sample_rest_tail(pose: &Pose, vel: Vec2, elapsed: f32, rest_len: f32) -> [Vec2; WHIP_NODES] {
+    let m = pose.moving;
+    let lag = if vel.len_sq() > 4.0 {
+        let vd = vel.normalized();
+        let cross = pose.face.x * vd.y - pose.face.y * vd.x;
+        (cross.atan2(pose.face.dot(vd)) * 1.5).clamp(-2.0, 2.0)
+    } else {
+        0.0
+    };
+    let whip = 1.0 - 0.85 * pose.dash;
+    let back = pose.face * -1.0;
+    let step = rest_len / (WHIP_NODES - 1) as f32;
+    let mut out = [Vec2::ZERO; WHIP_NODES];
+    let mut p = pose.place(-3.2, 0.0);
+    out[0] = p;
+    for (i, slot) in out.iter_mut().enumerate().skip(1) {
+        let s = (i as f32 - 0.5) / (WHIP_NODES - 1) as f32;
+        let idle = 1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin();
+        let run = 0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip;
+        let theta = lag * s + idle * (1.0 - m) + run * m;
+        p += back.rotate(theta) * step;
+        *slot = p;
+    }
+    out
+}
+
 /// [`draw_rat`], plus the Tail Thrash's one-off "just charged" flash
 /// (`0.0..=1.0`, see [`tail_ready_flash`]).
 ///
@@ -418,6 +962,20 @@ pub fn draw_rat_lashed(
     tail_flash: f32,
     lash: Option<LashVisual>,
 ) {
+    draw_rat_with_whip(pb, player, elapsed, cam, tail_flash, lash, None);
+}
+
+/// [`draw_rat_lashed`], driven by the render-only physics [`WhipChain`] when a
+/// **Spiked Tail** / **Barbed Wire** lash is active or settling back to idle.
+pub fn draw_rat_with_whip(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    elapsed: f32,
+    cam: Vec2,
+    tail_flash: f32,
+    lash: Option<LashVisual>,
+    whip: Option<&WhipChain>,
+) {
     let pose = pose_of(player, elapsed);
     let tint = tint_of(player, elapsed);
 
@@ -428,12 +986,13 @@ pub fn draw_rat_lashed(
     if let Some(t) = tail.as_mut() {
         t.flash = tail_flash.clamp(0.0, 1.0);
     }
-    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash);
+    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
     draw_feet(pb, &pose, tint, cam);
     draw_body(pb, &pose, tint, cam);
     draw_face(pb, &pose, elapsed, tint, cam);
-    // Under the rat, so it never hides the body: the dash cooldown read-out.
-    draw_dash_gauge(pb, player, elapsed, cam);
+    // Under the rat, so it never hides the body: the Super Dash charge ring
+    // (nothing at all unless a charge is being held).
+    draw_dash_charge(pb, player, elapsed, cam);
 }
 
 /// Everything about this frame's pose, derived once (split out so the tests can
@@ -488,30 +1047,20 @@ fn tint_of(player: &Player, elapsed: f32) -> Tint {
     }
 }
 
-// ---- Dash gauge ------------------------------------------------------------
+// ---- Dash charge ring -----------------------------------------------------
 
-/// How many pips the gauge has, how far out it sits (px) and the screen arc it
-/// spans (radians, `0` = due right, `PI/2` = straight down: the arc under the
-/// rat). Screen-space, so it does not spin with the facing.
-const GAUGE_PIPS: i32 = 7;
+/// How far out the charge ring sits (px). Screen-space, so it does not spin
+/// with the facing.
 const GAUGE_RADIUS: f32 = 10.0;
-// Left-to-right on screen so the refill reads like the HUD's charge bar.
-const GAUGE_ARC: (f32, f32) = (0.70, 0.30);
-
-const PIP_EMPTY: Rgb = (86, 62, 84);
-const PIP_CHARGING: Rgb = (236, 172, 108);
-const PIP_READY: Rgb = (255, 246, 214);
-const PIP_DENIED: Rgb = (238, 74, 84);
 
 /// The Super Dash **charge pose**: how much the body shortens along the facing
 /// and widens across it at a full meter (see [`pose_of`]).
 const CHARGE_COIL_SQUASH: f32 = 0.16;
 const CHARGE_COIL_SPREAD: f32 = 0.12;
 
-/// The Super Dash charge ring: how many pips it has (a closed circle, unlike
-/// the seven-pip cooldown arc) and its colours — the weapon's own blue-white,
-/// so "charging the dash" never reads as "the dash is ready" (that is amber
-/// and near-white) or as a refusal (red).
+/// The Super Dash charge ring: how many pips it has and its colours — the
+/// weapon's own blue-white, so "charging the dash" never reads as "the dash is
+/// ready" (the HUD's amber module) or as a refusal (red).
 const CHARGE_PIPS: i32 = 18;
 const CHARGE_COLOR: Rgb = (198, 230, 255);
 const CHARGE_FULL: Rgb = (255, 255, 255);
@@ -526,105 +1075,30 @@ const PREVIEW_MAX_LEN: f32 = 96.0;
 /// hostile layer).
 const PREVIEW_COLOR: Rgb = (150, 196, 255);
 
-/// The dash cooldown, attached to the rat: a shallow arc of [`GAUGE_PIPS`] pips under it
-/// that fills back up as the cooldown runs out.
+/// The **Super Dash charge ring**, attached to the rat: while the dash is held
+/// for a Super Dash the ring closes around it and fills clockwise from the top
+/// in the weapon's own blue-white, pulsing at a full meter — the hold-to-charge
+/// read, and the only on-rat dash read-out there is.
 ///
-/// States, all of them impossible to miss without any extra clutter:
-/// - **recharging**: pips fill left to right in warm amber (partly-lit pips are
-///   drawn at fractional brightness, so it reads as a smooth refill);
-/// - **ready** (`dash_ready_flash` running): the whole arc pops near-white and
-///   grows a one-pixel halo for a third of a second;
-/// - **dashing**: the arc flashes bright as it drains;
-/// - **refused** (`dash_denied` running): the arc turns red and jitters one
-///   pixel side to side, so a press that could not be spent is never silent
-///   (the matching `Sfx::DashDenied` blip comes from `player_system`);
-/// - **charging** (`dash_charging`): the arc closes into a full ring that fills
-///   clockwise from the top in the Super Dash's own blue-white and pulses at a
-///   full meter — the hold-to-charge read, which is the only state that matters
-///   while it runs.
+/// The cooldown pips that used to sit under the rat are **gone** (batch 12, the
+/// owner's call): the HUD's dash module already carries the cooldown, the ready
+/// flash and the refusal, and a second gauge in the corner of the eye under the
+/// sprite was clutter the player had to look through. So a cooling, ready,
+/// dashing or refused dash draws nothing here at all; the ring appears only
+/// while a charge is being held.
 ///
-/// Purely visual: no rng is drawn here (the jitter is keyed to the run clock),
-/// so the draw pass stays deterministic.
-pub fn draw_dash_gauge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) {
-    let max = player.loadout.stats.dash_cd.max(0.1);
-    let ready = player.dash_cd <= 0.0;
-    let dashing = player.dash_active > 0.0;
-    let fill = if ready || dashing {
-        1.0
-    } else {
-        (1.0 - player.dash_cd / max).clamp(0.0, 1.0)
-    };
-    let ready_pop = player.dash_ready_flash > 0.0;
-    let denied = player.dash_denied > 0.0 && !ready;
-    let centre = w2s(player.pos, cam);
-    // Holding the dash for a Super Dash replaces the cooldown arc with the
-    // charge ring: the meter is the only thing that matters while it fills.
-    if player.dash_charging {
-        draw_charge_ring(pb, centre, player.dash_charge, elapsed);
+/// Purely visual: no rng is drawn here, so the draw pass stays deterministic.
+pub fn draw_dash_charge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) {
+    if !player.dash_charging {
         return;
     }
-    // A refused press shakes the gauge one pixel side to side at ~25 Hz.
-    let shake = if denied {
-        if (elapsed * 50.0) as i32 % 2 == 0 {
-            1
-        } else {
-            -1
-        }
-    } else {
-        0
-    };
-
-    for i in 0..GAUGE_PIPS {
-        let t = if GAUGE_PIPS > 1 {
-            i as f32 / (GAUGE_PIPS - 1) as f32
-        } else {
-            0.5
-        };
-        let a = GAUGE_ARC.0 + (GAUGE_ARC.1 - GAUGE_ARC.0) * t;
-        let dir = Vec2::from_angle(std::f32::consts::PI * a);
-        let x = centre.0 + (dir.x * GAUGE_RADIUS).round() as i32 + shake;
-        let y = centre.1 + (dir.y * GAUGE_RADIUS).round() as i32;
-        // 0..1 how full this pip is: fractional for the one the cooldown is
-        // currently filling, so the refill rolls instead of stepping.
-        let level = (fill * GAUGE_PIPS as f32 - i as f32).clamp(0.0, 1.0);
-        let (color, lit) = if denied {
-            (PIP_DENIED, 0.55)
-        } else if ready || dashing {
-            (PIP_READY, 1.0)
-        } else {
-            (PIP_CHARGING, level)
-        };
-        if lit > 0.0 {
-            // Two pixels tall: one is a speck, two read as a pip at a glance.
-            blend(pb, x, y, color, 0.35 + 0.65 * lit);
-            blend(pb, x, y + 1, color, 0.25 + 0.55 * lit);
-        } else {
-            // Empty socket: a dim pip so the gauge's length is always readable.
-            blend(pb, x, y, PIP_EMPTY, 0.7);
-            blend(pb, x, y + 1, PIP_EMPTY, 0.5);
-        }
-        // The ready pop: a halo ring around each pip for the flash.
-        if ready_pop {
-            let halo = (255, 238, 196);
-            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                blend(pb, x + dx, y + dy, halo, 0.35);
-            }
-        }
-    }
-    // While dashing the arc keeps one extra bright pixel just below its lowest
-    // pip, so the drain stays visible without adding particles.
-    if dashing {
-        let a = std::f32::consts::PI * 0.5;
-        let dir = Vec2::from_angle(a);
-        let x = centre.0 + (dir.x * (GAUGE_RADIUS + 1.0)).round() as i32;
-        let y = centre.1 + (dir.y * (GAUGE_RADIUS + 1.0)).round() as i32;
-        pb.plot_add(x, y, (120, 120, 130));
-    }
+    let centre = w2s(player.pos, cam);
+    draw_charge_ring(pb, centre, player.dash_charge, elapsed);
 }
 
-/// The **Super Dash charge ring**: the on-rat arc closes into a circle that
-/// fills clockwise from the top as the meter fills, in the weapon's own
-/// blue-white (never the cooldown's amber, never a refusal's red).
+/// The **Super Dash charge ring** itself: the on-rat read-out closes into a
+/// circle that fills clockwise from the top as the meter fills, in the weapon's
+/// own blue-white (never the cooldown's amber, never a refusal's red).
 ///
 /// At a full meter the lit pips pulse, which is the "held long enough" cue in
 /// the corner of the eye — the simulated meter keeps filling (it caps at 1.0)
@@ -790,9 +1264,10 @@ pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, c
             continue;
         }
         last_core = sc;
-        // Subtle standing-wave intensity shimmer along the ray.
-        let node = 0.85 + 0.15 * (dist * 0.7).sin().abs();
-        let gain = b * node;
+        // A **steady** bar (batch 12): the sweep is one continuous cut, so the
+        // beam holds one brightness for its whole length instead of blinking
+        // per pulse. It only fades in and out with the sweep's own progress.
+        let gain = b;
         // Core pixel: crisp white-gold blend lifted brightly above any floor.
         blend(pb, sc.0, sc.1, hot, (0.78 * gain).clamp(0.0, 0.95));
         plot_add(pb, sc.0, sc.1, scale(hot, 0.45 * gain));
@@ -809,8 +1284,24 @@ pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, c
         }
     }
 
-    // 2c. Focal scorch starburst where the beam terminates (wall stop or max reach).
+    // 2c. Focal scorch where the beam terminates (wall stop or max reach): a
+    // charcoal smear under a hot star, so a sweep leaves a mark on the surface
+    // it cut rather than a floating spark.
     let se = w2s(end, cam);
+    let soot: Rgb = (54, 30, 16);
+    for &(dx, dy) in &[
+        (0, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+        (2, 0),
+        (-2, 0),
+        (0, 2),
+        (0, -2),
+    ] {
+        blend(pb, se.0 + dx, se.1 + dy, soot, 0.55 * b);
+    }
     blend(pb, se.0, se.1, hot, (0.90 * b).clamp(0.0, 1.0));
     for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
         plot_add(pb, se.0 + dx, se.1 + dy, scale(hot, 0.70 * b));
@@ -821,15 +1312,11 @@ pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, c
     }
 }
 
-/// The **Tail Thrash** arc: the rat's tail stretched into a long whipping arc
-/// that sweeps around it.
+/// The **Tail Thrash** full-circle spin: a broad pink sweep trail making a full
+/// disc around the rat, with a hot rose-white leading blade and outer dust rim.
 ///
 /// `visual` is `(angle, reach, brightness)` from `World::thrash_visual`: the
-/// sweep angle in world radians, the arc's radius in px, and a 0..1 fade that
-/// snaps the arc on with the trigger's screen shake and lingers out as the
-/// burst winds down. The arc is drawn as a tapering whip: a bright leading edge
-/// at `angle` with two dimmer ``ghost`` arcs trailing behind it (where the tip
-/// just was), so a still frame reads as motion rather than a hoop.
+/// sweep angle in world radians, the disc's radius in px, and a 0..1 fade.
 pub fn draw_tail_thrash(
     pb: &mut PixelBuffer,
     player: &Player,
@@ -844,55 +1331,250 @@ pub fn draw_tail_thrash(
         return;
     }
     let origin = w2s(player.pos, cam);
-    // Three passes: the live leading edge and two ghosts behind it (where the
-    // tip just was), so one frame reads as motion, not as a hoop.
-    for pass in 0..3 {
-        let lead = -(pass as f32) * 0.17;
-        let atten = if pass == 0 { 1.0 } else { 0.34 / pass as f32 };
-        let steps = (reach * 1.3) as i32;
-        for i in 0..steps.max(2) {
-            let t = i as f32 / steps.max(2) as f32;
-            // Radius from the rat's rump (4 px) out to the full reach.
-            let r = 4.0 + (reach - 4.0) * t;
-            // The arc lags behind the leading edge as it unwinds from the root,
-            // which is what makes a still frame look like a whip in motion.
-            let a = angle + lead - t * 0.42;
-            let p = Vec2::from_angle(a);
-            let nx = -p.y;
-            let ny = p.x;
-            let bx = origin.0 + (p.x * r).round() as i32;
-            let by = origin.1 + (p.y * r).round() as i32;
-            let weight = atten * fade * (0.32 + 0.68 * t);
-            let hot = if pass == 0 {
-                // Near-white at the tip, tail-rose at the root.
-                (
-                    (205.0 + 50.0 * t) as u8,
-                    (95.0 + 145.0 * t) as u8,
-                    (120.0 + 110.0 * t) as u8,
-                )
-            } else {
-                TAIL_BASE
-            };
-            // Core plus a two-step band each side: the whip has mass, and a
-            // 1-px line disappears against a busy floor. The 1.8x gain keeps
-            // the additive blend above the floor's own dark tones (a raw
-            // weight reads brown on the Sewer's stone).
-            let glow = (weight * 1.8).min(1.4);
-            plot_add(pb, bx, by, scale(hot, glow));
-            for (k, gain) in [(1.0f32, 0.6f32), (2.0, 0.26)] {
-                plot_add(
-                    pb,
-                    origin.0 + (p.x * r + nx * k).round() as i32,
-                    origin.1 + (p.y * r + ny * k).round() as i32,
-                    scale(hot, glow * gain),
-                );
-                plot_add(
-                    pb,
-                    origin.0 + (p.x * r - nx * k).round() as i32,
-                    origin.1 + (p.y * r - ny * k).round() as i32,
-                    scale(hot, glow * gain),
-                );
+    let pink_hot: Rgb = (255, 242, 250);
+    let pink_bright: Rgb = (255, 102, 184);
+    let pink_deep: Rgb = (196, 44, 128);
+    let dust_rim: Rgb = (204, 192, 178);
+
+    // 1. Broad pink full-disc sweep trail spanning ~300° behind `angle` across
+    //    concentric motion bands (cheap, zero alloc, crisp silhouette at 1x & 2x).
+    let trail_span = 5.25f32;
+    let r_min = (reach * 0.28).max(5.0);
+    let bands = 6i32;
+    for b in 0..bands {
+        let bt = b as f32 / (bands - 1) as f32;
+        let r = r_min + (reach - r_min) * bt;
+        let is_outer = b == bands - 1;
+        // Outer rings span wider and brighter so the full spinning disc reads clearly.
+        let span = trail_span * (0.65 + 0.35 * bt);
+        let steps = (r * span * 0.55).ceil().clamp(16.0, 160.0) as i32;
+        let mut last = (i32::MIN, i32::MIN);
+        for i in 0..=steps {
+            let frac = i as f32 / steps as f32; // 0 = leading edge, 1 = tail end
+            let a = angle - frac * span;
+            let (sa, ca) = a.sin_cos();
+            let px = origin.0 + (ca * r).round() as i32;
+            let py = origin.1 + (sa * r).round() as i32;
+            if (px, py) == last {
+                continue;
             }
+            last = (px, py);
+            let trail_fade = (1.0 - frac).powf(1.35) * fade;
+            let col = if frac < 0.14 {
+                mix(pink_hot, pink_bright, frac / 0.14)
+            } else {
+                mix(pink_bright, pink_deep, ((frac - 0.14) / 0.86).clamp(0.0, 1.0))
+            };
+            let gain = if is_outer {
+                (0.95 * trail_fade).clamp(0.0, 1.0)
+            } else {
+                ((0.36 + 0.34 * bt) * trail_fade).clamp(0.0, 0.88)
+            };
+            if is_outer && frac < 0.45 {
+                blend(pb, px, py, col, (0.85 * gain).clamp(0.0, 0.95));
+            } else {
+                plot_add(pb, px, py, scale(col, gain));
+            }
+            // Faint dust kicked outward just outside the leading half of the outer rim.
+            if is_outer && i % 4 == 0 && frac < 0.65 {
+                let dx = origin.0 + (ca * (r + 2.4)).round() as i32;
+                let dy = origin.1 + (sa * (r + 2.4)).round() as i32;
+                plot_add(pb, dx, dy, scale(dust_rim, 0.38 * trail_fade));
+            }
+        }
+    }
+
+    // 2. Blazing rose-white leading tail blade cutting across the disc at `angle`.
+    let steps = (reach * 1.25).ceil().max(2.0) as i32;
+    let mut last = (i32::MIN, i32::MIN);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let r = 4.0 + (reach - 4.0) * t;
+        let a = angle - t * 0.24;
+        let p = Vec2::from_angle(a);
+        let nx = -p.y;
+        let ny = p.x;
+        let bx = origin.0 + (p.x * r).round() as i32;
+        let by = origin.1 + (p.y * r).round() as i32;
+        if (bx, by) == last {
+            continue;
+        }
+        last = (bx, by);
+        let weight = fade * (0.45 + 0.55 * t);
+        let core = mix(pink_bright, pink_hot, 0.35 + 0.65 * t);
+        blend(pb, bx, by, core, (0.92 * weight).clamp(0.0, 1.0));
+        for side in [-1.0f32, 1.0] {
+            let sx = origin.0 + (p.x * r + nx * side * 1.2).round() as i32;
+            let sy = origin.1 + (p.y * r + ny * side * 1.2).round() as i32;
+            plot_add(pb, sx, sy, scale(pink_bright, 0.80 * weight));
+        }
+    }
+}
+
+/// **Gnaw** melee bite: two bone-white tooth crescents closing like a mouth in
+/// front of the rat's nose, with a tiny bone-white snap spark at closure.
+pub fn draw_gnaw_bite(pb: &mut PixelBuffer, snap: &BiteSnap, cam: Vec2) {
+    let total = snap.total.max(1e-4);
+    let progress = (1.0 - snap.t / total).clamp(0.0, 1.0);
+    let fade = if progress < 0.72 {
+        1.0
+    } else {
+        (1.0 - (progress - 0.72) / 0.28).clamp(0.0, 1.0)
+    };
+    if fade <= 0.02 {
+        return;
+    }
+    let dir = if snap.dir.len_sq() > 1e-4 {
+        snap.dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let perp = dir.perp();
+    // Mouth centre sits just in front of the rat's snout.
+    let center = snap.pos + dir * 4.5;
+
+    // Jaw closes briskly from open (`5.2 px` half-gap) to shut (`0.4 px`) by t=0.52.
+    let close = (progress / 0.52).clamp(0.0, 1.0);
+    let ease = close * close;
+    let gap = 5.2 * (1.0 - ease) + 0.4;
+
+    let white: Rgb = (255, 255, 250);
+    let bone: Rgb = (238, 224, 192);
+    let outline: Rgb = (24, 18, 22);
+
+    // Two opposing curved tooth crescents (upper `+perp`, lower `-perp`).
+    for side in [-1.0f32, 1.0] {
+        for step in -3..=3i32 {
+            let u = step as f32 * 1.25;
+            // Crescent curves outward at the corners (`step = ±3`) and closes inward at centre.
+            let arch = (step.abs() as f32 / 3.0).powi(2) * 1.9;
+            let v = side * (gap + arch);
+            let p = center + dir * u + perp * v;
+            let s = w2s(p, cam);
+            // Dark outer rim behind the crescent so white teeth pop on bright floors.
+            let rim = w2s(p + perp * (side * 1.2), cam);
+            if rim != s {
+                blend(pb, rim.0, rim.1, outline, 0.65 * fade);
+            }
+            let col = if step.abs() <= 1 { white } else { bone };
+            blend(pb, s.0, s.1, col, (0.96 * fade).clamp(0.0, 1.0));
+            // Three sharp inward-pointing white fangs on each jaw (`step = -2, 0, +2`).
+            if step % 2 == 0 {
+                let fang = w2s(p - perp * (side * 1.35), cam);
+                blend(pb, fang.0, fang.1, white, (0.98 * fade).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    // Crisp tiny bone-white clack spark at the bite seam when the jaws snap shut.
+    if (0.42..=0.88).contains(&progress) {
+        let spark = (1.0 - ((progress - 0.56).abs() / 0.32)).clamp(0.0, 1.0);
+        let sc = w2s(center + dir * 0.5, cam);
+        pb.plot(sc.0, sc.1, white);
+        for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            plot_add(pb, sc.0 + dx, sc.1 + dy, scale(white, 0.85 * spark));
+        }
+    }
+}
+
+/// **Tail Whip** frontal swipe: a quick pink half-circle crescent in FRONT of
+/// the rat only (`dir ± WHIP_ARC_HALF`), hot rose-white along the leading edge,
+/// tapering to sharp horns with dust motes at both arc ends (never behind the
+/// rat and never a full-circle disc like Tail Thrash).
+pub fn draw_tail_whip_crack(pb: &mut PixelBuffer, crack: &WhipCrack, cam: Vec2) {
+    let total = crack.total.max(1e-4);
+    let progress = (1.0 - crack.t / total).clamp(0.0, 1.0);
+    let fade = (1.0 - progress * progress).clamp(0.0, 1.0);
+    if fade <= 0.02 {
+        return;
+    }
+    let span = crack.to - crack.from;
+    let reach = span.len();
+    if reach <= 1.0 {
+        return;
+    }
+    let dir = span * (1.0 / reach);
+    let center_ang = dir.angle();
+    let half = WHIP_ARC_HALF;
+
+    let pink_hot: Rgb = (255, 240, 250);
+    let pink_bright: Rgb = (255, 108, 192);
+    let pink_deep: Rgb = (196, 44, 128);
+    let rim_dark: Rgb = (36, 14, 28);
+    let dust: Rgb = (204, 192, 178);
+
+    // Quick frontal sweep from -half across to +half (always strictly inside
+    // the front half-circle `[-half, +half]`, never behind the rat).
+    let lead_frac = (0.58 + 0.42 * (progress / 0.36).min(1.0)).clamp(0.0, 1.0);
+    let tail_frac = ((progress - 0.34) / 0.66).clamp(0.0, 0.72);
+    let a_start = center_ang - half + tail_frac * (2.0 * half);
+    let a_end = center_ang - half + lead_frac * (2.0 * half);
+    let arc_span = (a_end - a_start).max(0.05);
+
+    // Crescent thickness: plumpest at the centre of the front arc, tapering to
+    // crisp 1 px points at the ±90° horns (hollow around the rat, unlike Thrash).
+    let max_thick = (reach * 0.16).clamp(3.0, 5.5);
+    let steps = (reach * arc_span * 1.15).ceil().clamp(14.0, 128.0) as i32;
+
+    for i in 0..=steps {
+        let local_t = i as f32 / steps as f32; // 0 = trailing end, 1 = leading edge
+        let a = a_start + local_t * arc_span;
+        let full_u = ((a - (center_ang - half)) / (2.0 * half)).clamp(0.0, 1.0);
+        let belly = (full_u * std::f32::consts::PI).sin().powf(0.75);
+        let radial = Vec2::from_angle(a);
+        let lead_heat = local_t.powf(1.6);
+
+        // Subtle dark outer edge so the pink crescent stays crisp on bright floors.
+        let outer_rim = w2s(crack.from + radial * (reach + 1.1), cam);
+        blend(pb, outer_rim.0, outer_rim.1, rim_dark, 0.36 * fade * (0.4 + 0.6 * belly));
+
+        // Crescent body: radial layers from `reach` inward by `belly * max_thick`.
+        let depth = (belly * max_thick).round().max(1.0) as i32;
+        for d in 0..depth {
+            let rf = reach - d as f32;
+            if rf <= 4.0 {
+                break;
+            }
+            let p = w2s(crack.from + radial * rf, cam);
+            let inner_t = if depth > 1 {
+                d as f32 / (depth - 1) as f32
+            } else {
+                0.0
+            };
+            let col = if d == 0 {
+                mix(pink_bright, pink_hot, 0.35 + 0.65 * lead_heat)
+            } else {
+                mix(pink_bright, pink_deep, (inner_t * 0.85).clamp(0.0, 1.0))
+            };
+            let alpha = ((0.96 - inner_t * 0.38) * (0.45 + 0.55 * local_t) * fade).clamp(0.0, 1.0);
+            if d == 0 {
+                blend(pb, p.0, p.1, col, alpha);
+                plot_add(pb, p.0, p.1, scale(pink_hot, 0.28 * lead_heat * fade));
+            } else {
+                blend(pb, p.0, p.1, col, alpha * 0.82);
+            }
+        }
+    }
+
+    // Crisp leading tip sparkle right at the crescent's cutting head.
+    let head_pt = w2s(crack.from + Vec2::from_angle(a_end) * reach, cam);
+    blend(pb, head_pt.0, head_pt.1, pink_hot, (0.95 * fade).clamp(0.0, 1.0));
+    for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        plot_add(pb, head_pt.0 + dx, head_pt.1 + dy, scale(pink_hot, 0.45 * fade));
+    }
+
+    // A few pale dust motes kicked off both ±90° horn ends of the crescent.
+    for side in [-1.0f32, 1.0] {
+        let horn_dir = Vec2::from_angle(center_ang + side * half);
+        let drift = 1.5 + progress * 4.5;
+        for &(r_ofs, fwd_ofs, gain) in &[
+            (drift, 0.8f32, 0.68f32),
+            (drift + 2.2, 2.6, 0.48),
+            (drift - 1.2, 3.8, 0.38),
+        ] {
+            let mp = crack.from + horn_dir * (reach + r_ofs) + dir * fwd_ofs;
+            let s = w2s(mp, cam);
+            plot_add(pb, s.0, s.1, scale(dust, gain * fade));
         }
     }
 }
@@ -943,7 +1625,13 @@ fn draw_tail(
     cam: Vec2,
     tail: Option<TailCharge>,
     lash: Option<LashVisual>,
+    whip: Option<&WhipChain>,
 ) {
+    if let Some(chain) = whip.filter(|c| c.is_active()) {
+        draw_whip_chain(pb, elapsed, tint, cam, tail, chain);
+        return;
+    }
+
     let m = pose.moving;
     // Signed angle from the facing to the velocity: non-zero only mid-turn.
     let lag = if vel.len_sq() > 4.0 {
@@ -1245,6 +1933,294 @@ fn draw_tail(
     }
 }
 
+/// Draw the render-only physics-simulated [`WhipChain`] (Spiked Tail & evolved
+/// Barbed Wire): long, thin rat tail carrying a real travelling wave, bristling
+/// steel spikes (backward fishhook barbs + visible catch drag for Barbed Wire),
+/// supersonic motion smear, and a crisp white crack flash + tiny shock ring at
+/// the target tip.
+fn draw_whip_chain(
+    pb: &mut PixelBuffer,
+    elapsed: f32,
+    tint: Tint,
+    cam: Vec2,
+    tail: Option<TailCharge>,
+    chain: &WhipChain,
+) {
+    let nodes = &chain.pos;
+    let charge = tail.map_or(0.0, |t| t.charge);
+    let ready = tail.is_some_and(|t| t.ready);
+    let ready_flash = tail.map_or(0.0, |t| t.flash);
+    let pulse = 0.5 + 0.5 * (elapsed * 6.2).sin();
+    let a = tint.alpha();
+    let segs = WHIP_NODES - 1;
+
+    // 1. Drop shadow under the chain first so it never darkens the tail itself.
+    if !tint.ghost {
+        let mut last = (i32::MIN, i32::MIN);
+        for i in 0..segs {
+            let p0 = nodes[i];
+            let p1 = nodes[i + 1];
+            let steps = (p0.dist(p1) * 1.35).ceil().clamp(1.0, 24.0) as i32;
+            for k in 0..=steps {
+                let f = k as f32 / steps as f32;
+                let s = w2s(p0 + (p1 - p0) * f, cam);
+                if s != last {
+                    darken(pb, s.0 + 1, s.1 + 1, 0.30);
+                    last = s;
+                }
+            }
+        }
+    }
+
+    // 2. Supersonic whip-crack smear: 1–2 faint ghost arcs of the distal half
+    //    behind the live chain so even a single still frame reads as whip speed.
+    if chain.smear > 0.05 && chain.ghost_count > 0 {
+        let ghosts: [(&[Vec2; WHIP_NODES], f32); 2] = [
+            (&chain.ghost_a, 0.38 * chain.smear),
+            (&chain.ghost_b, 0.20 * chain.smear),
+        ];
+        for (gi, &(g_nodes, gain)) in ghosts.iter().enumerate() {
+            if gi >= chain.ghost_count as usize || gain <= 0.03 {
+                continue;
+            }
+            for i in (WHIP_NODES / 3)..segs {
+                let p0 = g_nodes[i];
+                let p1 = g_nodes[i + 1];
+                let steps = (p0.dist(p1) * 0.9).ceil().clamp(1.0, 16.0) as i32;
+                let mut last = (i32::MIN, i32::MIN);
+                for k in 0..=steps {
+                    let f = k as f32 / steps as f32;
+                    let s = w2s(p0 + (p1 - p0) * f, cam);
+                    if s != last {
+                        let u = (i as f32 + f) / segs as f32;
+                        plot_add(pb, s.0, s.1, scale(SPIKE_STEEL, gain * (0.4 + 0.6 * u)));
+                        last = s;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. The rat's own physical tail chain: long & thin, rose-pink grading to
+    //    bright tip (with optional Tail Thrash charge glow and Barbed Wire
+    //    steel-wrap highlights), flashing hot white at the tip on the crack.
+    let mut pixel_idx = 0u32;
+    let mut last_px = (i32::MIN, i32::MIN);
+    for i in 0..segs {
+        let p0 = nodes[i];
+        let p1 = nodes[i + 1];
+        let seg_vec = p1 - p0;
+        let seg_d = seg_vec.len();
+        let steps = (seg_d * 1.45).ceil().clamp(1.0, 28.0) as i32;
+        let normal = if seg_d > 1e-4 {
+            (seg_vec * (1.0 / seg_d)).perp()
+        } else {
+            Vec2::new(0.0, 1.0)
+        };
+        for k in 0..=steps {
+            let f = k as f32 / steps as f32;
+            let s_norm = ((i as f32 + f) / segs as f32).clamp(0.0, 1.0);
+            let wp = p0 + seg_vec * f;
+            let sc = w2s(wp, cam);
+            if sc == last_px {
+                continue;
+            }
+            last_px = sc;
+            pixel_idx = pixel_idx.wrapping_add(1);
+
+            let mut col = mix(TAIL_BASE, TAIL_TIP, s_norm);
+            col = mix(col, THRASH_GLOW, 0.5 * charge);
+            if ready {
+                let heat = ((0.15 + 0.55 * pulse + 0.45 * ready_flash)
+                    * (0.15 + 0.85 * s_norm * s_norm))
+                    .min(1.0);
+                col = mix(col, THRASH_HOT, heat);
+            }
+            if chain.barbed && pixel_idx % 3 == 0 {
+                col = mix(col, SPIKE_STEEL, 0.72);
+            }
+            if chain.flash > 0.0 && s_norm > 0.65 {
+                let tip_hot = ((s_norm - 0.65) / 0.35).clamp(0.0, 1.0) * chain.flash;
+                col = mix(col, SPIKE_HOT, tip_hot);
+            }
+            blend(pb, sc.0, sc.1, tint.apply(col), a);
+            if chain.flash > 0.2 && s_norm > 0.75 {
+                plot_add(pb, sc.0, sc.1, scale(SPIKE_HOT, 0.35 * chain.flash * a));
+            }
+            // Keep the whip long & thin: thicken only near the muscular base
+            // (or when Thrash-charged) so it tapers to a razor-thin 1 px lash.
+            if (s_norm < 0.28 && chain.bristle > 0.35) || (charge > 0.5 && s_norm < 0.45) {
+                let nx = normal.x.round() as i32;
+                let ny = normal.y.round() as i32;
+                if (nx, ny) != (0, 0) {
+                    let edge = if chain.barbed {
+                        mix(col, SPIKE_STEEL, 0.4)
+                    } else {
+                        col
+                    };
+                    blend(pb, sc.0 + nx, sc.1 + ny, tint.apply(edge), a * 0.75);
+                }
+            }
+        }
+    }
+
+    // 4. Steel spikes standing out along the chain while bristling / taut
+    //    (for Barbed Wire: bilateral backward-angled fishhook barbs).
+    if chain.bristle > 0.05 {
+        for i in 2..segs {
+            let s_norm = i as f32 / segs as f32;
+            let tang = nodes[i + 1] - nodes[i - 1];
+            if tang.len_sq() <= 1e-4 {
+                continue;
+            }
+            let d = tang.normalized();
+            let n = d.perp();
+            let sc = w2s(nodes[i], cam);
+            let spike_len = (1.0 + (0.9 + 2.1 * s_norm) * chain.bristle)
+                .round()
+                .clamp(1.0, 3.0) as i32;
+            let sides: &[f32] = if chain.barbed {
+                &[-1.0, 1.0]
+            } else if i % 2 == 0 {
+                &[1.0]
+            } else {
+                &[-1.0]
+            };
+            for &side in sides {
+                let barb_dir = if chain.barbed {
+                    // Angled backward toward the rump like real barbed wire.
+                    (n * (side * 0.82) - d * 0.57).normalized()
+                } else {
+                    n * side
+                };
+                for k in 1..=spike_len {
+                    let px = sc.0 + (barb_dir.x * k as f32).round() as i32;
+                    let py = sc.1 + (barb_dir.y * k as f32).round() as i32;
+                    let hot = k == spike_len;
+                    let c = if hot { SPIKE_HOT } else { SPIKE_STEEL };
+                    blend(pb, px, py, tint.apply(c), a);
+                    if hot && !tint.ghost {
+                        darken(pb, px + 1, py + 1, 0.22);
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Barbed Wire visible catch drag along the reeling chain during Recoil.
+    if chain.barbed && chain.drag_progress > 0.0 {
+        let reel_fade = (1.0 - chain.drag_progress * 0.75).clamp(0.25, 1.0);
+        let tip_w = nodes[WHIP_NODES - 1];
+        let ts = w2s(tip_w, cam);
+        let tang = (nodes[WHIP_NODES - 1] - nodes[WHIP_NODES - 2]).normalized();
+        let perp = tang.perp();
+        // Hooked barbed collar + snag cluster riding the reeling tip home.
+        blend(pb, ts.0, ts.1, SPIKE_HOT, 0.95 * reel_fade);
+        for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            blend(pb, ts.0 + dx, ts.1 + dy, SPIKE_STEEL, 0.90 * reel_fade);
+        }
+        for side in [-1.0f32, 1.0] {
+            let hook = (perp * side * 1.8 - tang * 1.4).normalized();
+            for k in 1..=2 {
+                let hx = ts.0 + (hook.x * k as f32).round() as i32;
+                let hy = ts.1 + (hook.y * k as f32).round() as i32;
+                blend(pb, hx, hy, SPIKE_HOT, 0.88 * reel_fade);
+            }
+        }
+        // Subtle tension glint back to the caught body if it is alive nearby.
+        if let Some(cp) = chain.catch_pos {
+            if cp.dist(tip_w) <= 18.0 {
+                let cs = w2s(cp, cam);
+                let steps = (tip_w.dist(cp) * 0.8).ceil().clamp(1.0, 12.0) as i32;
+                for k in 1..steps {
+                    let f = k as f32 / steps as f32;
+                    let mx = ts.0 + ((cs.0 - ts.0) as f32 * f).round() as i32;
+                    let my = ts.1 + ((cs.1 - ts.1) as f32 * f).round() as i32;
+                    plot_add(pb, mx, my, scale(SPIKE_STEEL, 0.55 * reel_fade));
+                }
+            }
+        }
+    }
+
+    // 6. White crack flash + tiny crisp shock ring at the tip (`chain.point`).
+    let tip_s = w2s(chain.point, cam);
+    if chain.flash > 0.02 {
+        let g = chain.flash.clamp(0.0, 1.0) * a;
+        let dark: Rgb = (24, 18, 28);
+        for &(dx, dy) in &[(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            blend(pb, tip_s.0 + dx, tip_s.1 + dy, dark, 0.45 * g);
+        }
+        blend(pb, tip_s.0, tip_s.1, SPIKE_HOT, g);
+        let ray_len = if g > 0.55 { 4 } else { 3 };
+        for k in 1..=ray_len {
+            let ra = ((1.0 - (k as f32 - 0.5) / (ray_len as f32 + 0.5)) * g).clamp(0.0, 1.0);
+            let c = if k <= 2 { SPIKE_HOT } else { SPIKE_STEEL };
+            for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                blend(pb, tip_s.0 + dx * k, tip_s.1 + dy * k, c, ra);
+            }
+        }
+        for k in 1..=(ray_len - 1).max(1) {
+            let da = ((0.85 - k as f32 * 0.22).max(0.2) * g).clamp(0.0, 1.0);
+            for &(dx, dy) in &[(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                plot_add(pb, tip_s.0 + dx * k, tip_s.1 + dy * k, scale(SPIKE_HOT, da));
+            }
+        }
+    }
+    // Tiny expanding white-steel shock ring right around the crack tip.
+    if chain.shock_t > 0.0 && chain.shock_t < 1.0 {
+        let rf = 2.0 + 5.5 * chain.shock_t;
+        let fade = (1.0 - chain.shock_t).powf(1.2) * a;
+        let seg_count = ((rf * 4.5).round() as i32).clamp(10, 36);
+        let mut last = (i32::MIN, i32::MIN);
+        for i in 0..seg_count {
+            let ang = i as f32 / seg_count as f32 * std::f32::consts::TAU;
+            let px = tip_s.0 + (ang.cos() * rf).round() as i32;
+            let py = tip_s.1 + (ang.sin() * rf).round() as i32;
+            if (px, py) == last {
+                continue;
+            }
+            last = (px, py);
+            let col = if chain.shock_t < 0.45 {
+                SPIKE_HOT
+            } else {
+                SPIKE_STEEL
+            };
+            blend(pb, px, py, col, (0.85 * fade).clamp(0.0, 1.0));
+        }
+    }
+    // Small burst of thorns + subtle dashed burst radius at `chain.point`
+    // (the hit effect at the impact point, staying put while the whip recoils).
+    if chain.star > 0.02 && chain.radius > 0.5 {
+        let g = chain.star.clamp(0.0, 1.0);
+        let r = chain.radius.max(1.5);
+        for i in 0..6 {
+            let ang = i as f32 * std::f32::consts::TAU / 6.0 + 0.26;
+            for (k, fade) in [(1.0f32, 0.90f32), (0.62, 0.50)] {
+                let reach = r * k;
+                plot_add(
+                    pb,
+                    tip_s.0 + (ang.cos() * reach).round() as i32,
+                    tip_s.1 + (ang.sin() * reach).round() as i32,
+                    scale(SPIKE_HOT, g * fade),
+                );
+            }
+        }
+        let dashes = ((r * 1.4) as i32).max(6);
+        for i in 0..dashes {
+            if i % 2 == 1 {
+                continue;
+            }
+            let ang = i as f32 / dashes as f32 * std::f32::consts::TAU + 0.12;
+            plot_add(
+                pb,
+                tip_s.0 + (ang.cos() * r).round() as i32,
+                tip_s.1 + (ang.sin() * r).round() as i32,
+                scale(SPIKE_STEEL, g * 0.65),
+            );
+        }
+    }
+}
+
 /// Four pink paws that poke out past the flanks in diagonal pairs.
 fn draw_feet(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
     let reach = 0.25 + 0.75 * pose.moving;
@@ -1459,6 +2435,97 @@ mod tests {
         p.pos = Vec2::new(0.0, 0.0);
         let mut pb = PixelBuffer::new(8, 8);
         draw_rat(&mut pb, &p, 0.3, Vec2::ZERO);
+    }
+
+    /// Every pixel of the rig, so two frames can be compared exactly.
+    fn rig_pixels(p: &Player, elapsed: f32) -> Vec<Rgb> {
+        let pb = render_rat(p, elapsed);
+        let mut out = Vec::with_capacity(RIG_W * RIG_H);
+        for y in 0..RIG_H {
+            for x in 0..RIG_W {
+                out.push(pb.pixel_at(x, y));
+            }
+        }
+        out
+    }
+
+    /// The owner asked for the dash charge indicator **under the rat** to go:
+    /// a cooling, ready, ready-popping or refused dash draws exactly the rat
+    /// and nothing else, so no pip sits in the corner of the eye any more. (The
+    /// HUD's dash module is where the cooldown lives now.)
+    #[test]
+    fn no_dash_pips_are_drawn_under_the_rat() {
+        let base = rig_pixels(&rat(rig_pos(), 1.1), 0.4);
+        // Each state used to light its own arc: cooling amber, the ready pop's
+        // halo, the dashing drain, the refused red shake.
+        for (cd, ready_flash, denied, dashing) in [
+            (0.0, 0.0, 0.0, 0.0),  // ready
+            (0.8, 0.0, 0.0, 0.0),  // cooling, part way back up
+            (0.8, 0.4, 0.0, 0.0),  // the ready pop
+            (1.4, 0.0, 0.3, 0.0),  // a refused press
+        ] {
+            let mut p = rat(rig_pos(), 1.1);
+            p.dash_cd = cd;
+            p.dash_ready_flash = ready_flash;
+            p.dash_denied = denied;
+            p.dash_active = dashing;
+            assert_eq!(
+                rig_pixels(&p, 0.4),
+                base,
+                "cd={cd} flash={ready_flash} denied={denied}: the gauge is back"
+            );
+        }
+        // The dashing state changes the *pose*, so it is compared with the same
+        // pose and no cooldown: the drain pip it used to add is gone too.
+        let mut dashing = rat(rig_pos(), 1.1);
+        dashing.dash_active = 0.16;
+        let mut dashing_cooling = rat(rig_pos(), 1.1);
+        dashing_cooling.dash_active = 0.16;
+        dashing_cooling.dash_cd = 0.2;
+        assert_eq!(rig_pixels(&dashing_cooling, 0.4), rig_pixels(&dashing, 0.4));
+    }
+
+    /// …but the Super Dash charge ring still appears while a charge is held,
+    /// above the rat where the ring's first pip sits.
+    #[test]
+    fn the_super_dash_charge_ring_still_appears_while_charging() {
+        let centre = rig_pos();
+        // The top pip of the ring: `CHARGE_PIPS` start clockwise from straight
+        // up, at `GAUGE_RADIUS`.
+        let top = (centre.0 as i32, (centre.1 - GAUGE_RADIUS).round() as i32);
+        let idle = render_rat(&rat(centre, 0.0), 0.25);
+        let mut p = rat(centre, 0.0);
+        p.dash_charging = true;
+        p.dash_charge = 1.0;
+        let charging = render_rat(&p, 0.25);
+        let mut changed = 0;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let at = ((top.0 + dx) as usize, (top.1 + dy) as usize);
+                if idle.pixel_at(at.0, at.1) != charging.pixel_at(at.0, at.1) {
+                    changed += 1;
+                }
+            }
+        }
+        assert!(
+            changed >= 2,
+            "the charge ring no longer draws above the rat ({changed} pixels changed)"
+        );
+        // A held dash with an empty meter draws the sockets, so it still reads
+        // as a ring rather than nothing.
+        let mut empty = rat(centre, 0.0);
+        empty.dash_charging = true;
+        empty.dash_charge = 0.0;
+        let cold = render_rat(&empty, 0.25);
+        let mut socket = 0;
+        for y in 0..RIG_H as i32 {
+            for x in 0..RIG_W as i32 {
+                if cold.pixel_at(x as usize, y as usize) != idle.pixel_at(x as usize, y as usize) {
+                    socket += 1;
+                }
+            }
+        }
+        assert!(socket >= 18, "an empty held meter drew no ring: {socket} pixels");
     }
 
     /// Everything the tail added: the pixels that differ from the same rat with
@@ -2107,5 +3174,166 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_rat.ppm", out).unwrap();
+    }
+
+    /// Batch 12: Gnaw bite crescents, Tail Whip frontal half-circle crescent
+    /// (front only + dust motes), Tail Thrash broad pink full disc, and Spiked
+    /// Tail physics Verlet whip (wave during wind-up, tip landing on target at
+    /// the exact crack tick, spikes + white crack flash + tiny shock ring,
+    /// recoil & settle, and Barbed Wire catch drag) all render cleanly and leave
+    /// `lash == None` untouched.
+    #[test]
+    fn batch12_bite_whip_thrash_and_spiked_tail_render() {
+        let mut pb = PixelBuffer::new(96, 96);
+        let bg = (18, 22, 24);
+        let count_lit = |buf: &PixelBuffer| -> usize {
+            (0..buf.h)
+                .flat_map(|y| (0..buf.w).map(move |x| (x, y)))
+                .filter(|&(x, y)| buf.pixel_at(x, y) != bg)
+                .count()
+        };
+
+        // Gnaw bite: closing white tooth crescents.
+        pb.clear(bg);
+        let snap = BiteSnap {
+            pos: Vec2::new(40.0, 48.0),
+            dir: Vec2::new(1.0, 0.0),
+            t: 0.055,
+            total: 0.11,
+        };
+        draw_gnaw_bite(&mut pb, &snap, Vec2::ZERO);
+        assert!(count_lit(&pb) >= 16, "gnaw bite should draw closing tooth crescents");
+
+        // Tail Whip: frontal pink half-circle crescent ONLY in front of the rat
+        // (facing +X from x=48 -> zero pixels behind x=44).
+        pb.clear(bg);
+        let crack = WhipCrack {
+            from: Vec2::new(48.0, 48.0),
+            to: Vec2::new(78.0, 48.0),
+            t: 0.075,
+            total: 0.12,
+        };
+        draw_tail_whip_crack(&mut pb, &crack, Vec2::ZERO);
+        assert!(count_lit(&pb) >= 60, "tail whip should draw a visible frontal crescent");
+        let front_centre = pb.pixel_at(78, 48);
+        assert!(
+            front_centre != bg && front_centre.0 >= 180,
+            "tail whip crescent should be bright pink/white at front centre, got {front_centre:?}"
+        );
+        let behind_lit = (0..pb.h)
+            .flat_map(|y| (0..44).map(move |x| (x, y)))
+            .filter(|&(x, y)| pb.pixel_at(x, y) != bg)
+            .count();
+        assert_eq!(
+            behind_lit, 0,
+            "tail whip crescent must stay strictly in front of the rat, found {behind_lit} pixels behind"
+        );
+
+        // Tail Thrash: broad pink full-disc sweep trail.
+        pb.clear(bg);
+        let p = rat(Vec2::new(48.0, 48.0), 0.0);
+        draw_tail_thrash(&mut pb, &p, Some((0.4, 34.0, 0.9)), Vec2::ZERO);
+        assert!(count_lit(&pb) >= 180, "tail thrash should draw a broad full-circle disc trail");
+
+        // Spiked Tail: Verlet physics whip simulation across wind-up, crack,
+        // recoil, and post-lash settle.
+        let target = Vec2::new(82.0, 48.0);
+        let mut lash = Lash {
+            origin: p.pos,
+            target,
+            primary: None,
+            boss: false,
+            reach: 44.0,
+            radius: 10.0,
+            dmg: 22.0,
+            shove: 120.0,
+            shards: 0,
+            evolved: false,
+            timer: 0.0,
+            struck: false,
+            dragged: false,
+        };
+        let mut chain = WhipChain::new();
+        assert!(!chain.is_active(), "idle chain starts inactive");
+
+        // Step through wind-up at 60 Hz: verify a genuine lateral whip wave
+        // forms off the rump->target chord before the crack.
+        let mut max_lateral = 0.0f32;
+        let dt = 1.0 / 60.0;
+        for tick in 1..=7 {
+            lash.timer = tick as f32 * dt;
+            chain.sync(&p, lash.timer, Some((1, &lash, None)));
+            assert!(chain.is_active());
+            for node in chain.nodes().iter().skip(2).take(WHIP_NODES - 3) {
+                max_lateral = max_lateral.max((node.y - 48.0).abs());
+            }
+        }
+        assert!(
+            max_lateral >= 4.0,
+            "wind-up throw should produce a visible lateral whip wave, got max_lateral={max_lateral}"
+        );
+
+        // Exact crack tick (t >= LASH_WINDUP): tip must land squarely on target
+        // and render white crack flash + tiny shock ring + spikes.
+        lash.timer = LASH_WINDUP;
+        lash.struck = true;
+        chain.sync(&p, lash.timer, Some((1, &lash, None)));
+        assert!(
+            chain.tip().dist(target) <= 0.5,
+            "whip tip must land on target at crack tick, got dist={}",
+            chain.tip().dist(target)
+        );
+        pb.clear(bg);
+        draw_rat_with_whip(&mut pb, &p, lash.timer, Vec2::ZERO, 0.0, None, Some(&chain));
+        assert!(count_lit(&pb) >= 80, "spiked tail physics whip should render chain, spikes & flash");
+        let tip_px = pb.pixel_at(82, 48);
+        assert!(
+            tip_px.0 >= 230 && tip_px.1 >= 230 && tip_px.2 >= 230,
+            "crack tip should have a pure-white crack flash, got {tip_px:?}"
+        );
+
+        // Determinism check: a fresh chain jumping straight to the crack tick
+        // (capture harness snapshot) must also land on target without NaN.
+        let mut snap_chain = WhipChain::new();
+        snap_chain.sync(&p, LASH_WINDUP, Some((1, &lash, None)));
+        assert!(snap_chain.tip().dist(target) <= 0.5);
+        for n in snap_chain.nodes() {
+            assert!(n.x.is_finite() && n.y.is_finite());
+        }
+
+        // Recoil + post-lash settle returns cleanly to inactive idle tail.
+        lash.timer = LASH_TOTAL - 0.01;
+        chain.sync(&p, lash.timer, Some((1, &lash, None)));
+        for step in 1..=15 {
+            chain.sync(&p, LASH_TOTAL + step as f32 * dt, None);
+        }
+        assert!(!chain.is_active(), "chain must settle back to inactive idle tail");
+
+        // Barbed Wire evolution: reels the hooked catch back along the chain.
+        let mut barbed = Lash {
+            evolved: true,
+            timer: LASH_RECOIL_AT + 0.08,
+            struck: true,
+            dragged: true,
+            ..lash
+        };
+        let mut bchain = WhipChain::new();
+        bchain.sync(&p, barbed.timer, Some((2, &barbed, Some(Vec2::new(62.0, 48.0)))));
+        assert!(
+            bchain.tip().dist(p.pos) < target.dist(p.pos) - 5.0,
+            "barbed wire recoil should visibly reel tip back toward the rat"
+        );
+        pb.clear(bg);
+        draw_rat_with_whip(&mut pb, &p, barbed.timer, Vec2::ZERO, 0.0, None, Some(&bchain));
+        assert!(count_lit(&pb) >= 60);
+
+        // Zero-size buffer and degenerate lash must never panic.
+        barbed.target = p.pos;
+        bchain.sync(&p, 0.5, Some((3, &barbed, None)));
+        let mut zero = PixelBuffer::new(0, 0);
+        draw_gnaw_bite(&mut zero, &snap, Vec2::ZERO);
+        draw_tail_whip_crack(&mut zero, &crack, Vec2::ZERO);
+        draw_tail_thrash(&mut zero, &p, Some((0.4, 34.0, 0.9)), Vec2::ZERO);
+        draw_rat_with_whip(&mut zero, &p, 0.5, Vec2::ZERO, 0.0, None, Some(&bchain));
     }
 }

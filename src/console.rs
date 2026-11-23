@@ -1095,11 +1095,20 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "smooth",
         aliases: &["epx"],
-        usage: "smooth [on|off]",
-        summary: "Toggle the 1x edge smoothing (a render-only A/B).",
-        args: &[ArgKind::OnOff],
+        usage: "smooth [off|on|strong]",
+        summary: "Set the 1x edge smoothing: off, on (rounding) or strong (antialiasing).",
+        args: &[ArgKind::Words(&["off", "on", "strong"])],
         read_only: true,
         handler: cmd_smooth,
+    },
+    CommandSpec {
+        name: "foreground",
+        aliases: &["parallax"],
+        usage: "foreground [on|off]",
+        summary: "Toggle the parallax foreground layer (a render-only A/B).",
+        args: &[ArgKind::OnOff],
+        read_only: true,
+        handler: cmd_foreground,
     },
 ];
 
@@ -2253,9 +2262,28 @@ fn cmd_hitboxes(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> 
 fn cmd_smooth(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     // Render-only, like `fps` and `hitboxes` above: no simulation state moves,
     // so it must not flag the run as cheated.
-    let on = parse_on_off(args.first().copied(), app.smooth_enabled())?;
-    app.set_smooth(on);
-    app.console_line(format!("smooth {}", if on { "on" } else { "off" }), LineKind::Success);
+    use crate::render::subcell::Smooth;
+    let level = match args.first() {
+        // No argument flips it: off, or back on at the default (antialiasing).
+        None if app.smooth_enabled() => Smooth::Off,
+        None => Smooth::default(),
+        Some(word) => Smooth::parse(word)
+            .ok_or_else(|| format!("expected off, on or strong, got `{word}`"))?,
+    };
+    app.set_smooth_level(level);
+    app.console_line(format!("smooth {}", level.as_str()), LineKind::Success);
+    Ok(())
+}
+
+/// `foreground` is the parallax overhead layer ([`crate::render::foreground`]):
+/// render-only, so it never flags the run.
+fn cmd_foreground(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let on = parse_on_off(args.first().copied(), app.foreground_enabled())?;
+    app.set_foreground(on);
+    app.console_line(
+        format!("foreground {}", if on { "on" } else { "off" }),
+        LineKind::Success,
+    );
     Ok(())
 }
 
@@ -2802,6 +2830,34 @@ mod tests {
         run_command(&mut app, "smooth").expect("smooth steps");
         assert!(!app.smooth_enabled(), "no argument flips it");
         assert!(scrollback(&app).contains("smooth off"));
+        // Three levels: off, on (the EPX rounding) and strong (antialiasing,
+        // the default, and what a bare `smooth` turns back on).
+        use crate::render::subcell::Smooth;
+        run_command(&mut app, "smooth on").expect("smooth on");
+        assert_eq!(app.smooth_level(), Smooth::Epx);
+        run_command(&mut app, "smooth strong").expect("smooth strong");
+        assert_eq!(app.smooth_level(), Smooth::Strong);
+        assert!(scrollback(&app).contains("smooth strong"));
+        run_command(&mut app, "smooth 0").expect("smooth 0");
+        run_command(&mut app, "smooth").expect("smooth flips back on");
+        assert_eq!(app.smooth_level(), Smooth::Strong);
+        assert!(run_command(&mut app, "smooth lots").is_err());
+        assert!(!app.console_cheat, "no level flags the run");
+    }
+
+    /// `foreground` is the parallax overhead layer: render-only, so it must be
+    /// usable mid-run without branding the run CONSOLE USED.
+    #[test]
+    fn the_foreground_command_a_bs_the_layer_without_flagging() {
+        let mut app = fresh_app();
+        run_command(&mut app, "foreground off").expect("foreground off");
+        assert!(!app.foreground_enabled());
+        assert!(!app.console_cheat, "a render-only toggle must not flag the run");
+        run_command(&mut app, "foreground on").expect("foreground on");
+        assert!(app.foreground_enabled());
+        run_command(&mut app, "foreground").expect("foreground steps");
+        assert!(!app.foreground_enabled(), "no argument flips it");
+        assert!(scrollback(&app).contains("foreground off"));
     }
 
     #[test]

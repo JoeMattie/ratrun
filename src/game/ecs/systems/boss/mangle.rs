@@ -1264,14 +1264,14 @@ mod tests {
                 query.iter(&w.ecs).next().map(|b| b.kind)
             };
             assert_eq!(kind, Some(BossKind::Mangle), "seed {seed}");
-            // Start in the arena (the App leads the rat there with the minimap
-            // bearing; this test measures the fight).
-            if let Some(room) = w.level.boss_room() {
-                let centre = room.rect.center_world();
+            // Start in the fight: batch 12 removed the arena, so the boss
+            // arrives where the rat is and the fight measures nothing about a
+            // walk. Put the rat on the boss's own ground.
+            if let Some(pos) = w.boss_marker() {
                 if let Some(open) = w
                     .level
                     .tiles
-                    .nearest_open_center(centre, SizeClass::Small, 16)
+                    .nearest_open_center(pos, SizeClass::Small, 16)
                 {
                     w.player.pos = open;
                 }

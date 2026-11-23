@@ -9,6 +9,9 @@
 //!   simulation.
 //! * `subcell` — sub-cell detail (always on): the zoomed-out picture drawn with quadrant,
 //!   sextant or octant glyphs instead of half blocks. Render-only.
+//! * `foreground` — the parallax overhead layer: pipes, lines and hanging things
+//!   drawn after the lighting pass and under the hostile layer, sliding faster
+//!   than the floor. Render-only, capped at 8 % of the view's pixels a frame.
 //! * `palette` — colours and `to_term()`, the fold to the terminal's depth.
 //! * `hud`, `overlay`, `minimap`, `minimap_source`, `cursor` — what sits over
 //!   the playfield during a run.
@@ -36,3 +39,4 @@ pub mod minimap_source;
 pub mod options;
 pub mod lighting;
 pub mod zoom;
+pub mod foreground;

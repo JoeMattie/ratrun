@@ -11,8 +11,31 @@
 //! - `fire_one` — the six original weapons (Gnaw, Cheese Spray, Squeak Nova,
 //!   Spore Orbit, Tail Whip, Acid Spit) plus the dispatch arms for Acid Rain,
 //!   Hantavirus and Spiked Tail; the ACTIVE weapons, Laser Eyes and Super Dash
-//!   fire from their own systems. Includes Tail Whip's direct `Enemy::hurt`
-//!   and Spore Orbit's "carry the angle, drop the old ring" rule.
+//!   fire from their own systems. Includes Gnaw's bite and Tail Whip's crack
+//!   (both direct `Enemy::hurt`, no projectile) and Spore Orbit's "carry the
+//!   angle, drop the old ring" rule.
+//! - `nova_ring` — **Squeak Nova**'s expanding ring (batch 12): stepped from
+//!   `fire_weapons_system` every tick, so the shockwave is one system's
+//!   business and needs no schedule slot of its own.
+//!
+//! ## Batch 12: the weapons that play differently
+//!
+//! Six weapons changed *shape* so the look-alike groups read apart in one
+//! glance. Each one keeps the damage a body in its region takes per cycle:
+//!
+//! | weapon | before | now |
+//! |---|---|---|
+//! | Gnaw | a homing dart (a projectile) | a frontal **bite**: no projectile, a 20-24 px jaw, single target |
+//! | Cheese Spray | a long fan of darts | a short fan of **slow, fat wedges** whose cone slows |
+//! | Squeak Nova | a ring of radial darts | one **expanding ring** that damages what its front passes |
+//! | Tail Whip | a melee aura all round | a **frontal half-circle swipe** (180°, 30-42 px) |
+//! | Sonic Squeak | an expanding ring all round | a forward **cone** of 38° |
+//! | Laser Eyes | a fan of timed pulses | one continuous **sweep** across an arc |
+//!
+//! Tail Thrash (a full disc with knockback), Spiked Tail (a lash with a burst at
+//! the impact), Acid Spit (one lobbed glob into a pool) and Acid Rain
+//! (staggered drops, no lingering pool) already played the way the design table
+//! says, and were left alone.
 //!
 //! Neon-branch hooks re-applied here (`fire_one`):
 //! - `b.weapon = Some(kind)` on every player projectile.
@@ -45,11 +68,11 @@
 //!
 //! | weapon | walls | why |
 //! |---|---|---|
-//! | Gnaw | aimed at a visible foe; the dart stops on the first wall | the point of the change: no more hitting through cover |
-//! | Cheese Spray | aimed at a visible foe; darts stop on walls; spread off-axis darts clip the corridor walls | point-blank it still delivers the whole cone |
-//! | Squeak Nova | the ring stops on walls (no pass-through) | a radial burst that ignores walls makes corridors meaningless; down a corridor its axial shots are the ones that can reach you |
+//! | Gnaw | aimed at a visible foe; the bite needs a clear line | the point of the LOS rule: no biting through cover |
+//! | Cheese Spray | aimed at a visible foe; the wedges stop on walls; the slowing field needs a clear line too | point-blank it still delivers the whole wedge fan |
+//! | Squeak Nova | the ring stops on walls (a body behind masonry is never passed) | a shockwave that ignores walls makes corridors meaningless |
 //! | Spore Orbit | **passes through walls** (projectiles exempt from the sweep); damage still needs a line from the rat | a 24 px orbit cannot exist in a 16 px half-width corridor, so destroy-on-contact would silently empty the weapon there — and its damage is point-blank anyway |
-//! | Tail Whip | melee arc: an enemy takes it only with a clear line from the rat | a whip may not reach through a maze partition |
+//! | Tail Whip | the swipe needs a clear line per body it covers | a whip may not reach through a maze partition |
 //! | Acid Spit | lob lands on the first wall (unchanged), now also on a closed one-way gate; targets only a visible foe | the pool is area denial in the open, not artillery through cover |
 //!
 //! Resources: `Res<TickInput>` (dt), `ResMut<Player>`, `Res<Level>`,
@@ -97,12 +120,14 @@ use crate::game::bullet::{Bullet, Faction, Lob, Orbit};
 use crate::game::collision::SizeClass;
 use crate::game::ecs::systems::weapons_wave3b::MELEE_NUDGE_COOLDOWN;
 use crate::game::weapon::{
-    SQUEAK_BOSS_SLOW, SQUEAK_BOSS_SLOW_SECS, SQUEAK_ELITE_SLOW, SQUEAK_EXPAND, SQUEAK_SHOVE,
+    BITE_SECS, CHEESE_SLOW_MULT, CHEESE_SLOW_SECS, CHEESE_WEDGE_LIFE, CHEESE_WEDGE_SPEED,
+    GNAW_BITE_HALF, GNAW_BITE_REACH, NOVA_EXPAND, NOVA_REACH, SQUEAK_BOSS_SLOW,
+    SQUEAK_BOSS_SLOW_SECS, SQUEAK_CONE_HALF, SQUEAK_ELITE_SLOW, SQUEAK_EXPAND, SQUEAK_SHOVE,
     SQUEAK_STUN, THRASH_BOSS_KNOCKBACK, THRASH_BURST, THRASH_KNOCKBACK, THRASH_SHAKE,
-    THRASH_SWEEP_RATE, THRASH_SWEEPS,
+    THRASH_SWEEP_RATE, THRASH_SWEEPS, WHIP_ARC_HALF, WHIP_REACH, WHIP_SWIPE_SECS,
 };
 use crate::game::ecs::components::{
-    EchoSpoke, Entity, EvolvedShot, FairyRing, MilkTooth, SpawnId,
+    BiteSnap, Entity, EvolvedShot, FairyRing, MilkTooth, SpawnId, WhipCrack,
 };
 use crate::game::ecs::systems::evolutions;
 use crate::game::ecs::resources::{
@@ -143,6 +168,21 @@ pub fn fire_weapons_system(
     let dt = input.dt;
     // The reticle (wave 3 controls): `None` = auto-aim exactly as before.
     let aim = input.aim;
+    // Batch 12: age the melee weapons' snapshots (a bite and a whip crack each
+    // live a tenth of a second). Despawn is deferred, so the component exists
+    // for the whole frame it was spawned in.
+    for (entity, mut snap) in scratch.bites.iter_mut() {
+        snap.t -= dt;
+        if snap.t <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+    for (entity, mut crack) in scratch.cracks.iter_mut() {
+        crack.t -= dt;
+        if crack.t <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
     // Legacy: snapshot the player state and the two multipliers.
     let ppos = player.pos;
     let pface = player.face;
@@ -261,6 +301,9 @@ pub fn fire_weapons_system(
             &mut scratch.evo,
             &mut scratch.moved,
             aim,
+            // Batch 12: the Squeak Nova's ring is the weapon's live effect; the
+            // arm below seats it and `nova_ring` (after this loop) steps it.
+            &mut scratch.active,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -269,6 +312,25 @@ pub fn fire_weapons_system(
             // tick instead of serving a full cooldown for a dud shot.
             player.loadout.weapons[i].timer = 0.0;
         }
+    }
+
+    // Batch 12: **Squeak Nova**'s expanding ring. It is an ordinary
+    // auto-firing weapon (no charge meter), so nothing else owns its clock; the
+    // front is a pure function of its age, and `EnemyIndex` is live here with
+    // nothing reaped yet, exactly like the rest of this pass.
+    if scratch.active.nova_active() {
+        nova_ring(
+            dt,
+            &level,
+            &mut rng,
+            &mut particles,
+            order,
+            &mut enemies,
+            &mut bosses,
+            &mut damage_numbers,
+            &mut ledger,
+            &mut scratch.active,
+        );
     }
 
     // A weapon moved a body this tick (Counterweight's nudge or Ratchet Tail's
@@ -335,7 +397,7 @@ where
 /// twelve nearer enemies still keeps the weapons off it.
 pub const TARGET_LOS_CANDIDATES: usize = 12;
 
-/// Line-of-sight radius for the melee aura (a whip is not a projectile).
+/// Line-of-sight radius for a melee effect (a whip is not a projectile).
 const MELEE_LOS_RADIUS: f32 = 1.0;
 
 /// How far a weapon will even consider a target, in px: the shot's own reach
@@ -373,17 +435,94 @@ fn target_range(kind: WeaponKind) -> f32 {
     }
 }
 
-/// Half-angle of Gnaw's homing cone around an aim direction: within this cone
-/// of the reticle the nearest reachable body steals the shot, outside it the
-/// dart flies straight. Mild on purpose — aiming must feel direct, not sticky.
-const AIM_CONE_COS: f32 = 0.9397; // cos(20°)
-
 /// The aim direction from an aim **point** (world pixels), or `None` when
 /// there is no aim or the reticle sits on the rat.
 fn aim_dir(ppos: Vec2, aim: Option<Vec2>) -> Option<Vec2> {
     aim.map(|p| p - ppos)
         .filter(|v| v.len_sq() > 4.0)
         .map(|v| v.normalized())
+}
+
+/// The unit direction a whole-cast weapon fires along (batch 12's cone
+/// weapons): the reticle when the player aims, else the rat's facing, else up.
+fn cast_dir(ppos: Vec2, pface: Vec2, aim: Option<Vec2>) -> Vec2 {
+    aim_dir(ppos, aim).unwrap_or_else(|| {
+        if pface.len_sq() > 1e-4 {
+            pface.normalized()
+        } else {
+            Vec2::new(0.0, -1.0)
+        }
+    })
+}
+
+/// Does the circle at `center` (radius `r`) lie inside the cone that starts at
+/// `origin`, points along `dir`, is `len` px long and is `half` radians wide?
+///
+/// The body's own radius is slack at both ends: a body whose edge pokes into the
+/// wedge is inside it (that is what makes a cone feel like a swept volume
+/// rather than a laser pointer). The angular slack is `asin(r / distance)`, the
+/// angle the body's silhouette subtends — small at range, generous point-blank.
+pub fn cone_hits_circle(
+    origin: Vec2,
+    dir: Vec2,
+    len: f32,
+    half: f32,
+    center: Vec2,
+    r: f32,
+) -> bool {
+    let rel = center - origin;
+    let dist = rel.len();
+    // Behind the muzzle (a body the rat is standing on is not "behind").
+    if rel.dot(dir) + r < 0.0 {
+        return false;
+    }
+    if dist - r > len {
+        return false;
+    }
+    if dist <= r + 0.5 {
+        return true;
+    }
+    let angle = rel.normalized().dot(dir).clamp(-1.0, 1.0).acos();
+    let slack = (r / dist).clamp(0.0, 1.0).asin();
+    angle <= half + slack
+}
+
+/// The nearest live body inside a cone with a clear line to the rat.
+///
+/// `SpawnId` order decides ties (the lowest id wins), exactly like
+/// [`nearest_visible`], and the walk stops at the first body because the pick is
+/// "nearest", not "first". Used by the two batch-12 melee weapons: Gnaw's bite
+/// and the Tail Whip's crack.
+fn nearest_in_cone(
+    level: &Level,
+    reach: f32,
+    half: f32,
+    dir: Vec2,
+    order: &[Entity],
+    enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
+    from: Vec2,
+) -> Option<(Entity, Vec2)> {
+    let mut best: Option<(f32, Entity, Vec2)> = None;
+    for &entity in order {
+        let Ok((_, _, e)) = enemies.get(entity) else {
+            continue;
+        };
+        if !e.alive() {
+            continue;
+        }
+        let d = e.pos.dist_sq(from);
+        if best.is_some_and(|(bd, _, _)| d >= bd) {
+            continue;
+        }
+        if !cone_hits_circle(from, dir, reach, half, e.pos, e.radius) {
+            continue;
+        }
+        if !los_clear(level, from, e.pos, MELEE_LOS_RADIUS) {
+            continue;
+        }
+        best = Some((d, entity, e.pos));
+    }
+    best.map(|(_, entity, pos)| (entity, pos))
 }
 
 /// The same pick as [`nearest_visible`], with the reach supplied by the caller
@@ -525,6 +664,16 @@ pub struct FireScratch<'w, 's> {
     /// the numbers alone). Bundled into this scratch because the system is at
     /// bevy's 16-parameter cap and the console's extra slot would overflow it.
     cvars: Res<'w, Cvars>,
+    /// The two melee snares' pictures (`BiteSnap`, `WhipCrack`): aged and
+    /// despawned here because this pass runs every tick and the schedule has no
+    /// spare slot for two 0.1 s decorations.
+    bites: Query<'w, 's, (Entity, &'static mut BiteSnap)>,
+    cracks: Query<'w, 's, (Entity, &'static mut WhipCrack)>,
+    /// The concentrated weapons' live effects. **Squeak Nova**'s expanding
+    /// ring is stepped here (it is a weapon effect, not an active weapon) and
+    /// `fire_one` writes it on the cast; the Tail Thrash and the Sonic Squeak
+    /// cone are `active_weapons_system`'s business and never touched here.
+    active: ResMut<'w, ActiveFx>,
 }
 
 /// The active-weapons pass's two reused buffers.
@@ -639,17 +788,22 @@ fn nearest_visible(
 ///    reached zero is spent. A press with nothing charged does nothing, and an
 ///    active still fires when the dash is on cooldown (the dash is the
 ///    `player_system`'s business, not this system's).
-/// 2. **Live effects.** A Tail Thrash burst sweeps three times over
-///    `THRASH_BURST` seconds: each sweep hurts every enemy in the arc, deletes
+/// 2. **Live effects.** A Tail Thrash burst sweeps three full discs over
+///    `THRASH_BURST` seconds: each sweep hurts every enemy in the disc, deletes
 ///    enemy bullets inside it, knocks survivors outward and re-damages the boss.
-///    A Sonic Squeak ring expands over `SQUEAK_EXPAND` seconds and hits every
-///    enemy once as its front passes (the `prev..now` band), stunning regulars,
-///    slowing elites and briefly slowing the boss.
+///    A Sonic Squeak press resolves **once, on the press tick**, against the
+///    forward cone (38° either side of the aim, out to the weapon's reach): every
+///    body inside it takes the hit, is stunned (elites and heavies slowed) and is
+///    shoved outward, and the drawn chevrons that follow only animate the push.
 ///
 /// Determinism: the enemy walk uses the same stable order the other weapons use
 /// and every per-enemy rng draw happens inside [`vfx`] calls that already draw
 /// in `SpawnId` order, so a replay of the same inputs lands the same hits in the
 /// same order. Nothing here draws rng unless a weapon is actually spent.
+///
+/// The **Squeak Nova**'s ring is stepped by [`nova_ring`] from
+/// `fire_weapons_system` instead (it is an ordinary auto-firing weapon, so
+/// nothing here owns its clock).
 #[allow(clippy::too_many_arguments)]
 pub fn active_weapons_system(
     mut commands: Commands,
@@ -716,6 +870,9 @@ pub fn active_weapons_system(
     }
 
     // 1b. The Space press spends every fully charged active weapon.
+    // The Sonic Squeak's cone is aimed like every other whole-cast weapon: the
+    // reticle when the player aims, else the rat's facing.
+    let cone_dir = cast_dir(ppos, pface, input.aim);
     if input.active {
         for i in 0..player.loadout.weapons.len() {
             let (kind, charged) = {
@@ -767,6 +924,10 @@ pub fn active_weapons_system(
                     sfx.0.push(Sfx::ShootThrash);
                 }
                 WeaponKind::SonicSqueak => {
+                    // Batch 12: a **cone**, not a ring. The damage, the stun,
+                    // the shove and Roll Call's tags all land on the press
+                    // tick, inside the wedge; the fields below only drive the
+                    // drawn nested chevrons pushing outward.
                     *fx = ActiveFx {
                         squeak_left: SQUEAK_EXPAND,
                         squeak_prev_r: 0.0,
@@ -774,14 +935,28 @@ pub fn active_weapons_system(
                         squeak_max_r: reach,
                         squeak_dmg: dmg,
                         squeak_pos: ppos,
+                        squeak_half: SQUEAK_CONE_HALF,
+                        squeak_facing: cone_dir,
                         ..*fx
                     };
                     fx.squeak_evolved = evolved;
-                    // A fresh ring starts with no tags (Roll Call).
+                    // A fresh cone starts with no tags (Roll Call).
                     fx.clear_roll_call();
                     shake.amount = shake.amount.max(1.6);
                     vfx::emit_sonic_squeak(&mut particles, &mut rng.0, ppos, reach, SQUEAK_EXPAND);
                     sfx.0.push(Sfx::SonicSqueak);
+                    squeak_cone(
+                        &level,
+                        &mut rng,
+                        &mut particles,
+                        order,
+                        &mut enemies,
+                        &mut bosses,
+                        &mut damage_numbers,
+                        &mut ledger,
+                        &mut fx,
+                        stats.shove_mult,
+                    );
                 }
                 _ => {}
             }
@@ -824,7 +999,9 @@ pub fn active_weapons_system(
         }
     }
 
-    // 2b. The squeak ring: expand it and hit everything its front passes.
+    // 2b. The squeak cone's push. The hit already landed on the press tick, so
+    // this only advances the drawn chevron front (the art fades the wedge out
+    // with `squeak_left`).
     if fx.squeak_left > 0.0 {
         fx.squeak_left = (fx.squeak_left - dt).max(0.0);
         let prev = fx.squeak_r;
@@ -832,18 +1009,6 @@ pub fn active_weapons_system(
         let now = (prev + step).min(fx.squeak_max_r);
         fx.squeak_prev_r = prev;
         fx.squeak_r = now;
-        squeak_ring(
-            &level,
-            &mut rng,
-            &mut particles,
-            order,
-            &mut enemies,
-            &mut bosses,
-            &mut damage_numbers,
-            &mut ledger,
-            &mut fx,
-            stats.shove_mult,
-        );
         if fx.squeak_left <= 0.0 {
             fx.squeak_r = 0.0;
             fx.squeak_prev_r = 0.0;
@@ -1010,9 +1175,20 @@ fn thrash_sweep(
     );
 }
 
-/// Resolve one tick of the squeak ring: everything the front passed.
+/// Resolve a **Sonic Squeak** press: everything inside the forward cone.
+///
+/// Batch 12 made the squeak directional. It used to be a ring: everything whose
+/// near edge the expanding front crossed, all the way around the rat. It is now
+/// one wedge, `SQUEAK_CONE_HALF` either side of the aim, out to the weapon's
+/// reach — the shape the tail thrash is not (a disc) and the nova is not (a
+/// ring). Everything inside it takes the hit once per press, is stunned (elites
+/// and heavies slowed), shoved outward along the cone's axis, and tagged for
+/// **Roll Call**.
+///
+/// Walls stop it: a body behind masonry takes nothing — no damage, no shove, no
+/// stun, no tag — exactly as before.
 #[allow(clippy::too_many_arguments)]
-fn squeak_ring(
+fn squeak_cone(
     level: &Level,
     rng: &mut RngRes,
     particles: &mut Particles,
@@ -1022,13 +1198,14 @@ fn squeak_ring(
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
     fx: &mut ActiveFx,
-    // Counterweight: the ring's native outward shove.
+    // Counterweight: the cone's native outward shove.
     shove_mult: f32,
 ) {
     let kind = WeaponKind::SonicSqueak;
     let origin = fx.squeak_pos;
-    let prev = fx.squeak_prev_r;
-    let now = fx.squeak_r;
+    let axis = fx.squeak_facing;
+    let reach = fx.squeak_max_r;
+    let half = fx.squeak_half;
     let dmg = fx.squeak_dmg;
 
     for &entity in order {
@@ -1038,21 +1215,14 @@ fn squeak_ring(
         if !e.alive() {
             continue;
         }
-        // Hit once, as the ring's front passes the body's near edge.
-        let edge = e.pos.dist(origin) - e.radius;
-        if edge > now || edge <= prev {
+        if !cone_hits_circle(origin, axis, reach, half, e.pos, e.radius) {
             continue;
         }
-        // Wall cover blocks the ring exactly as it blocks the other weapons
-        // (and as the boss branch below already does): a body behind masonry
-        // takes **nothing** — no damage, no shove, no stun, no Roll Call tag.
-        // The line test used to gate only the stun, so the ring still dealt
-        // its damage and shove straight through a wall.
         if !los_clear(level, origin, e.pos, MELEE_LOS_RADIUS) {
             continue;
         }
         let hp_before = e.hp.max(0.0);
-        // The ring arrives from its own origin, so the shell faces it.
+        // The cone arrives from its own apex, so the shell faces it.
         let applied = e.hurt_from(dmg, origin);
         let killed = !e.alive();
         ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
@@ -1062,21 +1232,19 @@ fn squeak_ring(
         let enemy_id = e.id;
         // Elites keep their footing (slowed, not stunned); everything else is
         // pinned for the full stun.
-        {
-            if e.elite || e.kind.heavy() {
-                e.slow_for(SQUEAK_ELITE_SLOW, SQUEAK_STUN);
-            } else {
-                e.stun_for(SQUEAK_STUN);
+        if e.elite || e.kind.heavy() {
+            e.slow_for(SQUEAK_ELITE_SLOW, SQUEAK_STUN);
+        } else {
+            e.stun_for(SQUEAK_STUN);
+        }
+        // Roll Call: the cone tags everything it stunned or slowed; the answers
+        // fire 0.8 s later (`evolutions::roll_call_system`).
+        if fx.squeak_evolved && fx.tag(entity, sid.0) {
+            if fx.answer_left <= 0.0 {
+                fx.answer_left = evolutions::ROLL_CALL_DELAY;
+                fx.answer_damage = dmg * 0.5;
             }
-            // Roll Call: the ring tags everything it stunned or slowed; the
-            // answers fire 0.8 s later (`evolutions::roll_call_system`).
-            if fx.squeak_evolved && fx.tag(entity, sid.0) {
-                if fx.answer_left <= 0.0 {
-                    fx.answer_left = evolutions::ROLL_CALL_DELAY;
-                    fx.answer_damage = dmg * 0.5;
-                }
-                vfx::emit_roll_call_tag(particles, &mut rng.0, pos);
-            }
+            vfx::emit_roll_call_tag(particles, &mut rng.0, pos);
         }
         e.vel += out * SQUEAK_SHOVE * shove_mult;
         vfx::emit_squeak_hit(particles, &mut rng.0, pos, out, killed);
@@ -1099,8 +1267,7 @@ fn squeak_ring(
         if shapes.iter().next().is_none() {
             continue;
         }
-        let edge = boss.pos.dist(origin) - boss.kind.body_radius();
-        if edge > now || edge <= prev {
+        if !cone_hits_circle(origin, axis, reach, half, boss.pos, boss.kind.body_radius()) {
             continue;
         }
         if level.tiles.segment_hit(origin, boss.pos, 1.0).is_some() {
@@ -1113,15 +1280,174 @@ fn squeak_ring(
         boss.slow_for(SQUEAK_BOSS_SLOW, SQUEAK_BOSS_SLOW_SECS);
         ledger.add_boss(kind, amount);
         let killed = boss.hp <= 0.0;
-        vfx::emit_squeak_hit(particles, &mut rng.0, boss.pos, boss.pos - origin, killed);
+        let (boss_pos, boss_radius, boss_id) = (boss.pos, boss.kind.body_radius(), boss.id);
+        vfx::emit_squeak_hit(particles, &mut rng.0, boss_pos, boss_pos - origin, killed);
         damage_numbers.record(
-            boss.id,
-            boss.pos,
-            boss.kind.body_radius(),
+            boss_id,
+            boss_pos,
+            boss_radius,
             amount,
             killed,
             DamageSource::Normal,
         );
+    }
+}
+
+/// Step **Squeak Nova**'s ring: expand the front and damage everything it
+/// passes, once per pass.
+///
+/// Batch 12 replaced the nova's ring of radial darts with one shockwave. The
+/// front's radius is a pure function of its age (`NOVA_EXPAND` out; with
+/// **Echo Chamber** the same again back in), and the damage band is
+/// `prev..now`, so a body can only be hit once on the way out and once on the
+/// way back however the tick rate divides the pass. Walls stop it: a body
+/// behind masonry takes nothing, exactly like the spoke could not get there.
+/// Enemy walks are `SpawnId` ordered (`EnemyIndex`) and every rng draw happens
+/// inside a `vfx` call, so a replay lands the same hits in the same order.
+#[allow(clippy::too_many_arguments)]
+fn nova_ring(
+    dt: f32,
+    level: &Level,
+    rng: &mut RngRes,
+    particles: &mut Particles,
+    order: &[Entity],
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    bosses: &mut Query<&mut Boss>,
+    damage_numbers: &mut DamageNumbers,
+    ledger: &mut DamageLedger,
+    fx: &mut ActiveFx,
+) {
+    let kind = WeaponKind::SqueakNova;
+    let origin = fx.nova_pos;
+    let prev = fx.nova_prev_r;
+    let dmg = fx.nova_dmg;
+    let max_r = fx.nova_max_r;
+    fx.nova_age += dt;
+    // Out for `NOVA_EXPAND`, then (Echo Chamber) back in for the same again.
+    let phase = fx.nova_age / NOVA_EXPAND;
+    let inbound = phase > 1.0;
+    let now = if inbound {
+        max_r * (2.0 - phase).clamp(0.0, 1.0)
+    } else {
+        max_r * phase.clamp(0.0, 1.0)
+    };
+    fx.nova_prev_r = prev;
+    fx.nova_r = now;
+
+    for &entity in order {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        if !e.alive() {
+            continue;
+        }
+        let dist = e.pos.dist(origin);
+        // The front meets the body's near edge on the way out and its far edge
+        // on the way back, so a ring that sweeps a body never skips it.
+        let passed = if inbound {
+            let far = dist + e.radius;
+            now <= far && far < prev
+        } else {
+            let near = dist - e.radius;
+            prev < near && near <= now
+        };
+        if !passed || !los_clear(level, origin, e.pos, MELEE_LOS_RADIUS) {
+            continue;
+        }
+        let hp_before = e.hp.max(0.0);
+        // The ring arrives from its own origin, so the shell faces it.
+        let applied = e.hurt_from(dmg, origin);
+        let killed = !e.alive();
+        ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+        let pos = e.pos;
+        let enemy_radius = e.radius;
+        let enemy_id = e.id;
+        let enemy_kind = e.kind;
+        if inbound {
+            // Echo Chamber: the returning front, drawn as the rebound
+            // (`vfx::emit_echo_return`'s "inward" direction).
+            vfx::emit_echo_return(
+                particles,
+                &mut rng.0,
+                pos,
+                (origin - pos).normalized(),
+            );
+        } else {
+            vfx::emit_weapon_hit(
+                particles,
+                &mut rng.0,
+                pos,
+                pos - origin,
+                Some(kind),
+                enemy_kind,
+                killed,
+            );
+        }
+        damage_numbers.record(
+            enemy_id,
+            pos,
+            enemy_radius,
+            applied,
+            killed,
+            DamageSource::Normal,
+        );
+    }
+
+    // The boss takes the ring too, once per pass, exactly like the horde.
+    for mut boss in bosses.iter_mut() {
+        if boss.dead {
+            continue;
+        }
+        let shapes = boss.hit_shapes();
+        if shapes.iter().next().is_none() {
+            continue;
+        }
+        let dist = boss.pos.dist(origin);
+        let passed = if inbound {
+            let far = dist + boss.kind.body_radius();
+            now <= far && far < prev
+        } else {
+            let near = dist - boss.kind.body_radius();
+            prev < near && near <= now
+        };
+        if !passed || level.tiles.segment_hit(origin, boss.pos, 1.0).is_some() {
+            continue;
+        }
+        let amount = dmg * boss.damage_mult;
+        if !boss.take_damage(amount) {
+            continue;
+        }
+        ledger.add_boss(kind, amount);
+        let killed = boss.hp <= 0.0;
+        let (boss_pos, boss_radius, boss_id) = (boss.pos, boss.kind.body_radius(), boss.id);
+        vfx::emit_weapon_hit(
+            particles,
+            &mut rng.0,
+            boss_pos,
+            boss_pos - origin,
+            Some(kind),
+            EnemyKind::Boss,
+            killed,
+        );
+        damage_numbers.record(
+            boss_id,
+            boss_pos,
+            boss_radius,
+            amount,
+            killed,
+            DamageSource::Normal,
+        );
+    }
+
+    // The ring's own clock. Once it is spent the whole cast is forgotten (the
+    // next cast seats a fresh one).
+    let total = fx.nova_total();
+    fx.nova_left = (total - fx.nova_age).max(0.0);
+    if fx.nova_left <= 0.0 {
+        fx.nova_left = 0.0;
+        fx.nova_age = 0.0;
+        fx.nova_prev_r = 0.0;
+        fx.nova_r = 0.0;
     }
 }
 
@@ -1169,74 +1495,150 @@ fn fire_one(
     // The reticle in world pixels (`None` = auto-aim). The per-weapon table is
     // in the module docs on `TickInput::aim`; each arm below applies it.
     aim: Option<Vec2>,
+    // The concentrated weapons' live effects: this pass writes the **Squeak
+    // Nova** ring (the ring is stepped after the loadout loop).
+    fx: &mut crate::game::ecs::resources::ActiveFx,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
     match kind {
         WeaponKind::Gnaw => {
-            // Lens Cap stretches a ranged weapon's reach, which for an aiming
-            // weapon is the range it will consider: a dart that flies further
-            // must also be allowed to pick a target that far away.
-            let range = stats.ranged_reach(target_range(kind));
+            // Batch 12: Gnaw is a **bite** — a snapping jaw in front of the
+            // rat's nose, no projectile. It keeps the dart's single-target
+            // identity (it takes the nearest visible body inside a narrow
+            // forward cone) and the whole volley's output: from level 4 the old
+            // two darts' worth lands as one bite, so a body takes per cycle
+            // what the darts dealt it.
+            let i = (wlevel.clamp(1, 5) as usize) - 1;
+            let reach = stats.melee_reach(GNAW_BITE_REACH[i]);
+            // Aimed (reticle or pad stick): the jaw snaps inside its cone of
+            // that direction. Auto-aim (Classic, no reticle): the rat turns its
+            // head, so the bite takes the nearest body in reach whatever way it
+            // is standing — the same "nearest visible body" rule every other
+            // auto-firing weapon uses.
             let aimed = aim_dir(ppos, aim);
-            // Aimed: the dart flies along the reticle, homing only on a body
-            // inside a narrow cone of it (and firing even with nothing there).
-            // Auto-aim: exactly the legacy nearest-visible pick.
-            let pick = nearest_visible_within(
-                level,
-                kind,
-                range,
-                order,
-                enemies,
-                boss_points,
-                ppos,
-                target_scratch,
-            )
-            .filter(|epos| match aimed {
-                Some(d) => (*epos - ppos).normalized().dot(d) >= AIM_CONE_COS,
-                None => true,
-            });
-            if let Some(dir) = pick.map(|epos| (epos - ppos).normalized()).or(aimed) {
-                // One dart, two from level 4 (`Weapon::level_projectiles` is
-                // the level for Gnaw): a fan of ±3° keeps the pair from
-                // stacking into one body at close range while staying
-                // effectively single-target at range.
-                let shots = 1 + projs / 4;
-                // Milk Teeth (`WAVE3_DESIGN` §3) evolves the **lead** dart: it
-                // lodges for 1 s and comes home biting every body it crosses
-                // (`evolutions::milk_teeth_system`). The rest of the level-5
-                // volley still flies as Gnaw darts, so an earned evolution is
-                // never a downgrade in output, range or boss damage.
-                let mut started = 0;
+            let aim_u = aimed.unwrap_or_else(|| cast_dir(ppos, pface, aim));
+            let half = if aimed.is_some() {
+                GNAW_BITE_HALF
+            } else {
+                std::f32::consts::PI
+            };
+            let shots = 1 + projs / 4;
+            let bite = dmg * shots as f32;
+            let pick = nearest_in_cone(level, reach, half, aim_u, order, enemies, ppos);
+            // The jaw closes on the body it caught (so the art and the drawn
+            // line point at it), else straight ahead.
+            let dir = pick
+                .map(|(_, pos)| (pos - ppos).normalized())
+                .unwrap_or(aim_u);
+            let mut bit = false;
+            if let Some((entity, pos)) = pick {
+                if let Ok((_, _, mut e)) = enemies.get_mut(entity) {
+                    let hp_before = e.hp.max(0.0);
+                    // Directional armour: a bite arrives from the rat.
+                    let applied = e.hurt_from(bite, ppos);
+                    let killed = !e.alive();
+                    ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+                    let enemy_radius = e.radius;
+                    let enemy_id = e.id;
+                    let enemy_kind = e.kind;
+                    vfx::emit_weapon_hit(
+                        particles,
+                        &mut rng.0,
+                        pos,
+                        pos - ppos,
+                        Some(kind),
+                        enemy_kind,
+                        killed,
+                    );
+                    damage_numbers.record(
+                        enemy_id,
+                        pos,
+                        enemy_radius,
+                        applied,
+                        killed,
+                        DamageSource::Normal,
+                    );
+                    bit = true;
+                }
+            }
+            // The boss is a body too: the jaw closes on it when the rat is
+            // pressed against it, with the bite's own damage this cast.
+            if !bit {
+                for mut boss in bosses.iter_mut() {
+                    if boss.dead {
+                        continue;
+                    }
+                    let shapes = boss.hit_shapes();
+                    if shapes.iter().next().is_none() {
+                        continue;
+                    }
+                    if !cone_hits_circle(
+                        ppos,
+                        dir,
+                        reach,
+                        half,
+                        boss.pos,
+                        boss.kind.body_radius(),
+                    ) || level.tiles.segment_hit(ppos, boss.pos, 1.0).is_some()
+                    {
+                        continue;
+                    }
+                    let amount = bite * boss.damage_mult;
+                    if !boss.take_damage(amount) {
+                        continue;
+                    }
+                    ledger.add_boss(kind, amount);
+                    let killed = boss.hp <= 0.0;
+                    let (boss_pos, boss_radius, boss_id) =
+                        (boss.pos, boss.kind.body_radius(), boss.id);
+                    vfx::emit_weapon_hit(
+                        particles,
+                        &mut rng.0,
+                        boss_pos,
+                        boss_pos - ppos,
+                        Some(kind),
+                        EnemyKind::Boss,
+                        killed,
+                    );
+                    damage_numbers.record(
+                        boss_id,
+                        boss_pos,
+                        boss_radius,
+                        amount,
+                        killed,
+                        DamageSource::Normal,
+                    );
+                    bit = true;
+                    break;
+                }
+            }
+            if bit {
+                // A decoration, not a body: it carries no `SpawnId`, so the
+                // spawn-order sequence every other system orders by is not
+                // perturbed by a jaw snap.
+                commands.spawn(BiteSnap {
+                    pos: ppos + dir * 4.0,
+                    dir,
+                    t: BITE_SECS,
+                    total: BITE_SECS,
+                });
+                // Milk Teeth (`WAVE3_DESIGN` §3) evolves the old lead dart: the
+                // evolved bite also spits the tooth, which lodges for 1 s and
+                // comes home biting every body it crosses
+                // (`evolutions::milk_teeth_system`). The base weapon stays a
+                // bite; the evolution adds its own projectile on top, so an
+                // earned evolution is never a downgrade.
                 if evolved {
                     commands.spawn((
                         MilkTooth::new(
                             ppos,
                             dir * evolutions::MILK_SPEED,
                             dmg,
-                            // The same flight a Gnaw dart gets (2.5 s of life,
-                            // Lens Cap included), so the tooth reaches the
-                            // target the aim picked.
                             stats.ranged_reach(evolutions::MILK_REACH),
                         ),
                         next_id.take(),
                     ));
-                    started = 1;
-                }
-                for k in started..shots {
-                    let angle = if shots > 1 {
-                        let spread = (k as f32 - (shots - 1) as f32 / 2.0) * 0.052;
-                        dir.angle() + spread
-                    } else {
-                        dir.angle()
-                    };
-                    let v = Vec2::from_angle(angle) * 120.0;
-                    let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
-                    b.size = 1;
-                    // Lens Cap: a ranged weapon's reach is its projectile life.
-                    b.life = stats.ranged_reach(b.life);
-                    b.weapon = Some(kind);
-                    commands.spawn((b, next_id.take()));
                 }
                 vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, 0.0);
                 fired = true;
@@ -1256,6 +1658,26 @@ fn fire_one(
             // cast-time ray), and the string is created when both have settled.
             // The inner darts stay ordinary darts.
             let spread = 0.18;
+            // Batch 12: the fan is a **shotgun of slow, short wedges**, so it
+            // also slows what it covers (the wedge that lands on a body still
+            // deals its damage on its own tick — this is the fan's slowing
+            // field, applied as the fan leaves, on the same open floor the
+            // wedges can cross).
+            let fan_half = 0.5 * spread * (projs - 1) as f32 + crate::game::weapon::CHEESE_FAN_SLACK;
+            // Lens Cap stretches the wedges' flight, so it stretches the fan.
+            let fan_reach = CHEESE_WEDGE_SPEED * stats.ranged_reach(CHEESE_WEDGE_LIFE);
+            for &entity in order {
+                let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+                    continue;
+                };
+                if !e.alive()
+                    || !cone_hits_circle(ppos, spray_dir, fan_reach, fan_half, e.pos, e.radius)
+                    || !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS)
+                {
+                    continue;
+                }
+                e.slow_for(CHEESE_SLOW_MULT, CHEESE_SLOW_SECS);
+            }
             let half = (projs - 1) as f32 / 2.0;
             let tines = evolved && projs >= 2;
             if tines {
@@ -1292,10 +1714,14 @@ fn fire_one(
                     continue;
                 }
                 let spread = (k as f32 - (projs - 1) as f32 / 2.0) * spread;
-                let v = Vec2::from_angle(base + spread) * 110.0;
+                let v = Vec2::from_angle(base + spread) * CHEESE_WEDGE_SPEED;
                 let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
+                // Chunky wedges: a wide body on a short flight (`size 2` is
+                // the fat projectile art, the 3 px radius the hit reach).
+                b.size = 2;
+                b.radius = 3.0;
                 // Lens Cap.
-                b.life = stats.ranged_reach(1.4);
+                b.life = stats.ranged_reach(CHEESE_WEDGE_LIFE);
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
             }
@@ -1303,21 +1729,28 @@ fn fire_one(
             fired = true;
         }
         WeaponKind::SqueakNova => {
-            for k in 0..projs {
-                let a = k as f32 / projs as f32 * std::f32::consts::TAU;
-                let v = Vec2::from_angle(a) * 95.0;
-                let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
-                // Lens Cap (the nova's ring is made of these darts).
-                b.life = stats.ranged_reach(1.3);
-                b.weapon = Some(kind);
-                if evolved {
-                    // Echo Chamber: the spoke reflects off its first wall
-                    // (`projectiles::bullets_system`) instead of dying there.
-                    commands.spawn((b, EchoSpoke::default(), next_id.take()));
-                } else {
-                    commands.spawn((b, next_id.take()));
-                }
-            }
+            // Batch 12: a true shockwave — **one expanding ring** that damages
+            // every body its front passes, instead of a ring of radial darts.
+            // The front is stepped by [`nova_ring`] at the end of
+            // `fire_weapons_system` (the cached `EnemyIndex` is live there and
+            // the damage lands in the same tick as every other weapon's).
+            let reach = stats.ranged_reach(NOVA_REACH);
+            // Echo Chamber adds the return leg to the ring's life.
+            let passes: f32 = if evolved { 2.0 } else { 1.0 };
+            let life = passes * NOVA_EXPAND;
+            *fx = ActiveFx {
+                nova_left: life,
+                nova_age: 0.0,
+                nova_prev_r: 0.0,
+                nova_r: 0.0,
+                nova_max_r: reach,
+                nova_dmg: dmg,
+                nova_pos: ppos,
+                // Echo Chamber: the ring strikes the walls and comes back
+                // through for a second hit.
+                nova_echo: evolved,
+                ..*fx
+            };
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, 0.0);
             fired = true;
         }
@@ -1396,61 +1829,81 @@ fn fire_one(
             fired = true;
         }
         WeaponKind::TailWhip => {
-            // Lens Cap's melee reach.
-            let radius = stats.melee_reach(26.0 + projs as f32 * 3.0);
+            // Batch 12 (corrected): a **quick low swipe in front of the rat** —
+            // a 180° arc centred on the aim (mouse/pad) or the rat's facing
+            // (keyboard), short reach, fast cadence. Every body in that front
+            // half-circle takes the hit, so the whip is the rat's near guard;
+            // Tail Thrash is the full-circle spin and the Spiked Tail is the
+            // one that targets a single body. Damage per body per cycle is
+            // unchanged: the same `dmg` on the same cooldown.
+            let i = (wlevel.clamp(1, 5) as usize) - 1;
+            let reach = stats.melee_reach(WHIP_REACH[i]);
+            let dir = cast_dir(ppos, pface, aim);
             for &entity in order {
                 let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                     continue;
                 };
-                // Melee arc: the whip does not reach through a wall. Enemies
-                // inside the aura are a handful, so the per-enemy line test is
-                // bounded by the aura radius, not by the horde.
-                if e.alive()
-                    && e.pos.dist(ppos) <= radius + e.radius
-                    && los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS)
+                // A swipe, not an aura: only the front half-circle.
+                if !e.alive()
+                    || !cone_hits_circle(ppos, dir, reach, WHIP_ARC_HALF, e.pos, e.radius)
                 {
-                    let hp_before = e.hp.max(0.0);
-                    // The whip arrives from the rat: the shell can eat it.
-                    let applied = e.hurt_from(dmg, ppos);
-                    let killed = !e.alive();
-                    // Balance instrumentation only (see `DamageLedger`).
-                    ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
-                    let pos = e.pos;
-                    let enemy_radius = e.radius;
-                    let enemy_id = e.id;
-                    // Counterweight: +2 px of outward shove per stack on a
-                    // melee hit that has no native knockback (the whip), once
-                    // per body per 0.4 s. `resolve_circle` keeps the nudge on
-                    // legal floor instead of pushing a body into a wall.
-                    if stats.shove_px > 0.0 && melee_nudge.ready(enemy_id as u64) {
-                        let out = (pos - ppos).normalized();
-                        melee_nudge.mark(enemy_id as u64, MELEE_NUDGE_COOLDOWN);
-                        let shifted = pos + out * stats.shove_px;
-                        e.pos = level.tiles.resolve_circle(
-                            shifted,
-                            e.radius,
-                            SizeClass::Small,
-                            None,
-                        );
-                        *moved = true;
-                    }
-                    vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
-                    damage_numbers.record(
-                        enemy_id,
-                        pos,
-                        enemy_radius,
-                        applied,
-                        killed,
-                        DamageSource::TailWhip,
-                    );
+                    continue;
                 }
+                // It does not reach through a maze partition.
+                if !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS) {
+                    continue;
+                }
+                let hp_before = e.hp.max(0.0);
+                // The whip arrives from the rat: the shell can eat it.
+                let applied = e.hurt_from(dmg, ppos);
+                let killed = !e.alive();
+                // Balance instrumentation only (see `DamageLedger`).
+                ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+                let pos = e.pos;
+                let enemy_radius = e.radius;
+                let enemy_id = e.id;
+                // Counterweight: +2 px of outward shove per stack on a melee
+                // hit that has no native knockback (the whip), once per body
+                // per 0.4 s. `resolve_circle` keeps the nudge on legal floor
+                // instead of pushing a body into a wall.
+                if stats.shove_px > 0.0 && melee_nudge.ready(enemy_id as u64) {
+                    let out = (pos - ppos).normalized();
+                    melee_nudge.mark(enemy_id as u64, MELEE_NUDGE_COOLDOWN);
+                    let shifted = pos + out * stats.shove_px;
+                    e.pos = level.tiles.resolve_circle(
+                        shifted,
+                        e.radius,
+                        SizeClass::Small,
+                        None,
+                    );
+                    *moved = true;
+                }
+                vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
+                damage_numbers.record(
+                    enemy_id,
+                    pos,
+                    enemy_radius,
+                    applied,
+                    killed,
+                    DamageSource::TailWhip,
+                );
             }
-            // The full boss is not an `Enemy`: its hit shapes take the same
-            // whipped reach, with **this cast's** Lens Cap-stretched radius and
-            // Short Teeth-scaled damage. Resolving it here (rather than from a
-            // "the whip fired" signal another system watches for) keeps a
-            // consumed `Sfx` out of the simulation: whether the caller drains
-            // audio can never change a boss's HP.
+            // The crescent itself: the arc the swipe just cut, drawn for
+            // `WHIP_SWIPE_SECS` (`components::WhipCrack`). A decoration: no
+            // `SpawnId`, so no other system's order moves. A swing happens even
+            // when it hits nothing, so the player sees the arc every time.
+            commands.spawn(WhipCrack {
+                from: ppos,
+                to: ppos + dir * reach,
+                t: WHIP_SWIPE_SECS,
+                total: WHIP_SWIPE_SECS,
+            });
+            // The full boss is not an `Enemy`: its hit shapes take the arc,
+            // with **this cast's** Lens Cap-stretched reach and Short
+            // Teeth-scaled damage. Resolving it here (rather than from a "the
+            // whip fired" signal another system watches for) keeps a consumed
+            // `Sfx` out of the simulation: whether the caller drains audio can
+            // never change a boss's HP.
             for mut boss in bosses.iter_mut() {
                 if boss.dead {
                     continue;
@@ -1459,8 +1912,16 @@ fn fire_one(
                 if shapes.iter().next().is_none() {
                     continue;
                 }
-                if !shapes.circle_hits_grounded(ppos, radius)
-                    || level.tiles.segment_hit(ppos, boss.pos, 1.0).is_some()
+                // Inside the front half-circle: the boss's own body radius is
+                // the slack, so standing against it always counts.
+                if !cone_hits_circle(
+                    ppos,
+                    dir,
+                    reach,
+                    WHIP_ARC_HALF,
+                    boss.pos,
+                    boss.kind.body_radius(),
+                ) || level.tiles.segment_hit(ppos, boss.pos, 1.0).is_some()
                 {
                     continue;
                 }
@@ -1481,13 +1942,15 @@ fn fire_one(
                 );
             }
             if evolved {
-                // Ratchet Tail teleports the hooked body around the rat, so
-                // the grid has to follow it (below).
+                // Ratchet Tail hooks one of the bodies the swipe actually cut
+                // and swings it a quarter turn around the rat, so the grid has
+                // to follow it (below).
                 if ratchet_swing(
                     level,
                     ppos,
                     pface,
-                    radius,
+                    dir,
+                    reach,
                     order,
                     enemies,
                     dmg,
@@ -1499,7 +1962,7 @@ fn fire_one(
                     *moved = true;
                 }
             }
-            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, radius);
+            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, reach);
             fired = true;
         }
         WeaponKind::AcidSpit => {
@@ -1693,6 +2156,9 @@ fn ratchet_swing(
     level: &Level,
     ppos: Vec2,
     pface: Vec2,
+    // The swipe's arc: Ratchet Tail hooks the nearest foe the whip actually
+    // cut, which since batch 12 means inside the front half-circle.
+    swipe_dir: Vec2,
     reach: f32,
     order: &[Entity],
     enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
@@ -1717,6 +2183,9 @@ fn ratchet_swing(
         }
         let d = e.pos.dist(ppos);
         if d > reach + e.radius || d <= 1.0 {
+            continue;
+        }
+        if !cone_hits_circle(ppos, swipe_dir, reach, WHIP_ARC_HALF, e.pos, e.radius) {
             continue;
         }
         if !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS) {
@@ -1880,7 +2349,8 @@ mod tests {
     use rand::rngs::StdRng;
 
     use super::{
-        Candidate, RANK_BOSS, RANK_ENEMY, TARGET_LOS_CANDIDATES, fire_weapons_system, nearest_of,
+        BiteSnap, Candidate, RANK_BOSS, RANK_ENEMY, TARGET_LOS_CANDIDATES, WhipCrack,
+        fire_weapons_system, nearest_of,
     };
     use crate::audio::Sfx;
     use crate::game::art_walls::WallKind;
@@ -1915,10 +2385,10 @@ mod tests {
     }
 
     /// Every kind that spawns a projectile (Tail Whip is an aura).
-    const PROJECTILE_WEAPONS: [WeaponKind; 5] = [
-        WeaponKind::Gnaw,
+    /// The weapons that still spawn a projectile. Batch 12 took Gnaw (a bite)
+    /// and Squeak Nova (a ring) off this list: neither fires anything any more.
+    const PROJECTILE_WEAPONS: [WeaponKind; 3] = [
         WeaponKind::CheeseSpray,
-        WeaponKind::SqueakNova,
         WeaponKind::SporeOrbit,
         WeaponKind::AcidSpit,
     ];
@@ -2213,6 +2683,8 @@ mod tests {
         use crate::game::loadout::PassiveKind;
         let mut w = World::new(Theme::Sewer, 43);
         w.clear_enemies();
+        // The whip swipes the half-circle in front of the rat, so face it.
+        w.player.face = Vec2::new(1.0, 0.0);
         arm(&mut w, WeaponKind::TailWhip);
         // Counterweight: +2 px of outward shove per stack on the whip, once per
         // body per 0.4 s.
@@ -2455,26 +2927,228 @@ mod tests {
         );
     }
 
-    /// Tail Whip damages in place (through `Enemy::hurt`) only inside the aura.
+    /// The Tail Whip is a **frontal half-circle swipe**: every body in the
+    /// 180° arc in front of the rat takes the hit in place (`Enemy::hurt`, no
+    /// projectile) — including one off to the side at 70° — while a body behind
+    /// the rat, or one past the short reach, is never touched.
     #[test]
-    fn tail_whip_hurts_enemies_inside_the_radius_only() {
+    fn tail_whip_swipes_the_half_circle_in_front() {
+        use crate::game::weapon::WHIP_ARC_HALF;
         let mut w = World::new(Theme::Sewer, 5);
+        open_map(&mut w);
         w.clear_enemies();
         w.clear_bullets();
         w.sfx.clear();
         let ppos = w.player.pos;
-        let near = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(10.0, 0.0), 1.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        // Dead ahead, inside the L1 30 px reach.
+        let ahead = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(18.0, 0.0), 1.0);
+        // 70° off the axis at 22 px: still inside the half-circle (90°).
+        let off_axis = w.spawn_enemy(
+            EnemyKind::Cat,
+            ppos + Vec2::from_angle(70.0f32.to_radians()) * 22.0,
+            1.0,
+        );
+        // Behind the rat (and inside the reach): the swipe is not an aura.
+        let behind = w.spawn_enemy(EnemyKind::Cat, ppos - Vec2::new(18.0, 0.0), 1.0);
+        // Past the reach.
         let far = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(80.0, 0.0), 1.0);
         arm(&mut w, WeaponKind::TailWhip);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
-        let near_hp = w.ecs.get::<Enemy>(near).unwrap().hp;
-        let far_hp = w.ecs.get::<Enemy>(far).unwrap().hp;
-        assert!(near_hp < EnemyKind::Cat.base_hp(), "near enemy unhurt");
-        assert_eq!(far_hp, EnemyKind::Cat.base_hp(), "far enemy hurt");
+        let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
+        let base = EnemyKind::Cat.base_hp();
+        assert!(hp(&w, ahead) < base, "the body ahead was not swiped");
+        assert!(
+            hp(&w, off_axis) < base,
+            "a body inside the front half-circle was missed"
+        );
+        assert_eq!(hp(&w, behind), base, "the swipe reached behind the rat");
+        assert_eq!(hp(&w, far), base, "a body past the reach was swiped");
         assert_eq!(w.sfx.iter().filter(|s| **s == Sfx::ShootWhip).count(), 1);
         assert!(w.bullets().is_empty(), "Tail Whip must not spawn bullets");
+        // The drawn swipe: one crescent, centred on the aim at the reach.
+        let cracks: Vec<WhipCrack> = w
+            .ecs
+            .query::<&WhipCrack>()
+            .iter(&w.ecs)
+            .copied()
+            .collect();
+        assert_eq!(cracks.len(), 1, "the swipe must be drawn once");
+        let arc = cracks[0];
+        assert!(
+            (arc.to - ppos).normalized().dot(Vec2::new(1.0, 0.0)) > 0.999,
+            "the crescent must be centred on the facing"
+        );
+        assert!(
+            (arc.to - ppos).len() > 20.0,
+            "the crescent's centre line is the swipe's reach"
+        );
+        assert!(
+            (WHIP_ARC_HALF - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+            "the swipe is a half-circle"
+        );
+    }
+
+    /// Gnaw is a **bite**: a very short reach, single target, no projectile, and
+    /// the jaw's own `BiteSnap` for the art.
+    #[test]
+    fn gnaw_bites_one_body_at_arm_s_length() {
+        let mut w = World::new(Theme::Sewer, 4242);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        let ppos = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        let in_jaws = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(12.0, 0.0), 1.0);
+        let second = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(16.0, 6.0), 1.0);
+        let out_of_reach = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(60.0, 0.0), 1.0);
+        arm(&mut w, WeaponKind::Gnaw);
+        run_weapons(&mut w, 1.0 / 60.0);
+        let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
+        let base = EnemyKind::Cat.base_hp();
+        assert!(hp(&w, in_jaws) < base, "the nearest body was not bitten");
+        assert_eq!(hp(&w, second), base, "the bite must be single-target");
+        assert_eq!(hp(&w, out_of_reach), base, "the bite reached too far");
+        assert!(w.bullets().is_empty(), "a bite must not spawn a projectile");
+        assert_eq!(w.ecs.query::<&BiteSnap>().iter(&w.ecs).count(), 1);
+        // The bite took the whole volley's damage (one dart at L1).
+        assert!(
+            (base - hp(&w, in_jaws) - Weapon::new(WeaponKind::Gnaw).damage()).abs() < 1e-3,
+            "the bite must deal one dart's damage at L1"
+        );
+    }
+
+    /// **Sonic Squeak only hits inside its cone.** A body 30° off the axis is
+    /// inside the 38° wedge; one 80° off — at the same distance — is not.
+    #[test]
+    fn sonic_squeak_only_hits_inside_its_cone() {
+        let mut w = World::new(Theme::Sewer, 26);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        let inside = w.spawn_enemy(
+            EnemyKind::Skitterer,
+            p + Vec2::from_angle(30.0f32.to_radians()) * 40.0,
+            1.0,
+        );
+        let outside = w.spawn_enemy(
+            EnemyKind::Skitterer,
+            p + Vec2::from_angle(80.0f32.to_radians()) * 40.0,
+            1.0,
+        );
+        let behind = w.spawn_enemy(EnemyKind::Skitterer, p - Vec2::new(30.0, 0.0), 1.0);
+        let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
+        let (i0, o0, b0) = (hp(&w, inside), hp(&w, outside), hp(&w, behind));
+        arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
+
+        tick_active(&mut w, true);
+
+        assert!(hp(&w, inside) < i0, "a body inside the cone was missed");
+        assert_eq!(hp(&w, outside), o0, "a body outside the cone was hit");
+        assert_eq!(hp(&w, behind), b0, "a body behind the rat was hit");
+    }
+
+    /// The three recognisable **groups** now have three different hit regions:
+    /// the whip is a front crescent and the thrash a whole disc; the nova is a ring all
+    /// the way round and the squeak a forward cone; Gnaw is a bite (no
+    /// projectile) and Cheese Spray a fan of wedges that slows.
+    #[test]
+    fn the_look_alike_groups_have_different_hit_shapes() {
+        let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
+        // --- the tails: whip = the front half-circle, thrash = the full disc
+        let mut w = World::new(Theme::Sewer, 31);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        // 20 px directly behind the rat: inside both reaches, but only the
+        // thrash's disc covers it.
+        let behind = w.spawn_enemy(EnemyKind::Brute, p - Vec2::new(20.0, 0.0), 400.0);
+        // …and one 40° off the front axis: the whip's half-circle takes it.
+        let in_front = w.spawn_enemy(
+            EnemyKind::Brute,
+            p + Vec2::from_angle(40.0f32.to_radians()) * 20.0,
+            400.0,
+        );
+        let (behind_hp, front_hp) = (hp(&w, behind), hp(&w, in_front));
+        arm(&mut w, WeaponKind::TailWhip);
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert!(hp(&w, in_front) < front_hp, "the whip must swipe in front");
+        assert_eq!(
+            hp(&w, behind),
+            behind_hp,
+            "the whip is a front half-circle, not a disc"
+        );
+        // The thrash's full disc takes the body behind the rat.
+        w.player.loadout.weapons = vec![Weapon {
+            kind: WeaponKind::TailThrash,
+            level: 1,
+            timer: 0.0,
+            evolved: false,
+        }];
+        tick_active(&mut w, true);
+        assert!(hp(&w, behind) < behind_hp, "the thrash sweeps the whole disc");
+
+        // --- the squeaks: nova = a ring all round, squeak = a cone --------
+        let mut w = World::new(Theme::Sewer, 32);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        let behind = w.spawn_enemy(EnemyKind::Brute, p - Vec2::new(30.0, 0.0), 400.0);
+        let before = hp(&w, behind);
+        arm(&mut w, WeaponKind::SqueakNova);
+        for _ in 0..80 {
+            run_weapons(&mut w, 1.0 / 60.0);
+            if !w.active_fx().nova_active() {
+                break;
+            }
+        }
+        assert!(hp(&w, behind) < before, "the nova ring goes all the way round");
+        w.player.loadout.weapons = vec![Weapon {
+            kind: WeaponKind::SonicSqueak,
+            level: 1,
+            timer: 0.0,
+            evolved: false,
+        }];
+        let before = hp(&w, behind);
+        tick_active(&mut w, true);
+        assert_eq!(hp(&w, behind), before, "the squeak is a cone, not a ring");
+
+        // --- the pellets: Gnaw = a bite with no projectile, Cheese Spray =
+        // a fan of wedges that slows what it covers -----------------------
+        let mut w = World::new(Theme::Sewer, 33);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(40.0, 0.0), 400.0);
+        arm(&mut w, WeaponKind::Gnaw);
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert!(w.bullets().is_empty(), "Gnaw must not fire a projectile");
+        assert_eq!(
+            hp(&w, far),
+            w.ecs.get::<Enemy>(far).unwrap().max_hp,
+            "a 20 px jaw must not reach 40 px"
+        );
+        // Cheese Spray reaches it with wedges and slows it.
+        w.player.loadout.weapons = vec![Weapon {
+            kind: WeaponKind::CheeseSpray,
+            level: 1,
+            timer: 0.0,
+            evolved: false,
+        }];
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert!(!w.bullets().is_empty(), "Cheese Spray must fire wedges");
+        assert!(
+            w.ecs.get::<Enemy>(far).unwrap().slow_t > 0.0,
+            "the wedge fan must slow what it covers"
+        );
     }
 
     /// Every auto-firing weapon in `fire_one` serves exactly its own level-1
@@ -2524,30 +3198,53 @@ mod tests {
         }
     }
 
-    /// Squeak Nova: one full ring per shot, evenly spaced, every spoke tagged
-    /// with the weapon (so its hits credit the Nova's ledger column).
+    /// Squeak Nova: one **expanding ring** per cast (no spokes), and the ring's
+    /// front damages a body as it passes — once on the way out.
     #[test]
-    fn squeak_nova_fires_one_evenly_spaced_ring() {
+    fn squeak_nova_is_one_expanding_ring() {
+        use crate::game::ecs::resources::ActiveFx;
+        use crate::game::weapon::NOVA_REACH;
         let mut w = World::new(Theme::Sewer, 77);
         open_map(&mut w);
         w.clear_enemies();
         w.clear_bullets();
+        // One body just inside the L1 ring, one well outside it.
+        let ppos = w.player.pos;
+        let inner = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(30.0, 0.0), 400.0);
+        let outer = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(180.0, 0.0), 400.0);
+        let (inner_hp, outer_hp) = (
+            w.ecs.get::<Enemy>(inner).unwrap().hp,
+            w.ecs.get::<Enemy>(outer).unwrap().hp,
+        );
         arm(&mut w, WeaponKind::SqueakNova);
         run_weapons(&mut w, 0.0);
-        let bullets = w.bullets();
-        let want = w.player.loadout.weapons[0].level_projectiles() as usize;
-        assert_eq!(bullets.len(), want, "a level-1 nova is {want} spokes");
-        let step = std::f32::consts::TAU / want as f32;
-        for (k, b) in bullets.iter().enumerate() {
-            assert_eq!(b.weapon, Some(WeaponKind::SqueakNova));
-            assert_eq!(b.faction as u8, Faction::Player as u8);
-            let dir = Vec2::from_angle(k as f32 * step);
-            assert!(
-                (b.vel.normalized() - dir).len() < 1e-3,
-                "spoke {k} is off its angle: {:?}",
-                b.vel
-            );
+        let fx = *w.ecs.resource::<ActiveFx>();
+        assert!(fx.nova_active(), "the cast must leave a ring playing");
+        assert!(
+            (fx.nova_max_r - NOVA_REACH).abs() < 1e-3,
+            "the ring's radius is the old spokes' flight: {}",
+            fx.nova_max_r
+        );
+        assert!(w.bullets().is_empty(), "the nova must not fire spokes");
+        // The front starts at the rat and has not reached the body yet.
+        assert_eq!(fx.nova_r, 0.0);
+        assert_eq!(w.ecs.get::<Enemy>(inner).unwrap().hp, inner_hp);
+        // Step the ring out.
+        let mut ticks = 0;
+        while ticks < 120 && w.ecs.resource::<ActiveFx>().nova_active() {
+            run_weapons(&mut w, 1.0 / 60.0);
+            ticks += 1;
         }
+        let dmg = Weapon::new(WeaponKind::SqueakNova).damage();
+        assert!(
+            (inner_hp - w.ecs.get::<Enemy>(inner).unwrap().hp - dmg).abs() < 1e-3,
+            "the ring's front must damage what it passes, once"
+        );
+        assert_eq!(
+            w.ecs.get::<Enemy>(outer).unwrap().hp,
+            outer_hp,
+            "a body outside the ring was hit"
+        );
     }
 
     /// Tail Whip books what it dealt to its own ledger column and to no other.
@@ -2560,6 +3257,7 @@ mod tests {
         let at = w.player.pos + Vec2::new(10.0, 0.0);
         let body = w.spawn_enemy(EnemyKind::Brute, at, 400.0);
         let before = w.ecs.get::<Enemy>(body).unwrap().hp;
+        w.player.face = Vec2::new(1.0, 0.0);
         arm(&mut w, WeaponKind::TailWhip);
         run_weapons(&mut w, 0.0);
         let lost = before - w.ecs.get::<Enemy>(body).unwrap().hp;
@@ -2644,6 +3342,7 @@ mod tests {
         w.clear_bullets();
         let ppos = w.player.pos;
         let enemy = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(10.0, 0.0), 1.0);
+        w.player.face = Vec2::new(1.0, 0.0);
         arm(&mut w, WeaponKind::TailWhip);
         let hp_before = w.ecs.get::<Enemy>(enemy).unwrap().hp;
 
@@ -2895,8 +3594,11 @@ mod tests {
         w.clear_enemies();
         w.clear_bullets();
         let ppos = w.player.pos;
+        // Batch 12: the squeak is a forward cone, so everything the test wants
+        // hit stands in front of the rat.
+        w.player.face = Vec2::new(1.0, 0.0);
         let bug = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(30.0, 0.0), 1.0);
-        let elite = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(-40.0, 0.0), 20.0);
+        let elite = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(50.0, 24.0), 20.0);
         w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
         let far = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(0.0, 400.0), 1.0);
         arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
@@ -2908,8 +3610,8 @@ mod tests {
         tick_active(&mut w, false);
         let (origin, radius) = w
             .squeak_visual()
-            .expect("the squeak ring must be drawn while it expands");
-        assert_eq!(origin, ppos, "the ring is centred on the rat");
+            .expect("the squeak cone must be drawn while its chevrons push out");
+        assert_eq!(origin, ppos, "the cone starts at the rat");
         assert!(radius > 0.0 && radius < 90.0, "ring radius {radius}");
         // Run the ring out to its final radius.
         let mut ticks = 0;
@@ -2949,7 +3651,7 @@ mod tests {
         );
         assert!(
             !w.particles.shockwaves.is_empty(),
-            "the squeak must draw its expanding ring"
+            "the squeak must draw its pushing front"
         );
     }
 
@@ -2963,6 +3665,8 @@ mod tests {
         w.clear_bullets();
         w.clear_pools();
         let at = w.player.pos + Vec2::new(24.0, 0.0);
+        // The cone weapons aim with the rat's facing; point it at the boss.
+        w.player.face = Vec2::new(1.0, 0.0);
         spawn_boss_at(&mut w, BossKind::Cat, at);
         let boss_hp = |w: &mut World| {
             let mut q = w.ecs.query::<&Boss>();
@@ -3369,57 +4073,86 @@ mod tests {
         wall_column(w, 11, 10)
     }
 
-    /// The whole point of the change: an enemy the rat cannot see is not a
-    /// target, so the dart does not fire through the wall at it.
+    /// The whole point of the LOS rule: a jaw does not close through masonry.
+    /// The same body at the same distance is bitten in the open and untouched
+    /// once a wall stands between it and the rat.
     #[test]
-    fn gnaw_ignores_an_enemy_behind_a_wall() {
+    fn gnaw_will_not_bite_through_a_wall() {
         let mut w = World::new(Theme::Sewer, 501);
-        let face = wall_between(&mut w);
-        let hidden = w.player.pos;
-        w.spawn_enemy(EnemyKind::Cat, Vec2::new(face + 24.0, hidden.y), 1.0);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.player.pos = Vec2::new(170.0, 168.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        // Level 5's 24 px jaw reaches a cat 26 px out (the body's radius is the
+        // slack), so only the wall can decide it.
+        let body = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x + 26.0, p.y), 1.0);
         arm(&mut w, WeaponKind::Gnaw);
-
+        w.player.loadout.weapons[0].level = 5;
+        let hp = |w: &World| w.ecs.get::<Enemy>(body).unwrap().hp;
+        let before = hp(&w);
         run_weapons(&mut w, 1.0 / 60.0);
+        assert!(hp(&w) < before, "the bite must reach a body in the open");
 
-        assert!(
-            w.bullets().is_empty(),
-            "Gnaw fired at an enemy through a wall"
-        );
+        // Now the same body, with a solid column between them (x 176..192).
+        wall_column(&mut w, 11, 10);
+        w.player.loadout.weapons[0].timer = 0.0;
+        let before = hp(&w);
+        w.sfx.clear();
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert_eq!(hp(&w), before, "Gnaw bit through a wall");
         assert!(
             !w.sfx.contains(&Sfx::Shoot),
-            "a blocked shot must not announce itself"
+            "a blocked bite must not announce itself"
         );
     }
 
-    /// The squeak ring is physical: a body behind masonry takes no damage and
-    /// no stun (the line test used to gate only the stun).
+    /// The squeak cone is physical: a body behind masonry takes no damage and
+    /// no stun, while the same body at the same distance takes both once the
+    /// wall is gone.
     #[test]
     fn sonic_squeak_does_not_hit_through_a_wall() {
         let mut w = World::new(Theme::Sewer, 507);
-        let face = wall_between(&mut w);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.player.pos = Vec2::new(170.0, 168.0);
+        // The cone points north; the wall is the band of cells 20 px up.
+        w.player.face = Vec2::new(0.0, -1.0);
         let p = w.player.pos;
-        let hidden = w.spawn_enemy(EnemyKind::Cat, Vec2::new(face + 24.0, p.y), 1.0);
-        // The same distance on the open side, so the ring demonstrably ran.
-        let open = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x - 30.0, p.y), 1.0);
-        let hidden_hp = w.ecs.get::<Enemy>(hidden).unwrap().hp;
-        let open_hp = w.ecs.get::<Enemy>(open).unwrap().hp;
-        arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
+        let hidden = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x, p.y - 30.0), 1.0);
+        let hp = |w: &World| w.ecs.get::<Enemy>(hidden).unwrap().hp;
+        let stun = |w: &World| w.ecs.get::<Enemy>(hidden).unwrap().stun;
+        let cast = |w: &mut World| {
+            arm_active(w, WeaponKind::SonicSqueak, 0.0);
+            tick_active(w, true);
+            let mut ticks = 0;
+            while w.active_fx().squeak_active() {
+                tick_active(w, false);
+                ticks += 1;
+                assert!(ticks < 100, "the squeak cone never finished");
+            }
+        };
 
-        tick_active(&mut w, true);
-        let mut ticks = 0;
-        while w.active_fx().squeak_active() {
-            tick_active(&mut w, false);
-            ticks += 1;
-            assert!(ticks < 100, "the squeak ring never finished");
+        // In the open: hit and stunned.
+        let before = hp(&w);
+        cast(&mut w);
+        assert!(hp(&w) < before, "the cone must hit a body in the open");
+        assert!(stun(&w) > 0.0, "and stun it");
+
+        // With a solid row between the rat and the body: nothing.
+        for cx in 9..=12 {
+            w.level
+                .tiles
+                .set(cx, 10, TileKind::Wall(WallKind::Solid));
         }
-
-        assert!(
-            w.ecs.get::<Enemy>(open).unwrap().hp < open_hp,
-            "the ring must hit the body in the open"
-        );
-        let e = w.ecs.get::<Enemy>(hidden).unwrap();
-        assert_eq!(e.hp, hidden_hp, "the ring dealt damage through a wall");
-        assert_eq!(e.stun, 0.0, "and must not stun through one");
+        w.level.tiles.rebuild_masks();
+        let body = w.ecs.get::<Enemy>(hidden).unwrap();
+        let (before, stun_before) = (body.hp, body.stun);
+        cast(&mut w);
+        let body = w.ecs.get::<Enemy>(hidden).unwrap();
+        assert_eq!(body.hp, before, "the cone dealt damage through a wall");
+        assert_eq!(body.stun, stun_before, "and must not stun through one");
     }
 
     /// "No target" behaviour is unchanged: the timer stays ready so the
@@ -3441,32 +4174,35 @@ mod tests {
     }
 
     /// The rat shoots what it can see: a nearer enemy behind the wall loses to
-    /// a farther one in the open.
+    /// a farther one in the open. (Cheese Spray, whose fan still takes the
+    /// nearest *visible* body as its aim; the bite and the crack use the same
+    /// rule.)
     #[test]
-    fn gnaw_prefers_the_nearest_visible_enemy() {
+    fn cheese_spray_aims_at_the_nearest_visible_enemy() {
         let mut w = World::new(Theme::Sewer, 503);
         let face = wall_between(&mut w);
         let p = w.player.pos;
         w.spawn_enemy(EnemyKind::Cat, Vec2::new(face + 20.0, p.y), 1.0);
         let visible = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x, p.y + 80.0), 1.0);
-        let _ = visible;
-        arm(&mut w, WeaponKind::Gnaw);
+        arm(&mut w, WeaponKind::CheeseSpray);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
         let bullets = w.bullets();
-        assert_eq!(bullets.len(), 1, "Gnaw should have fired at the visible cat");
-        let v = bullets[0].vel;
+        assert!(!bullets.is_empty(), "Cheese Spray did not fire");
+        // The middle wedge is the fan's aim.
+        let dir = heading(&bullets[bullets.len() / 2]);
         assert!(
-            v.y > 100.0 && v.x.abs() < 1e-3,
-            "dart aimed at {v:?}, not straight down at the visible enemy"
+            dir.y > 0.99 && dir.x.abs() < 1e-3,
+            "the fan aimed {dir:?}, not straight down at the visible enemy"
         );
         assert!(w.ecs.get::<Enemy>(visible).is_some());
     }
 
     /// The line-of-sight budget is a cap on candidates, not on enemies: when
     /// every one of the cap's nearest candidates is behind cover the weapon
-    /// reports no target even though a visible one exists further out.
+    /// falls back to the facing rather than paying a query per body in the
+    /// horde.
     #[test]
     fn targeting_stops_at_the_candidate_cap() {
         let mut w = World::new(Theme::Sewer, 504);
@@ -3477,43 +4213,46 @@ mod tests {
             let y = p.y - 6.0 + i as f32 * 0.5;
             w.spawn_enemy(EnemyKind::Cat, Vec2::new(face + 20.0, y), 1.0);
         }
-        // One visible enemy, farther than every hidden candidate.
-        w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(p.x, p.y - 60.0), 1.0);
-        arm(&mut w, WeaponKind::Gnaw);
+        // One visible enemy, farther than every hidden candidate, and *behind*
+        // the rat: if the cap is honoured the fan keeps the rat's facing (+x).
+        w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(p.x - 60.0, p.y), 1.0);
+        arm(&mut w, WeaponKind::CheeseSpray);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
+        let bullets = w.bullets();
+        assert!(!bullets.is_empty(), "Cheese Spray must still fire");
+        let dir = heading(&bullets[bullets.len() / 2]);
         assert!(
-            w.bullets().is_empty(),
-            "the cap must bound the line queries: {} hidden candidates ate the budget",
-            TARGET_LOS_CANDIDATES
+            dir.x > 0.99,
+            "the fan {dir:?} found a body past the cover the cap has to bound"
         );
     }
 
-    /// A melee arc does not reach through a wall, even when the body is inside
-    /// the aura radius.
+    /// The crack does not reach through masonry: the same body is cut in the
+    /// open and untouched behind a wall, though both are inside the whip's long
+    /// reach.
     #[test]
     fn tail_whip_does_not_reach_through_a_wall() {
         let mut w = World::new(Theme::Sewer, 505);
-        let face = wall_between(&mut w);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.player.pos = Vec2::new(170.0, 168.0);
+        w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
-        // Level 1 aura is 26 + 3 = 29 px; this cat is 26 px away, 4 px past
-        // the wall's far face, so only the wall decides it.
-        let behind = w.spawn_enemy(EnemyKind::Cat, Vec2::new(face + 20.0, p.y), 1.0);
-        let front = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x - 12.0, p.y), 1.0);
+        let body = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x + 30.0, p.y), 1.0);
         arm(&mut w, WeaponKind::TailWhip);
-
+        let hp = |w: &World| w.ecs.get::<Enemy>(body).unwrap().hp;
+        let before = hp(&w);
         run_weapons(&mut w, 1.0 / 60.0);
+        assert!(hp(&w) < before, "the crack must reach a body in the open");
 
-        assert_eq!(
-            w.ecs.get::<Enemy>(behind).unwrap().hp,
-            EnemyKind::Cat.base_hp(),
-            "Tail Whip reached through the wall"
-        );
-        assert!(
-            w.ecs.get::<Enemy>(front).unwrap().hp < EnemyKind::Cat.base_hp(),
-            "Tail Whip missed the cat on the same side of the wall"
-        );
+        // A solid column between the rat and the body (x 176..192).
+        wall_column(&mut w, 11, 10);
+        w.player.loadout.weapons[0].timer = 0.0;
+        let before = hp(&w);
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert_eq!(hp(&w), before, "Tail Whip reached through the wall");
     }
 
     /// Acid Spit falls back to the facing lob (today's no-target behaviour)
@@ -3572,31 +4311,55 @@ mod tests {
         b.vel.normalized()
     }
 
-    /// The grounded boss points are candidates under the same rules as enemies,
-    /// so Gnav picks the nearest one when nothing else is around.
+    /// The boss is a body too: when the rat is pressed against it, the jaw
+    /// closes on it for the bite's own damage (and spawns nothing).
     #[test]
-    fn gnaw_aims_at_the_boss_when_it_is_the_nearest_body() {
-        let mut w = boss_target_world(601, BossKind::Cat, Vec2::new(60.0, 0.0));
-        let ppos = w.player.pos;
-        let points: Vec<Vec2> = w.boss_target_points().expect("boss alive").iter().collect();
-        assert!(!points.is_empty(), "the cat must expose grounded points");
+    fn gnaw_bites_the_boss_in_its_jaws() {
+        let mut w = boss_target_world(601, BossKind::Cat, Vec2::new(18.0, 0.0));
+        w.player.face = Vec2::new(1.0, 0.0);
+        let boss_hp = |w: &mut World| {
+            let mut q = w.ecs.query::<&Boss>();
+            q.iter(&w.ecs).next().map(|b| b.hp).expect("boss alive")
+        };
+        let before = boss_hp(&mut w);
         arm(&mut w, WeaponKind::Gnaw);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
-        let bullets = w.bullets();
-        assert_eq!(bullets.len(), 1, "Gnaw did not fire at the boss");
-        let dir = heading(&bullets[0]);
+        assert!(w.bullets().is_empty(), "the bite must not spawn a projectile");
         assert!(
-            dir.x > 0.9,
-            "dart aimed {dir:?}: it should have turned right to the boss"
+            boss_hp(&mut w) < before,
+            "the jaw must close on the boss standing in it"
         );
-        assert!(
-            points
-                .iter()
-                .any(|q| ((*q - ppos).normalized() - dir).len() < 1e-3),
-            "dart {dir:?} does not point at any boss target point {points:?}"
+        assert_eq!(
+            w.ecs.query::<&BiteSnap>().iter(&w.ecs).count(),
+            1,
+            "the bite is drawn"
         );
+    }
+
+    /// A boss the rat cannot see is not bitten, though it stands inside the
+    /// jaw's reach.
+    #[test]
+    fn gnaw_will_not_bite_a_boss_through_a_wall() {
+        let mut w = World::new(Theme::Sewer, 605);
+        let face = wall_between(&mut w);
+        let p = w.player.pos;
+        w.player.loadout.weapons[0].timer = 0.0;
+        spawn_boss_at(&mut w, BossKind::Cat, Vec2::new(face + 20.0, p.y));
+        w.player.face = Vec2::new(1.0, 0.0);
+        arm(&mut w, WeaponKind::Gnaw);
+        w.player.loadout.weapons[0].level = 5;
+        let boss_hp = |w: &mut World| {
+            let mut q = w.ecs.query::<&Boss>();
+            q.iter(&w.ecs).next().map(|b| b.hp).expect("boss alive")
+        };
+        let before = boss_hp(&mut w);
+
+        run_weapons(&mut w, 1.0 / 60.0);
+
+        assert_eq!(boss_hp(&mut w), before, "the jaw closed through a wall");
+        assert_eq!(w.ecs.query::<&BiteSnap>().iter(&w.ecs).count(), 0);
     }
 
     /// Cheese Spray's whole cone turns to the boss.
@@ -3649,42 +4412,51 @@ mod tests {
 
     /// Nearest wins: a nearer enemy screens the boss exactly as the horde does.
     #[test]
-    fn gnaw_prefers_a_nearer_enemy_over_the_boss() {
+    fn the_aim_prefers_a_nearer_enemy_over_the_boss() {
         let mut w = boss_target_world(604, BossKind::Cat, Vec2::new(90.0, 30.0));
         let ppos = w.player.pos;
         w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(0.0, 30.0), 1.0);
-        arm(&mut w, WeaponKind::Gnaw);
+        arm(&mut w, WeaponKind::CheeseSpray);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
         let bullets = w.bullets();
-        assert_eq!(bullets.len(), 1, "Gnaw did not fire");
-        let dir = heading(&bullets[0]);
+        assert!(!bullets.is_empty(), "Cheese Spray did not fire");
+        let dir = heading(&bullets[bullets.len() / 2]);
         assert!(
             dir.y > 0.99 && dir.x.abs() < 1e-3,
-            "dart {dir:?} ignored the nearer enemy for the boss"
+            "the fan {dir:?} ignored the nearer enemy for the boss"
         );
     }
 
-    /// A boss the rat cannot see is not a target, even in range.
+    /// A boss the rat cannot see is not a target, even in range: the fan keeps
+    /// the rat's facing instead of turning to it.
     #[test]
-    fn the_boss_behind_a_wall_is_not_targeted() {
+    fn the_boss_behind_a_wall_is_not_aimed_at() {
         let mut w = World::new(Theme::Sewer, 605);
         let face = wall_between(&mut w);
         let p = w.player.pos;
         spawn_boss_at(&mut w, BossKind::Cat, Vec2::new(face + 20.0, p.y));
-        arm(&mut w, WeaponKind::Gnaw);
+        arm(&mut w, WeaponKind::CheeseSpray);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
+        let bullets = w.bullets();
+        assert!(!bullets.is_empty(), "Cheese Spray must still fire");
+        // The rat faces +x, and the boss is +x behind masonry: the fan must not
+        // centre on the boss's grounded points (which are *not* dead ahead).
+        let mid = heading(&bullets[bullets.len() / 2]);
+        let points: Vec<Vec2> = w.boss_target_points().expect("boss alive").iter().collect();
         assert!(
-            w.bullets().is_empty(),
-            "Gnaw fired at the boss through a wall"
+            !points
+                .iter()
+                .any(|q| ((*q - p).normalized() - mid).len() < 1e-3),
+            "the fan centred on a boss behind a wall: {mid:?}"
         );
     }
 
-    /// The cat mid-`Pounce` has no grounded point, so it is not targetable and
-    /// the dart does not fire at empty air.
+    /// The cat mid-`Pounce` has no grounded point, so it is not targetable: the
+    /// fan keeps the rat's facing instead of turning to it.
     #[test]
     fn an_airborne_cat_is_not_targeted() {
         let mut w = boss_target_world(606, BossKind::Cat, Vec2::new(60.0, 0.0));
@@ -3702,18 +4474,21 @@ mod tests {
             assert!(boss.is_airborne());
             assert!(boss.target_points().is_empty());
         }
-        arm(&mut w, WeaponKind::Gnaw);
+        arm(&mut w, WeaponKind::CheeseSpray);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
-        assert!(
-            w.bullets().is_empty(),
-            "Gnaw fired at a leaping cat it cannot hit"
-        );
-        assert_eq!(
-            w.player.loadout.weapons[0].timer, 0.0,
-            "a shot with no target must retry next tick"
-        );
+        let bullets = w.bullets();
+        assert!(!bullets.is_empty(), "Cheese Spray must still fire");
+        // The rat faces up; nothing may turn the fan right toward the leaping
+        // cat at +x.
+        for b in &bullets {
+            let dir = heading(b);
+            assert!(
+                dir.y < -0.9,
+                "the fan turned to a leaping cat it cannot hit: {dir:?}"
+            );
+        }
     }
 
     /// The pick's ordering: distance first, then an enemy before a boss point

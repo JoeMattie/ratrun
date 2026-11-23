@@ -3,11 +3,11 @@
 //! Layout and placement stages run in this order (the file-ownership
 //! table with signatures is in `CONTENT_PLAN.md` §2):
 //!
-//! 1. [`layout::build_layout`] — rooms, corridors, open halls, the boss arena
-//!    and the start room; carves them into the tile grid and returns the named
+//! 1. [`layout::build_layout`] — rooms, corridors, open halls, the far hall and
+//!    the start room; carves them into the tile grid and returns the named
 //!    regions. *(generator worker A)*
-//! 2. [`layout::furnish`] — the theme's props inside the rooms and along the
-//!    boss arena's perimeter, painted into the grid as solid cells. *(worker A)*
+//! 2. [`layout::furnish`] — the theme's props inside the rooms, painted into
+//!    the grid as solid cells. *(worker A)*
 //! 3. [`maze::carve_mazes`] — **at most one** maze section in the reserved
 //!    slot (a maze is a find: about 1 map in 8 carries one, see
 //!    [`layout::MAZE_ONE_IN`]), with a reward at its end and a one-way door as
@@ -56,10 +56,10 @@
 //! RATRUN_LEVEL_STATS=2500 cargo test level_statistics -- --nocapture
 //! ```
 //!
-//! prints the designer-facing distributions (rooms, halls, corridors, boss
-//! arena size and distance, mazes per map and their distance, open-floor
-//! share) over that many seeds per theme, and fails if any first attempt does
-//! not validate.
+//! prints the designer-facing distributions (rooms, halls, corridors, largest
+//! hall size and distance, mazes per map and their distance, open-floor share)
+//! over that many seeds per theme, and fails if any first attempt does not
+//! validate.
 
 pub mod hazards;
 pub mod layout;
@@ -213,7 +213,7 @@ fn generate_stages(
     if theme == Theme::Trailer {
         let mut level = trailer::generate(tiles, &mut rng, seed);
         stage!(lights, lights::place(&mut level, attempt));
-        return level;
+        return strip_boss_arena(level);
     }
 
     let design = stage!(layout, layout::build_layout(&mut tiles, &mut rng, theme));
@@ -274,12 +274,48 @@ fn generate_stages(
         start: design.start,
         mazes: mazes.clone(),
         objects,
-        boss: design.boss.clone(),
+        boss: crate::game::level::BossArena::default(),
         trailer: crate::game::level::TrailerDeck::default(),
     };
     stage!(lights, lights::place(&mut level, attempt));
+    strip_boss_arena(level)
+}
+
+/// Make a generated level arena-free (batch 12).
+///
+/// The generator no longer builds a boss arena, and the boss arrives where the
+/// rat is (`Level::fight_rect_around`). The themes' own generators still
+/// describe the room that used to be one — the Flatbed's cab hold is the last
+/// one — so this is the single place the last of it is taken away: a
+/// [`crate::game::level::RoomKind::Boss`] room becomes an ordinary
+/// [`crate::game::level::RoomKind::Hall`] and the level's
+/// [`crate::game::level::BossArena`] furniture is cleared. Nothing else about
+/// the map changes: the tile grid, the props, the objects and the lights are
+/// already painted.
+fn strip_boss_arena(mut level: Level) -> Level {
+    use crate::game::level::{BossArena, LightFixtureKind, LightZoneKind, RoomKind};
+
+    for room in &mut level.rooms {
+        if room.kind == RoomKind::Boss {
+            room.kind = RoomKind::Hall;
+        }
+    }
+    // `lights::place` runs before this, so a theme's own generator can have
+    // zoned or lit its former arena: those become ordinary room lights.
+    for zone in &mut level.objects.light_zones {
+        if zone.kind == LightZoneKind::Arena {
+            zone.kind = LightZoneKind::Room;
+        }
+    }
+    for fixture in &mut level.objects.lights {
+        if fixture.kind == LightFixtureKind::Arena {
+            fixture.kind = LightFixtureKind::Pendant;
+        }
+    }
+    level.boss = BossArena::default();
     level
 }
+
 
 /// Build the runtime [`LevelObjects`] from the generator's placements: the
 /// art modules' own view structs, initialised to their idle states.

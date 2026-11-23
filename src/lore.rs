@@ -3,8 +3,9 @@
 //! The thread: you are **Subject R-47**, a lab rat that chewed out of its cage
 //! in a sprawling research facility. The building's automated extermination
 //! protocol has triggered. Claw up from the Sewers, through the Kitchen or the
-//! Laundry, to the Lab or the Printworks — and get out. The Flatbed is the
-//! ride home (a practice floor, never a campaign step).
+//! Laundry, past the Lab or the Printworks — and out on the **Flatbed**, the
+//! campaign's fourth and last level (batch twelve: the ride is the finale). The
+//! same floor is still a practice run on its own.
 
 use crate::game::level::Theme;
 
@@ -59,7 +60,7 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
              overnight. Tomorrow's front page says you were caught.",
         ),
         Theme::Trailer => (
-            "THE GETAWAY — THE FLATBED",
+            "SECTOR 04 — THE FLATBED",
             "Forty feet of wet deck doing eighty into the dark. The cab is \
              forward. So is the magpie, and it thinks the rig is its nest.",
         ),
@@ -95,6 +96,15 @@ pub fn victory(theme: Theme) -> &'static str {
         }
     }
 }
+
+/// The campaign victory plate's closing line.
+///
+/// The run ends on the ride now (the Flatbed is the campaign's fourth level),
+/// so the plate carries the getaway's own payoff instead of a generic
+/// "three sectors" note. `lore::victory(Theme::Trailer)` is the same beat for a
+/// **practice** ride, which shows it on the incident report instead.
+pub const GETAWAY_WIN: &str =
+    "The last shriek drops astern. The deck runs out, and the facility is behind you.";
 
 /// The Kitchen's second boss, **SUBJECT R-01**: the bar's name and class tag.
 ///
@@ -202,6 +212,12 @@ mod tests {
             );
         }
         assert!(DEFEAT.chars().count() <= 112);
+        // The campaign victory plate's closing line wraps in 47 x 2 at 57 x 20.
+        assert!(
+            GETAWAY_WIN.chars().count() <= 94,
+            "the victory-plate line is {} cells (budget 94)",
+            GETAWAY_WIN.chars().count()
+        );
     }
 
     /// STYLE.md §1: no exclamation marks anywhere in the lore.
@@ -223,6 +239,7 @@ mod tests {
             COBRA_CLASS,
             COBRA_ARRIVAL,
             COBRA_FIELD_NOTE,
+            GETAWAY_WIN,
         ];
         all.extend_from_slice(INTRO);
         for theme in Theme::playable() {

@@ -264,6 +264,26 @@ pub static STYLE: Style = Style {
     lead_vib_depth: 0.0018,
     stab_decay_ms: 280.0,
     enhanced_drums: true,
+    patches: [
+        super::Patch::Chip,
+        super::Patch::Chip,
+        super::Patch::Chip,
+        super::Patch::Chip,
+        super::Patch::FmSlapBass,
+        super::Patch::FmEpiano,
+        super::Patch::KsClavinet,
+        super::Patch::FmClav,
+        super::Patch::FmPunchBrass,
+        super::Patch::Fx16,
+    ],
+    drum_kit: super::DrumKit::Mechanical,
+    mix_16: [0.215, 0.320, 0.500, 0.310, 0.255, 0.145, 0.310, 0.260, 0.210, 0.155],
+    drive_16: 1.14,
+    echo_ms: 182.0,
+    echo_feedback: 0.26,
+    echo_lp_hz: 3500.0,
+    echo_send: [0.00, 0.12, 0.06, 0.14, 0.00, 0.15, 0.20, 0.24, 0.26, 0.20],
+    master_lp_hz: 14500.0,
     ..Style::base()
 };
 

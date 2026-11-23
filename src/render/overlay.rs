@@ -162,21 +162,6 @@ fn draw_poi_arrows(frame: &mut Frame, game: Rect, world: &World, _state: &HudSta
         }
     }
 
-    // A seen boss arena stays findable from anywhere on the map.
-    if let Some(room) = world.level.boss_room() {
-        if world.boss_arena_marker().is_some() {
-            push_poi(
-                &mut targets,
-                &mut n,
-                PoiTarget {
-                    pos: room.center(),
-                    kind: MarkerKind::BossArena,
-                    priority: 2,
-                },
-            );
-        }
-    }
-
     // Rare floor finds on explored ground.
     for entity in world.ecs.iter_entities() {
         let Some(pickup) = entity.get::<Pickup>() else {
@@ -461,10 +446,11 @@ pub const BOSS_WARNING_SECS: f32 = 25.0;
 
 /// The pre-boss warning banner, drawn 25 s out (`BOSS_WARNING_SECS`).
 ///
-/// It names the boss that is coming and sends the player to the arena — the
-/// compass (`draw_boss_compass`) points at the arena until the boss spawns,
-/// then at the boss itself. Returns the rows it reserved at the top of `game`
-/// (0 when it did not draw: too narrow, or no warning window).
+/// It names the boss that is coming and counts down to its arrival. Since
+/// batch 12 it does not send the player anywhere: the boss arrives where the
+/// rat is, so there is no ground to reach before it. Returns the rows it
+/// reserved at the top of `game` (0 when it did not draw: too narrow, or no
+/// warning window).
 fn draw_boss_warning(
     frame: &mut Frame,
     game: Rect,
@@ -485,7 +471,7 @@ fn draw_boss_warning(
     if game.width >= 56 {
         let _ = write!(
             state.boss_banner,
-            " ▸ {} IN {:02}s  ·  HEAD FOR THE ARENA ◂ ",
+            " ▸ {} IN {:02}s  ·  STAND YOUR GROUND ◂ ",
             codename,
             rem
         );
@@ -496,7 +482,7 @@ fn draw_boss_warning(
     }
     if state.boss_banner.is_empty() || state.boss_banner.chars().count() > room {
         state.boss_banner.clear();
-        let _ = write!(state.boss_banner, " ▸ ARENA IN {:02}s ◂ ", rem);
+        let _ = write!(state.boss_banner, " ▸ BOSS IN {:02}s ◂ ", rem);
     }
     let bw = (state.boss_banner.chars().count() as u16).min(game.width);
     let bx = game.x + (game.width - bw) / 2;
@@ -861,32 +847,19 @@ fn draw_miniboss_ui(
     0
 }
 
-/// Draw a compact directional edge pointer when the target is off-screen.
+/// Draw a compact directional edge pointer at the living boss when it is
+/// off-screen.
 ///
-/// The pointer follows the living boss. Before the boss spawns it follows the
-/// **arena** instead, so the 25 s warning's "head for the arena" is a real
-/// bearing and not only text; the pointer switches to the boss the moment the
-/// boss exists.
+/// The 25 s warning no longer points anywhere: batch 12 removed the boss arena,
+/// and the boss now arrives where the rat is, so there is nothing to walk to
+/// (the warning is a countdown, not a bearing). The boss's own arrow is
+/// unchanged.
 ///
 /// Returns the label's rectangle (empty when nothing was drawn) so the edge
 /// arrows can keep off it.
-fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudState) -> Rect {
-    // The target: the boss once it exists, else the arena during the pre-boss
-    // warning window. `to_boss` only picks the edge label.
-    let (offset, to_boss) = match state.telemetry.boss_offset {
-        Some(offset) => (offset, true),
-        None => {
-            let warning = !world.director.boss_spawned
-                && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
-                && world.elapsed < director::BOSS_TIME;
-            if !warning {
-                return Rect::default();
-            }
-            let Some(room) = world.level.boss_room() else {
-                return Rect::default();
-            };
-            (room.center() - world.player.pos, false)
-        }
+fn draw_boss_compass(frame: &mut Frame, game: Rect, _world: &World, state: &HudState) -> Rect {
+    let Some(offset) = state.telemetry.boss_offset else {
+        return Rect::default();
     };
     if game.width < 24 || game.height < 10 {
         return Rect::default();
@@ -917,12 +890,12 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
         let frac_y = ((ny / nx.abs().max(1.0)) * 0.5 + 0.5).clamp(0.18, 0.82);
         let y = game.y + ((game.height.saturating_sub(2)) as f32 * frac_y) as u16;
         if nx < 0.0 {
-            let label = if to_boss { " ◄ BOSS " } else { " ◄ ARENA " };
+            let label = " ◄ BOSS ";
             let lw = (label.chars().count() as u16).min(game.width - 2);
             buf.set_stringn(game.x + 1, y, label, lw as usize, style);
             Rect::new(game.x + 1, y, lw, 1)
         } else {
-            let label = if to_boss { " BOSS ► " } else { " ARENA ► " };
+            let label = " BOSS ► ";
             let lw = label.chars().count() as u16;
             let x = game.right().saturating_sub(lw + 1).max(game.x);
             buf.set_stringn(x, y, label, lw as usize, style);
@@ -931,12 +904,7 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
     } else {
         // Top or bottom edge.
         let frac_x = ((nx / ny.abs().max(1.0)) * 0.5 + 0.5).clamp(0.15, 0.85);
-        let label = match (ny < 0.0, to_boss) {
-            (true, true) => " ▲ BOSS ",
-            (true, false) => " ▲ ARENA ",
-            (false, true) => " ▼ BOSS ",
-            (false, false) => " ▼ ARENA ",
-        };
+        let label = if ny < 0.0 { " ▲ BOSS " } else { " ▼ BOSS " };
         let lw = label.chars().count() as u16;
         let cx = game.x + ((game.width.saturating_sub(lw)) as f32 * frac_x) as u16;
         let y = if ny < 0.0 {
@@ -1145,11 +1113,7 @@ mod tests {
     /// phase readout (which reads `World::boss_phase()`) has a real entity.
     fn spawn_boss(w: &mut World, phase: u8) {
         use crate::game::ecs::systems::boss::{Boss, BossKind};
-        let arena = w
-            .level
-            .boss_room()
-            .expect("generated level has a boss room")
-            .rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let mut boss = Boss::new(
             BossKind::for_theme(w.level.theme),
             w.player.pos,
@@ -1258,8 +1222,12 @@ mod tests {
             "missing pre-boss countdown for {plate} in {text}"
         );
         assert!(
-            text.contains("HEAD FOR THE ARENA"),
-            "the 25 s warning must send the player to the arena: {text}"
+            text.contains("STAND YOUR GROUND"),
+            "the 25 s warning must name the boss and hold the rat where it is: {text}"
+        );
+        assert!(
+            !text.to_uppercase().contains("ARENA"),
+            "the warning still sends the player to an arena: {text}"
         );
     }
 
@@ -1289,20 +1257,18 @@ mod tests {
             .unwrap();
         let text = buf_text(&terminal);
         assert!(
-            !text.contains("IN 30s") && !text.contains("HEAD FOR THE ARENA"),
+            !text.contains("IN 30s") && !text.contains("STAND YOUR GROUND"),
             "the warning started too early: {text}"
         );
     }
 
-    /// Before the boss exists, the compass points at the arena the warning
-    /// sends the player to; it switches to the boss once there is one.
+    /// The warning draws no bearing (batch 12): there is no arena to walk to,
+    /// so the compass waits for the boss itself.
     #[test]
-    fn the_warning_compass_points_at_the_arena_until_the_boss_arrives() {
+    fn the_warning_draws_no_bearing() {
         let mut w = World::new(Theme::Lab, 7);
         w.viewport = Vec2::new(80.0, 48.0);
         w.elapsed = director::BOSS_TIME - 20.0;
-        let arena = w.level.boss_room().expect("boss room").center();
-        let to = arena - w.player.pos;
         let mut hud = HudState::default();
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -1310,27 +1276,12 @@ mod tests {
             .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
             .unwrap();
         let text = buf_text(&terminal);
-        assert!(
-            !text.contains("BOSS ►") && !text.contains("◄ BOSS"),
-            "the compass pointed at a boss that does not exist yet: {text}"
-        );
-        // The right edge for the arena's bearing (the warning banner also says
-        // "ARENA", so match a labelled edge, not just the word).
-        let expected = if to.x.abs() >= to.y.abs() {
-            if to.x < 0.0 {
-                "◄ ARENA"
-            } else {
-                "ARENA ►"
-            }
-        } else if to.y < 0.0 {
-            "▲ ARENA"
-        } else {
-            "▼ ARENA"
-        };
-        assert!(
-            text.contains(expected),
-            "no {expected} bearing on the warning: {text}"
-        );
+        for label in ["BOSS ►", "◄ BOSS", "▲ BOSS", "▼ BOSS", "ARENA", "BEARING"] {
+            assert!(
+                !text.contains(label),
+                "the warning still draws a {label:?} bearing: {text}"
+            );
+        }
     }
 
     #[test]
@@ -1471,7 +1422,12 @@ mod tests {
     #[test]
     fn the_boss_warning_falls_back_to_a_wording_that_fits_whole() {
         let long = "AN UNREASONABLY LONG CODENAME FOR A BOSS";
-        for (tw, want) in [(120u16, "HEAD FOR THE ARENA ◂"), (57, "IN 10s ◂"), (44, "ARENA IN 10s ◂"), (30, "ARENA IN 10s ◂")] {
+        for (tw, want) in [
+            (120u16, "STAND YOUR GROUND ◂"),
+            (57, "IN 10s ◂"),
+            (44, "BOSS IN 10s ◂"),
+            (30, "BOSS IN 10s ◂"),
+        ] {
             let mut w = World::new(Theme::Sewer, 7);
             w.elapsed = director::BOSS_TIME - 10.0;
             let mut hud = HudState::default();

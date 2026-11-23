@@ -1,7 +1,7 @@
 //! Seeded, non-colliding room lights. This stage only reads the finished map.
 //!
 //! Two passes: the **hanging** lights (a row of pendants over each room, a
-//! passage lamp down each corridor, the arena's lamps, the blackout floors'
+//! passage lamp down each corridor, the blackout floors'
 //! dying bulbs — batch 8 and earlier) and the **wall-mounted** sconces (batch
 //! 9, [`place_wall_lamps`]). The sconce pass is appended after every existing
 //! draw of the stage's salted rng, so it can only add fixtures: the zones, the
@@ -54,7 +54,7 @@ fn place_hanging_lights(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         let seed = rng.random::<u32>();
         let zone = match room.kind {
             RoomKind::Start => LightZoneKind::Start,
-            RoomKind::Boss => LightZoneKind::Arena,
+            RoomKind::Boss => LightZoneKind::Room,
             RoomKind::Corridor => LightZoneKind::Corridor,
             RoomKind::Maze => LightZoneKind::Maze,
             RoomKind::Room if seed.is_multiple_of(5) => LightZoneKind::Blackout,
@@ -66,7 +66,6 @@ fn place_hanging_lights(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         });
 
         let span = room.rect.w.max(room.rect.h) as f32 * 16.0;
-        let short = room.rect.w.min(room.rect.h) as f32 * 16.0;
         let horizontal = room.rect.w >= room.rect.h;
         let (kind, count, radius) = match zone {
             LightZoneKind::Start => (
@@ -74,6 +73,9 @@ fn place_hanging_lights(level: &mut Level, rng: &mut rand::rngs::StdRng) {
                 2,
                 (span * 0.65).clamp(88.0, 160.0),
             ),
+            // Unreachable since batch 12 removed the boss arena: no map has an
+            // Arena zone. The arm stays because the enum variant is matched
+            // exhaustively here (and in `render::lighting`).
             LightZoneKind::Arena => (
                 LightFixtureKind::Arena,
                 4,
@@ -94,15 +96,9 @@ fn place_hanging_lights(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         };
         for i in 0..count {
             let along = (i as f32 + 0.5) / count as f32 - 0.5;
-            let across = if kind == LightFixtureKind::Arena {
-                if i.is_multiple_of(2) {
-                    -short * 0.33
-                } else {
-                    short * 0.33
-                }
-            } else {
-                0.0
-            };
+            // Hanging lamps hang over the room's long axis; the arena's
+            // staggered pairing is gone with the arena.
+            let across = 0.0;
             let shift = along * span * 0.76;
             let intended = room.center()
                 + if horizontal {
@@ -251,7 +247,7 @@ fn place_emitters(level: &mut Level, rng: &mut rand::rngs::StdRng) {
     }
 }
 
-// ---- Wall-mounted lamps (batch 9) -----------------------------------------
+// ---- Wall-mounted lamps (batch 9, re-lit in batch 12) ---------------------
 //
 // The owner's note: *"walls should have light sources in some places"*. Every
 // fixture above hangs over open floor; a **sconce** hangs on a structural wall
@@ -259,25 +255,38 @@ fn place_emitters(level: &mut Level, rng: &mut rand::rngs::StdRng) {
 // a corridor reads as a rhythm of pools with dark stretches between them
 // instead of one even dimness.
 //
+// Batch 12 (the owner: *"the wall lights need to be WAAAAY brighter"*) made the
+// lamp a room light — a 110 px fan three times as bright, drawn as a 5–7 px
+// emissive fitting — raised the budget to 40 a map, and gave **corridors their
+// own admission rule**: nearly every corridor was a short door connector whose
+// faces all sat inside the room rule's three-cell doorway clearance, so they
+// carried no lamp at all. Nothing here reads a simulation value and nothing
+// moves a golden or the map pin.
+//
 // Everything here runs on the stage's own salted rng, after every existing
 // draw, and only appends to `objects.lights`. A fixture is a render-only input:
 // no system reads the list, so nothing here can move a determinism golden. The
 // map pin (`levelgen::mod::map_hash`) folds tiles, rat-holes, traps, doors and
-// rewards — never fixtures — so it cannot move either.
+// rewards — never fixtures — so it cannot move either. The batch-12 filters add
+// no new rng draw; they only change which faces are admitted, which moves the
+// draws that follow (accepted: fixture positions move, nothing else).
 
 /// The most wall lamps one map may carry. A fixture costs the lighting pass one
 /// cached shadow bake (regenerated only when the map's occluders change) plus
 /// one splat while it overlaps the view, so a map's lamp count is a *light*
 /// budget rather than a per-frame cost — but it is still bounded: a long
-/// corridor map with a big arena would stack them otherwise. A corridor
-/// contributes one per 8–12 cells (two or three on a typical passage), a room
-/// one or two, the arena a ring of six and a maze at most two, so a campaign
-/// map collects a dozen or so and the flatbed's rails carry at most
-/// [`RAIL_LAMP_CAP`].
-const SCONCE_CAP: usize = 26;
-/// How far a wall lamp's fan reaches into the room (world px): a modest pool,
-/// roughly 40–60 px of reach with the soft edge.
-const SCONCE_RADIUS: f32 = 46.0;
+/// corridor map would stack them otherwise. A corridor contributes one per
+/// 8–12 cells (two or three on a typical passage), a room one or two and a maze
+/// at most two, so a campaign map collects two dozen or so and the flatbed's
+/// rails carry at most
+/// [`RAIL_LAMP_CAP`]. Batch 12 raised it from 26: the roles ask for about fifty
+/// and the budget always bound, so corridors were starved.
+const SCONCE_CAP: usize = 40;
+/// How far a wall lamp's fan reaches into the room (world px). Batch 9 was a
+/// modest 46 px pool; batch 12 made a wall lamp a room light, so the fan runs
+/// 110 px — nearly seven tiles — with the soft edge falling to nothing at the
+/// radius.
+const SCONCE_RADIUS: f32 = 110.0;
 /// A wall lamp keeps this many cells (Chebyshev) clear of a hanging Pendant or
 /// Passage lamp, so the two pools never pile up on each other.
 const SCONCE_LAMP_GAP: i32 = 3;
@@ -286,14 +295,26 @@ const SCONCE_GAP: i32 = 4;
 /// ...and this many cells from any doorway cell: a threshold keeps the light it
 /// has, and a lamp beside a doorway reads as a second exit.
 const SCONCE_DOOR_GAP: i32 = 3;
+/// A *corridor* face keeps only this many cells from a doorway (batch 12): most
+/// corridors are short door connectors, and a three-cell clearance covers a
+/// whole five-cell link, so the old rule left them dark.
+const SCONCE_CORRIDOR_DOOR_GAP: i32 = 2;
+/// A corridor face may sit under its own hanging Passage lamp's shoulder: the
+/// room rule's three cells refuses every face of a short connector, because a
+/// Passage lamp hangs in the middle of the corridor by construction.
+const SCONCE_CORRIDOR_LAMP_GAP: i32 = 1;
+/// A corridor wall must run this many cells straight (this cell included) to
+/// carry a lamp: a fitting on the end of a one-cell nub between two doorways
+/// reads as a stray pixel, not as a wall lamp.
+const SCONCE_CORRIDOR_RUN: i32 = 4;
 /// The walking rhythm of a corridor's lamps, in cells: one every 8–12 tiles,
 /// alternating sides.
 const SCONCE_STEP_MIN: i32 = 8;
 const SCONCE_STEP_MAX: i32 = 12;
 /// A room whose long wall is at least this long (cells) gets two wall lamps.
 const SCONCE_LONG_ROOM: i32 = 13;
-/// The flatbed's side rails carry at most this many marker lamps.
-const RAIL_LAMP_CAP: usize = 8;
+/// The flatbed's side rails carry at most this many marker lamps (8 in batch 9).
+const RAIL_LAMP_CAP: usize = 12;
 /// ...at least this many columns apart (a longer bed spreads them further).
 const RAIL_LAMP_STEP: i32 = 11;
 
@@ -421,7 +442,64 @@ fn admits(face: Face, hanging: &[Vec2], chosen: &[Face]) -> bool {
         .any(|c| cell_gap(c.floor, face.floor) <= SCONCE_GAP)
 }
 
-/// Batch 9: hang a sconce on some of the map's structural wall faces.
+/// How many structural wall cells run straight through `wall` along the face's
+/// own wall, counting `wall` itself. A corridor lamp wants at least
+/// [`SCONCE_CORRIDOR_RUN`] of them (batch 12).
+fn wall_run(tiles: &TileMap, wall: (i32, i32), face: Cardinal) -> i32 {
+    let (dx, dy) = cardinal_delta(face);
+    // The wall runs across the face normal.
+    let (ax, ay) = (dy, dx);
+    // Out of bounds reads as solid (`TileMap::get`), so the walk must stop at
+    // the map edge itself or it would never terminate on a border wall.
+    let solid = |x, y| tiles.in_bounds(x, y) && tiles.get(x, y) == TileKind::Wall(WallKind::Solid);
+    let mut run = 1;
+    for sign in [-1, 1] {
+        let mut step = 1;
+        while solid(wall.0 + ax * sign * step, wall.1 + ay * sign * step) {
+            run += 1;
+            step += 1;
+        }
+    }
+    run
+}
+
+/// Whether `face` may carry a **corridor** lamp (batch 12).
+///
+/// A corridor is one or two cells wide, its hanging Passage lamp sits in the
+/// middle of it by construction, and most of them are short door connectors —
+/// so the room rule's three-cell doorway clearance and three-cell lamp
+/// clearance refused almost every corridor face on a real map. The corridor
+/// rule instead asks for a straight wall long enough to mount a fitting on, two
+/// cells of clearance from any threshold, and the ordinary spacing from the
+/// wall lamps already chosen. A rat-hole face, a shop hole, a one-way door and
+/// a doorway tile never reach here: [`sconce_faces`] already dropped them.
+fn admits_corridor(
+    face: Face,
+    tiles: &TileMap,
+    doorways: &[(i32, i32)],
+    hanging: &[Vec2],
+    chosen: &[Face],
+) -> bool {
+    if near(doorways, face.floor, SCONCE_CORRIDOR_DOOR_GAP) {
+        return false;
+    }
+    if wall_run(tiles, face.wall, face.dir) < SCONCE_CORRIDOR_RUN {
+        return false;
+    }
+    let centre = TileMap::tile_rect(face.floor.0, face.floor.1).center();
+    if hanging
+        .iter()
+        .any(|&p| world_gap(centre, p) <= SCONCE_CORRIDOR_LAMP_GAP)
+    {
+        return false;
+    }
+    !chosen
+        .iter()
+        .any(|c| cell_gap(c.floor, face.floor) <= SCONCE_GAP)
+}
+
+/// Batch 9: hang a sconce on some of the map's structural wall faces. Batch 12
+/// raised the budget and widened what a corridor may ask for.
 fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
     if level.theme == Theme::Trailer {
         // The flatbed has rails rather than walls.
@@ -442,13 +520,12 @@ fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         .map(|f| f.pos)
         .collect();
     let mut chosen: Vec<Face> = Vec::new();
-    // The cap binds on every campaign map (the roles would ask for about
+    // The cap still binds on some campaign maps (the roles would ask for about
     // fifty), so the order decides who is lit. Spend it where a lamp matters
-    // most and then thin evenly instead of truncating the room list: the arena
-    // and the start room, the corridors, every other room or hall, and only
-    // then the rooms in between. Each group keeps the level's own room order.
+    // most and then thin evenly instead of truncating the room list: the start
+    // room, the corridors, every other room or hall, and only then the rooms in
+    // between. Each group keeps the level's own room order.
     let mut order: Vec<&Room> = Vec::with_capacity(level.rooms.len());
-    order.extend(level.rooms.iter().filter(|r| r.kind == RoomKind::Boss));
     order.extend(level.rooms.iter().filter(|r| r.kind == RoomKind::Start));
     order.extend(level.rooms.iter().filter(|r| r.kind == RoomKind::Corridor));
     let living = || {
@@ -465,13 +542,15 @@ fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         }
         match room.kind {
             RoomKind::Corridor => {
-                corridor_lamps(room, &faces, &doorways, &hanging, &mut chosen, rng)
+                corridor_lamps(room, &level.tiles, &faces, &doorways, &hanging, &mut chosen, rng)
             }
             RoomKind::Room | RoomKind::Hall => {
                 room_lamps(room, &faces, &doorways, &hanging, &mut chosen, rng)
             }
             RoomKind::Start => start_room_lamp(room, &faces, &doorways, &hanging, &mut chosen),
-            RoomKind::Boss => arena_lamps(room, &faces, &doorways, &hanging, &mut chosen),
+            // No generated map has one since batch 12; a hand-built arena room
+            // gets the ordinary room treatment.
+            RoomKind::Boss => room_lamps(room, &faces, &doorways, &hanging, &mut chosen, rng),
             RoomKind::Maze => {}
         }
     }
@@ -504,9 +583,11 @@ fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
 
 /// A corridor gets one lamp every 8–12 cells, alternating sides: the rhythm the
 /// player reads a passage by. The faces are walked in `along` order, so the rng
-/// draws (the step) come in a fixed order for a given map.
+/// draws (the step) come in a fixed order for a given map. Admission is
+/// [`admits_corridor`], not the room rule.
 fn corridor_lamps(
     room: &Room,
+    tiles: &TileMap,
     faces: &[Face],
     doorways: &[(i32, i32)],
     hanging: &[Vec2],
@@ -517,7 +598,6 @@ fn corridor_lamps(
     let mut list: Vec<(i32, i32, Face)> = faces
         .iter()
         .filter(|f| room.rect.contains(f.floor.0, f.floor.1))
-        .filter(|f| !near(doorways, f.floor, SCONCE_DOOR_GAP))
         .filter_map(|f| {
             // Side: -1 for the north/west wall, +1 for the south/east one.
             let side = match (horizontal, f.dir) {
@@ -538,7 +618,10 @@ fn corridor_lamps(
         if chosen.len() >= SCONCE_CAP {
             return;
         }
-        if along < next || side == last_side || !admits(face, hanging, chosen.as_slice()) {
+        if along < next
+            || side == last_side
+            || !admits_corridor(face, tiles, doorways, hanging, chosen.as_slice())
+        {
             continue;
         }
         chosen.push(face);
@@ -630,58 +713,6 @@ fn start_room_lamp(
     }
 }
 
-/// The boss arena's walls get an evenly spaced ring: a lamp a third and two
-/// thirds along each long wall and one in the middle of each short one.
-fn arena_lamps(
-    room: &Room,
-    faces: &[Face],
-    doorways: &[(i32, i32)],
-    hanging: &[Vec2],
-    chosen: &mut Vec<Face>,
-) {
-    let horizontal = room.rect.w >= room.rect.h;
-    let mut sides: [Vec<(i32, Face)>; 4] = std::array::from_fn(|_| Vec::new());
-    for face in faces.iter().filter(|f| room.rect.contains(f.floor.0, f.floor.1)) {
-        if near(doorways, face.floor, SCONCE_DOOR_GAP) {
-            continue;
-        }
-        let (side, along) = match face.dir {
-            Cardinal::North => (0usize, face.floor.0),
-            Cardinal::South => (1, face.floor.0),
-            Cardinal::West => (2, face.floor.1),
-            Cardinal::East => (3, face.floor.1),
-        };
-        sides[side].push((along, *face));
-    }
-    for side in &mut sides {
-        side.sort_unstable_by_key(|(along, f)| (*along, f.wall));
-    }
-    let long = if horizontal { [0usize, 1] } else { [2, 3] };
-    let short = if horizontal { [2usize, 3] } else { [0, 1] };
-    let plan = [
-        (long[0], 1usize, 3usize),
-        (long[0], 2, 3),
-        (long[1], 1, 3),
-        (long[1], 2, 3),
-        (short[0], 1, 2),
-        (short[1], 1, 2),
-    ];
-    for (side, num, denom) in plan {
-        if chosen.len() >= SCONCE_CAP {
-            return;
-        }
-        let list = &sides[side];
-        if list.is_empty() {
-            continue;
-        }
-        let index = (list.len() * num / denom).min(list.len() - 1);
-        let face = list[index].1;
-        if admits(face, hanging, chosen.as_slice()) {
-            chosen.push(face);
-        }
-    }
-}
-
 /// A maze's walls get a sparse pair facing its junctions only: the dark between
 /// the crossings is the maze's whole point.
 fn maze_lamps(
@@ -753,6 +784,7 @@ fn place_rail_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::art_walls::WallAxis;
     use crate::game::levelgen::generate_once;
     use crate::game::levelgen::validate::validate;
 
@@ -770,6 +802,20 @@ mod tests {
             .iter()
             .filter(|f| f.kind == LightFixtureKind::Sconce)
             .collect()
+    }
+
+    /// The doorway clearance a lamp on this floor cell must keep: a corridor may
+    /// come within two cells of a threshold, anything else keeps three.
+    fn door_gap_for(level: &Level, floor: (i32, i32)) -> i32 {
+        let corridor = level
+            .rooms
+            .iter()
+            .any(|r| r.kind == RoomKind::Corridor && r.rect.contains(floor.0, floor.1));
+        if corridor {
+            SCONCE_CORRIDOR_DOOR_GAP
+        } else {
+            SCONCE_DOOR_GAP
+        }
     }
 
     /// The pre-batch-9 stage alone, on the stage's own salt: the baseline the
@@ -827,13 +873,25 @@ mod tests {
                     "{ctx:?}: {lamp:?} does not face floor"
                 );
                 // Never on a hole, a door, a threshold or a doorway's doorstep.
+                // A corridor face may come two cells from a threshold instead
+                // of three (batch 12), so the clearance is read per lamp.
                 assert!(!blocked.contains(&(fx, fy)), "{ctx:?}: {lamp:?}");
-                assert!(!near(&doorways, (fx, fy), SCONCE_DOOR_GAP), "{ctx:?}");
-                // Clear of the hanging lamps and of the other wall lamps.
+                assert!(
+                    !near(&doorways, (fx, fy), door_gap_for(&level, (fx, fy))),
+                    "{ctx:?}: {lamp:?}"
+                );
+                // Clear of the hanging lamps and of the other wall lamps. A
+                // corridor face may sit under its own Passage lamp's shoulder
+                // (batch 12), so the clearance is read per lamp too.
                 let centre = TileMap::tile_rect(fx, fy).center();
+                let lamp_gap = if door_gap_for(&level, (fx, fy)) == SCONCE_CORRIDOR_DOOR_GAP {
+                    SCONCE_CORRIDOR_LAMP_GAP
+                } else {
+                    SCONCE_LAMP_GAP
+                };
                 for &h in &hanging {
                     assert!(
-                        world_gap(centre, h) > SCONCE_LAMP_GAP,
+                        world_gap(centre, h) > lamp_gap,
                         "{ctx:?}: {lamp:?} crowds a hanging lamp"
                     );
                 }
@@ -851,6 +909,129 @@ mod tests {
                 "{ctx:?}: {:?}",
                 validate(&level)
             );
+        }
+    }
+
+    /// The counts the batch is allowed to spend, over 20 seeds of every
+    /// playable floor: no map over its cap, and corridors do get lamps.
+    #[test]
+    fn wall_lamp_counts_stay_within_the_new_caps() {
+        let mut corridor_lamps = 0usize;
+        let mut most = 0usize;
+        for (theme, level) in maps() {
+            let lamps = sconces(&level);
+            let cap = if theme == Theme::Trailer {
+                RAIL_LAMP_CAP
+            } else {
+                SCONCE_CAP
+            };
+            assert!(
+                lamps.len() <= cap,
+                "{theme:?} {}: {} wall lamps over the cap {cap}",
+                level.seed,
+                lamps.len()
+            );
+            most = most.max(lamps.len());
+            for lamp in &lamps {
+                let cell = cell_of(lamp.pos);
+                if door_gap_for(&level, cell) == SCONCE_CORRIDOR_DOOR_GAP {
+                    corridor_lamps += 1;
+                }
+            }
+        }
+        // Batch 12 exists because corridors were dark; the sweep has to show
+        // lamps in them at all.
+        assert!(
+            corridor_lamps > 0,
+            "no corridor lamp in {} maps",
+            Theme::playable().len() * 20
+        );
+        assert!(
+            most > SCONCE_CAP / 2,
+            "the cap {SCONCE_CAP} is not being spent (most {most} lamps)"
+        );
+    }
+
+    /// A hand-built corridor: `len` cells long and two wide, walled on both
+    /// sides with a two-cell doorway in each end cap. The rest of the map is
+    /// open floor with no walls, so the corridor is the only place a lamp can
+    /// go (and there are no hanging lamps to refuse a face).
+    fn corridor_level(len: i32) -> Level {
+        let mut level = Level::empty(Theme::Sewer);
+        let (x0, y0) = (20, 40);
+        let wall = TileKind::Wall(WallKind::Solid);
+        level.tiles.fill_cells(x0 - 1, y0 - 1, len + 2, 1, wall);
+        level.tiles.fill_cells(x0 - 1, y0 + 2, len + 2, 1, wall);
+        for x in [x0 - 1, x0 + len] {
+            level.tiles.fill_cells(x, y0 - 1, 1, 4, wall);
+            for y in [y0, y0 + 1] {
+                level.tiles.set(
+                    x,
+                    y,
+                    TileKind::Wall(WallKind::Doorway {
+                        axis: WallAxis::Vertical,
+                    }),
+                );
+            }
+        }
+        level
+            .rooms
+            .push(Room::new(TileRect::new(x0, y0, len, 2), RoomKind::Corridor));
+        let mut rng = level_rng(level.theme, level.seed ^ 0x4c49_4748_5453, 0);
+        place_wall_lamps(&mut level, &mut rng);
+        level
+    }
+
+    /// A door connector six cells long: every face of it is inside the room
+    /// rule's three-cell doorway clearance, so batch 9 left these dark. The
+    /// corridor rule (two cells of clearance, four cells of straight wall)
+    /// lights it.
+    #[test]
+    fn a_corridor_with_a_four_tile_straight_wall_gets_a_lamp() {
+        let level = corridor_level(6);
+        let lamps = sconces(&level);
+        assert_eq!(lamps.len(), 1, "corridor lamps: {lamps:?}");
+        let cell = cell_of(lamps[0].pos);
+        assert!(
+            TileRect::new(20, 40, 6, 2).contains(cell.0, cell.1),
+            "lamp {cell:?} is outside the corridor"
+        );
+        // Three cells from each doorway: the room rule would have refused it.
+        let doorways = doorway_cells(&level);
+        assert_eq!(doorways.len(), 4, "{doorways:?}");
+        assert!(
+            !near(&doorways, cell, SCONCE_DOOR_GAP),
+            "the fixture sits inside the old doorway clearance"
+        );
+        assert!(near(&doorways, cell, SCONCE_CORRIDOR_DOOR_GAP + 1));
+        // On a wall at least four cells long, which is the corridor rule.
+        let dir = lamps[0].wall_facing(&level.tiles);
+        let wall = (cell.0 - dir.x as i32, cell.1 - dir.y as i32);
+        assert!(wall_run(&level.tiles, wall, Cardinal::South) >= SCONCE_CORRIDOR_RUN);
+    }
+
+    /// The straight-wall rule: a six-cell run counts six, a doorway in it
+    /// breaks the count, and a short corridor carries no lamp at all.
+    #[test]
+    fn a_corridor_lamp_needs_four_cells_of_straight_wall() {
+        let mut level = Level::empty(Theme::Sewer);
+        let wall = TileKind::Wall(WallKind::Solid);
+        level.tiles.fill_cells(10, 10, 6, 1, wall);
+        assert_eq!(wall_run(&level.tiles, (13, 10), Cardinal::South), 6);
+        assert_eq!(wall_run(&level.tiles, (10, 10), Cardinal::South), 6);
+        assert_eq!(wall_run(&level.tiles, (13, 10), Cardinal::East), 1);
+        level.tiles.set(
+            14,
+            10,
+            TileKind::Wall(WallKind::Doorway {
+                axis: WallAxis::Horizontal,
+            }),
+        );
+        // The doorway breaks the run: four cells to its west, one to its east.
+        assert_eq!(wall_run(&level.tiles, (13, 10), Cardinal::South), 4);
+        assert_eq!(wall_run(&level.tiles, (15, 10), Cardinal::South), 1);
+        for len in 1..=3 {
+            assert!(sconces(&corridor_level(len)).is_empty(), "len {len}");
         }
     }
 

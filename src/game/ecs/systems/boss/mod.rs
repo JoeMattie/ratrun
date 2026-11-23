@@ -129,8 +129,9 @@ use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
     BossDue, BossOverride, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue,
-    TickInput,
+    TickInput, Viewport,
 };
+use crate::game::ecs::systems::spawn::SpawnScratch;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, Rectf, Theme, TileRect};
 use crate::game::nav::FlowField;
@@ -225,9 +226,8 @@ impl BossKind {
     /// [`Self::pool_pick`] (theme + level seed); this is that pool's first
     /// entry, which is what every caller with no seed to spend means (the HUD's
     /// default plate, `for_level`'s campaign mapping, tests that pin a boss).
-    /// The Laundry fields the Mangle and the Printworks the Night Edition, the
-    /// latter with its own arena in `levelgen::layout::furnish_arena`. Nothing
-    /// else maps themes to bosses (the flatbed's own arm goes through
+    /// The Laundry fields the Mangle and the Printworks the Night Edition.
+    /// Nothing else maps themes to bosses (the flatbed's own arm goes through
     /// [`trailer_boss`]).
     ///
     /// The *spawn* no longer calls this: a floor may field more than one boss,
@@ -3575,6 +3575,15 @@ pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival) -> Boss {
 
 /// Spawn the level's boss when the director raises [`BossDue`].
 ///
+/// **Batch 12 removed the boss arena.** The boss arrives where the rat is: it
+/// is placed by the horde's own out-of-sight rule (outside the *widest* view
+/// and reachable by the large size class, `spawn::spawn_point_reachable`) on
+/// the boss's own rng stream, and the rectangle its controllers call the arena
+/// is the floor's standard fight size recentred on the rat at that moment
+/// ([`Level::fight_rect_around`]), with the dock at its centre — exactly what
+/// the console's `boss <kind> here` ([`crate::game::world::World::force_boss_here`])
+/// builds, so the two cannot drift apart.
+///
 /// `BossDue` is raised by `director::raise_boss_due`; P3 owns that call site.
 #[allow(clippy::too_many_arguments)]
 pub fn boss_spawn_system(
@@ -3588,6 +3597,7 @@ pub fn boss_spawn_system(
     level: Res<Level>,
     difficulty: Res<DifficultyLevel>,
     player: Res<Player>,
+    viewport: Res<Viewport>,
     bosses: Query<&Boss>,
     mut particles: ResMut<Particles>,
     mut shake: ResMut<Shake>,
@@ -3608,28 +3618,34 @@ pub fn boss_spawn_system(
         .0
         .take()
         .unwrap_or_else(|| BossKind::pool_pick(level.theme, level.seed));
-    let arena = level
-        .boss_room()
-        .map(|r| r.rect)
-        .unwrap_or_else(|| TileRect::new(0, 0, level.tiles.cols(), level.tiles.rows()));
-    // The generator exports the arena's fight furniture: the clear encounter
-    // floor (which is where the art's flip/escape layouts are guaranteed) and,
-    // on the Lab, the charging dock against the wall. Spawn on the clear floor,
-    // not on the arena's geometric centre, and hand the boss its real dock.
-    let centre = level
-        .boss_clear_floor()
-        .map(|f| f.center_world())
+    // The fight happens where the rat is, and it is a rectangle rather than a
+    // room: the nominal fight size, clamped to the map and centred on the rat.
+    let arena = level.fight_rect_around(player.pos);
+    // The dock (the mower's charging pad) sits at the rectangle's centre, on
+    // the nearest cell a large body fits in.
+    let dock = level
+        .tiles
+        .nearest_open_center(arena.center_world(), SizeClass::Large, 16)
         .unwrap_or_else(|| arena.center_world());
-    let dock = level.boss_dock().unwrap_or_else(|| arena.center_world());
+    // Out of sight, the way the horde arrives: outside the widest view and on
+    // the horde's connected map. The draw comes from the boss's own stream
+    // (`BossRng::for_run`, the same stream `open_fight` installs), so the run's
+    // rng order is untouched.
+    let mut boss_rng = BossRng::for_run(level.seed, kind).0;
     let radius = kind.body_radius();
-    let pos = if level.tiles.circle_clear(centre, radius, SizeClass::Large) {
-        centre
-    } else {
-        level
-            .tiles
-            .nearest_open_center(centre, SizeClass::Large, 16)
-            .unwrap_or(centre)
-    };
+    // The horde's scratch buffer is a resource the director owns; an arrival is
+    // once a floor, so its own is built here rather than borrowed.
+    let mut scratch = SpawnScratch::default();
+    let pos = crate::game::ecs::systems::spawn::spawn_point_reachable(
+        &mut boss_rng,
+        &level,
+        &player,
+        viewport.0,
+        &mut scratch,
+    )
+    // A rat holed up where the ring is solid still gets its fight, beside
+    // itself, exactly like a console `boss here`.
+    .unwrap_or_else(|| arrival_beside(&level, player.pos, radius, &arena));
     let boss = open_fight(
         &mut fight,
         Arrival {
@@ -3648,6 +3664,24 @@ pub fn boss_spawn_system(
     shake.amount = shake.amount.max(14.0);
     sfx.0.push(Sfx::Boss);
     commands.spawn((boss, next_spawn_id.take()));
+}
+
+/// Where a boss arrives when the horde's out-of-sight placement found no ring
+/// point at all (a rat holed up inside a one-cell squeeze): the first
+/// large-clear spot on a circle 48 px around the rat, else the nearest
+/// large-clear cell to the fight rectangle's centre.
+fn arrival_beside(level: &Level, rat: Vec2, radius: f32, arena: &TileRect) -> Vec2 {
+    for k in 0..8 {
+        let angle = k as f32 * (std::f32::consts::TAU / 8.0);
+        let p = rat + Vec2::new(angle.cos(), angle.sin()) * 48.0;
+        if level.tiles.circle_clear(p, radius, SizeClass::Large) {
+            return p;
+        }
+    }
+    level
+        .tiles
+        .nearest_open_center(arena.center_world(), SizeClass::Large, 16)
+        .unwrap_or_else(|| arena.center_world())
 }
 
 /// Apply player damage to the boss through its art-defined hit shapes.
@@ -3912,6 +3946,20 @@ fn walkable_line(level: &Level, from: Vec2, to: Vec2, radius: f32, class: SizeCl
     true
 }
 
+/// Has `rat` left `arena` (the boss fight's rectangle) by more than half the
+/// rectangle's own size?
+///
+/// The rectangle is built around the rat, so the only way to fail this is for
+/// the rat to walk away from the fight: more than half a rectangle past the
+/// nearer edge. Then the next neutral beat recentres it (`boss_update_system`).
+fn rat_left_the_fight(arena: TileRect, rat: Vec2) -> bool {
+    let world = arena.to_world();
+    let half = world.w.min(world.h) * 0.5;
+    let dx = (world.x - rat.x).max(rat.x - world.right()).max(0.0);
+    let dy = (world.y - rat.y).max(rat.y - world.bottom()).max(0.0);
+    dx.max(dy) > half
+}
+
 /// Where a rejoining boss is put: a large-clear cell within [`REJOIN_RADII`] of
 /// the rat **with a walkable line to him**, nearest bearing first. Both halves
 /// of that test matter: the boss and the rat can be 50 px apart on opposite
@@ -4163,6 +4211,21 @@ pub fn boss_update_system(
         // The state's own body-contact number: reset to the kind's default
         // every tick so a controller only has to say what is different.
         boss.contact_damage = boss.kind.contact_damage();
+
+        // The fight rectangle follows the rat. Batch 12 removed the arena, so
+        // the rectangle the controllers call it is centred on the rat at the
+        // moment the boss arrives; a rat that walks on gets it recentred, once,
+        // from the neutral beat — the same gate the rejoin rule uses and for the
+        // same reason: every hazard an attack queued was painted against the old
+        // rectangle, so moving it mid-attack would leave the tell detached from
+        // the shape that resolves.
+        if boss.state == boss.kind.initial_state() && rat_left_the_fight(boss.arena, player.pos) {
+            boss.arena = level.fight_rect_around(player.pos);
+            boss.dock = level
+                .tiles
+                .nearest_open_center(boss.arena.center_world(), SizeClass::Large, 16)
+                .unwrap_or_else(|| boss.arena.center_world());
+        }
 
         // Rejoin rule: a boss that is off screen and has not closed on the rat
         // for [`RELOCATE_AFTER_SECS`] is walked back into the fight. A level

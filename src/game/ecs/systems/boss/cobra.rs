@@ -1213,7 +1213,7 @@ mod tests {
         let boss = spawn_cobra_real(w);
         // The unit tests stage their moves on bare floor: the generated arena's
         // own furniture (benches, pillars) would decide the lines otherwise.
-        let arena = w.level.boss_room().map(|r| r.rect).expect("boss room");
+        let arena = w.level.fight_rect_around(w.player.pos);
         w.level
             .tiles
             .fill_cells(arena.x + 1, arena.y + 1, arena.w - 2, arena.h - 2, TileKind::Open);
@@ -1270,14 +1270,11 @@ mod tests {
 
     /// The boss arena's centre.
     fn arena_centre(w: &World) -> Vec2 {
-        w.level
-            .boss_room()
-            .map(|r| r.rect.center_world())
-            .expect("the Lab has a boss room")
+        w.level.fight_rect_around(w.player.pos).center_world()
     }
 
     fn arena_rect(w: &World) -> TileRect {
-        w.level.boss_room().map(|r| r.rect).expect("boss room")
+        w.level.fight_rect_around(w.player.pos)
     }
 
     /// Put the boss at `pos` and the rat at `rat`, both usually in the arena.

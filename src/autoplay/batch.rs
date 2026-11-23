@@ -2509,10 +2509,13 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-4>] [--practice] \
   --analyze        also run the anomaly scan (see autoplay::anomaly) and list
                    every class it finds with example seeds (costs ~10 %)
   --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
-  --route          a campaign takes this floor at its own stage (laundry is
-                   level 2, printworks level 3); with --practice it is the
-                   floor played, at its own level unless --level says otherwise
-                   (flatbed is practice only, or --level 4)
+  --route          a campaign takes this floor at its own level (laundry is
+                   level 2, printworks level 3, flatbed the level-4 finale);
+                   with --practice it is the floor played, at its own level
+                   unless --level says otherwise
+  --level N        start at campaign level N (1 Sewer, 2 stage two, 3 stage
+                   three, 4 the Flatbed finale); with --practice it is that
+                   floor alone, so --practice --route flatbed is the ride
   --seed-exact     read --seed as a run seed (replay an anomaly's seed)
   --caps W:P       distinct-kind slot caps (4:4 fresh profile, 8:8 maxed)
   --meta STAGE     nest stage: none (fresh), mid (half upgraded), max (everything)
@@ -2573,11 +2576,16 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
                 opts.seed = value()?.parse::<u64>().map_err(|_| "seed must be a number")?;
             }
             "--level" => {
+                // Every campaign level is a level index now, the ride (level 4)
+                // included: `--level 4` is the Flatbed **in campaign context**,
+                // and `--practice --level 4` is the ride alone at that level's
+                // scalars. The practice ride with no level named stays
+                // `--practice --route flatbed`.
                 let level = value()?
                     .parse::<usize>()
-                    .map_err(|_| format!("level must be 1-{}", campaign::SECTOR_COUNT))?;
-                if !(1..=campaign::SECTOR_COUNT).contains(&level) {
-                    return Err(format!("level must be 1-{}", campaign::SECTOR_COUNT));
+                    .map_err(|_| format!("level must be 1-{}", campaign::LEVEL_COUNT))?;
+                if !(1..=campaign::LEVEL_COUNT).contains(&level) {
+                    return Err(format!("level must be 1-{}", campaign::LEVEL_COUNT));
                 }
                 opts.start_level = level - 1;
                 level_given = true;
@@ -2647,31 +2655,35 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
     // silently playing something else.
     if let Some(theme) = opts.route {
         use crate::game::level::Theme;
-        let getaway = theme == Theme::Trailer;
+        let ride = theme == Theme::Trailer;
+        let sector = campaign::theme_sector(theme);
         if opts.practice {
             // A practice run plays that floor alone. Without `--level` it gets
-            // the floor's own index (the Flatbed's is the getaway sector), so
+            // the floor's own campaign level (the ride's is the fourth), so
             // `--practice --route flatbed` is the ride and not the Sewer.
             if !level_given {
-                opts.start_level = if getaway { campaign::LEVEL_COUNT } else { theme.stage() };
+                opts.start_level = sector;
             }
-        } else if getaway {
-            // The getaway ride is not a campaign step.
-            if !campaign::is_getaway_sector(opts.start_level) {
-                return Err(
-                    "--route flatbed/trailer is a practice floor: add --practice (or --level 4 for the getaway ride)"
-                        .into(),
-                );
+        } else if ride {
+            // The Flatbed is the campaign's finale now (batch twelve), so a
+            // campaign may be told to take it — and a campaign that starts at
+            // level 4 *is* the ride. Before batch twelve this was a practice
+            // floor only, and `--route flatbed` without `--practice` was an
+            // error.
+            if opts.start_level > sector {
+                return Err(format!(
+                    "--route flatbed is level {}: a campaign starting at --level {} never reaches it",
+                    sector + 1,
+                    opts.start_level + 1
+                ));
             }
-        } else if campaign::is_getaway_sector(opts.start_level) {
-            return Err(format!("--route {} cannot apply to --level 4 (the getaway ride)", theme.name()));
-        } else if opts.start_level > theme.stage() {
-            // A campaign takes the pick at the floor's own stage; a run that
+        } else if opts.start_level > sector {
+            // A campaign takes the pick at the floor's own level; a run that
             // starts past it would never play it.
             return Err(format!(
                 "--route {} is level {}: a campaign starting at --level {} never reaches it",
                 theme.name(),
-                theme.stage() + 1,
+                sector + 1,
                 opts.start_level + 1
             ));
         }
@@ -3312,38 +3324,55 @@ mod tests {
         assert_eq!(run.world().level.theme, Theme::Printworks);
     }
 
-    /// `--route flatbed` on a **campaign** run is an error: the getaway ride is
-    /// not a campaign fork, so the flag used to be accepted and then silently
-    /// ignored (the campaign played its own route instead).
+    /// `--route flatbed` accepts the ride in **both** contexts now: it is the
+    /// campaign's fourth level as well as a practice floor (batch twelve), so
+    /// the flag used to be an error on a campaign and is not any more.
     #[test]
-    fn the_route_flag_refuses_the_flatbed_on_a_campaign_level() {
+    fn the_route_flag_takes_the_flatbed_in_a_campaign_and_in_practice() {
         let args = |extra: &[&str]| -> Vec<String> {
             let mut v = vec!["--bot-batch".to_string(), "1".to_string()];
             v.extend(extra.iter().map(|s| s.to_string()));
             v
         };
-        // Campaign (no --practice): refused.
-        let err = parse_args(&args(&["--level", "2", "--route", "trailer"]))
-            .expect_err("a campaign run cannot be routed to the flatbed");
-        assert!(err.contains("practice"), "unhelpful error: {err}");
-        let err = parse_args(&args(&["--route", "flatbed"])).expect_err("same either name");
-        assert!(err.contains("practice"), "unhelpful error: {err}");
-        // Practice is exactly what it is for.
+        // A campaign may take the ride at its own (fourth) level.
+        let opts = parse_args(&args(&["--route", "trailer"]))
+            .expect("the ride is a campaign level now")
+            .expect("ours");
+        assert_eq!(opts.route, Some(crate::game::level::Theme::Trailer));
+        assert_eq!(opts.start_level, 0, "a campaign still starts at the Sewer");
+        let run = AutoRun::new(7, auto_opts(&opts));
+        assert_eq!(run.world().level.theme, crate::game::level::Theme::Sewer);
+        // Practice is still exactly what it is for.
         let opts = parse_args(&args(&["--level", "2", "--practice", "--route", "flatbed"]))
             .expect("practice parses")
             .expect("our flag");
         assert_eq!(opts.route, Some(crate::game::level::Theme::Trailer));
-        // And the getaway ride needs no route at all.
-        let opts = parse_args(&args(&["--level", "4"])).expect("getaway parses").expect("ours");
+        // `--level 4` with no route is the campaign's fourth level: the ride.
+        let opts = parse_args(&args(&["--level", "4"])).expect("level 4 parses").expect("ours");
         assert_eq!(opts.route, None);
+        assert_eq!(opts.start_level, campaign::LEVEL_COUNT - 1);
+        assert!(!opts.practice, "--level 4 alone is campaign context");
+        let run = AutoRun::new(7, auto_opts(&opts));
+        assert_eq!(run.world().level.theme, crate::game::level::Theme::Trailer);
+        assert!(run.opts().campaign, "a campaign, starting on the ride");
+        // `--practice --level 4` is the ride alone.
+        let opts = parse_args(&args(&["--level", "4", "--practice"]))
+            .expect("parses")
+            .expect("ours");
+        assert!(opts.practice, "--practice is still a practice run");
+        let run = AutoRun::new(7, auto_opts(&opts));
+        assert_eq!(run.world().level.theme, crate::game::level::Theme::Trailer);
+        assert!(!run.opts().campaign);
         // `--practice --route flatbed` with no level is the ride itself (it
         // used to play the Sewer: the route was dropped at level 1).
         let opts = parse_args(&args(&["--practice", "--route", "flatbed"]))
             .expect("parses")
             .expect("ours");
-        assert_eq!(opts.start_level, campaign::LEVEL_COUNT);
+        assert_eq!(opts.start_level, campaign::LEVEL_COUNT - 1);
         let run = AutoRun::new(7, auto_opts(&opts));
         assert_eq!(run.world().level.theme, crate::game::level::Theme::Trailer);
+        // A level past the campaign is still refused (there is no fifth).
+        assert!(parse_args(&args(&["--level", "5"])).is_err());
         // A side route without a level is that floor in practice, and its own
         // stage of a campaign that starts at level 1.
         let opts = parse_args(&args(&["--practice", "--route", "printworks"]))
@@ -3361,8 +3390,9 @@ mod tests {
             Some(crate::game::level::Theme::Laundry),
             "the campaign takes the pick at the floor's own stage"
         );
-        // A campaign that starts past the floor's stage can never play it.
-        assert!(parse_args(&args(&["--level", "3", "--route", "laundry"])).is_err());
+        // A campaign that starts past the floor's level can never play it — the
+        // Printworks is stage three, so a run starting at the ride never does.
+        assert!(parse_args(&args(&["--level", "4", "--route", "printworks"])).is_err());
     }
 
     #[test]

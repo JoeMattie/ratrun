@@ -198,6 +198,26 @@ pub static STYLE: Style = Style {
     lead_vib_depth: 0.0042,
     stab_decay_ms: 950.0,
     enhanced_drums: true,
+    patches: [
+        super::Patch::Chip,
+        super::Patch::Chip,
+        super::Patch::Chip,
+        super::Patch::Chip,
+        super::Patch::FmDarkBass,
+        super::Patch::WtStrings,
+        super::Patch::KsHarp,
+        super::Patch::WtHollowFlute,
+        super::Patch::FmWarmBrass,
+        super::Patch::Fx16,
+    ],
+    drum_kit: super::DrumKit::Deep,
+    mix_16: [0.200, 0.355, 0.640, 0.275, 0.215, 0.155, 0.410, 0.335, 0.195, 0.155],
+    drive_16: 1.15,
+    echo_ms: 232.0,
+    echo_feedback: 0.40,
+    echo_lp_hz: 3600.0,
+    echo_send: [0.00, 0.18, 0.10, 0.14, 0.00, 0.36, 0.34, 0.42, 0.34, 0.24],
+    master_lp_hz: 14500.0,
     ..Style::base()
 };
 

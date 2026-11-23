@@ -9,7 +9,7 @@
 //! |---|---|
 //! | Milk Teeth (Gnaw) | spawned here; [`milk_teeth_system`] flies, lodges and returns |
 //! | Fondue Fork (Cheese Spray) | [`CheeseString`] spawned in `fire_one`, cut in [`fondue_string_system`] |
-//! | Echo Chamber (Squeak Nova) | [`EchoSpoke`] marker: `projectiles::bullets_system` reflects the spoke |
+//! | Echo Chamber (Squeak Nova) | the ring's returning pass, run by `weapons::nova_ring` (`ActiveFx::nova_echo`) |
 //! | Fairy Ring (Spore Orbit) | [`FairyRing`] left on every second cast, ticked here |
 //! | Ratchet Tail (Tail Whip) | resolved immediately in `fire_one` (a swing, no state) |
 //! | Drain Cleaner (Acid Spit) | [`CorrosiveChannel`] built where the lob lands, ticked here |
@@ -1784,10 +1784,9 @@ mod tests {
     use crate::game::bullet::Bullet;
     use crate::game::collision::TileKind;
     use crate::game::ecs::components::{
-        AcidDrop, EchoSpoke, CHANNEL_HIT_CAP, FAIRY_TRACK_CAP, MILK_BITE_CAP, STRING_CUT_CAP,
+        AcidDrop, CHANNEL_HIT_CAP, FAIRY_TRACK_CAP, MILK_BITE_CAP, STRING_CUT_CAP,
     };
     use crate::game::ecs::resources::{spawn_with_id, EvoRuntime, LaserFx};
-    use crate::game::weapon::LASER_SWEEP_HALF;
     use crate::game::enemy::EnemyKind;
     use crate::game::level::Theme;
     use crate::game::loadout::Loadout;
@@ -2032,50 +2031,45 @@ mod tests {
             "no end planted on the late body (nearest end {short} px)"
         );
     }
-    /// Echo Chamber: a nova spoke that hits a wall reflects once and comes back
-    /// down its own line, damaging on the return leg.
+    /// **Echo Chamber**: since batch 12 the nova is one expanding ring, so the
+    /// evolution is the ring **coming back**: it strikes the walls, contracts
+    /// again and cuts everything inside on the way in for a second hit.
     #[test]
-    fn echo_chamber_spoke_reflects_once() {
-        use crate::game::ecs::systems::{combat, projectiles};
+    fn echo_chamber_ring_comes_back_for_a_second_hit() {
+        use crate::game::ecs::systems::weapons;
         let mut w = evolved_world(WeaponKind::SqueakNova);
         let origin = w.player.pos;
-        let cy = (origin.y / 16.0).floor() as i32;
-        let wall_x = ((origin.x + 40.0) / 16.0).floor() as i32;
-        for dy in -3..=3 {
-            w.level.tiles.set(wall_x, cy + dy, TileKind::Wall(crate::game::art_walls::WallKind::Solid));
-        }
-        w.level.tiles.rebuild_masks();
-        // West of the rat: the outbound spoke never touches it, only the
-        // reflected one on its way back past the rat can.
-        let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(-28.0, 0.0), 400.0);
-        let hp = hp_of(&w, body);
-        // One evolved spoke east, 95 px/s (the Squeak Nova speed).
-        let mut b = Bullet::new(
-            origin,
-            Vec2::new(95.0, 0.0),
-            6.0,
-            Faction::Player,
-            WeaponKind::SqueakNova.color(),
-        );
-        b.life = 1.8;
-        b.weapon = Some(WeaponKind::SqueakNova);
-        let spoke = spawn_with_id(&mut w.ecs, (b, EchoSpoke::default()));
+        // Two bodies inside the ring, and one standing on open floor far
+        // enough out that only a ring this wide can reach it.
+        let near = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(20.0, 0.0), 400.0);
+        let far = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(0.0, -70.0), 400.0);
+        let (near_hp, far_hp) = (hp_of(&w, near), hp_of(&w, far));
+        let damage = w.player.loadout.weapons[0].damage();
+        w.player.loadout.weapons[0].timer = 0.0;
 
-        let mut reflected = false;
-        for _ in 0..70 {
-            w.begin_tick(DT, Vec2::ZERO, false);
-            w.ecs
-                .run_system_cached(crate::game::ecs::systems::enemy_move::grid_build_system)
-                .unwrap();
-            w.ecs.run_system_cached(projectiles::bullets_system).unwrap();
-            w.ecs.run_system_cached(combat::player_bullet_hits_system).unwrap();
-            w.end_tick();
-            if let Some(s) = w.ecs.get::<EchoSpoke>(spoke) {
-                reflected |= s.reflected;
+        let mut ticks = 0;
+        while ticks < 120 {
+            run(&mut w, weapons::fire_weapons_system);
+            ticks += 1;
+            let fx = *w.ecs.resource::<ActiveFx>();
+            if !fx.nova_active() {
+                break;
             }
         }
-        assert!(reflected, "the spoke must reflect off the wall");
-        assert!(hp_of(&w, body) < hp, "the return leg must damage a body");
+        assert!(!w.ecs.resource::<ActiveFx>().nova_active(), "the ring never ended");
+        // Once out, once back.
+        assert!(
+            (near_hp - hp_of(&w, near) - 2.0 * damage).abs() < 1e-2,
+            "the returning front must cut again: {:.1} -> {:.1}",
+            near_hp,
+            hp_of(&w, near)
+        );
+        assert!(
+            (far_hp - hp_of(&w, far) - 2.0 * damage).abs() < 1e-2,
+            "every body inside the ring is cut on both passes: {:.1} -> {:.1}",
+            far_hp,
+            hp_of(&w, far)
+        );
     }
 
     /// Fairy Ring: crossing the fixed ring burns once per target per second.
@@ -2221,7 +2215,9 @@ mod tests {
         let origin = w.player.pos;
         let hooked = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(20.0, 0.0), 400.0);
         let swept = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(0.0, 20.0), 400.0);
-        let elite = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(-18.0, 0.0), 400.0);
+        // The whip is a **frontal half-circle** (batch 12), so the elite has to
+        // stand in front to take the whip hit; it is still never hooked.
+        let elite = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(0.0, -20.0), 400.0);
         w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
         let swept_hp = hp_of(&w, swept);
         let hooked_hp = hp_of(&w, hooked);
@@ -2240,7 +2236,7 @@ mod tests {
         );
         let elite_moved = w.ecs.get::<Enemy>(elite).unwrap().pos;
         assert!(
-            (elite_moved - (origin + Vec2::new(-18.0, 0.0))).len() < 0.5,
+            (elite_moved - (origin + Vec2::new(0.0, -20.0))).len() < 0.5,
             "a heavy body is never hooked: {elite_moved:?}"
         );
     }
@@ -3062,74 +3058,59 @@ mod tests {
         );
     }
 
-    /// **Carbon Copy**: the previous sweep replays from its own origin, in
-    /// reverse, at half damage — and only one copy is kept.
+    /// **Carbon Copy**: the previous sweep replays from its own origin, the
+    /// other way round the arc, at half damage — and only one copy is kept.
     #[test]
     fn carbon_copy_replays_the_last_sweep_backwards_at_half_damage() {
         use crate::game::ecs::systems::weapons_wave3b;
-        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 5 pulses, 54 px, 10 dmg
+        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 50 per hit, 54 px
         let origin = w.player.pos;
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
-        // Burst 1: nobody in the sweep, so it only records the geometry.
+        // Sweep 1: nobody in the way, so it only records the geometry.
         let mut ticks = 0;
-        loop {
+        while ticks < 200 {
             run(&mut w, weapons_wave3b::laser_eyes_system);
             ticks += 1;
             let fx = *w.ecs.resource::<LaserFx>();
             if ticks > 1 && !fx.active() {
                 break;
             }
-            assert!(ticks < 120, "the burst never ended");
         }
         let recorded = w.ecs.resource::<LaserFx>().copy.expect("a completed sweep is kept");
         assert!((recorded.origin.x - origin.x).abs() < 1e-4);
         assert!((recorded.facing.x - 1.0).abs() < 1e-4);
 
-        // The rat turns and walks away; the afterimage stays where it fired from.
-        w.player.pos = origin + Vec2::new(0.0, 30.0);
+        // The rat turns and walks out of range; the afterimage stays where the
+        // recorded sweep fired from, and the live beam can no longer reach the
+        // body planted on the recorded beam's line.
+        w.player.pos = origin + Vec2::new(0.0, 90.0);
         w.player.face = Vec2::new(0.0, 1.0);
-        // Two bodies on the recorded fan's outer edges, 40 px from its origin
-        // (only the matching pulse can reach either).
-        let a = w.spawn_enemy(
-            EnemyKind::Cat,
-            origin + Vec2::from_angle(LASER_SWEEP_HALF) * 40.0,
-            400.0,
-        );
-        let b = w.spawn_enemy(
-            EnemyKind::Cat,
-            origin + Vec2::from_angle(-LASER_SWEEP_HALF) * 40.0,
-            400.0,
-        );
-        let (a0, b0) = (hp_of(&w, a), hp_of(&w, b));
+        let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(20.0, 0.0), 400.0);
+        let hp = hp_of(&w, body);
         w.player.loadout.weapons[0].timer = 0.0;
-        let mut a_tick: Option<usize> = None;
-        let mut b_tick: Option<usize> = None;
-        for tick in 0..120 {
+        let mut ticks = 0;
+        while ticks < 200 {
             run(&mut w, weapons_wave3b::laser_eyes_system);
-            if a_tick.is_none() && hp_of(&w, a) < a0 {
-                a_tick = Some(tick);
-            }
-            if b_tick.is_none() && hp_of(&w, b) < b0 {
-                b_tick = Some(tick);
-            }
-            if tick > 2 && !w.ecs.resource::<LaserFx>().active() {
-                break;
+            ticks += 1;
+            if ticks > 1 && !w.ecs.resource::<LaserFx>().active() {
+                // The afterimage may still be running after the live sweep.
+                if w.ecs.resource::<LaserFx>().copy_left <= 0.0 {
+                    break;
+                }
             }
         }
-        // Half of one 10-damage pulse.
-        let half = 10.0 * CARBON_COPY_DAMAGE;
-        assert!((a0 - hp_of(&w, a) - half).abs() < 0.01, "the copy deals half: {}", a0 - hp_of(&w, a));
-        assert!((b0 - hp_of(&w, b) - half).abs() < 0.01, "the copy deals half: {}", b0 - hp_of(&w, b));
-        // Backwards: the recorded sweep ran -35° → +35°, so the copy catches the
-        // +35° body first.
-        let (a_tick, b_tick) = (a_tick.expect("the +35° body is hit"), b_tick.expect("the -35° body is hit"));
-        assert!(a_tick < b_tick, "the afterimage replays the sweep in reverse: {a_tick} vs {b_tick}");
-
-        // One copy, and it is the sweep that just finished.
+        // Half of one sweep's hit (the whole old burst = 50, so 25).
+        assert!(
+            (hp - hp_of(&w, body) - 25.0).abs() < 0.01,
+            "the copy deals half of one sweep hit: {:.1} -> {:.1}",
+            hp,
+            hp_of(&w, body)
+        );
+        // One copy is kept, and the newest completed sweep replaces it.
         let kept = w.ecs.resource::<LaserFx>().copy.expect("still one copy");
         assert!(
-            (kept.origin.y - w.player.pos.y).abs() < 1e-4 && (kept.facing.y - 1.0).abs() < 1e-4,
+            (kept.origin.y - (origin.y + 90.0)).abs() < 1e-4,
             "the newest completed sweep replaces the old negative"
         );
     }

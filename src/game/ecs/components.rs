@@ -647,3 +647,207 @@ pub struct Lash {
     /// The recoil drag (Barbed Wire) has resolved.
     pub dragged: bool,
 }
+
+/// Which of the lash's three beats it is in right now (`Lash::phase`).
+///
+/// The boundaries are the simulation's own clock
+/// (`weapon::LASH_WINDUP` / `LASH_RECOIL_AT` / `LASH_TOTAL`), so an animation
+/// driven off this can never drift from the damage it is drawing:
+///
+/// ```text
+/// spawn ── WindUp ── 0.12 ── Crack ── 0.20 ── Recoil ── 0.34 ──> despawn
+///         bristle         the crack lands   hold + Barbed Wire drag, settle
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LashPhase {
+    /// Bristling: the tail has not landed yet.
+    WindUp,
+    /// The crack landed. The tail holds extended (and Barbed Wire starts its
+    /// drag at `LASH_RECOIL_AT`).
+    Crack,
+    /// The tail is reeling back and settling.
+    Recoil,
+    /// Past `LASH_TOTAL`: only exists for the tick it is despawned on.
+    Over,
+}
+
+impl LashPhase {
+    /// `(start, length)` of this phase in seconds since the fire. The last
+    /// phase has zero length.
+    pub fn span(self) -> (f32, f32) {
+        use crate::game::weapon::{LASH_RECOIL_AT, LASH_TOTAL, LASH_WINDUP};
+        match self {
+            LashPhase::WindUp => (0.0, LASH_WINDUP),
+            LashPhase::Crack => (LASH_WINDUP, LASH_RECOIL_AT - LASH_WINDUP),
+            LashPhase::Recoil => (LASH_RECOIL_AT, (LASH_TOTAL - LASH_RECOIL_AT).max(0.0)),
+            LashPhase::Over => (LASH_TOTAL, 0.0),
+        }
+    }
+}
+
+impl Lash {
+    /// The tail's root: where the whip is actually anchored (the rat's rump,
+    /// re-read every tick of the wind-up).
+    #[inline]
+    pub fn base(&self) -> Vec2 {
+        self.origin
+    }
+
+    /// The locked impact point: follows the target body while it lives, then
+    /// stays where it died.
+    #[inline]
+    pub fn tip(&self) -> Vec2 {
+        self.target
+    }
+
+    /// Seconds since the fire (0 → `LASH_TOTAL`).
+    #[inline]
+    pub fn elapsed(&self) -> f32 {
+        self.timer
+    }
+
+    /// Which beat the lash is in.
+    pub fn phase(&self) -> LashPhase {
+        use crate::game::weapon::{LASH_RECOIL_AT, LASH_TOTAL, LASH_WINDUP};
+        if self.timer < LASH_WINDUP {
+            LashPhase::WindUp
+        } else if self.timer < LASH_RECOIL_AT {
+            LashPhase::Crack
+        } else if self.timer < LASH_TOTAL {
+            LashPhase::Recoil
+        } else {
+            LashPhase::Over
+        }
+    }
+
+    /// Progress through the whole lash, `0..=1` across `LASH_TOTAL`.
+    pub fn progress(&self) -> f32 {
+        (self.timer / crate::game::weapon::LASH_TOTAL.max(1e-4)).clamp(0.0, 1.0)
+    }
+
+    /// Progress through the current beat, `0..=1` (`1.0` once the lash is over).
+    pub fn phase_progress(&self) -> f32 {
+        let (start, len) = self.phase().span();
+        if len <= 0.0 {
+            return 1.0;
+        }
+        ((self.timer - start) / len).clamp(0.0, 1.0)
+    }
+
+    /// Seconds from the fire to the crack (`weapon::LASH_WINDUP`).
+    #[inline]
+    pub fn crack_time(&self) -> f32 {
+        crate::game::weapon::LASH_WINDUP
+    }
+
+    /// The tick (1 = the tick the lash was spawned on) the crack lands on at
+    /// this frame time. `spiked_tail_system` advances `timer` by one `dt` on the
+    /// spawn tick, so the crack is resolved on the first tick where
+    /// `n * dt >= crack_time()`.
+    pub fn crack_tick(&self, dt: f32) -> u32 {
+        if dt <= 0.0 {
+            return 1;
+        }
+        (crate::game::weapon::LASH_WINDUP / dt).ceil().max(1.0) as u32
+    }
+
+    /// Ticks left until the crack (0 once it has landed).
+    pub fn ticks_to_crack(&self, dt: f32) -> u32 {
+        if dt <= 0.0 || self.struck {
+            return 0;
+        }
+        let done = (self.timer / dt).round() as u32;
+        self.crack_tick(dt).saturating_sub(done)
+    }
+
+    /// Has the crack landed?
+    #[inline]
+    pub fn cracked(&self) -> bool {
+        self.struck
+    }
+
+    /// Did the crack land **during the last tick**? True on exactly one frame
+    /// (the one the animation's white flash belongs on).
+    pub fn cracked_now(&self, dt: f32) -> bool {
+        self.struck && self.timer - dt < crate::game::weapon::LASH_WINDUP
+    }
+
+    /// Is this an evolved **Barbed Wire** lash (the recoil drags its catch)?
+    #[inline]
+    pub fn barbed_wire(&self) -> bool {
+        self.evolved
+    }
+
+    /// Seconds from the fire to the start of the Barbed Wire drag
+    /// (`weapon::LASH_RECOIL_AT`).
+    #[inline]
+    pub fn drag_time(&self) -> f32 {
+        crate::game::weapon::LASH_RECOIL_AT
+    }
+
+    /// The tick the Barbed Wire drag resolves on, if this lash has one.
+    pub fn drag_tick(&self, dt: f32) -> Option<u32> {
+        if !self.evolved || dt <= 0.0 {
+            return None;
+        }
+        Some((crate::game::weapon::LASH_RECOIL_AT / dt).ceil().max(1.0) as u32)
+    }
+
+    /// Has the Barbed Wire drag resolved?
+    #[inline]
+    pub fn dragged(&self) -> bool {
+        self.dragged
+    }
+
+    /// Did the drag resolve during the last tick?
+    pub fn dragged_now(&self, dt: f32) -> bool {
+        self.evolved
+            && self.dragged
+            && self.timer - dt < crate::game::weapon::LASH_RECOIL_AT
+    }
+}
+
+// ---- The melee weapons' snapshots (batch 12) -----------------------------
+//
+// Gnaw's bite and Tail Whip's crack are instant: they damage, and then the only
+// thing left is the picture. Rather than a new schedule slot, each is a
+// short-lived component that `weapons::fire_weapons_system` ages and despawns
+// on its own pass (that system runs every tick regardless of whether either
+// weapon fires). Art reads them; nothing in the simulation does.
+
+/// One **Gnaw** bite: a snapping jaw in front of the rat's nose.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BiteSnap {
+    /// The bite's aim point on the rat's face plane.
+    pub pos: Vec2,
+    /// Unit vector the jaw closed along (the reticle, else the rat's facing).
+    pub dir: Vec2,
+    /// Seconds left to draw.
+    pub t: f32,
+    /// The bite's whole life in seconds.
+    pub total: f32,
+}
+
+/// One **Tail Whip** swipe: the frontal half-circle arc the rat just cut.
+///
+/// Batch 12's correction made the whip a **crescent in front of the rat** (a
+/// 180° arc: `weapon::WHIP_ARC_HALF` either side of the aim/facing), not a line
+/// to one body. The component's fields are unchanged — the art worker was
+/// already reading them — so they now mean:
+///
+/// * `from` — the rat on the swipe tick (the arc's centre),
+/// * `to` — the **centre of the arc**: `from + dir * reach`, so
+///   `dir = (to - from).normalized()` and `reach = (to - from).len()`,
+/// * the drawn arc is `dir ± WHIP_ARC_HALF` out to `reach`,
+/// * `t` counts down from `total` = `WHIP_SWIPE_SECS`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct WhipCrack {
+    /// The rat (the arc's centre).
+    pub from: Vec2,
+    /// The arc's centre line: the aim point at the swipe's reach.
+    pub to: Vec2,
+    /// Seconds left to draw.
+    pub t: f32,
+    /// The swipe's whole life in seconds.
+    pub total: f32,
+}

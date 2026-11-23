@@ -162,148 +162,212 @@ pub fn emit_weapon_fire(
     };
     match kind {
         WeaponKind::Gnaw => {
-            let n = ps.budget_count(3, false);
+            // Tiny bone-white snap spark in front of the nose (the two closing
+            // white tooth crescents are drawn directly by `art_rat::draw_gnaw_bite`).
+            let mouth = pos + dir * 5.0;
+            ps.push(Particle {
+                pos: mouth,
+                vel: Vec2::ZERO,
+                life: 0.10,
+                max_life: 0.10,
+                drag: 0.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom((255, 255, 250), (226, 214, 186)),
+                additive: true,
+                shape: Shape::Cross,
+            });
+            let n = ps.budget_count(2, false);
             ps.cone_shaped(
                 rng,
-                pos + dir * 2.5,
+                mouth,
                 dir,
                 n,
+                42.0,
+                0.70,
+                Ramp::Custom((255, 255, 250), (196, 184, 158)),
+                0.13,
+                true,
+                Shape::Dot,
+                9.0,
+            );
+        }
+        WeaponKind::CheeseSpray => {
+            // Warm cheddar-orange shotgun crumbs that arc and drop with gravity.
+            let n = ps.budget_count(4, false);
+            let base = dir.angle();
+            for _ in 0..n {
+                let a = base + rng.random_range(-0.55..0.55);
+                let sp = rng.random_range(26.0..58.0);
+                let life = rng.random_range(0.18..0.28);
+                ps.push(Particle {
+                    pos: pos + dir * 2.5,
+                    vel: Vec2::from_angle(a) * sp,
+                    life,
+                    max_life: life,
+                    drag: 5.5,
+                    gravity: 36.0,
+                    ramp: Ramp::Gold,
+                    additive: false,
+                    shape: Shape::Dot,
+                });
+            }
+        }
+        WeaponKind::SqueakNova => {
+            // Thin concentric pale-cyan harmonic rings racing outward (plus the
+            // exact simulation-driven rings in `art_wave3a::draw_squeak_nova_ring`).
+            let r = if radius > 1.0 { radius } else { 44.0 };
+            ps.push_shockwave(Shockwave {
+                pos,
+                start_r: 3.0,
+                end_r: r,
+                life: 0.30,
+                max_life: 0.30,
+                color: (104, 236, 255),
+                core: (242, 255, 255),
+                thick: 1.0,
+                additive: true,
+                arc_dir: None,
+                arc_half_angle: 0.0,
+            });
+            ps.push_shockwave(Shockwave {
+                pos,
+                start_r: 2.0,
+                end_r: r * 0.76,
+                life: 0.36,
+                max_life: 0.36,
+                color: (72, 206, 246),
+                core: (206, 248, 255),
+                thick: 1.0,
+                additive: true,
+                arc_dir: None,
+                arc_half_angle: 0.0,
+            });
+            let n = ps.budget_count(6, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                n,
                 68.0,
-                0.30,
-                Ramp::Spark,
+                1.0,
+                Ramp::Custom((242, 255, 255), (68, 204, 244)),
+                0.26,
+                true,
+                Shape::Dot,
+                5.0,
+            );
+        }
+        WeaponKind::SporeOrbit => {
+            // Soft drifting green spore motes blooming along the orbit ring.
+            let r = if radius > 1.0 { radius } else { 22.0 };
+            let n = ps.budget_count(6, false);
+            for k in 0..n {
+                let a = k as f32 / n.max(1) as f32 * std::f32::consts::TAU
+                    + rng.random_range(-0.2..0.2);
+                let out = Vec2::from_angle(a);
+                let life = rng.random_range(0.28..0.44);
+                ps.push(Particle {
+                    pos: pos + out * r,
+                    vel: out * rng.random_range(6.0..16.0),
+                    life,
+                    max_life: life,
+                    drag: 3.5,
+                    gravity: 0.0,
+                    ramp: Ramp::Spore,
+                    additive: true,
+                    shape: Shape::Ember,
+                });
+            }
+        }
+        WeaponKind::TailWhip => {
+            // Frontal pink half-circle crescent swipe in front of the rat only
+            // (`dir ± WHIP_ARC_HALF`, drawn by `art_rat::draw_tail_whip_crack`)
+            // plus a few dust motes at both ±90° horn ends — never a full ring!
+            let r = radius.max(24.0);
+            let perp = dir.perp();
+            ps.push_shockwave(Shockwave {
+                pos,
+                start_r: r * 0.58,
+                end_r: r,
+                life: 0.13,
+                max_life: 0.13,
+                color: (255, 108, 192),
+                core: (255, 240, 250),
+                thick: 1.4,
+                additive: true,
+                arc_dir: Some(dir),
+                arc_half_angle: crate::game::weapon::WHIP_ARC_HALF,
+            });
+            // Dust motes kicked off both ±90° ends of the frontal crescent.
+            let dust = ps.budget_count(4, false);
+            for k in 0..dust {
+                let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+                let horn = pos + perp * (side * r * 0.92) + dir * rng.random_range(0.0..4.0);
+                let out = (perp * side + dir * 0.45).normalized();
+                let life = rng.random_range(0.18..0.28);
+                ps.push(Particle {
+                    pos: horn,
+                    vel: out * rng.random_range(16.0..34.0),
+                    life,
+                    max_life: life,
+                    drag: 5.5,
+                    gravity: 0.0,
+                    ramp: Ramp::Smoke,
+                    additive: false,
+                    shape: Shape::Dot,
+                });
+            }
+            let streaks = ps.budget_count(2, false);
+            ps.cone_shaped(
+                rng,
+                pos + dir * (r * 0.88),
+                dir,
+                streaks,
+                52.0,
+                0.75,
+                Ramp::Custom((255, 240, 250), (255, 108, 192)),
                 0.14,
                 true,
                 Shape::Streak,
                 8.0,
             );
         }
-        WeaponKind::CheeseSpray => {
-            let n = ps.budget_count(6, false);
-            ps.cone_shaped(
-                rng,
-                pos + dir * 2.5,
-                dir,
-                n,
-                72.0,
-                0.55,
-                Ramp::Fire,
-                0.22,
-                true,
-                Shape::Dot,
-                5.5,
-            );
-        }
-        WeaponKind::SqueakNova => {
-            ps.push_shockwave(Shockwave {
-                pos,
-                start_r: 2.0,
-                end_r: 18.0,
-                life: 0.24,
-                max_life: 0.24,
-                color: (185, 135, 255),
-                core: (255, 245, 255),
-                thick: 1.5,
-                additive: true,
-                arc_dir: None,
-                arc_half_angle: 0.0,
-            });
-            let n = ps.budget_count(10, false);
-            ps.burst_shaped(
-                rng,
-                pos,
-                n,
-                78.0,
-                1.0,
-                Ramp::Nova,
-                0.28,
-                true,
-                Shape::Streak,
-                5.5,
-            );
-        }
-        WeaponKind::SporeOrbit => {
-            let n = ps.budget_count(6, false);
-            ps.burst_shaped(
-                rng,
-                pos,
-                n,
-                28.0,
-                3.0,
-                Ramp::Spore,
-                0.32,
-                true,
-                Shape::Ember,
-                4.0,
-            );
-        }
-        WeaponKind::TailWhip => {
-            // Bold hot-pink & white sweeping shockwave ring around the rat.
-            ps.push_shockwave(Shockwave {
-                pos,
-                start_r: 5.0,
-                end_r: radius,
-                life: 0.24,
-                max_life: 0.24,
-                color: (255, 130, 192),
-                core: (255, 245, 252),
-                thick: 2.0,
-                additive: true,
-                arc_dir: None,
-                arc_half_angle: 0.0,
-            });
-            let sparks = ps.budget_count(16, false);
-            for k in 0..sparks {
-                let a = k as f32 / sparks.max(1) as f32 * std::f32::consts::TAU
-                    + rng.random_range(-0.12..0.12);
-                let tangent = Vec2::from_angle(a + std::f32::consts::FRAC_PI_2);
-                let out = Vec2::from_angle(a);
-                let life = rng.random_range(0.18..0.30);
+        WeaponKind::AcidSpit => {
+            // Wet toxic-green spit droplets arcing out with gravity.
+            let n = ps.budget_count(4, false);
+            let base = dir.angle();
+            for _ in 0..n {
+                let a = base + rng.random_range(-0.40..0.40);
+                let sp = rng.random_range(28.0..54.0);
+                let life = rng.random_range(0.18..0.28);
                 ps.push(Particle {
-                    pos: pos + out * (radius * 0.88),
-                    vel: tangent * rng.random_range(35.0..68.0) + out * 16.0,
+                    pos: pos + dir * 2.0,
+                    vel: Vec2::from_angle(a) * sp,
                     life,
                     max_life: life,
-                    drag: 6.0,
-                    gravity: 0.0,
-                    ramp: Ramp::Tail,
-                    additive: true,
-                    shape: Shape::Streak,
+                    drag: 4.5,
+                    gravity: 26.0,
+                    ramp: Ramp::Acid,
+                    additive: false,
+                    shape: Shape::Dot,
                 });
             }
-        }
-        WeaponKind::AcidSpit => {
-            let n = ps.budget_count(4, false);
-            ps.cone_shaped(
-                rng,
-                pos + dir * 2.0,
-                dir,
-                n,
-                46.0,
-                0.45,
-                Ramp::Acid,
-                0.24,
-                false,
-                Shape::Dot,
-                5.0,
-            );
         }
         // The active weapons have their own emitters (they are not fired by
         // `fire_one`); reached only if a test asks `emit_weapon_fire` directly.
         WeaponKind::TailThrash => emit_thrash_start(ps, rng, pos),
-        WeaponKind::SonicSqueak => emit_sonic_squeak(ps, rng, pos, radius.max(20.0), 0.3),
-        // Wave 3. Laser Eyes' burst start is a pair of muzzle sparks (its
-        // pulses have their own emitter); Super Dash's "fire" is the dash
-        // itself, so the weapon prompt is the comb in `emit_super_dash_comb`.
+        WeaponKind::SonicSqueak => {
+            emit_sonic_squeak_cone(ps, rng, pos, dir, radius.max(40.0), 0.66, 0.30)
+        }
+        // Wave 3. Laser Eyes' burst start is a pair of red-white muzzle sparks;
+        // Super Dash's "fire" is the dash itself.
         WeaponKind::LaserEyes => emit_laser_muzzle(ps, rng, pos, dir),
         WeaponKind::SuperDash => {}
-        // Wave 3 weapons A: Acid Rain's cast is its own emitter (it has to
-        // read as rain from above), and Hantavirus fires no projectile — its
-        // feedback is the tag on the body.
+        // Wave 3 weapons A: Acid Rain's cast is its own emitter (blue-green rain),
+        // and Hantavirus fires no projectile — its feedback is the magenta tag.
         WeaponKind::AcidRain => emit_acid_rain_fire(ps, rng, pos, aim),
         WeaponKind::Hantavirus => emit_virus_tag(ps, rng, pos),
-        // The Spiked Tail's whole wind-up tell is the drawn tail bristling
-        // (`art_rat`), which is the weapon's identity: a puff here would only
-        // confuse it. Its crack has its own emitter.
+        // The Spiked Tail's whole wind-up tell is the physics-simulated whip
+        // chain (`art_rat::WhipChain`): its crack has its own emitter.
         WeaponKind::SpikedTail => {}
     }
 }
@@ -327,118 +391,126 @@ pub fn emit_weapon_hit(
 
     match weapon {
         Some(WeaponKind::Gnaw) | None => {
-            // Sharp ivory-gold kinetic streaks + crisp hot impact glint.
+            // Crisp bone-white bite clack cross + tiny bone chips.
             ps.push(Particle {
                 pos,
                 vel: Vec2::ZERO,
-                life: 0.11,
-                max_life: 0.11,
+                life: 0.12,
+                max_life: 0.12,
                 drag: 0.0,
                 gravity: 0.0,
-                ramp: Ramp::Spark,
-                additive: true,
-                shape: Shape::Blob,
-            });
-            let n = ps.budget_count(5 + bonus, false);
-            ps.cone_shaped(
-                rng,
-                pos,
-                reflect,
-                n,
-                92.0,
-                1.05,
-                Ramp::Spark,
-                0.22,
-                true,
-                Shape::Streak,
-                5.5,
-            );
-        }
-        Some(WeaponKind::CheeseSpray) => {
-            // Sizzling golden-orange cheddar splatter droplets + hot orange sparks.
-            let n = ps.budget_count(6 + bonus, false);
-            ps.cone_shaped(
-                rng,
-                pos,
-                reflect,
-                n,
-                72.0,
-                1.35,
-                Ramp::Fire,
-                0.26,
-                true,
-                Shape::Dot,
-                4.2,
-            );
-            let globs = ps.budget_count(2, false);
-            ps.cone_shaped(
-                rng,
-                pos,
-                reflect,
-                globs,
-                46.0,
-                1.0,
-                Ramp::Gold,
-                0.22,
-                true,
-                Shape::Blob,
-                5.0,
-            );
-        }
-        Some(WeaponKind::SqueakNova) => {
-            // Electric violet star-cross pop + sharp radial streaks.
-            ps.push(Particle {
-                pos,
-                vel: Vec2::ZERO,
-                life: 0.22,
-                max_life: 0.22,
-                drag: 0.0,
-                gravity: 0.0,
-                ramp: Ramp::Nova,
+                ramp: Ramp::Custom((255, 255, 250), (226, 214, 186)),
                 additive: true,
                 shape: Shape::Cross,
             });
-            let n = ps.budget_count(5 + bonus, false);
+            let n = ps.budget_count(3 + bonus, false);
+            ps.cone_shaped(
+                rng,
+                pos,
+                reflect,
+                n,
+                74.0,
+                1.05,
+                Ramp::Custom((255, 255, 250), (196, 184, 158)),
+                0.18,
+                true,
+                Shape::Streak,
+                7.0,
+            );
+        }
+        Some(WeaponKind::CheeseSpray) => {
+            // Chunky warm yellow-orange cheddar crumbs arcing and dropping.
+            let n = ps.budget_count(3 + bonus, false);
+            let base = reflect.angle();
+            for _ in 0..n {
+                let a = base + rng.random_range(-1.25..1.25);
+                let sp = rng.random_range(24.0..62.0);
+                let life = rng.random_range(0.22..0.34);
+                ps.push(Particle {
+                    pos,
+                    vel: Vec2::from_angle(a) * sp + Vec2::new(0.0, -10.0),
+                    life,
+                    max_life: life,
+                    drag: 4.0,
+                    gravity: 44.0,
+                    ramp: Ramp::Gold,
+                    additive: false,
+                    shape: Shape::Dot,
+                });
+            }
+            if ps.budget_count(1, false) > 0 {
+                let life = rng.random_range(0.18..0.28);
+                ps.push(Particle {
+                    pos,
+                    vel: reflect * rng.random_range(20.0..42.0) + Vec2::new(0.0, -8.0),
+                    life,
+                    max_life: life,
+                    drag: 4.5,
+                    gravity: 40.0,
+                    ramp: Ramp::Custom((255, 232, 92), (238, 128, 22)),
+                    additive: false,
+                    shape: Shape::Blob,
+                });
+            }
+        }
+        Some(WeaponKind::SqueakNova) => {
+            // Pale-cyan acoustic ripple ping.
+            ps.push(Particle {
+                pos,
+                vel: Vec2::ZERO,
+                life: 0.16,
+                max_life: 0.16,
+                drag: 0.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom((242, 255, 255), (84, 214, 248)),
+                additive: true,
+                shape: Shape::Cross,
+            });
+            let n = ps.budget_count(3 + bonus, false);
             ps.burst_shaped(
                 rng,
                 pos,
                 n,
-                82.0,
+                62.0,
                 0.8,
-                Ramp::Nova,
-                0.24,
+                Ramp::Custom((242, 255, 255), (68, 198, 238)),
+                0.22,
                 true,
-                Shape::Streak,
+                Shape::Dot,
                 5.2,
             );
         }
         Some(WeaponKind::SporeOrbit) => {
-            // Drifting bioluminescent mint spore puff + subtle cross glint on kill.
-            if killed {
+            // Puffballs burst into a lingering green spore cloud + soft drifting motes.
+            let clouds = ps.budget_count(2, false);
+            for _ in 0..clouds {
+                let a = rng.random_range(0.0..std::f32::consts::TAU);
+                let sp = rng.random_range(8.0..20.0);
+                let life = rng.random_range(0.46..0.64);
                 ps.push(Particle {
-                    pos,
-                    vel: Vec2::ZERO,
-                    life: 0.20,
-                    max_life: 0.20,
-                    drag: 0.0,
+                    pos: pos + Vec2::from_angle(a) * rng.random_range(0.0..2.0),
+                    vel: Vec2::from_angle(a) * sp,
+                    life,
+                    max_life: life,
+                    drag: 3.2,
                     gravity: 0.0,
                     ramp: Ramp::Spore,
-                    additive: true,
-                    shape: Shape::Cross,
+                    additive: false,
+                    shape: Shape::Puff,
                 });
             }
-            let n = ps.budget_count(4 + bonus / 2, false);
+            let n = ps.budget_count(3 + bonus, false);
             ps.burst_shaped(
                 rng,
                 pos,
                 n,
-                46.0,
-                1.5,
+                34.0,
+                1.8,
                 Ramp::Spore,
-                0.34,
+                0.42,
                 true,
                 Shape::Ember,
-                4.2,
+                3.6,
             );
         }
         Some(WeaponKind::TailWhip) => {
@@ -446,24 +518,8 @@ pub fn emit_weapon_hit(
         }
         Some(WeaponKind::TailThrash) => emit_thrash_hit(ps, rng, pos, reflect, killed),
         Some(WeaponKind::SonicSqueak) => emit_squeak_hit(ps, rng, pos, reflect, killed),
-        // Wave 3 weapons A hit through their own systems (a splash / a tick),
-        // never through a projectile impact; kept here so the match stays
-        // exhaustive and a direct call still reads right.
-        Some(WeaponKind::AcidRain) => {
-            let n = ps.budget_count(4, false);
-            ps.burst_shaped(
-                rng,
-                pos,
-                n,
-                52.0,
-                1.4,
-                Ramp::Acid,
-                0.28,
-                true,
-                Shape::Dot,
-                4.6,
-            );
-        }
+        // Acid Rain: small blue-green ripple ring + tiny splash droplets, never a big pool.
+        Some(WeaponKind::AcidRain) => emit_acid_rain_ripple(ps, rng, pos, 5.5),
         Some(WeaponKind::Hantavirus) => emit_virus_tick(ps, rng, pos, killed),
         Some(WeaponKind::AcidSpit) => {
             let globs = ps.budget_count(3, false);
@@ -479,33 +535,31 @@ pub fn emit_weapon_hit(
                 Shape::Blob,
                 4.2,
             );
-            let spray = ps.budget_count(5, false);
+            let spray = ps.budget_count(4, false);
             ps.burst_shaped(
                 rng,
                 pos,
                 spray,
-                72.0,
+                68.0,
                 1.2,
                 Ramp::Acid,
-                0.28,
+                0.26,
                 true,
                 Shape::Dot,
                 4.8,
             );
         }
-        // Wave 3's self-driving weapons have their own emitters (a laser
-        // pulse, a dash comb); reached only if a test asks directly.
-        Some(WeaponKind::LaserEyes) => emit_laser_muzzle(ps, rng, pos, reflect),
+        // Wave 3's self-driving weapons have their own emitters.
+        Some(WeaponKind::LaserEyes) => emit_laser_hit(ps, rng, pos, reflect, killed),
         Some(WeaponKind::SuperDash) => {
             emit_super_dash_comb(ps, rng, pos, pos + reflect * 12.0, 4.0)
         }
-        // A spike shard striking a body: the same spiked star the crack draws,
-        // tightened to a shard.
+        // A spike shard striking a body: steel-grey thorn sparks.
         Some(WeaponKind::SpikedTail) => emit_lash_shard_hit(ps, rng, pos, reflect, killed),
     }
 }
 
-/// Crisp rat-tail pink slash flash on enemies clipped by `TailWhip`.
+/// Crisp pink/white swipe sparks on a body clipped by `TailWhip`'s frontal crescent.
 pub fn emit_tail_whip_hit(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -520,11 +574,11 @@ pub fn emit_tail_whip_hit(
         max_life: 0.16,
         drag: 0.0,
         gravity: 0.0,
-        ramp: Ramp::Tail,
+        ramp: Ramp::Custom((255, 255, 255), (255, 118, 196)),
         additive: true,
         shape: Shape::Cross,
     });
-    let n = ps.budget_count(if killed { 7 } else { 5 }, false);
+    let n = ps.budget_count(if killed { 6 } else { 4 }, false);
     let dir = if out_dir.len_sq() > 0.01 {
         out_dir.normalized()
     } else {
@@ -535,32 +589,32 @@ pub fn emit_tail_whip_hit(
         pos,
         dir,
         n,
-        88.0,
-        0.95,
-        Ramp::Tail,
-        0.24,
+        78.0,
+        1.15,
+        Ramp::Custom((255, 255, 255), (255, 108, 192)),
+        0.20,
         true,
         Shape::Streak,
-        5.2,
+        6.8,
     );
 }
 
 // ---- Active weapons (the two Space-triggered ones) -------------------------
 
-/// Colors of the Tail Thrash arc: hot amber core fading to rose (the drawn tail
-/// in `art_rat` uses the same family so the vfx and the arc read as one thing).
-pub const THRASH_CORE: Rgb = (255, 244, 214);
-pub const THRASH_MID: Rgb = (255, 168, 92);
-pub const THRASH_EDGE: Rgb = (232, 82, 128);
+/// Colors of the Tail Thrash disc: rose-white leading edge sweeping into broad
+/// hot pink (matching `art_rat::draw_tail_thrash`).
+pub const THRASH_CORE: Rgb = (255, 242, 250);
+pub const THRASH_MID: Rgb = (255, 102, 184);
+pub const THRASH_EDGE: Rgb = (196, 44, 128);
 
-/// The trigger frame of a Tail Thrash: a heavy ring of dust and a flash.
+/// The trigger frame of a Tail Thrash: a broad pink spin rim and outward dust.
 pub fn emit_thrash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
     ps.push_shockwave(Shockwave {
         pos,
-        start_r: 2.0,
-        end_r: 26.0,
-        life: 0.22,
-        max_life: 0.22,
+        start_r: 4.0,
+        end_r: 28.0,
+        life: 0.24,
+        max_life: 0.24,
         color: THRASH_MID,
         core: THRASH_CORE,
         thick: 2.5,
@@ -568,15 +622,34 @@ pub fn emit_thrash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
         arc_dir: None,
         arc_half_angle: 0.0,
     });
-    let n = ps.budget_count(14, false);
+    // Outward-kicked dust puffs around the rat.
+    let dust = ps.budget_count(6, false);
+    for k in 0..dust {
+        let a = k as f32 / dust.max(1) as f32 * std::f32::consts::TAU
+            + rng.random_range(-0.18..0.18);
+        let out = Vec2::from_angle(a);
+        let life = rng.random_range(0.28..0.42);
+        ps.push(Particle {
+            pos: pos + out * rng.random_range(6.0..12.0),
+            vel: out * rng.random_range(52.0..86.0),
+            life,
+            max_life: life,
+            drag: 4.8,
+            gravity: 0.0,
+            ramp: Ramp::Smoke,
+            additive: false,
+            shape: Shape::Puff,
+        });
+    }
+    let n = ps.budget_count(6, false);
     ps.burst_shaped(
         rng,
         pos,
         n,
-        96.0,
+        92.0,
         1.6,
         Ramp::Tail,
-        0.26,
+        0.24,
         true,
         Shape::Streak,
         6.0,
@@ -584,8 +657,8 @@ pub fn emit_thrash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
     ps.push(Particle {
         pos,
         vel: Vec2::ZERO,
-        life: 0.18,
-        max_life: 0.18,
+        life: 0.16,
+        max_life: 0.16,
         drag: 0.0,
         gravity: 0.0,
         ramp: Ramp::Custom(THRASH_CORE, THRASH_EDGE),
@@ -594,8 +667,8 @@ pub fn emit_thrash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
     });
 }
 
-/// One resolved sweep of the thrash: a long directional arc along the drawn
-/// sweep angle plus sparks kicked out along the whole reach.
+/// One resolved sweep of the thrash: a broad pink sweep arc plus tangential
+/// spin streaks and dust kicked outward from the rim.
 pub fn emit_thrash_sweep(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -609,26 +682,26 @@ pub fn emit_thrash_sweep(
         pos,
         start_r: reach * 0.55,
         end_r: reach,
-        life: 0.20,
-        max_life: 0.20,
+        life: 0.22,
+        max_life: 0.22,
         color: THRASH_MID,
         core: THRASH_CORE,
-        thick: if hit { 2.5 } else { 1.5 },
+        thick: if hit { 2.5 } else { 1.8 },
         additive: true,
         arc_dir: Some(dir),
-        arc_half_angle: 1.15,
+        arc_half_angle: 1.55,
     });
-    // Sparks ride the arc so the sweep reads as a *sweep*, not a pulse.
-    let n = ps.budget_count(if hit { 9 } else { 5 }, false);
+    // Tangential pink spin streaks riding the full disc rim.
+    let n = ps.budget_count(if hit { 7 } else { 5 }, false);
     for k in 0..n {
         let side = k as f32 / n.max(1) as f32 - 0.5;
-        let a = angle + side * 2.2;
+        let a = angle + side * 2.8;
         let out = Vec2::from_angle(a);
-        let life = rng.random_range(0.16..0.28);
+        let life = rng.random_range(0.16..0.26);
         ps.push(Particle {
             pos: pos + out * reach * rng.random_range(0.72..1.0),
-            vel: Vec2::from_angle(a + std::f32::consts::FRAC_PI_2) * rng.random_range(50.0..110.0)
-                + out * 24.0,
+            vel: Vec2::from_angle(a + std::f32::consts::FRAC_PI_2) * rng.random_range(54.0..108.0)
+                + out * 22.0,
             life,
             max_life: life,
             drag: 5.5,
@@ -636,6 +709,24 @@ pub fn emit_thrash_sweep(
             ramp: Ramp::Custom(THRASH_CORE, THRASH_MID),
             additive: true,
             shape: Shape::Streak,
+        });
+    }
+    // Dust kicked outward past the sweep perimeter.
+    let dust = ps.budget_count(4, false);
+    for k in 0..dust {
+        let a = angle + (k as f32 / dust.max(1) as f32 - 0.5) * 2.6;
+        let out = Vec2::from_angle(a);
+        let life = rng.random_range(0.24..0.38);
+        ps.push(Particle {
+            pos: pos + out * (reach * 0.88),
+            vel: out * rng.random_range(44.0..76.0),
+            life,
+            max_life: life,
+            drag: 5.0,
+            gravity: 0.0,
+            ramp: Ramp::Smoke,
+            additive: false,
+            shape: Shape::Puff,
         });
     }
 }
@@ -650,21 +741,21 @@ pub fn emit_thrash_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_di
     ps.push(Particle {
         pos,
         vel: Vec2::ZERO,
-        life: 0.18,
-        max_life: 0.18,
+        life: 0.16,
+        max_life: 0.16,
         drag: 0.0,
         gravity: 0.0,
         ramp: Ramp::Custom(THRASH_CORE, THRASH_MID),
         additive: true,
         shape: Shape::Cross,
     });
-    let n = ps.budget_count(if killed { 8 } else { 5 }, false);
+    let n = ps.budget_count(if killed { 6 } else { 4 }, false);
     ps.cone_shaped(
         rng,
         pos,
         dir,
         n,
-        120.0,
+        112.0,
         1.05,
         Ramp::Tail,
         0.22,
@@ -672,10 +763,25 @@ pub fn emit_thrash_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_di
         Shape::Streak,
         6.5,
     );
+    let dust = ps.budget_count(2, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        dust,
+        58.0,
+        0.95,
+        Ramp::Smoke,
+        0.26,
+        false,
+        Shape::Dot,
+        5.5,
+    );
 }
 
-/// The Sonic Squeak's expanding ring, drawn by the shockwave buffer itself so
-/// the art and the damage band agree on the radius.
+/// Sonic Squeak press apex pop (legacy 5-arg signature kept for existing
+/// callers; the directional forward wedge of nested white chevrons is drawn by
+/// `art_wave3a::draw_sonic_cone` — NEVER a big 360° ring!).
 pub fn emit_sonic_squeak(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -683,77 +789,134 @@ pub fn emit_sonic_squeak(
     radius: f32,
     dur: f32,
 ) {
-    ps.push_shockwave(Shockwave {
-        pos,
-        start_r: 3.0,
-        end_r: radius,
-        life: dur,
-        max_life: dur,
-        color: (150, 236, 255),
-        core: (245, 254, 255),
-        thick: 2.0,
-        additive: true,
-        arc_dir: None,
-        arc_half_angle: 0.0,
-    });
-    // A second, slower ring gives the wavefront some thickness.
+    let cap_r = (radius * 0.14).clamp(6.0, 12.0);
     ps.push_shockwave(Shockwave {
         pos,
         start_r: 2.0,
-        end_r: radius * 0.86,
-        life: dur * 1.25,
-        max_life: dur * 1.25,
-        color: (110, 196, 240),
-        core: (210, 246, 255),
-        thick: 1.5,
+        end_r: cap_r,
+        life: (dur * 0.55).clamp(0.10, 0.22),
+        max_life: (dur * 0.55).clamp(0.10, 0.22),
+        color: (212, 238, 255),
+        core: (255, 255, 255),
+        thick: 1.2,
         additive: true,
         arc_dir: None,
         arc_half_angle: 0.0,
     });
-    let n = ps.budget_count(12, false);
+    let n = ps.budget_count(6, false);
     ps.burst_shaped(
         rng,
         pos,
         n,
-        70.0,
-        1.2,
-        Ramp::Custom((245, 254, 255), (120, 210, 245)),
-        0.26,
+        64.0,
+        1.0,
+        Ramp::Custom((255, 255, 255), (192, 228, 252)),
+        0.22,
         true,
         Shape::Dot,
-        5.0,
+        5.5,
     );
 }
 
-/// Impact flash on a body the squeak ring passed.
+/// Directional **Sonic Squeak** cone blast: forward nested white chevron
+/// pulses pushing outward along `dir` inside `±half_angle` (never a ring).
+pub fn emit_sonic_squeak_cone(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    dir: Vec2,
+    radius: f32,
+    half_angle: f32,
+    dur: f32,
+) {
+    let dir = safe_dir(dir, Vec2::new(1.0, 0.0));
+    let half = safe_clamp(half_angle, 0.20, 1.15, 0.66);
+    let r = safe_clamp(radius, 12.0, 160.0, 60.0);
+    let dur = safe_clamp(dur, 0.12, 0.60, 0.30);
+    // Two directional white wedge-arcs (never a 360° ring).
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 4.0,
+        end_r: r,
+        life: dur,
+        max_life: dur,
+        color: (212, 238, 255),
+        core: (255, 255, 255),
+        thick: 1.8,
+        additive: true,
+        arc_dir: Some(dir),
+        arc_half_angle: half,
+    });
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 2.0,
+        end_r: r * 0.72,
+        life: dur * 1.12,
+        max_life: dur * 1.12,
+        color: (186, 224, 250),
+        core: (248, 252, 255),
+        thick: 1.2,
+        additive: true,
+        arc_dir: Some(dir),
+        arc_half_angle: half,
+    });
+    // Forward cone of crisp pure-white `>` chevron particles.
+    let n = ps.budget_count(8, false);
+    ps.cone_shaped(
+        rng,
+        pos + dir * 3.0,
+        dir,
+        n,
+        (r / dur).clamp(80.0, 220.0),
+        half * 0.85,
+        Ramp::Custom((255, 255, 255), (192, 230, 255)),
+        dur * 0.85,
+        true,
+        Shape::Chevron,
+        2.5,
+    );
+}
+
+/// Impact shove flash on a body hit by Sonic Squeak: forward white chevron + streaks.
 pub fn emit_squeak_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir: Vec2, killed: bool) {
     let dir = if out_dir.len_sq() > 0.01 {
         out_dir.normalized()
     } else {
         Vec2::new(1.0, 0.0)
     };
-    let n = ps.budget_count(if killed { 6 } else { 3 }, false);
+    ps.push(Particle {
+        pos,
+        vel: dir * 48.0,
+        life: 0.18,
+        max_life: 0.18,
+        drag: 4.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom((255, 255, 255), (192, 232, 255)),
+        additive: true,
+        shape: Shape::Chevron,
+    });
+    let n = ps.budget_count(if killed { 5 } else { 3 }, false);
     ps.cone_shaped(
         rng,
         pos,
         dir,
         n,
-        60.0,
-        1.1,
-        Ramp::Custom((230, 250, 255), (105, 190, 235)),
-        0.20,
+        66.0,
+        0.75,
+        Ramp::Custom((255, 255, 255), (186, 226, 252)),
+        0.18,
         true,
-        Shape::Dot,
-        4.6,
+        Shape::Streak,
+        5.0,
     );
 }
 
 // ---- Wave 3 weapons: Laser Eyes and Super Dash ----------------------------
 
-/// Amber core of a Laser Eyes beam.
-const LASER_CORE: Rgb = (255, 246, 214);
-/// Outer glow of the beam.
-const LASER_GLOW: Rgb = (255, 176, 46);
+/// White-hot core of a Laser Eyes sweeping beam (red-white searchlight).
+const LASER_CORE: Rgb = (255, 246, 246);
+/// Searing crimson-red outer sheath & cut sparks of the beam.
+const LASER_GLOW: Rgb = (255, 56, 64);
 
 /// The burst's first tick: two muzzle sparks at the eyes (`dir` is the locked
 /// facing). One rng draw per spark, so a burst is a fixed cost.
@@ -798,8 +961,8 @@ pub fn emit_laser_pulse(
     // The bar itself: a dense row of additive dots along the ray, brightest at
     // the muzzle. `budget_count` caps the row so a crowded frame still draws
     // the beam, just sparser.
-    let want = (len * 0.7) as usize;
-    let dots = ps.budget_count(want.max(3), true);
+    let want = (len * 0.25) as usize;
+    let dots = ps.budget_count(want.clamp(3, 10), true);
     for i in 0..dots {
         let t = i as f32 / dots.max(1) as f32;
         let p = origin + dir * (2.0 + len * t);
@@ -817,8 +980,17 @@ pub fn emit_laser_pulse(
             shape: Shape::Dot,
         });
     }
-    // A spark where the bar ends (a wall face or open air).
+    // A spark + faint floor scorch mark where the beam cuts/terminates.
     let end = origin + dir * len;
+    ps.push_stain(Stain {
+        pos: end,
+        radius: 1.8,
+        color: (22, 10, 12),
+        life: 3.5,
+        max_life: 3.5,
+        seed: rng.random::<u16>(),
+        kind: StainKind::Scorch,
+    });
     let n = ps.budget_count(2 + hits.min(3) as usize, true);
     ps.cone_shaped(
         rng,
@@ -835,14 +1007,25 @@ pub fn emit_laser_pulse(
     );
 }
 
-/// Impact fleck on a body a Laser Eyes pulse pierced.
+/// Impact fleck on a body a Laser Eyes beam cut: white-hot core + crimson sparks.
 pub fn emit_laser_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir: Vec2, killed: bool) {
     let dir = if out_dir.len_sq() > 0.01 {
         out_dir.normalized()
     } else {
         Vec2::new(1.0, 0.0)
     };
-    let n = ps.budget_count(if killed { 5 } else { 3 }, true);
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.12,
+        max_life: 0.12,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(LASER_CORE, LASER_GLOW),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let n = ps.budget_count(if killed { 6 } else { 4 }, true);
     ps.cone_shaped(
         rng,
         pos,
@@ -994,21 +1177,21 @@ pub fn emit_super_dash_hit(
     );
 }
 
-/// Subtle mint shimmer trailing behind orbiting spores.
+/// Soft drifting green spore motes trailing behind orbiting puffballs.
 pub fn emit_orbit_trail(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, dt: f32) {
-    // Emit roughly 12 spores/sec per orb so it glows without flooding the ring.
+    // Emit roughly 12 spores/sec per orb so soft motes drift without crowding.
     if rng.random::<f32>() < (dt * 14.0).min(0.45) && ps.budget_count(1, false) > 0 {
-        let life = rng.random_range(0.18..0.30);
+        let life = rng.random_range(0.24..0.38);
         ps.push(Particle {
-            pos: pos + Vec2::new(rng.random_range(-0.8..0.8), rng.random_range(-0.8..0.8)),
-            vel: Vec2::new(rng.random_range(-8.0..8.0), rng.random_range(-8.0..8.0)),
+            pos: pos + Vec2::new(rng.random_range(-1.2..1.2), rng.random_range(-1.2..1.2)),
+            vel: Vec2::new(rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0)),
             life,
             max_life: life,
-            drag: 4.5,
+            drag: 3.5,
             gravity: 0.0,
             ramp: Ramp::Spore,
             additive: true,
-            shape: Shape::Dot,
+            shape: Shape::Ember,
         });
     }
 }
@@ -4860,6 +5043,12 @@ pub fn emit_buff_expire(ps: &mut Particles, pos: Vec2, kind: PickupKind) {
 ///
 /// The marks themselves are drawn (`game::art_wave3a`), not particles: they
 /// have to stay pinned to a floor spot for the whole wind-up.
+/// Cool blue-green Acid Rain palette (distinct from Acid Spit's yellow-lime pools).
+const RAIN_CORE: Rgb = (224, 255, 252);
+const RAIN_TEAL: Rgb = (48, 228, 204);
+const RAIN_DEEP: Rgb = (20, 128, 134);
+
+/// Acid Rain cast cue: brief upward teal mist + small ceiling ripple ring.
 pub fn emit_acid_rain_fire(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, aim: Vec2) {
     let base = safe_pos(pos);
     let dir = if aim.len_sq() > 0.01 {
@@ -4867,31 +5056,28 @@ pub fn emit_acid_rain_fire(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, ai
     } else {
         Vec2::new(0.0, -1.0)
     };
-    // The spit: a short upward-retro cone of lime mist.
-    let n = ps.budget_count(4, false);
+    let n = ps.budget_count(3, false);
     ps.cone_shaped(
         rng,
         base - dir * 1.5,
         -dir,
         n,
-        38.0,
+        32.0,
         0.55,
-        Ramp::Acid,
-        0.22,
-        false,
+        Ramp::Custom(RAIN_TEAL, RAIN_DEEP),
+        0.20,
+        true,
         Shape::Dot,
-        4.6,
+        4.8,
     );
-    // A ceiling drip ring just above the rat's head: the tell that the rain is
-    // coming down, not across.
     ps.push_shockwave(Shockwave {
         pos: base + Vec2::new(0.0, -9.0),
         start_r: 1.5,
         end_r: 5.0,
-        life: 0.20,
-        max_life: 0.20,
-        color: (198, 255, 72),
-        core: (240, 255, 190),
+        life: 0.18,
+        max_life: 0.18,
+        color: RAIN_TEAL,
+        core: RAIN_CORE,
         thick: 1.0,
         additive: true,
         arc_dir: None,
@@ -4899,91 +5085,164 @@ pub fn emit_acid_rain_fire(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, ai
     });
 }
 
-/// Hantavirus's tag: a plum ring snaps around the chosen body and three pips
-/// blink on above it (the countdown the art then keeps drawing).
+/// Small blue-green ripple ring when an Acid Rain drop lands (never a big pool,
+/// no floor stain — distinct from Acid Spit's sizzling green pools).
+pub fn emit_acid_rain_ripple(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, radius: f32) {
+    let base = safe_pos(pos);
+    let r = safe_clamp(radius, 3.5, 8.0, 5.5);
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: 1.5,
+        end_r: r,
+        life: 0.22,
+        max_life: 0.22,
+        color: RAIN_TEAL,
+        core: RAIN_CORE,
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(4, false);
+    for _ in 0..n {
+        let a = rng.random_range(0.0..std::f32::consts::TAU);
+        let sp = rng.random_range(16.0..34.0);
+        let life = rng.random_range(0.16..0.26);
+        ps.push(Particle {
+            pos: base,
+            vel: Vec2::from_angle(a) * sp + Vec2::new(0.0, -14.0),
+            life,
+            max_life: life,
+            drag: 4.5,
+            gravity: 48.0,
+            ramp: Ramp::Custom(RAIN_CORE, RAIN_TEAL),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// Hantavirus's tag: an inward-locking sickly-magenta ring snaps onto the host.
 pub fn emit_virus_tag(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
     let base = safe_pos(pos);
     ps.push_shockwave(Shockwave {
         pos: base,
-        start_r: 2.0,
-        end_r: 7.5,
-        life: 0.24,
-        max_life: 0.24,
-        color: (206, 106, 190),
-        core: (246, 208, 246),
+        start_r: 7.5,
+        end_r: 2.0,
+        life: 0.22,
+        max_life: 0.22,
+        color: (248, 56, 212),
+        core: (255, 214, 252),
         thick: 1.2,
         additive: true,
         arc_dir: None,
         arc_half_angle: 0.0,
     });
-    let n = ps.budget_count(6, false);
+    let n = ps.budget_count(4, false);
     ps.burst_shaped(
         rng,
         base,
         n,
-        34.0,
-        1.4,
-        Ramp::Custom((246, 208, 246), (120, 40, 110)),
-        0.30,
-        true,
-        Shape::Dot,
-        4.0,
-    );
-}
-
-/// One Hantavirus damage tick: a small plum pop on the host. The kill variant
-/// is brighter and rolls a little further (it is what a player sees when a
-/// chain finishes a body).
-pub fn emit_virus_tick(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
-    let base = safe_pos(pos);
-    ps.push(Particle {
-        pos: base,
-        vel: Vec2::ZERO,
-        life: 0.12,
-        max_life: 0.12,
-        drag: 0.0,
-        gravity: 0.0,
-        ramp: Ramp::Custom((246, 208, 246), (140, 52, 128)),
-        additive: true,
-        shape: Shape::Cross,
-    });
-    let n = ps.budget_count(if killed { 7 } else { 4 }, false);
-    ps.burst_shaped(
-        rng,
-        base,
-        n,
-        if killed { 58.0 } else { 36.0 },
-        1.5,
-        Ramp::Custom((246, 208, 246), (120, 40, 110)),
-        if killed { 0.34 } else { 0.24 },
+        30.0,
+        1.2,
+        Ramp::Custom((255, 214, 252), (140, 24, 122)),
+        0.26,
         true,
         Shape::Dot,
         4.4,
     );
 }
 
-/// The chain leaving one host for the next: a short plum trail along the
-/// transfer line, so a jump is always visible on screen (nothing teleports
-/// silently).
+/// One Hantavirus damage tick: a crisp sickly-magenta pop on the host.
+pub fn emit_virus_tick(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    let base = safe_pos(pos);
+    ps.push(Particle {
+        pos: base,
+        vel: Vec2::ZERO,
+        life: 0.14,
+        max_life: 0.14,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom((255, 214, 252), (248, 56, 212)),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let n = ps.budget_count(if killed { 6 } else { 4 }, false);
+    ps.burst_shaped(
+        rng,
+        base,
+        n,
+        if killed { 54.0 } else { 34.0 },
+        1.4,
+        Ramp::Custom((255, 214, 252), (140, 24, 122)),
+        if killed { 0.30 } else { 0.22 },
+        true,
+        Shape::Dot,
+        4.6,
+    );
+}
+
+/// The chain jumping from one host to the next: a **visible sickly-magenta
+/// thread snapping taut between `from` and `to`**, with bright anchor knots at
+/// both ends so every contagion jump reads unmistakably in motion and stills.
 pub fn emit_virus_jump(ps: &mut Particles, rng: &mut impl Rng, from: Vec2, to: Vec2) {
     let from = safe_pos(from);
     let to = safe_pos(to);
     let seg = to - from;
     let len = seg.len();
-    let dir = if len > 0.5 { seg.normalized() } else { Vec2::new(1.0, 0.0) };
-    let n = ps.budget_count(8, false);
-    for i in 0..n {
-        let t = (i as f32 + rng.random_range(0.0..0.6)) / n.max(1) as f32;
-        let life = rng.random_range(0.16..0.28);
-        let jitter = dir.perp() * rng.random_range(-1.6..1.6);
+    let dir = if len > 0.5 { seg * (1.0 / len) } else { Vec2::new(1.0, 0.0) };
+    let perp = dir.perp();
+    let hot: Rgb = (255, 214, 252);
+    let mag: Rgb = (248, 56, 212);
+    let deep: Rgb = (128, 20, 114);
+
+    // Anchor snap knots at departure (`from`) and arrival (`to`).
+    for endpoint in [from, to] {
         ps.push(Particle {
-            pos: from + seg * t + jitter,
-            vel: dir * rng.random_range(16.0..34.0) + jitter * 6.0,
+            pos: endpoint,
+            vel: Vec2::ZERO,
+            life: 0.22,
+            max_life: 0.22,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(hot, mag),
+            additive: true,
+            shape: Shape::Cross,
+        });
+    }
+    ps.push_shockwave(Shockwave {
+        pos: to,
+        start_r: 2.0,
+        end_r: 6.0,
+        life: 0.20,
+        max_life: 0.20,
+        color: mag,
+        core: hot,
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+
+    // Continuous bowed-then-snapping magenta thread spanning `from -> to`
+    // (capped at 14 segments so long jumps stay cheap and bounded).
+    let want = ((len / 2.2).ceil() as usize).clamp(4, 14);
+    let n = ps.budget_count(want, false);
+    let bow_side = if rng.random_range(0..2) == 0 { 1.0 } else { -1.0 };
+    for i in 0..n {
+        let t = (i as f32 + 0.5) / n.max(1) as f32;
+        let arch = (t * std::f32::consts::PI).sin();
+        let bow = perp * (bow_side * arch * 2.2);
+        let life = rng.random_range(0.24..0.34);
+        ps.push(Particle {
+            pos: from + seg * t + bow,
+            // Pull back toward the chord line so the thread visibly snaps taut!
+            vel: dir * 20.0 - bow * 4.5,
             life,
             max_life: life,
-            drag: 6.0,
+            drag: 7.0,
             gravity: 0.0,
-            ramp: Ramp::Custom((246, 208, 246), (120, 40, 110)),
+            ramp: Ramp::Custom(if i % 3 == 0 { hot } else { mag }, deep),
             additive: true,
             shape: Shape::Streak,
         });
@@ -5005,8 +5264,8 @@ const MILK_IVORY: Rgb = (255, 248, 224);
 const MILK_HOOK: Rgb = (226, 214, 186);
 const FONDUE_STRING: Rgb = (255, 226, 120);
 const FONDUE_POST: Rgb = (255, 196, 60);
-const ECHO_OUT: Rgb = (206, 168, 255);
-const ECHO_IN: Rgb = (248, 248, 255);
+const ECHO_OUT: Rgb = (104, 236, 255);
+const ECHO_IN: Rgb = (255, 255, 255);
 const FAIRY_MINT: Rgb = (150, 255, 200);
 const FAIRY_CAP: Rgb = (212, 255, 232);
 const DRAIN_BILE: Rgb = (176, 255, 96);
@@ -6004,10 +6263,10 @@ pub fn emit_miniboss_tell(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, col
 // - **Ripcord**: "white knots pull down a blue cord" — white knots at the
 //   departure point and the far end, a blue cord between them, then a snap.
 
-/// Lime tread (the lit step of a Downspout staircase), riser, and deep shadow.
-const DOWNSPOUT_TREAD: Rgb = (224, 255, 128);
-const DOWNSPOUT_RISER: Rgb = (96, 198, 52);
-const DOWNSPOUT_DARK: Rgb = (28, 78, 24);
+/// Cool blue-green / teal tread (the lit step of a Downspout staircase), riser, and deep shadow.
+const DOWNSPOUT_TREAD: Rgb = (196, 255, 246);
+const DOWNSPOUT_RISER: Rgb = (48, 224, 198);
+const DOWNSPOUT_DARK: Rgb = (18, 86, 88);
 
 /// **Downspout**: the whole staircase, drawn at fire time along the gutter's
 /// march line (`rat` → `far`), one tread + riser per drop. It lives long enough
@@ -7184,7 +7443,7 @@ pub fn emit_lash_impact(
             shape: Shape::Streak,
         });
     }
-    // The burst, drawn at its real radius: a tight steel ring.
+    // The burst, drawn at its real radius: a tight steel-white crack ring.
     ps.push_shockwave(Shockwave {
         pos: base,
         start_r: (radius * 0.35).max(1.5),
@@ -7198,7 +7457,7 @@ pub fn emit_lash_impact(
         arc_dir: None,
         arc_half_angle: 0.0,
     });
-    let grit = ps.budget_count(5, false);
+    let grit = ps.budget_count(3, false);
     ps.cone_shaped(
         rng,
         base,
@@ -8016,5 +8275,68 @@ mod tests {
             blit_cell(&mut sheet3, &cell, idx * scw, 0);
         }
         write_ppm("/tmp/ratrun_vfx_stains.ppm", &sheet3);
+    }
+
+    #[test]
+    fn batch12_weapon_vfx_are_bounded_and_safe() {
+        let mut rng = StdRng::seed_from_u64(1212);
+        let origin = Vec2::new(48.0, 48.0);
+        let dir = Vec2::new(1.0, 0.0);
+
+        for kind in WeaponKind::all() {
+            let mut ps = Particles::new(128);
+            emit_weapon_fire(&mut ps, &mut rng, kind, origin, dir, 36.0);
+            assert!(
+                ps.len() <= 20,
+                "{kind:?} fire exceeded bounded count: {}",
+                ps.len()
+            );
+            assert!(
+                ps.shockwaves.len() <= 3,
+                "{kind:?} fire pushed too many shockwaves: {}",
+                ps.shockwaves.len()
+            );
+
+            let mut ps_hit = Particles::new(128);
+            emit_weapon_hit(
+                &mut ps_hit,
+                &mut rng,
+                origin + dir * 16.0,
+                dir * 90.0,
+                Some(kind),
+                EnemyKind::Skitterer,
+                true,
+            );
+            assert!(
+                ps_hit.len() <= 24,
+                "{kind:?} hit exceeded bounded count: {}",
+                ps_hit.len()
+            );
+        }
+
+        // New dedicated helpers: directional Sonic Squeak cone, Acid Rain ripple,
+        // and Hantavirus visible snapping jump thread.
+        let mut ps = Particles::new(128);
+        emit_sonic_squeak_cone(&mut ps, &mut rng, origin, dir, 60.0, 0.66, 0.30);
+        assert!(ps.len() <= 12 && ps.shockwaves.len() == 2);
+        assert!(
+            ps.shockwaves.iter().all(|sw| sw.arc_dir.is_some()),
+            "sonic squeak cone must emit directional arcs, never a 360° ring"
+        );
+
+        let mut ps_rain = Particles::new(128);
+        emit_acid_rain_ripple(&mut ps_rain, &mut rng, origin, 6.0);
+        assert!(ps_rain.len() <= 6 && ps_rain.shockwaves.len() == 1 && ps_rain.stains.is_empty());
+
+        let mut ps_virus = Particles::new(128);
+        emit_virus_jump(&mut ps_virus, &mut rng, origin, origin + Vec2::new(22.0, 6.0));
+        assert!(ps_virus.len() >= 6 && ps_virus.len() <= 18);
+
+        // Zero-cap and NaN safety.
+        let mut zero = Particles::default();
+        emit_sonic_squeak_cone(&mut zero, &mut rng, Vec2::new(f32::NAN, 0.0), Vec2::ZERO, f32::NAN, f32::NAN, f32::NAN);
+        emit_acid_rain_ripple(&mut zero, &mut rng, Vec2::new(f32::NAN, 0.0), f32::NAN);
+        emit_virus_jump(&mut zero, &mut rng, Vec2::new(f32::NAN, 0.0), Vec2::ZERO);
+        assert_eq!(zero.len(), 0);
     }
 }

@@ -240,7 +240,9 @@ struct PictureKey {
     /// The resolved glyph set, and whether the 1x picture is smoothed: both
     /// decide the drawn frame without moving `World::ticks`.
     subcell: crate::render::subcell::SubcellSet,
-    smooth: bool,
+    smooth: crate::render::subcell::Smooth,
+    /// Whether the parallax foreground layer draws (see `render::foreground`).
+    foreground: bool,
 }
 
 impl PictureKey {
@@ -254,6 +256,7 @@ impl PictureKey {
             toggles: (w.hitboxes, w.smoke_enabled),
             subcell: w.subcell,
             smooth: w.smooth,
+            foreground: w.foreground,
         }
     }
 }
@@ -388,10 +391,15 @@ pub struct App {
     /// `RATRUN_SUBCELL`, read once at startup: pins the glyph set for the
     /// session (there is no saved option any more).
     subcell_env: Option<crate::render::subcell::Choice>,
-    /// EPX edge smoothing of the 1x (and zoomed-in) picture. On by default
-    /// (`RATRUN_SMOOTH=0` pins it off for a session; the console `smooth`
-    /// command A/Bs it live). Render-only: it never reaches the simulation.
-    smooth: bool,
+    /// Edge treatment of the 1x (and zoomed-in) picture: antialiasing by
+    /// default (`RATRUN_SMOOTH=0|1|2` pins off / EPX / antialiasing for a
+    /// session; the console `smooth` command switches it live). Render-only:
+    /// it never reaches the simulation.
+    smooth: crate::render::subcell::Smooth,
+    /// The parallax foreground layer (overhead pipes, lines, proofs). On by
+    /// default (`RATRUN_FOREGROUND=0` pins it off for a session; the console
+    /// `foreground` command A/Bs it live). Render-only, like `smooth`.
+    foreground: bool,
     /// Options screen: the selected row (`0..options::ROW_COUNT`).
     options_row: usize,
     /// Where Esc/Back on the options screen returns to (`Title` or `Paused`).
@@ -595,6 +603,7 @@ impl App {
             effects_env,
             subcell_env: crate::render::subcell::Choice::from_env(),
             smooth: crate::render::subcell::smooth_from_env(),
+            foreground: crate::render::foreground::enabled_from_env(),
             options_row: options::MUSIC_ROW,
             options_return: Screen::Title,
             preview_cd: 0.0,
@@ -1003,16 +1012,16 @@ impl App {
         self.enter_world(world, via_story);
     }
 
-    /// Begin a **practice run**: one later sector, alone, on the default
-    /// loadout, carrying nothing in and nothing out. It still records the
-    /// sector clear (so the next one unlocks) but never a campaign win.
+    /// Begin a **practice run**: one floor, alone, on the default loadout,
+    /// carrying nothing in and nothing out. It still records the floor clear
+    /// (so the next sector unlocks) but never a campaign win.
+    ///
+    /// Every floor is practisable this way, the Flatbed included: the ride is
+    /// the campaign's fourth level (`campaign::theme_stage`), and a practice run
+    /// on it plays that index's map and boss on the first level's scalars.
     fn start_practice(&mut self, theme: Theme) {
-        if theme == campaign::getaway_theme() {
-            // The flatbed is a practice floor with its own level index.
-            self.start_getaway();
-            return;
-        }
-        let level = campaign::theme_stage(theme).clamp(1, campaign::LEVEL_COUNT - 1);
+        // The floor's own campaign level, the ride's fourth included.
+        let level = campaign::theme_stage(theme).min(campaign::LEVEL_COUNT - 1);
         // A practice run is a side-route floor too, so it uses the same seeded
         // derivation a campaign on that route does.
         let seed = campaign::level_seed_on(self.seed(), level, theme);
@@ -1055,6 +1064,8 @@ impl App {
         }
         self.sfx(Sfx::UiSelect);
         if theme == campaign::getaway_theme() {
+            // The ride is the campaign's finale, and the sector select plays it
+            // as a practice floor: a campaign has to start at the Sewer.
             self.start_getaway();
         } else if campaign::theme_stage(theme) == 0 {
             // Stage one is the campaign's front door, exactly as START RUN.
@@ -1065,34 +1076,14 @@ impl App {
         }
     }
 
-    /// Begin the **getaway ride**: the flatbed, alone, on the default loadout.
+    /// Begin the **getaway ride**: the Flatbed alone, as a practice run.
     ///
-    /// A practice run like a later sector, but on its own theme: the trailer is
-    /// the final stage's third route option, not a campaign step
-    /// (`campaign::getaway_theme`).
+    /// The ride is the campaign's finale as well as a practice floor, so this is
+    /// just [`App::start_practice`] on its theme: the sector select starts a
+    /// campaign only from stage one, and every other floor (the ride included)
+    /// is a labelled practice run.
     fn start_getaway(&mut self) {
-        // The getaway world is built with its own level index, one past the
-        // campaign's stages (`campaign::is_getaway_sector`).
-        let sector = campaign::LEVEL_COUNT;
-        let seed = campaign::level_seed(self.seed(), sector);
-        self.begin_run_bookkeeping();
-        self.campaign = None;
-        self.practice = Some(campaign::getaway_theme());
-        self.console_cheat = false;
-        self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
-        self.keep_items.clear();
-        self.keep_entries.clear();
-        self.keep_selected.clear();
-        self.keep_splices.clear();
-        self.victory_loadout.clear();
-        let world = World::new_level_with_theme(
-            sector,
-            campaign::getaway_theme(),
-            seed,
-            Loadout::with_modifiers(Loadout::START_WEAPON, self.run_modifiers()),
-            campaign::CampaignTotals::default(),
-        );
-        self.enter_world(world, false);
+        self.start_practice(campaign::getaway_theme());
     }
 
     /// Hand a freshly built level to the app: reset the per-level telemetry,
@@ -1301,11 +1292,10 @@ impl App {
                         _ => {}
                     }
                 }
-                MouseEventKind::Down(MouseButton::Right)
-                    if target == Some(Target::Dash) && !self.input.controls.mouse_aims() =>
-                {
-                    return Some(Target::Pause)
-                }
+                // Only a left press activates a target here. A right click is
+                // Back on every menu and, in play, the actives' trigger: it
+                // never opens the pause plate (`mouse_only_*` pinned the old
+                // right-click-pauses behaviour that the owner asked to drop).
                 MouseEventKind::Moved
                 | MouseEventKind::Drag(_)
                 | MouseEventKind::Down(MouseButton::Left) => {
@@ -2957,7 +2947,11 @@ impl App {
         if self.input.action_pressed(Action::Map) || click == Some(Target::Minimap) {
             self.map_open = !self.map_open;
             self.sfx(Sfx::UiMove);
-        } else if self.map_open && self.input.action_pressed(Action::Back) {
+        } else if self.map_open
+            && (self.input.action_pressed(Action::Back) || self.input.right_clicked())
+        {
+            // The expanded map is an overlay: a right click closes it exactly
+            // as Esc does (and, like Esc, never also pauses).
             self.map_open = false;
             esc_used = true;
             self.sfx(Sfx::UiMove);
@@ -2996,10 +2990,11 @@ impl App {
         // A click is the mouse player's whole "do the thing" gesture, so it
         // asks for both — but it only **releases the charged actives when the
         // dash actually starts**. A click while the dash is cooling is a
-        // refused dash (`Sfx::DashDenied` + the red gauge) and must not spend a
-        // charged defensive ring on the way out, which is what it used to do
-        // (`WAVE3 review`, "Controls and full racks"). Space is unaffected: it
-        // always fires the actives on its own.
+        // refused dash (`Sfx::DashDenied` + the HUD module's red flash) and
+        // must not spend a charged defensive ring on the way out, which is what
+        // it used to do (`WAVE3 review`, "Controls and full racks"). Space and
+        // the right click are unaffected: they always fire the actives on their
+        // own.
         let click_dash = click == Some(Target::Dash);
         let dash_ready = self
             .world
@@ -3013,7 +3008,10 @@ impl App {
             held: self.input.dash_held(),
             up: self.input.dash_up(),
         };
-        // Classic/Gamepad: a click is dash + (ready) actives, as it always was.
+        // Classic/Gamepad: a left click is dash + (ready) actives, and a right
+        // click is the actives on their own — `active_pressed` reads every
+        // device bound to `FireActives`, which is Space, the right click and
+        // the pad's X on those tables.
         // Mouse aim: the clicks are split — LMB fires the actives, RMB dashes —
         // so a left click never spends the dash and a right click never spends
         // a charge.
@@ -3451,7 +3449,10 @@ impl App {
         };
         let level = w.level_index.min(campaign::LEVEL_COUNT - 1);
         let theme = w.level.theme;
-        let getaway = w.level_index >= campaign::LEVEL_COUNT;
+        // The ride is a campaign level now (the fourth), so a campaign clears it
+        // for real; a **practice** ride is the one case that must not write a
+        // campaign record.
+        let ride_practice = theme.is_trailer() && self.campaign.is_none();
         let record = LevelRecord {
             time: w.elapsed,
             kills: w.kills,
@@ -3462,11 +3463,12 @@ impl App {
         };
         let campaign_won = self.campaign.is_some() && w.campaign_won();
         // One floor down this run (the bank's floor bonus counts these; a
-        // practice/ getaway floor is charged at the practice rate instead).
+        // practice floor is charged at the practice rate instead).
         self.floors_cleared = self.floors_cleared.saturating_add(1);
-        // The campaign's per-stage breakdown only takes campaign levels: the
-        // getaway ride is a practice floor and must not overwrite a stage.
-        if !getaway {
+        // The campaign's per-level breakdown only takes campaign levels: a
+        // practice ride is not the campaign's fourth floor and must not
+        // overwrite it.
+        if !ride_practice {
             self.records[level] = record;
             // A CONSOLE USED run never banks a durable campaign record: the
             // cheats make the sector clear meaningless. The in-memory record
@@ -3476,8 +3478,8 @@ impl App {
             }
         }
         // Bests are banked **per floor**, so the Kitchen and the Laundry (both
-        // stage two) keep separate records, and the getaway ride gets its own
-        // instead of clobbering the final campaign sector's.
+        // stage two) keep separate records, and the ride gets its own instead of
+        // clobbering the final campaign sector's.
         // (A CONSOLE USED run records nothing durable.)
         if !self.console_cheat {
             self.scores.record_floor(theme, record.score, record.time);
@@ -3595,9 +3597,10 @@ impl App {
     }
 
     /// The floor the run goes to after the level in flight, from the
-    /// campaign's chosen route (`campaign::Route`) — **not** a stage index.
-    /// `None` when this clear ends the run: a practice floor, the getaway ride,
-    /// a final-stage floor, or no campaign in flight.
+    /// campaign's chosen route (`campaign::Route`) — **not** a level index.
+    /// `None` when this clear ends the run: a practice floor, the ride (a
+    /// capped practice ride or the campaign's own last level), or no campaign in
+    /// flight.
     fn next_level_plate(&self) -> Option<campaign_ui::CampaignLevel> {
         let world = self.world.as_ref()?;
         let camp = self.campaign.as_ref()?;
@@ -4042,18 +4045,46 @@ impl App {
         self.picture_dirty = true;
     }
 
-    /// Turn the 1x edge smoothing on or off (the console `smooth` command).
-    /// Render-only: no run state, no save, no golden can see it.
+    /// Turn the 1x edge smoothing off, or on at its default level (the
+    /// antialiasing). Render-only: no run state, no save, no golden can see it.
     pub(crate) fn set_smooth(&mut self, on: bool) {
-        if self.smooth != on {
-            self.smooth = on;
+        use crate::render::subcell::Smooth;
+        if on != self.smooth_enabled() {
+            self.set_smooth_level(if on { Smooth::default() } else { Smooth::Off });
+        }
+    }
+
+    /// Whether the 1x edge smoothing is on at any level.
+    pub(crate) fn smooth_enabled(&self) -> bool {
+        self.smooth != crate::render::subcell::Smooth::Off
+    }
+
+    /// Pick the 1x edge treatment (the console `smooth` command): off, the
+    /// EPX rounding, or the antialiasing. Render-only.
+    pub(crate) fn set_smooth_level(&mut self, level: crate::render::subcell::Smooth) {
+        if self.smooth != level {
+            self.smooth = level;
             self.picture_dirty = true;
         }
     }
 
-    /// Whether the 1x edge smoothing is on.
-    pub(crate) fn smooth_enabled(&self) -> bool {
+    /// The 1x edge treatment in force.
+    pub(crate) fn smooth_level(&self) -> crate::render::subcell::Smooth {
         self.smooth
+    }
+
+    /// Turn the parallax foreground layer on or off (the console `foreground`
+    /// command). Render-only: no run state, no save, no golden can see it.
+    pub(crate) fn set_foreground(&mut self, on: bool) {
+        if self.foreground != on {
+            self.foreground = on;
+            self.picture_dirty = true;
+        }
+    }
+
+    /// Whether the parallax foreground layer is on.
+    pub(crate) fn foreground_enabled(&self) -> bool {
+        self.foreground
     }
 
     fn toggle_auto_pick(&mut self) {
@@ -4530,7 +4561,8 @@ impl App {
                 }
                 // The minimap is registered last, so it takes precedence over
                 // the full-field Dash target. Only a left press activates a
-                // target (`mouse_action`), so right-click still dashes/pauses.
+                // target (`mouse_action`); a right click is Back in the menus
+                // and the actives in play, never a click on what sits under it.
                 if matches!(self.screen, Screen::Playing) {
                     if !self.last_map.is_empty() {
                         self.hits.add(self.last_map, Target::Minimap);
@@ -4750,11 +4782,9 @@ impl App {
             if count >= slots.len() {
                 break;
             }
-            let stage = if theme.is_trailer() {
-                campaign::LEVEL_COUNT
-            } else {
-                campaign::theme_stage(theme)
-            };
+            // The floor's own campaign level: the ride reads its fourth, not
+            // the Lab's third (`campaign::theme_stage`).
+            let stage = campaign::theme_stage(theme);
             slots[count] = campaign_ui::LevelSlotView {
                 floor,
                 level: campaign_ui::CampaignLevel::from_theme(theme),
@@ -4969,7 +4999,9 @@ impl App {
                 new_best: self.new_best,
                 levels,
                 final_loadout: &self.victory_loadout,
-                custom_blurb: None,
+                // The run ends on the ride now, so the plate carries the
+                // getaway's own closing line (`lore::GETAWAY_WIN`).
+                custom_blurb: Some(crate::lore::GETAWAY_WIN),
                 focus: self.victory_focus,
                 hovered: match self.hits.hovered {
                     Some(Target::Restart) => Some(campaign_ui::CampaignVictoryAction::PlayAgain),
@@ -5033,6 +5065,7 @@ impl App {
                 w.subcell =
                     crate::render::subcell::resolve(self.subcell_env, crate::term::block_set());
                 w.smooth = self.smooth;
+                w.foreground = self.foreground;
                 let key = PictureKey::of(w, self.run_counter, &self.pixels);
                 if self.picture_dirty || self.picture_key != Some(key) {
                     w.draw(&mut self.pixels);
@@ -5605,13 +5638,25 @@ mod tests {
             let field = h.locate("▀");
             h.events(&[], &[(left, field)]);
             assert!(h.app.world.as_ref().unwrap().player.dash_cd > 0.0);
+            // A right click in play is the actives' trigger, never a menu
+            // (batch 12: the owner's "right click should fire the weapon not
+            // bring up a menu"). It leaves the screen exactly where it was.
             h.events(&[], &[(right, field)]);
+            assert!(
+                matches!(h.app.screen, Screen::Playing),
+                "a right click opened the pause plate"
+            );
+            // The pause plate still comes from Esc, and a right click on it is
+            // Back — the same thing Esc does there.
+            h.frame(&[KeyCode::Esc]);
             assert!(matches!(h.app.screen, Screen::Paused));
-            h.events(&[], &[(left, (0, 0))]);
-            assert!(matches!(h.app.screen, Screen::Paused));
-            h.click("resume");
-            assert!(matches!(h.app.screen, Screen::Playing));
-            h.events(&[], &[(right, field)]);
+            h.events(&[], &[(right, (0, 0))]);
+            assert!(
+                matches!(h.app.screen, Screen::Playing),
+                "a right click did not leave the pause plate"
+            );
+            // …and the plate's own chips still reach the menu.
+            h.frame(&[KeyCode::Esc]);
             h.click("Q to menu");
             assert!(matches!(h.app.screen, Screen::Title));
             for button in ["restart", "Q to menu"] {
@@ -5702,6 +5747,181 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Title));
     }
 
+    /// The owner's right click: in Classic it **fires the charged actives** and
+    /// never opens a menu (the whole playfield used to be a right-click pause).
+    #[test]
+    fn a_right_click_in_classic_fires_the_actives_and_never_pauses() {
+        use crate::game::weapon::WeaponKind;
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+        }
+        h.frame(&[]);
+        let field = h.locate("▀");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Right), field)]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(
+                w.active_fx().thrash_active(),
+                "the right click did not release the charged actives"
+            );
+            assert_eq!(w.player.dash_active, 0.0, "the right click must not dash");
+            assert_eq!(w.player.dash_cd, 0.0, "the right click spent the dash");
+        }
+        assert!(
+            matches!(h.app.screen, Screen::Playing),
+            "a right click left the run"
+        );
+    }
+
+    /// Mouse aim keeps its own split: the right click is still the dash there
+    /// (and a click no longer reaches a menu in that scheme either).
+    #[test]
+    fn a_mouse_aim_right_click_still_dashes() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.set_scheme(Scheme::MouseAim);
+        h.frame(&[]);
+        let game = h.app.last_game;
+        assert!(game.width > 8 && game.height > 4, "no playfield to click");
+        let pos = (game.x + game.width / 2, game.y + 2);
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+        }
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Right), pos)]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(
+                w.player.dash_active > 0.0,
+                "the mouse-aim right click must still dash"
+            );
+        }
+        assert!(matches!(h.app.screen, Screen::Playing), "mouse aim lost its run");
+    }
+
+    /// The other half of the owner's ask: in **any** menu or overlay a right
+    /// click is Back, exactly what Esc does there — and it is never a left press,
+    /// so it cannot also click the row under the pointer.
+    #[test]
+    fn a_right_click_backs_out_of_every_menu_like_esc() {
+        let right = MouseEventKind::Down(MouseButton::Right);
+        let mut h = Harness::new(80, 24);
+        // The title has no Back (Esc does nothing there), so the pointer over a
+        // row must not press it either.
+        h.frame(&[]);
+        let start = h.locate("START RUN");
+        h.events(&[], &[(right, start)]);
+        assert!(
+            matches!(h.app.screen, Screen::Title),
+            "a right click pressed a title row"
+        );
+
+        // Sector select and the story dossier both leave for the title.
+        h.app.screen = Screen::SectorSelect;
+        h.frame(&[]);
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Title), "sector select stuck");
+        h.app.screen = Screen::Story;
+        h.frame(&[]);
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Title), "the dossier stuck");
+
+        // In play the expanded map is an overlay: a right click closes it and
+        // the run keeps going.
+        h.enter_playing();
+        h.frame(&[KeyCode::Tab]);
+        assert!(h.app.map_open, "Tab did not open the map");
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(
+            !h.app.map_open && matches!(h.app.screen, Screen::Playing),
+            "the map stuck open"
+        );
+
+        // The pause plate and every plate it opens.
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        h.app.open_options(Screen::Paused);
+        h.frame(&[]);
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Paused), "options stuck");
+        h.app.open_controls();
+        h.frame(&[]);
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Options), "controls stuck");
+        h.app.open_library(Screen::Paused);
+        h.frame(&[]);
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Paused), "library stuck");
+        h.app.open_nest(Screen::Paused);
+        h.frame(&[]);
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Paused), "nest stuck");
+        // …and the pause plate itself resumes the run.
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Playing), "pause stuck");
+
+        // The splice shelf leaves for the field: the run is still live, so the
+        // player walks onto the hole's threshold and the shelf opens.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.gold = 40;
+            if let Some(hole) = w.level.objects.shop_holes.first().copied() {
+                w.player.pos = hole.face() + hole.facing * 3.0;
+            }
+        }
+        h.frame(&[]);
+        assert!(
+            matches!(h.app.screen, Screen::Shop),
+            "the threshold did not open the shelf"
+        );
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Playing), "the shop stuck");
+
+        // A chest and a level-up card have no Back action at all, so a right
+        // click does nothing there — the same as Esc.
+        h.app.screen = Screen::Chest;
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Chest), "a chest has no back");
+        h.show_upgrade_cards();
+        h.events(&[], &[(right, (0, 0))]);
+        assert!(
+            matches!(h.app.screen, Screen::LevelUp),
+            "a right click picked a card"
+        );
+    }
+
+    /// The Controls screen captures a right click as a binding like any other
+    /// button — the one screen where it must **not** be Back.
+    #[test]
+    fn the_controls_screen_captures_a_right_click_instead_of_backing_out() {
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]);
+        h.app.open_options(Screen::Title);
+        h.app.open_controls();
+        h.frame(&[]);
+        h.app.bind_capture = Some(Action::Mute);
+        h.frame(&[]);
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Right), (2, 2))]);
+        assert!(
+            matches!(h.app.screen, Screen::Controls),
+            "a captured right click left the screen"
+        );
+        assert_eq!(
+            h.app.input.controls.active().get(Action::Mute),
+            Binding::Mouse(MouseBind::Right),
+            "the right click was not captured as the binding"
+        );
+    }
+
     #[test]
     fn title_screen_renders() {
         let mut h = Harness::new(80, 40);
@@ -5774,14 +5994,12 @@ mod tests {
                 hh.app.menu_idx = 1; // the sector row
                 let text = hh.frame(&[]);
                 assert_eq!(hh.app.theme(), theme);
-                let number = if theme == Theme::Trailer {
-                    4
-                } else {
-                    theme.stage() + 1
-                };
-                // A fresh save has only the first stage open; the Flatbed is
-                // always open.
-                let locked = theme != Theme::Trailer && theme.stage() > 0;
+                let number = campaign::theme_stage(theme) + 1;
+                // A fresh save has only stage one open. The ride is the
+                // campaign's fourth level now, so it is locked like any other
+                // floor until a stage-three sector is cleared — and it is still
+                // reachable as a practice floor once it opens.
+                let locked = theme.stage() > 0;
                 let label = if locked {
                     format!("‹ {number:02} {} × ›", theme.name())
                 } else {
@@ -5808,12 +6026,15 @@ mod tests {
     }
 
     /// Enter on the title's sector row opens the select screen with the
-    /// Flatbed selected; Enter **there** starts the getaway ride. Every floor
-    /// starts from the one screen, the flatbed included, so it is not a hidden
-    /// special case on the title row.
+    /// Flatbed selected; Enter **there** starts the getaway ride once the floor
+    /// is open. Every floor starts from the one screen, the ride included.
     #[test]
     fn the_title_sector_row_starts_the_flatbed() {
         let mut hh = Harness::new(80, 24);
+        // A cleared campaign is what opens the ride's card now.
+        for theme in [Theme::Sewer, Theme::Kitchen, Theme::Lab] {
+            hh.app.scores.record_floor(theme, 100, 200.0);
+        }
         hh.app.select_idx = Theme::playable().len() - 1; // the Flatbed
         hh.app.menu_idx = 1; // the sector row
         hh.frame(&[]);
@@ -5830,8 +6051,13 @@ mod tests {
         );
         let w = hh.app.world.as_ref().expect("a world");
         assert_eq!(w.level.theme, Theme::Trailer);
-        assert_eq!(w.level_index, crate::game::campaign::LEVEL_COUNT);
+        assert_eq!(w.level_index, crate::game::campaign::LEVEL_COUNT - 1);
         assert!(hh.app.campaign.is_none(), "the getaway ride is a practice run");
+        assert_eq!(
+            w.difficulty_override,
+            Some(0),
+            "a practice floor plays the first level's scalars"
+        );
         // Its map intro card is the flatbed's lore, not a campaign sector's.
         let text = hh.frame(&[KeyCode::Enter]); // intro -> playing
         assert!(matches!(hh.app.screen, Screen::Playing));
@@ -5978,14 +6204,11 @@ mod tests {
     }
 
     fn shelf(h: &Harness, slot: usize) -> crate::game::shop::SpliceKind {
-        h.app
-            .world
-            .as_ref()
-            .unwrap()
-            .shop
-            .get(0)
-            .and_then(|stock| stock.slot(slot))
-            .expect("the shelf has a splice in this slot")
+        let stock = h.app.world.as_ref().unwrap().shop.get(0);
+        match stock.and_then(|stock| stock.slot(slot)) {
+            Some(kind) => kind,
+            None => panic!("the shelf has a splice in this slot"),
+        }
     }
 
     #[test]
@@ -6757,6 +6980,39 @@ mod tests {
         assert_eq!(w.difficulty_override, Some(0));
         let carried = World::new_level(1, 7, Loadout::starting());
         assert_eq!(carried.difficulty_override, None);
+    }
+
+    /// The **practice ride** is unchanged by the Flatbed joining the campaign:
+    /// the sector card plays the Flatbed alone, on the default loadout, at level
+    /// index 3 with the first level's scalars, and it never advances anything.
+    #[test]
+    fn the_practice_flatbed_is_still_the_getaway_ride() {
+        let mut hh = Harness::new(80, 24);
+        hh.app.start_getaway();
+        {
+            let w = hh.app.world.as_ref().unwrap();
+            assert_eq!(w.level.theme, Theme::Trailer);
+            assert_eq!(w.level_index(), campaign::LEVEL_COUNT - 1);
+            assert_eq!(w.difficulty_override, Some(0), "level 0's scalars");
+            assert_eq!(w.level.seed, campaign::level_seed(hh.app.seed(), 3));
+            assert_eq!(w.player.loadout.weapons.len(), 1, "no carried build");
+        }
+        assert!(hh.app.campaign.is_none(), "not a campaign run");
+        assert_eq!(hh.app.practice, Some(Theme::Trailer));
+        // Clearing it ends the run (the incident report), never a campaign win.
+        hh.app.world.as_mut().unwrap().mark_level_complete();
+        hh.frame(&[]);
+        assert_eq!(hh.app.screen.name_for_test(), "LevelComplete");
+        hh.frame(&[KeyCode::Enter]);
+        assert_eq!(hh.app.screen.name_for_test(), "End");
+        assert!(
+            hh.app.last_summary.as_ref().is_some_and(|s| s.practice && s.won),
+            "a cleared practice ride is a practice win"
+        );
+        assert!(
+            !hh.app.scores.entries[0].campaign_won,
+            "a practice ride never wins the campaign"
+        );
     }
 
     /// A practice run on a later sector really plays level 0's curve: the
@@ -9065,6 +9321,9 @@ mod tests {
         h.app.world.as_mut().unwrap().smoke_enabled = false;
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 3, "the smoke toggle must redraw");
+        h.app.world.as_mut().unwrap().foreground = false;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 4, "the foreground toggle must redraw");
 
         // Any discrete input (it may have changed anything): redraw once.
         let mut h = paused_harness();
@@ -11230,25 +11489,64 @@ mod tests {
             }
         }
 
-        // -- Level 3 (Lab): the final boss wins the campaign -----------------
+        // -- Level 3 (Lab): the keep screen comes before the ride ------------
+        h.finish_level();
+        assert_eq!(
+            h.app.screen.name_for_test(),
+            "LevelComplete",
+            "stage three no longer ends the run"
+        );
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        pack_three(&mut h);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(
+            h.app.screen.name_for_test(),
+            "LevelIntro",
+            "the ride has its own intro plate"
+        );
+        let intro = h.screen_text();
+        assert!(intro.contains("THE FLATBED"), "the ride is not named: {intro}");
+        h.frame(&[KeyCode::Enter]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.level.theme, Theme::Trailer, "level 4 is the Flatbed");
+            assert_eq!(w.level_index, campaign::LEVEL_COUNT - 1);
+        }
+
+        // -- Level 4 (the Flatbed): its boss wins the campaign ---------------
         h.finish_level();
         assert_eq!(h.app.screen.name_for_test(), "Victory");
         let text = h.screen_text();
         assert!(text.contains("EXTRACTION COMPLETE"), "no victory plate: {text}");
-        // The breakdown names every sector's boss.
-        for boss in ["APEX JAGUAR", "THE SWEEPER", "TURF-REAPER MK.IV"] {
+        // The breakdown names every sector's boss, the ride's included.
+        for boss in [
+            "APEX JAGUAR",
+            "THE SWEEPER",
+            "TURF-REAPER MK.IV",
+            "THE MAGPIE",
+        ] {
             assert!(text.contains(boss), "{boss} missing from the breakdown: {text}");
         }
-        assert!(text.contains("3 / 3"), "the sectors column must read 3/3");
+        assert!(text.contains("4 / 4"), "the sectors column must read 4/4");
+        assert!(
+            text.contains("THE FLATBED"),
+            "the ride is not on the victory plate: {text}"
+        );
         assert!(h.app.new_best, "the first campaign win is a new best");
         let entry = &h.app.scores.entries[0];
         assert!(entry.campaign_won, "the run records a campaign win");
-        assert_eq!(entry.campaign_level, 3);
+        assert_eq!(entry.campaign_level, 4);
         assert!(entry.won);
         assert!(entry.score >= 2000, "cumulative score: {entry:?}");
         assert_eq!(h.app.records[0].time, 90.0, "level 1's clock was recorded");
         assert_eq!(h.app.records[0].score, 1200, "level 1's score was recorded");
         assert_eq!(h.app.records[0].kills, 40, "level 1's kills were recorded");
+        assert_eq!(
+            h.app.records[3].plate,
+            Some(campaign_ui::CampaignLevel::Trailer),
+            "the ride's own row is in the breakdown"
+        );
         assert_eq!(h.app.records[2].time, 0.0, "level 3 finished on the first tick");
 
         // Play again restarts the campaign from the dossier.
@@ -11441,7 +11739,7 @@ mod tests {
         let text = h.frame(&[]);
         assert_eq!(h.app.screen.name_for_test(), "End");
         assert!(
-            text.contains("SECTOR 2/3"),
+            text.contains("SECTOR 2/4"),
             "the defeat screen must name the sector reached: {text}"
         );
         assert!(text.contains("Total time"), "cumulative totals must be shown");
@@ -11571,7 +11869,7 @@ mod tests {
         let paused = h.frame(&[KeyCode::Esc]);
         assert_eq!(h.app.screen.name_for_test(), "Paused");
         assert!(
-            paused.contains("2/3"),
+            paused.contains("2/4"),
             "the pause dossier must carry the stage pips: {paused}"
         );
         h.frame(&[KeyCode::Esc]);
@@ -11841,8 +12139,8 @@ mod tests {
                     "LevelIntro" => h.app.start_practice(Theme::Kitchen),
                     "Victory" => {
                         h.enter_playing();
-                        h.app.campaign.as_mut().unwrap().level = 2;
-                        h.app.world.as_mut().unwrap().level_index = 2;
+                        h.app.campaign.as_mut().unwrap().level = campaign::LEVEL_COUNT - 1;
+                        h.app.world.as_mut().unwrap().level_index = campaign::LEVEL_COUNT - 1;
                         h.finish_level();
                     }
                     _ => {
@@ -13657,6 +13955,30 @@ mod tests {
         assert_eq!(h.app.world_draws, drawn + 3, "a new glyph set must redraw");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 3);
+    }
+
+    /// The parallax foreground toggle is the same kind of thing: a render-only
+    /// switch that redraws the frozen picture and never ticks the world.
+    #[test]
+    fn the_foreground_toggle_is_render_only_and_redraws() {
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        let ticks = h.app.world.as_ref().unwrap().ticks;
+        assert!(h.app.foreground_enabled(), "on by default");
+        h.app.set_foreground(false);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a foreground change redraws the field");
+        assert_eq!(
+            h.app.world.as_ref().unwrap().ticks,
+            ticks,
+            "the foreground layer is render-only: no tick"
+        );
+        assert!(!h.app.world.as_ref().unwrap().foreground, "the world was not told");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "and then the picture is cached again");
+        h.app.set_foreground(true);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 2);
     }
 
     /// The minimap's view box (and therefore the fog-of-war radar framing and

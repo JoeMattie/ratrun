@@ -30,7 +30,13 @@ pub const THRASH_BOSS_KNOCKBACK: f32 = 0.15;
 /// Screen shake (the `Shake` resource) on the trigger frame.
 pub const THRASH_SHAKE: f32 = 5.0;
 
-/// Seconds the Sonic Squeak ring takes to expand to its final radius.
+/// Half-angle of the Sonic Squeak **cone** (batch 12: it is a forward wedge, not
+/// a ring), in radians (38°). A body is inside the cone when its centre lies
+/// within this angle of the cone's axis, with its own radius as slack.
+pub const SQUEAK_CONE_HALF: f32 = 0.663_225_1;
+
+/// Seconds the Sonic Squeak cone's chevron front takes to push out to its
+/// reach (the damage lands on the press tick; this is the drawn push).
 pub const SQUEAK_EXPAND: f32 = 0.30;
 /// Stun applied to regular enemies the ring passes.
 pub const SQUEAK_STUN: f32 = 1.5;
@@ -39,23 +45,109 @@ pub const SQUEAK_ELITE_SLOW: f32 = 0.35;
 /// The boss is slowed for a shorter window and less severely.
 pub const SQUEAK_BOSS_SLOW: f32 = 0.5;
 pub const SQUEAK_BOSS_SLOW_SECS: f32 = 0.8;
-/// Outward shove (px/s of velocity) the ring gives everything it passes.
+/// Outward shove (px/s of velocity) the cone gives everything it covers.
 pub const SQUEAK_SHOVE: f32 = 70.0;
 
-// ---- Laser Eyes tuning (wave 3, design §4) -------------------------------
+// ---- Squeak Nova: the expanding ring (batch 12) --------------------------
+//
+// The nova used to fire a ring of radial darts; it is now a true shockwave: a
+// single ring that damages every body its front passes, once. The old spokes'
+// flight was `life` 1.3 s at 95 px/s, so the ring's reach is that distance and
+// a body the spokes could reach still takes one hit per cast — the same
+// per-body dps.
 
-/// Seconds between two pulses of one Laser Eyes burst. The pulses fire at
-/// `0, 0.10, 0.20, ...` after the trigger, so the burst's damage schedule and
-/// the art's blinking bar share this one number.
+/// Seconds the ring takes to reach [`NOVA_REACH`] (and, with **Echo Chamber**,
+/// the same again to come back in).
+pub const NOVA_EXPAND: f32 = 0.32;
+/// The ring's final radius in px before Lens Cap (`Stats::ranged_reach`).
+pub const NOVA_REACH: f32 = 123.5;
+
+// ---- Tail Whip: the frontal half-circle swipe (batch 12, corrected) ------
+//
+// The whip used to be a melee aura all the way round the rat, and my first
+// batch-12 pass made it a single-target line. The owner's design row is a
+// **quick low swipe in front of the rat**: a half-circle arc (180°) centred on
+// the aim/facing, short reach, fast cadence. The three tails now read apart by
+// shape alone — a crescent in front (whip), a full disc (thrash), one targeted
+// lash with a burst at the impact (spiked tail). Damage per body per cycle is
+// unchanged: the same `Weapon::damage()` on the same cooldown, delivered to
+// every body in the front half-circle instead of a full circle.
+
+/// Half-angle of the swipe: `WHIP_ARC_HALF` either side of the aim/facing is
+/// 180° of arc, i.e. the whole front half of the rat's surroundings.
+pub const WHIP_ARC_HALF: f32 = std::f32::consts::FRAC_PI_2;
+
+/// Reach of the swipe in px, L1 → L5, before Lens Cap (`Stats::melee_reach`).
+/// Short on purpose: the swipe is the rat's near guard, and the Spiked Tail is
+/// the tail that reaches.
+pub const WHIP_REACH: [f32; 5] = [30.0, 33.0, 36.0, 39.0, 42.0];
+
+/// Seconds the drawn crescent lives (`components::WhipCrack`).
+pub const WHIP_SWIPE_SECS: f32 = 0.12;
+
+// ---- Gnaw: the frontal bite (batch 12) ----------------------------------
+//
+// Gnaw was the starter dart; it is now a **melee bite** — no projectile, a
+// snapping jaw in front of the rat's nose, very short reach, fast. It keeps the
+// dart's single-target identity (it bites the nearest body in its cone) and its
+// whole burst's damage: at L4+ the old two darts' worth lands as one bite.
+
+/// Reach of the bite in px, L1 → L5 (before Lens Cap's melee reach hook).
+pub const GNAW_BITE_REACH: [f32; 5] = [20.0, 21.0, 22.0, 23.0, 24.0];
+/// Half-angle of the bite's jaw (48°), in radians.
+pub const GNAW_BITE_HALF: f32 = 0.837_758;
+/// Seconds the drawn snap lives (`components::BiteSnap`).
+pub const BITE_SECS: f32 = 0.11;
+
+// ---- Cheese Spray: the slowing wedges (batch 12) ------------------------
+//
+// The spray is a shotgun of **chunky wedges**: they fly a short way, slow down
+// and drop, and everything the fan covers is slowed. The per-body damage per
+// cycle is the darts' own (one wedge = one dart's damage); the reach is what
+// shrank.
+
+/// Wedge speed in px/s (the old dart flew at 110).
+pub const CHEESE_WEDGE_SPEED: f32 = 78.0;
+/// Wedge flight in seconds, before Lens Cap's ranged-reach hook. 78 x 0.55 is
+/// about 43 px: a shotgun, not a rifle.
+pub const CHEESE_WEDGE_LIFE: f32 = 0.55;
+/// A body the fan covers is slowed to this fraction of its speed.
+pub const CHEESE_SLOW_MULT: f32 = 0.55;
+/// …for this many seconds.
+pub const CHEESE_SLOW_SECS: f32 = 0.9;
+/// Extra half-angle (10°) on either side of the wedge fan the slowing field
+/// covers, so a body at the fan's edge — and one a wedge's fat body would have
+/// clipped — is slowed with the rest.
+pub const CHEESE_FAN_SLACK: f32 = 0.174_532_9;
+
+// ---- Laser Eyes tuning (batch 12: the sweep) ----------------------------
+//
+// One burst is now **one continuous beam pivoting through an arc**: it starts
+// at one edge of the arc, sweeps to the other over `LASER_SWEEP_SECS`, and the
+// next burst sweeps back the other way (`LaserFx::dir`). Everything the beam
+// segment crosses takes the whole sweep's damage once (a per-sweep hit set), so
+// dps per body is what the old pulse burst dealt it: `pulses x damage`.
+
+/// Seconds one sweep lasts, L1 → L5.
+pub const LASER_SWEEP_SECS: [f32; 5] = [0.55, 0.63, 0.70, 0.80, 0.90];
+/// Full arc one sweep pivots through, L1 → L5, in **degrees** (60° → 110°).
+/// Stored in degrees because that is how the design row reads; `Weapon::laser_half_arc`
+/// converts on the way out (radians), so the arc is never a hand-rounded literal.
+pub const LASER_ARC_DEG: [f32; 5] = [60.0, 70.0, 80.0, 95.0, 110.0];
+/// From this level a **second beam** sweeps the mirrored way at the same time
+/// (both beams share one hit set, so a body is still cut once per sweep).
+pub const LASER_TWIN_LEVEL: u8 = 4;
+
+/// The old per-pulse cadence, kept only because two render readers still scale
+/// a light's brightness by it (`world::laser_visual`, `lighting::sources`).
+/// Nothing in the simulation pulses any more: `LaserFx::since_pulse` stays 0, so
+/// those readers see a steady (unblinking) beam.
 pub const LASER_PULSE_INTERVAL: f32 = 0.10;
-/// Half-angle (radians) of the burst's sweep: pulses are spread evenly across
-/// `-35°..+35°` of the facing the rat held when the burst began.
+/// Reference half-arc for the render side's beam light pools (the sweep's real
+/// half-arc per level is `LASER_ARC_DEG` / 2, carried live on `LaserFx::half`).
 pub const LASER_SWEEP_HALF: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// The beam's half-width in px (the design's "3 px wide" bar).
 pub const LASER_HALF_WIDTH: f32 = 1.5;
-/// Seconds the muzzle glow stays after the last pulse, so a burst ends with a
-/// visible fade instead of a hard cut (art only — nothing damages here).
-pub const LASER_TAIL: f32 = 0.12;
 
 /// Number of weapon slots every per-weapon bookkeeping array needs
 /// (`ecs::resources::DamageLedger`, the balance reports).
@@ -137,7 +229,7 @@ pub const LASH_DAMAGE: [f32; 5] = [22.0, 27.0, 33.0, 38.0, 44.0];
 pub const LASH_CYCLE: [f32; 5] = [1.3, 1.19, 1.08, 0.96, 0.85];
 /// Reach of the lash (rat to the target's near edge), L1 → L5. Lens Cap
 /// stretches it.
-pub const LASH_REACH: [f32; 5] = [44.0, 49.0, 54.0, 59.0, 64.0];
+pub const LASH_REACH: [f32; 5] = [80.0, 90.0, 100.0, 110.0, 120.0];
 /// Radius of the burst at the impact point, L1 → L5. Long Fuse widens it.
 pub const LASH_RADIUS: [f32; 5] = [10.0, 11.5, 13.0, 14.5, 16.0];
 /// Spare spike shards that break off the tail and fly on, L1 → L5 (design:
@@ -264,20 +356,20 @@ impl WeaponKind {
 
     pub fn desc(self) -> &'static str {
         match self {
-            WeaponKind::Gnaw => "Fires a dart at the nearest foe.",
-            WeaponKind::CheeseSpray => "Scatters darts in a forward fan.",
-            WeaponKind::SqueakNova => "Fires a ring of shots all around you.",
+            WeaponKind::Gnaw => "Bites the nearest foe in front of you.",
+            WeaponKind::CheeseSpray => "Blasts a short, slowing fan of wedges.",
+            WeaponKind::SqueakNova => "A ring of force bursts out, cutting all it passes.",
             WeaponKind::SporeOrbit => "Orbiting spores shred nearby foes.",
-            WeaponKind::TailWhip => "Whips every foe within close reach.",
+            WeaponKind::TailWhip => "Swipes a half-circle of foes ahead of you.",
             WeaponKind::AcidSpit => "Lobs acid that pools and burns.",
             // The "ACTIVE" prefix is what the level-up card shows, so the
             // player learns which weapons the Space bar fires (task: the first
             // two player-triggered weapons).
             WeaponKind::TailThrash => "ACTIVE: Space sweeps a shot-clearing arc.",
-            WeaponKind::SonicSqueak => "ACTIVE: Space blasts a stunning ring.",
+            WeaponKind::SonicSqueak => "ACTIVE: Space blasts a stunning cone ahead.",
             // The dash weapon's card teaches the trigger the same way: the
             // dash key, and (since the hold-to-charge pass) the hold itself.
-            WeaponKind::LaserEyes => "Sweeps piercing beams ahead of you.",
+            WeaponKind::LaserEyes => "Sweeps cutting beams across an arc ahead.",
             WeaponKind::SuperDash => "DASH: hold to charge, release to dash through foes.",
             WeaponKind::AcidRain => "Drops staggered acid splashes nearby.",
             WeaponKind::Hantavirus => "Tags a foe for 3 hits, then jumps on.",
@@ -479,7 +571,7 @@ impl WeaponKind {
                 super::loadout::PassiveKind::FireRate,
                 "Echo Chamber",
                 "The walls know the chorus.",
-                "Every shot that hits a wall rebounds back along its path for a second hit.",
+                "The ring strikes the walls and comes back through for a second hit.",
             ),
             // Fairy Ring — every second cast leaves a still, burning ring.
             WeaponKind::SporeOrbit => e(
@@ -649,12 +741,49 @@ impl Weapon {
         }
     }
 
-    /// Laser Eyes: pulses in one burst (3 / 3 / 4 / 4 / 5).
+    /// Laser Eyes: the old burst's pulses (3 / 3 / 4 / 4 / 5). A sweep no
+    /// longer pulses; this is the multiplier that keeps its dps unchanged —
+    /// one body the beam crosses takes `pulses x damage` per sweep.
     pub fn laser_pulses(&self) -> u32 {
         match self.kind {
             WeaponKind::LaserEyes => LASER_PULSES[self.tier()],
             _ => 0,
         }
+    }
+
+    /// Laser Eyes: what one body the beam crosses takes per sweep, i.e. the
+    /// whole old pulse burst's damage. `Weapon::damage()` is the per-pulse
+    /// table, so this is exactly the dps the burst had against one body.
+    #[inline]
+    pub fn laser_hit_damage(&self) -> f32 {
+        match self.kind {
+            WeaponKind::LaserEyes => self.damage() * self.laser_pulses().max(1) as f32,
+            _ => 0.0,
+        }
+    }
+
+    /// Laser Eyes: **half** the sweep's arc in radians (L1 30° → L5 55°).
+    #[inline]
+    pub fn laser_half_arc(&self) -> f32 {
+        match self.kind {
+            WeaponKind::LaserEyes => (LASER_ARC_DEG[self.tier()] * 0.5).to_radians(),
+            _ => 0.0,
+        }
+    }
+
+    /// Laser Eyes: seconds one sweep lasts (L1 0.55 → L5 0.90).
+    #[inline]
+    pub fn laser_sweep_secs(&self) -> f32 {
+        match self.kind {
+            WeaponKind::LaserEyes => LASER_SWEEP_SECS[self.tier()],
+            _ => 0.0,
+        }
+    }
+
+    /// Laser Eyes: does this level sweep a second, mirrored beam (L4+)?
+    #[inline]
+    pub fn laser_twin(&self) -> bool {
+        self.kind == WeaponKind::LaserEyes && self.level >= LASER_TWIN_LEVEL
     }
 
     /// Laser Eyes: beam length in px, before the wall stop and Lens Cap
@@ -1057,6 +1186,98 @@ mod tests {
         w.level = 9;
         assert_eq!(w.damage(), 44.0);
         assert_eq!(w.lash_reach(), 64.0);
+    }
+
+    /// **Dps parity (batch 12)**: every weapon whose hit *shape* changed keeps
+    /// the damage one body took per cycle. The numbers in `old` are what the
+    /// pre-batch-12 build dealt a body standing in the weapon's reach, read off
+    /// that build's tables:
+    ///
+    /// | weapon | per cycle, per body |
+    /// |---|---|
+    /// | Gnaw | one dart, or two from L4 (`level x (1 + 0.25 (level-1))`) |
+    /// | Cheese Spray | one dart of the fan |
+    /// | Squeak Nova | one spoke |
+    /// | Tail Whip | one aura hit |
+    /// | Sonic Squeak | one ring hit |
+    /// | Laser Eyes | every pulse of the burst (`pulses x damage`) |
+    /// | Tail Thrash | three sweeps |
+    ///
+    /// The new build has to stay within 10 % of that, per level. What *did*
+    /// change is the **area** a cycle covers (a bite instead of a dart, a line
+    /// instead of an aura, a cone instead of a ring): that is the point of
+    /// batch 12, and the dps a body standing in the region takes is untouched.
+    #[test]
+    fn the_reworked_weapons_keep_their_damage_per_cycle() {
+        let at = |kind: WeaponKind, level: u8| {
+            let mut w = Weapon::new(kind);
+            w.level = level;
+            w
+        };
+        // What one body took per cycle before batch 12, L1 → L5.
+        let old: [(WeaponKind, [f32; 5]); 7] = [
+            (WeaponKind::Gnaw, [9.0, 11.25, 13.5, 33.75, 40.5]),
+            (WeaponKind::CheeseSpray, [7.0, 8.75, 10.5, 12.25, 14.0]),
+            (WeaponKind::SqueakNova, [6.5, 8.125, 9.75, 11.375, 13.0]),
+            (WeaponKind::TailWhip, [10.0, 12.5, 15.0, 17.5, 20.0]),
+            (WeaponKind::SonicSqueak, [9.0, 11.25, 13.5, 15.75, 18.0]),
+            (WeaponKind::LaserEyes, [18.0, 21.0, 32.0, 36.0, 50.0]),
+            (WeaponKind::TailThrash, [78.0, 97.5, 117.0, 136.5, 156.0]),
+        ];
+        for (kind, want) in old {
+            for level in 1..=5u8 {
+                let w = at(kind, level);
+                let now = match kind {
+                    // A bite lands the whole volley (one dart, two from L4) on
+                    // the one body it takes.
+                    WeaponKind::Gnaw => w.damage() * (1 + (level / 4) as u32) as f32,
+                    // One wedge, one ring pass, one crack, one cone hit, one
+                    // sweep hit (which is the whole old burst).
+                    WeaponKind::CheeseSpray
+                    | WeaponKind::SqueakNova
+                    | WeaponKind::TailWhip
+                    | WeaponKind::SonicSqueak => w.damage(),
+                    WeaponKind::LaserEyes => w.laser_hit_damage(),
+                    // The thrash still sweeps three full discs.
+                    WeaponKind::TailThrash => w.damage() * w.thrash_sweeps() as f32,
+                    _ => unreachable!(),
+                };
+                let want = want[(level - 1) as usize];
+                let ratio = now / want;
+                assert!(
+                    (ratio - 1.0).abs() <= 0.10,
+                    "{kind:?} L{level}: {now} per cycle vs {want} before batch 12 \
+                     ({}% off)",
+                    (ratio - 1.0) * 100.0
+                );
+            }
+        }
+    }
+
+    /// The laser's per-sweep hit is the whole old burst, and its arc/sweep table
+    /// is the batch-12 design row (60°..110°, 0.55..0.90 s, second beam at L4).
+    #[test]
+    fn laser_sweeps_match_the_design_row() {
+        for (level, (arc_deg, secs, twin)) in [
+            (1u8, (60.0f32, 0.55f32, false)),
+            (2, (70.0, 0.63, false)),
+            (3, (80.0, 0.70, false)),
+            (4, (95.0, 0.80, true)),
+            (5, (110.0, 0.90, true)),
+        ] {
+            let mut w = Weapon::new(WeaponKind::LaserEyes);
+            w.level = level;
+            assert!(
+                (w.laser_half_arc() * 2.0 - arc_deg.to_radians()).abs() < 1e-4,
+                "L{level} arc"
+            );
+            assert!((w.laser_sweep_secs() - secs).abs() < 1e-6, "L{level} sweep");
+            assert_eq!(w.laser_twin(), twin, "L{level} twin beam");
+            // One body takes the old burst's whole damage.
+            assert!(
+                (w.laser_hit_damage() - w.damage() * w.laser_pulses() as f32).abs() < 1e-6
+            );
+        }
     }
 
     /// Neither wave-3 weapon is a Space-triggered *active*: Super Dash must

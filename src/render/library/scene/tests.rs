@@ -1014,3 +1014,396 @@ fn library_scene_timings() {
         );
     }
 }
+
+// ---- Batch 12: the cards the owner flagged --------------------------------
+
+/// The body bounds a boss card must hold, straight from the scene's own rule.
+/// The union framing (`Script::boss_fit`) is measured from exactly this, so the
+/// test and the picture cannot drift apart.
+fn boss_bounds_now(scene: &mut LibraryScene) -> Option<(Vec2, Vec2)> {
+    let w = scene.world();
+    let mut q = w.ecs.query::<&Boss>();
+    q.iter(&w.ecs).next().map(boss_body_bounds)
+}
+
+/// Is the Redtail down where the art draws a bird (rather than only its shadow)?
+///
+/// The art owns the rule: while the hawk is overhead `Boss::hit_shapes` is
+/// empty — no weapon can touch it and the deck shows a shadow — so "a hit shape
+/// exists" is exactly "there are non-shadow pixels of the bird to draw".
+fn redtail_on_the_deck(scene: &mut LibraryScene) -> bool {
+    let w = scene.world();
+    let mut q = w.ecs.query::<&Boss>();
+    for boss in q.iter(&w.ecs) {
+        if boss.kind == BossKind::Hawk {
+            return boss.hit_shapes().iter().next().is_some();
+        }
+    }
+    false
+}
+
+/// Every boss's drawn body — the union the card is framed on — is on its plate
+/// for at least 90 % of the loop, and the Redtail is a bird, not only a shadow,
+/// for at least 70 % of its.
+///
+/// The Sweeper and SUBJECT R-01 were clipped at the top, the Night Edition at
+/// the bottom, the King Cobra was mostly off the plate and the Redtail was an
+/// empty deck; this is the property that says none of them is.
+#[test]
+fn every_boss_body_stays_on_its_plate() {
+    for kind in BossKind::all() {
+        let key = Key::Boss(kind);
+        let mut scene = LibraryScene::build(key).expect("a boss scene");
+        let mut art = PixelBuffer::new(44, 30);
+        let ticks = (scene.loop_secs() / TICK) as u32;
+        let (mut seen, mut on) = (0u32, 0u32);
+        let (mut samples, mut visible) = (0u32, 0u32);
+        for i in 0..ticks {
+            if i % 4 == 0 {
+                plate(&mut scene, &mut art);
+                if let Some((lo, hi)) = boss_bounds_now(&mut scene) {
+                    seen += 1;
+                    let corners = [
+                        Vec2::new(lo.x, lo.y),
+                        Vec2::new(hi.x, lo.y),
+                        Vec2::new(lo.x, hi.y),
+                        Vec2::new(hi.x, hi.y),
+                    ];
+                    if corners.iter().all(|c| on_plate(&scene, *c)) {
+                        on += 1;
+                    }
+                }
+                if kind == BossKind::Hawk {
+                    samples += 1;
+                    if redtail_on_the_deck(&mut scene) {
+                        visible += 1;
+                    }
+                }
+            }
+            scene.step();
+        }
+        assert!(seen > 0, "{kind:?} never put a body on its plate");
+        assert!(
+            on * 100 >= seen * 90,
+            "{kind:?}: the body was fully on the plate {on} of {seen} samples (union {:?}, view {:?})",
+            scene.boss_union,
+            scene.view
+        );
+        if kind == BossKind::Hawk {
+            assert!(samples > 0, "the Redtail never ran");
+            assert!(
+                visible * 100 >= samples * 70,
+                "the Redtail was on the deck for only {visible} of {samples} samples"
+            );
+        }
+    }
+}
+
+/// A floor's card is a real furnished, **lit** room cut from the floor's own
+/// generated map: walls, a prop, a light fixture and a wall sconce in the
+/// 12 × 8-tile window, the floor's real lighting (not the cards' flat light),
+/// no rat, and the pan really travels across the window.
+#[test]
+fn every_floor_card_shows_a_furnished_lit_room() {
+    for theme in Theme::playable() {
+        let key = Key::Floor(theme);
+        let mut scene = LibraryScene::build(key).expect("a floor scene");
+        assert!(scene.world.hide_rat, "{theme:?} drew the rat");
+        assert!(!scene.world.flat_lit, "{theme:?} is flat-lit");
+        let window = scene.script.window.expect("a crop");
+        let (walls, props, lights, sconces) = {
+            let level = &scene.world.level;
+            let walls = window
+                .cells()
+                .filter(|(x, y)| level.tiles.get(*x, *y).is_wall())
+                .count();
+            let props = level
+                .props
+                .iter()
+                .filter(|p| window.contains_world(p.rect.center()))
+                .count();
+            let lights = level
+                .objects
+                .lights
+                .iter()
+                .filter(|l| window.contains_world(l.pos))
+                .count();
+            let sconces = level
+                .objects
+                .lights
+                .iter()
+                .filter(|l| {
+                    window.contains_world(l.pos) && l.kind == LightFixtureKind::Sconce
+                })
+                .count();
+            (walls, props, lights, sconces)
+        };
+        assert!(walls >= 2, "{theme:?}: a window with {walls} wall cells");
+        assert!(props >= 1, "{theme:?}: the window has no prop");
+        assert!(lights >= 1, "{theme:?}: the window has no light fixture");
+        assert!(sconces >= 1, "{theme:?}: the window has no wall sconce");
+
+        // The picture itself: unlit for the measurement, so every pixel that
+        // differs from the bare floor is real art (a wall, a prop, a fixture or
+        // a body) and not the lighting pass.
+        let mut art = PixelBuffer::new(44, 30);
+        let (mut wall_px, mut prop_px, mut light_px, mut rat_ink) = (0usize, 0usize, 0usize, false);
+        let (mut cam_lo, mut cam_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let ticks = (scene.loop_secs() / TICK) as u32;
+        for i in 0..ticks {
+            if i % 10 == 0 {
+                scene.world.flat_lit = true;
+                plate(&mut scene, &mut art);
+                rat_ink |= has_rat_ink(&art);
+                let (cam, view) = (scene.world.cam, scene.view);
+                cam_lo = cam_lo.min(cam.x);
+                cam_hi = cam_hi.max(cam.x);
+                let scale = view.x / art.w as f32;
+                let to_plate = |p: Vec2| {
+                    (
+                        ((p.x - cam.x) / scale).round() as i32,
+                        ((p.y - cam.y) / scale).round() as i32,
+                    )
+                };
+                let floor = scene.floor_plate(art.w, art.h).pixels().to_vec();
+                let changed = |x: i32, y: i32| {
+                    if !(0..art.w as i32).contains(&x) || !(0..art.h as i32).contains(&y) {
+                        return false;
+                    }
+                    let i = y as usize * art.w + x as usize;
+                    art.pixels()[i] != floor[i]
+                };
+                let level = &scene.world.level;
+                for (cx, cy) in window.cells() {
+                    if !level.tiles.get(cx, cy).is_wall() {
+                        continue;
+                    }
+                    let (x0, y0) = to_plate(Vec2::new(
+                        cx as f32 * crate::game::collision::TILE_F,
+                        cy as f32 * crate::game::collision::TILE_F,
+                    ));
+                    let (x1, y1) = to_plate(Vec2::new(
+                        (cx + 1) as f32 * crate::game::collision::TILE_F,
+                        (cy + 1) as f32 * crate::game::collision::TILE_F,
+                    ));
+                    let mut hit = 0usize;
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            hit += usize::from(changed(x, y));
+                        }
+                    }
+                    if hit >= 8 {
+                        wall_px += 1;
+                    }
+                }
+                for p in &level.props {
+                    let (x0, y0) = to_plate(Vec2::new(p.rect.x, p.rect.y));
+                    let (x1, y1) = to_plate(Vec2::new(p.rect.right(), p.rect.bottom()));
+                    let mut hit = 0usize;
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            hit += usize::from(changed(x, y));
+                        }
+                    }
+                    prop_px = prop_px.max(hit);
+                }
+                for l in &level.objects.lights {
+                    // The fixture's own footprint is a few pixels of housing
+                    // and housing glow around its mount point.
+                    let (x, y) = to_plate(l.pos);
+                    let mut hit = 0usize;
+                    for dy in -4..=4 {
+                        for dx in -4..=4 {
+                            hit += usize::from(changed(x + dx, y + dy));
+                        }
+                    }
+                    light_px = light_px.max(hit);
+                }
+                scene.world.flat_lit = false;
+            }
+            scene.step();
+        }
+        assert!(!rat_ink, "{theme:?}: the floor card drew the rat");
+        assert!(wall_px > 0, "{theme:?}: no wall pixels on the plate");
+        assert!(prop_px >= 6, "{theme:?}: no prop on the plate ({prop_px} px)");
+        assert!(light_px > 0, "{theme:?}: no light fixture on the plate");
+        assert!(
+            cam_hi - cam_lo > 10.0,
+            "{theme:?}: the camera did not pan ({cam_lo}..{cam_hi})"
+        );
+    }
+}
+
+/// The tiny subjects are drawn at 2 × (zoom 0.5), with the practice dummy at
+/// least 14 px off the subject's rest position: at 1:1 they were specks.
+#[test]
+fn tiny_subjects_are_drawn_at_twice_the_plate_zoom() {
+    for kind in [
+        EnemyKind::BellFlea,
+        EnemyKind::WickMoth,
+        EnemyKind::Lilliputian,
+        EnemyKind::InkBlot,
+    ] {
+        assert!(
+            kind.radius() < TINY_BODY_RADIUS,
+            "{kind:?} is not a tiny body"
+        );
+        let key = Key::Enemy(kind);
+        let mut scene = LibraryScene::build(key).expect("a scene");
+        assert_eq!(scene.script.zoom, TINY_ZOOM, "{kind:?} is not at 2x");
+        let rest = scene.subject_pos().expect("a body");
+        let dummy = scene.world.player.pos;
+        assert!(
+            rest.dist(dummy) >= 14.0,
+            "{kind:?}: the dummy is {} px from the body",
+            rest.dist(dummy)
+        );
+        let mut art = PixelBuffer::new(44, 30);
+        plate(&mut scene, &mut art);
+        assert!(
+            (scene.view.x - 44.0 * TINY_ZOOM).abs() < 0.01,
+            "{kind:?}: the plate shows {} px, not a 2x view",
+            scene.view.x
+        );
+    }
+}
+
+/// Every named fight opens on its **idle** frame with the whole body on the
+/// plate: the loop starts at the body's mark, not on a walk-in from off frame.
+#[test]
+fn every_miniboss_first_frame_holds_its_body() {
+    for kind in MinibossKind::all() {
+        let key = Key::Miniboss(kind);
+        let mut scene = LibraryScene::build(key).expect("a miniboss scene");
+        let subject = scene.subject().expect("a body");
+        assert_eq!(
+            scene.world.ecs.get::<Miniboss>(subject).map(|mb| mb.state),
+            Some(MinibossState::Approach),
+            "{kind:?} does not open on its idle approach"
+        );
+        let mut art = PixelBuffer::new(44, 30);
+        plate(&mut scene, &mut art);
+        let (lo, hi) = scene.fit_bounds().expect("a fitted body");
+        for corner in [
+            Vec2::new(lo.x, lo.y),
+            Vec2::new(hi.x, lo.y),
+            Vec2::new(lo.x, hi.y),
+            Vec2::new(hi.x, hi.y),
+        ] {
+            assert!(
+                on_plate(&scene, corner),
+                "{kind:?}: the first frame cuts its body (corner {corner:?}, view {:?}, cam {:?})",
+                scene.view,
+                scene.world.cam
+            );
+        }
+    }
+}
+
+/// The Tail Thrash's and the Flywheel's targets survive a whole loop (a
+/// max-rank sweep killed a 4,000 hp body on the first pass) and the plate shows
+/// the whole sweep radius.
+#[test]
+fn the_thrash_and_flywheel_targets_survive_the_loop() {
+    for key in [
+        Key::Weapon(WeaponKind::TailThrash),
+        Key::Evolution(WeaponKind::TailThrash),
+    ] {
+        let mut scene = LibraryScene::build(key).expect("an arsenal scene");
+        let mut art = PixelBuffer::new(44, 30);
+        plate(&mut scene, &mut art);
+        let reach = scene.world.player.loadout.weapons[0].active_reach();
+        assert!(
+            scene.view.x >= 2.0 * reach && scene.view.y >= 2.0 * reach,
+            "{key:?}: a {reach} px sweep in a {:?} view",
+            scene.view
+        );
+        let mut fewest = usize::MAX;
+        one_loop(&mut scene, |s| {
+            let w = s.world();
+            let mut q = w.ecs.query::<&Enemy>();
+            let standing = q.iter(&w.ecs).filter(|b| b.speed_scale == 0.0).count();
+            fewest = fewest.min(standing);
+        });
+        assert!(
+            fewest >= 3,
+            "{key:?}: only {fewest} targets survived its own sweep"
+        );
+    }
+}
+
+/// The Super Dash and the Ripcord lay their targets along the dash lane and
+/// keep the whole lane — the rat, the charge and every target — in frame.
+#[test]
+fn the_dash_lane_stays_in_frame() {
+    for key in [
+        Key::Weapon(WeaponKind::SuperDash),
+        Key::Evolution(WeaponKind::SuperDash),
+    ] {
+        let mut scene = LibraryScene::build(key).expect("an arsenal scene");
+        let mut art = PixelBuffer::new(44, 30);
+        let mut hit = false;
+        one_loop(&mut scene, |s| {
+            plate(s, &mut art);
+            for home in dash_lane_homes(s.world.level.start) {
+                assert!(on_plate(s, home), "{key:?}: a lane target left the plate");
+            }
+            assert!(
+                on_plate(s, s.world.player.pos),
+                "{key:?}: the rat left its own dash lane"
+            );
+            hit |= a_body_is_hurt(s);
+        });
+        assert!(hit, "{key:?} never hit its lane");
+    }
+}
+
+/// The chest card shows the rat walking up, the chest opening and a reward
+/// burst — and the real collection never opens a plate (the card drops it).
+#[test]
+fn the_chest_opens_and_pays_out() {
+    let key = Key::Object(ObjectKind::Chest);
+    let mut scene = LibraryScene::build(key).expect("a chest scene");
+    let mut art = PixelBuffer::new(44, 30);
+    let chest = scene.script.chest.expect("a chest point");
+    let ticks = (scene.loop_secs() / TICK) as u32;
+    let mut collected_at = None;
+    let mut burst = false;
+    for i in 0..ticks {
+        if i % 3 == 0 {
+            plate(&mut scene, &mut art);
+            // Only after the lid opened: the closed chest's own brass and seam
+            // use these colours, so the claim is about the burst, not the box.
+            if scene.opened.is_some() {
+                burst |= has_colour(&art, CHEST_BRASS) && has_colour(&art, CHEST_GLOW);
+            }
+        }
+        scene.step();
+        assert_eq!(scene.world.pending_chests, 0, "a chest plate was left open");
+        if collected_at.is_none() && scene.opened.is_some() {
+            collected_at = Some(scene.clock());
+        }
+    }
+    let at = collected_at.expect("the chest was never collected");
+    assert!(at > 0.4, "the chest was collected before the rat walked up");
+    assert!(burst, "the chest never burst open");
+    assert!(chest.dist(scene.world.level.start) > 10.0);
+}
+
+/// A shooter's pellet leaves a self-lit trail (a 1 px dot is not a shot on a
+/// card), and the trail is the card's own: no bullet is changed by it.
+#[test]
+fn shooter_pellets_leave_a_trail() {
+    for theme in Theme::playable() {
+        let key = Key::Enemy(roster::kind(theme, Slot::R));
+        let mut scene = LibraryScene::build(key).expect("a shooter scene");
+        assert!(scene.script.trail, "{key:?} draws no pellet trail");
+        let mut art = PixelBuffer::new(44, 30);
+        let mut seen = false;
+        one_loop(&mut scene, |s| {
+            plate(s, &mut art);
+            seen |= PELLET_TRAIL.iter().any(|c| has_colour(&art, *c));
+        });
+        assert!(seen, "{key:?} never drew a pellet trail");
+    }
+}

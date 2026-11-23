@@ -751,11 +751,7 @@ mod tests {
 
     /// Carve a sealed room into the boss arena; returns the interior rect.
     fn carve_room(w: &mut World, cells: (i32, i32)) -> TileRect {
-        let arena = w
-            .level
-            .boss_room()
-            .expect("the Printworks has a boss room")
-            .rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let x = arena.x + 2;
         let y = arena.y + 2;
         w.level.tiles.fill_cells(
@@ -1158,7 +1154,7 @@ mod tests {
     fn a_rat_outside_the_arena_is_hunted_on_reachable_floor() {
         let mut w = printworks(61);
         spawn_press(&mut w);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let radius = BossKind::NightEdition.body_radius();
         let boss = boss_of(&mut w).expect("boss alive");
         // Park the rat far outside the arena, on open floor.
@@ -1210,7 +1206,7 @@ mod tests {
         let mut w = printworks(71);
         spawn_press(&mut w);
         // A one-cell-wide slot: no 36 x 30 px page fits in it at all.
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let x = arena.x + 3;
         let y = arena.y + 3;
         w.level.tiles.fill_cells(
@@ -1256,7 +1252,7 @@ mod tests {
     fn a_carriage_is_suppressed_when_the_rule_cannot_run() {
         let mut w = printworks(72);
         spawn_press(&mut w);
-        let arena = w.level.boss_room().expect("boss room").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         let x = arena.x + 3;
         let y = arena.y + 3;
         // A three-cell-wide pocket: 48 px, less than the rule's 54 px run.

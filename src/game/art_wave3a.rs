@@ -13,18 +13,19 @@ use crate::game::weapon::RAIN_FALL;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
 
-/// Bright white-lime core of a drop.
-const CORE: Rgb = (248, 255, 206);
-/// Vivid neon-lime body of the descending strokes.
-const STROKE: Rgb = (162, 255, 58);
-/// Deep caustic emerald shadow / trailing mist.
-const EMERALD: Rgb = (54, 168, 36);
-/// Plum infection pip highlight, body, shade, and spent socket.
-const PIP_HI: Rgb = (255, 224, 252);
-const PIP: Rgb = (232, 78, 204);
-const PIP_SHADE: Rgb = (154, 34, 136);
-const PIP_DIM: Rgb = (82, 38, 84);
-const PIP_BG: Rgb = (20, 8, 24);
+/// Bright aqua-white core of an Acid Rain drop (cool blue-green, distinct from
+/// Acid Spit's yellow-lime pools).
+const CORE: Rgb = (224, 255, 252);
+/// Vivid blue-green / teal body of the vertical rain streaks.
+const STROKE: Rgb = (48, 228, 204);
+/// Deep sea-teal shadow / trailing mist.
+const EMERALD: Rgb = (20, 128, 134);
+/// Sickly magenta infection mark highlight, body, shade, and spent socket.
+const PIP_HI: Rgb = (255, 214, 252);
+const PIP: Rgb = (248, 56, 212);
+const PIP_SHADE: Rgb = (164, 28, 146);
+const PIP_DIM: Rgb = (86, 34, 88);
+const PIP_BG: Rgb = (22, 6, 26);
 
 /// Subtle floor darkening helper for readable ground reticles on bright tiles.
 #[inline]
@@ -77,30 +78,29 @@ impl RingDedup {
 
 /// Draw one locked Acid Rain drop at screen position `s`.
 ///
-/// Three reads, in the design's order:
+/// Three reads, unmistakably distinct from Acid Spit's lobbed green pools:
 ///
-/// 1. **The mark** — a dashed caustic lime target ring with cardinal reticle
-///    ticks and a shrinking convergence ring so the landing spot reads clearly
-///    on dark Sewer bricks and bright Lab/Kitchen tiles alike.
-/// 2. **The fall** — in the last [`RAIN_FALL`] seconds, three slanted, tapered
-///    lime rain strokes plunge from above into the mark, with hot white-lime
-///    teardrop heads.
-/// 3. **The hit** — the last frames flare the ring and pop a splash crown.
+/// 1. **The shadow dot** — a small dark ground shadow dot with a tiny blue-green
+///    pinpoint glint (never a big green pool ring!). Evolved **Downspout** draws
+///    a stepped teal-emerald stair tread instead.
+/// 2. **The vertical fall** — thin blue-green streaks plunging straight down
+///    from above onto the shadow dot.
+/// 3. **The ripple** — on impact, a small crisp concentric blue-green ripple
+///    ring (never a big pool) + tiny upward droplets.
 pub fn draw_acid_drop(pb: &mut PixelBuffer, d: &AcidDrop, s: (i32, i32)) {
     let ring_r = (d.radius.round() as i32).clamp(3, 12);
-    // `1 - delay/RAIN_FALL`: 0 while only the mark shows, 1 at impact.
+    // `1 - delay/RAIN_FALL`: 0 while only the shadow dot shows, 1 at impact.
     let fall = ((RAIN_FALL - d.delay) / RAIN_FALL).clamp(0.0, 1.0);
     let dim = 0.58 + 0.42 * fall;
     let phase = d.index as i32;
 
-    // 1. Mark: Downspout (`d.evolved`) uses a crisp stepped green stair-tread
-    //    target frame instead of a generic round ring so the volley reads as a
-    //    stepped staircase before, during, and after impact.
+    // 1. Mark: Downspout (`d.evolved`) uses a crisp stepped teal-emerald stair
+    //    tread; base Acid Rain uses a compact ground shadow dot + tiny aqua center.
     if d.evolved {
-        let hw = ring_r.clamp(3, 8);
-        let dark_riser: Rgb = (22, 68, 22);
-        let tread_mid: Rgb = (132, 242, 54);
-        let tread_hi: Rgb = (224, 255, 134);
+        let hw = ring_r.clamp(3, 7);
+        let dark_riser: Rgb = (12, 48, 52);
+        let tread_mid: Rgb = (44, 212, 188);
+        let tread_hi: Rgb = (196, 255, 246);
         // Recessed riser shadow directly underneath the stair tread.
         for dx in -hw..=hw {
             blend_px(pb, s.0 + dx, s.1 + 1, dark_riser, 0.72 * dim);
@@ -125,114 +125,82 @@ pub fn draw_acid_drop(pb: &mut PixelBuffer, d: &AcidDrop, s: (i32, i32)) {
             );
             blend_px(pb, s.0 + dx, s.1 - 2, dark_riser, 0.55 * dim);
         }
-        // Crisp corner stair-stringer ticks.
         for &(tx, ty) in &[(-hw - 1, -1), (hw + 1, -1), (-hw - 1, 1), (hw + 1, 1)] {
             pb.plot_add(s.0 + tx, s.1 + ty, palette::scale(CORE, 0.45 + 0.45 * fall));
         }
     } else {
-        // Dashed target ring with subtle dark floor etch so it reads on bright floors.
-        let steps = (ring_r * 8).max(16);
-        // The ring has more steps than pixels, so neighbouring steps round to
-        // the same pixel; each pixel is shaded and lit once (see `RingDedup`).
-        let mut seen = RingDedup::new();
-        for i in 0..steps {
-            // 2-on, 1-off dashed cadence shifted by volley index so stacked drops separate.
-            if (i + phase * 2).rem_euclid(3) == 2 {
-                continue;
+        // Compact elliptical dark ground shadow dot directly under the falling drops
+        // (deepens slightly as the drop nears impact). Never a big pool!
+        let sh = 0.34 + 0.28 * fall;
+        for dx in -2..=2i32 {
+            shade_px(pb, s.0 + dx, s.1, sh);
+            if dx.abs() <= 1 {
+                shade_px(pb, s.0 + dx, s.1 - 1, sh * 0.72);
+                shade_px(pb, s.0 + dx, s.1 + 1, sh * 0.72);
             }
-            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-            let dx = (a.cos() * ring_r as f32).round() as i32;
-            let dy = (a.sin() * ring_r as f32).round() as i32;
-            if seen.repeat((dx, dy)) {
-                continue;
-            }
-            shade_px(pb, s.0 + dx, s.1 + dy, 0.28);
-            pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(STROKE, 0.55 + 0.35 * dim));
         }
-        // Four inward cardinal reticle ticks so the mark reads as a locked strike zone.
-        let tick_col = palette::scale(CORE, 0.45 + 0.40 * fall);
-        for &(tx, ty) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            pb.plot_add(s.0 + tx * (ring_r - 1), s.1 + ty * (ring_r - 1), tick_col);
-            if ring_r >= 6 {
-                pb.plot_add(
-                    s.0 + tx * (ring_r - 2),
-                    s.1 + ty * (ring_r - 2),
-                    palette::scale(STROKE, 0.55),
-                );
-            }
+        // Subtle blue-green pinpoint center so the landing spot is readable even
+        // on dark floors during the wind-up.
+        pb.plot_add(s.0, s.1, palette::scale(STROKE, 0.45 + 0.45 * fall));
+        if fall > 0.25 {
+            pb.plot_add(s.0 - 1, s.1, palette::scale(EMERALD, 0.50 * fall));
+            pb.plot_add(s.0 + 1, s.1, palette::scale(EMERALD, 0.50 * fall));
         }
     }
 
-    // Converging inner focus ring once the fall begins.
+    // 2. Thin vertical blue-green streaks falling straight down from above.
     if fall > 0.0 {
-        let r_in = ((1.0 - fall) * (ring_r as f32 * 0.72)).round() as i32;
-        if r_in >= 2 {
-            let in_steps = (r_in * 6).max(8);
-            let c_in = palette::scale(CORE, 0.35 + 0.45 * fall);
-            let mut seen = RingDedup::new();
-            for i in (0..in_steps).step_by(2) {
-                let a = i as f32 / in_steps as f32 * std::f32::consts::TAU + fall * 1.4;
-                let rx = s.0 + (a.cos() * r_in as f32).round() as i32;
-                let ry = s.1 + (a.sin() * r_in as f32).round() as i32;
-                if seen.repeat((rx, ry)) {
-                    continue;
-                }
-                pb.plot_add(rx, ry, c_in);
-            }
-        } else {
-            // Final bullseye pinpoint.
-            pb.plot(s.0, s.1, CORE);
-            for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(STROKE, 0.85));
-            }
-        }
-    }
-
-    // 2. Three descending slanted lime strokes plunging toward the mark.
-    if fall > 0.0 {
-        let drop_y = s.1 - (2.0 + (1.0 - fall) * 16.0).round() as i32;
-        let bright = (0.45 + 0.55 * fall).clamp(0.15, 1.0);
+        let drop_y = s.1 - (1.0 + (1.0 - fall) * 20.0).round() as i32;
+        let bright = (0.55 + 0.45 * fall).clamp(0.25, 1.0);
         for k in 0..3i32 {
-            // Spread across the target with volley-staggered heights.
             let x = s.0 + (k - 1) * 3;
-            let stagger = (((k + phase) % 3) - 1) * 2;
-            let y = drop_y + stagger;
+            let stagger = (((k + phase) % 3) - 1) * 3;
+            let y = (drop_y + stagger).min(s.1);
             let is_lead = k == 1;
-            let len = if is_lead { 6 } else { 5 };
-            // Hot teardrop head at the leading bottom tip.
+            let len = if is_lead { 8 } else { 5 };
+            // Hot aqua-white needle head at the leading bottom tip.
             pb.plot(x, y, palette::scale(if is_lead { CORE } else { STROKE }, bright));
-            if is_lead {
-                pb.plot_add(x, y + 1, palette::scale(CORE, bright * 0.75));
-                pb.plot_add(x - 1, y, palette::scale(STROKE, bright * 0.45));
-                pb.plot_add(x + 1, y, palette::scale(STROKE, bright * 0.45));
+            if is_lead && y < s.1 {
+                pb.plot_add(x, y + 1, palette::scale(CORE, bright * 0.65));
             }
-            // Slanted tapered caustic streak trailing up-left (matching top-left rain slant).
+            // Strictly vertical (dx = 0) 1px blue-green rain streak above the head.
             for seg in 1..len {
                 let t = seg as f32 / len as f32;
-                let sx = x - seg / 3;
                 let sy = y - seg;
                 let col = if seg == 1 {
-                    palette::mix(CORE, STROKE, 0.5)
+                    palette::mix(CORE, STROKE, 0.45)
                 } else {
                     palette::mix(STROKE, EMERALD, t)
                 };
-                pb.plot_add(sx, sy, palette::scale(col, bright * (1.0 - t * 0.65)));
+                pb.plot_add(x, sy, palette::scale(col, bright * (1.0 - t * 0.62)));
             }
         }
     }
 
-    // 3. Impact frames: caustic splash crown & white-lime ring flare.
-    if fall >= 0.86 {
-        let k = ((fall - 0.86) / 0.14).clamp(0.0, 1.0);
-        pb.ring(s.0, s.1, ring_r, palette::scale(CORE, 0.55 + 0.45 * k));
-        // Little upward splash crown droplets popping off the center.
-        for &(dx, dy) in &[(-2, -2), (0, -3), (2, -2), (-3, -1), (3, -1)] {
-            pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(CORE, 0.65 + 0.35 * k));
+    // 3. Impact frames: small crisp blue-green ripple ring (never a big pool).
+    if fall >= 0.72 {
+        let k = ((fall - 0.72) / 0.28).clamp(0.0, 1.0);
+        let ripple_r = (1.5 + k * (ring_r as f32 * 0.55).clamp(2.5, 4.5)).round() as i32;
+        let steps = (ripple_r * 8).max(12);
+        let mut seen = RingDedup::new();
+        let ring_col = palette::scale(palette::mix(CORE, STROKE, k * 0.65), 1.0 - k * 0.35);
+        for i in 0..steps {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            let rx = s.0 + (a.cos() * ripple_r as f32).round() as i32;
+            let ry = s.1 + (a.sin() * (ripple_r as f32 * 0.72)).round() as i32;
+            if seen.repeat((rx, ry)) {
+                continue;
+            }
+            pb.plot_add(rx, ry, ring_col);
         }
+        // Two tiny upward rain-splash flecks right off the center.
+        let lift = 1 + (k * 2.0).round() as i32;
+        pb.plot_add(s.0 - 1, s.1 - lift, palette::scale(CORE, 0.85 * (1.0 - k * 0.4)));
+        pb.plot_add(s.0 + 1, s.1 - lift, palette::scale(STROKE, 0.80 * (1.0 - k * 0.4)));
     }
 }
 
-/// Draw the three Hantavirus pips above a body at screen position `s`.
+/// Draw the three sickly-magenta Hantavirus pips + host perimeter mark at `s`.
 ///
 /// `ticks_left` pips are lit and the rest are empty sockets, so the countdown
 /// is readable at a glance: 3 at the tag, then one gone per tick, and the pips
@@ -258,25 +226,30 @@ pub fn draw_infection_pips(pb: &mut PixelBuffer, s: (i32, i32), radius: f32, tic
             pb.plot(x, y + 1, palette::scale(PIP_DIM, 0.72));
             pb.plot(x + 1, y + 1, palette::scale(PIP_DIM, 0.72));
         } else {
-            // Lit bio-bead: vivid 2x2 plum pearl with hot white-pink glint + aura.
+            // Lit bio-bead: vivid 2x2 sickly-magenta pearl with pale highlight.
             pb.plot(x, y, PIP_HI);
-            pb.plot(x + 1, y, (246, 94, 224));
+            pb.plot(x + 1, y, PIP);
             pb.plot(x, y + 1, PIP);
             pb.plot(x + 1, y + 1, PIP_SHADE);
-            pb.plot_add(x, y - 1, palette::scale((246, 94, 224), 0.65));
-            pb.plot_add(x + 1, y - 1, palette::scale(PIP, 0.45));
+            pb.plot_add(x, y - 1, palette::scale(PIP, 0.65));
         }
     }
 
-    // Four plum spore-ticks hugging the host's diagonal perimeter so the body
-    // itself reads as infected even if a floating digit overlaps the pip bar.
+    // Four crisp sickly-magenta corner bracket ticks hugging the host so infected
+    // bodies read immediately at 1x and 2x zoom-out even under damage numbers.
     let hr = (r + 2).max(3);
-    for &(dx, dy) in &[(-hr, -hr + 1), (hr, -hr + 1), (-hr, hr - 1), (hr, hr - 1)] {
-        pb.plot(s.0 + dx, s.1 + dy, PIP_BG);
-        pb.plot_add(s.0 + dx, s.1 + dy, (246, 94, 224));
+    for &(sx, sy) in &[(-1i32, -1i32), (1, -1), (-1, 1), (1, 1)] {
+        let cx = s.0 + sx * hr;
+        let cy = s.1 + sy * (hr - 1).max(2);
+        pb.plot(cx + sx, cy, PIP_BG);
+        pb.plot(cx, cy + sy, PIP_BG);
+        pb.plot(cx, cy, PIP_HI);
+        pb.plot(cx - sx, cy, PIP);
+        pb.plot(cx, cy - sy, PIP);
     }
-    // Thin vertical plum tether pixel linking the bead bar down to the host.
-    pb.plot_add(s.0, y + 3, palette::scale(PIP, 0.7));
+    // Thin vertical sickly-magenta tether linking the bead bar down to the host.
+    pb.plot(s.0, y + 3, PIP);
+    pb.plot_add(s.0, y + 4, palette::scale(PIP_SHADE, 0.8));
 }
 
 // ============================================================================
@@ -288,8 +261,9 @@ pub fn draw_infection_pips(pb: &mut PixelBuffer, s: (i32, i32), radius: f32, tic
 // crisply in motion and in still frames regardless of particle load.
 
 use crate::game::ecs::components::{
-    CheeseString, CorrosiveChannel, FairyRing, MilkPhase, MilkTooth,
+    CheeseString, CorrosiveChannel, FairyRing, MilkPhase, MilkTooth, Pool,
 };
+use crate::game::ecs::resources::ActiveFx;
 use crate::game::ecs::systems::evolutions::{CHANNEL_ADVANCE, CHANNEL_SETTLE, MILK_LODGE_SECS};
 use crate::math::Vec2;
 
@@ -451,8 +425,8 @@ pub fn draw_cheese_string(pb: &mut PixelBuffer, line: &CheeseString, cam: Vec2, 
     }
 }
 
-/// **Echo Chamber** (Squeak Nova + Frenzy): outbound violet dots become crisp
-/// hollow white inward ticks after reflecting off a wall.
+/// **Echo Chamber** (Squeak Nova + Frenzy): outbound pale-cyan wavefront arcs
+/// become crisp hollow white inward ticks after reflecting off a wall.
 pub fn draw_echo_spoke(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2, reflected: bool) {
     let dir = if vel.len_sq() > 1.0 {
         vel.normalized()
@@ -461,13 +435,17 @@ pub fn draw_echo_spoke(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2, reflected
     };
     let perp = dir.perp();
     if !reflected {
-        // Outbound: vivid violet orb with a bright lavender core & short comet pixel.
-        let core: Rgb = (246, 224, 255);
-        let violet: Rgb = (196, 108, 255);
-        let tail: Rgb = (132, 54, 214);
+        // Outbound: thin curved pale-cyan wavefront arc matching Squeak Nova's rings.
+        let core: Rgb = (238, 255, 255);
+        let cyan: Rgb = (104, 236, 255);
+        let tail: Rgb = (56, 174, 224);
         pb.plot(s.0, s.1, core);
-        for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(violet, 0.72));
+        for side in [-1.0f32, 1.0] {
+            let w1 = (
+                s.0 + (perp.x * side * 1.4 - dir.x * 0.4).round() as i32,
+                s.1 + (perp.y * side * 1.4 - dir.y * 0.4).round() as i32,
+            );
+            pb.plot_add(w1.0, w1.1, cyan);
         }
         let back = (
             s.0 - (dir.x * 2.0).round() as i32,
@@ -477,8 +455,8 @@ pub fn draw_echo_spoke(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2, reflected
     } else {
         // Reflected inward: crisp hollow white chevron tick (`>`) racing back!
         let white: Rgb = (255, 254, 255);
-        let ice: Rgb = (214, 198, 255);
-        let dark: Rgb = (24, 16, 38);
+        let ice: Rgb = (168, 238, 255);
+        let dark: Rgb = (16, 30, 42);
         let tip = (
             s.0 + (dir.x * 2.0).round() as i32,
             s.1 + (dir.y * 2.0).round() as i32,
@@ -497,7 +475,7 @@ pub fn draw_echo_spoke(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2, reflected
             );
             pb.plot(w1.0, w1.1, white);
             pb.plot(w2.0, w2.1, white);
-            // Soft lavender echo wake behind each wing.
+            // Soft pale-cyan echo wake behind each wing.
             let wake = (
                 w2.0 - (dir.x * 1.5).round() as i32,
                 w2.1 - (dir.y * 1.5).round() as i32,
@@ -598,12 +576,12 @@ pub fn draw_corrosive_channel(
         if fade <= 0.01 {
             return;
         }
-        let stringer: Rgb = (10, 32, 12);
-        let riser_dark: Rgb = (14, 46, 16);
-        let riser_mid: Rgb = (46, 134, 34);
-        let tread_mid: Rgb = (148, 246, 62);
-        let tread_hi: Rgb = (232, 255, 138);
-        let foam: Rgb = (250, 255, 218);
+        let stringer: Rgb = (8, 30, 34);
+        let riser_dark: Rgb = (12, 46, 52);
+        let riser_mid: Rgb = (28, 134, 134);
+        let tread_mid: Rgb = (48, 224, 198);
+        let tread_hi: Rgb = (182, 255, 242);
+        let foam: Rgb = (232, 255, 254);
 
         let steps_px = ch.length.ceil() as i32;
         let step_stride = 6i32;
@@ -994,6 +972,539 @@ pub fn draw_super_dash_comb(
     }
 }
 
+// ============================================================================
+// Batch 12: Distinct per-weapon shapes (render-only, zero rng, zero alloc)
+// ============================================================================
+
+/// **Cheese Spray**: a fat tumbling warm yellow-orange triangular wedge that
+/// slows down and drops, trailing a single crumb behind it.
+pub fn draw_cheese_wedge(
+    pb: &mut PixelBuffer,
+    s: (i32, i32),
+    vel: Vec2,
+    spin: f32,
+    life: f32,
+) {
+    let hi: Rgb = (255, 250, 188);
+    let body: Rgb = (255, 210, 48);
+    let rind: Rgb = (238, 128, 22);
+    let hole: Rgb = (196, 108, 18);
+    let rim: Rgb = (52, 26, 10);
+
+    // Subtle settle drop right before expiring.
+    let drop_y = if life < 0.18 { 1 } else { 0 };
+    let cx = s.0;
+    let cy = s.1 + drop_y;
+
+    // Three vertices of a chunky isosceles cheese wedge rotated by `spin`.
+    let (sa, ca) = spin.sin_cos();
+    let rot = |x: f32, y: f32| -> (f32, f32) { (x * ca - y * sa, x * sa + y * ca) };
+    let v0 = rot(2.8, 0.0); // pointed wedge tip
+    let v1 = rot(-2.0, -2.2); // upper rind corner
+    let v2 = rot(-2.0, 2.2); // lower rind corner
+
+    let edge = |a: (f32, f32), b: (f32, f32), px: f32, py: f32| -> f32 {
+        (b.0 - a.0) * (py - a.1) - (b.1 - a.1) * (px - a.0)
+    };
+    let area = edge(v0, v1, v2.0, v2.1);
+    let sign = if area >= 0.0 { 1.0 } else { -1.0 };
+
+    // Ground drop shadow pixel directly beneath the wedge.
+    shade_px(pb, cx + 1, cy + 3, 0.38);
+    shade_px(pb, cx, cy + 3, 0.30);
+
+    for dy in -3..=3i32 {
+        for dx in -3..=3i32 {
+            let px = dx as f32;
+            let py = dy as f32;
+            let e0 = edge(v0, v1, px, py) * sign;
+            let e1 = edge(v1, v2, px, py) * sign;
+            let e2 = edge(v2, v0, px, py) * sign;
+            if e0 >= -0.35 && e1 >= -0.35 && e2 >= -0.35 {
+                // Classify pixel: rind along the base edge (v1..v2), butter-white
+                // highlight near the pointed tip (v0), warm cheddar inside.
+                let tip_d2 = (px - v0.0).powi(2) + (py - v0.1).powi(2);
+                let col = if e1 < 1.15 {
+                    rind
+                } else if tip_d2 <= 2.4 {
+                    hi
+                } else if dx == 0 && dy == 0 {
+                    hole
+                } else {
+                    body
+                };
+                pb.plot(cx + dx, cy + dy, col);
+            } else if e0 >= -1.6 && e1 >= -1.6 && e2 >= -1.6 && dy >= 0 {
+                // Crisp dark lower-rim contrast so yellow reads on bright Kitchen floors.
+                blend_px(pb, cx + dx, cy + dy, rim, 0.58);
+            }
+        }
+    }
+
+    // Trailing cheddar crumb behind the travel vector.
+    if vel.len_sq() > 16.0 {
+        let dir = vel.normalized();
+        let cr = (
+            cx - (dir.x * 3.4).round() as i32,
+            cy - (dir.y * 3.4).round() as i32,
+        );
+        pb.plot_add(cr.0, cr.1, palette::scale(rind, 0.85));
+    }
+}
+
+/// **Fondue Fork** outer tine in flight: a gleaming two-pronged golden fork tip
+/// racing out to plant one end of the sagging cheese string.
+pub fn draw_fondue_tine(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2) {
+    let dir = if vel.len_sq() > 1.0 {
+        vel.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let perp = dir.perp();
+    let hot: Rgb = (255, 252, 206);
+    let gold: Rgb = (255, 204, 54);
+    let ochre: Rgb = (176, 108, 18);
+
+    // Shaft back, twin prongs forward.
+    let shaft = (
+        s.0 - (dir.x * 2.0).round() as i32,
+        s.1 - (dir.y * 2.0).round() as i32,
+    );
+    pb.plot(shaft.0, shaft.1, ochre);
+    pb.plot(s.0, s.1, gold);
+    for side in [-1.0f32, 1.0] {
+        let p1 = (
+            s.0 + (dir.x * 1.0 + perp.x * side * 1.1).round() as i32,
+            s.1 + (dir.y * 1.0 + perp.y * side * 1.1).round() as i32,
+        );
+        let p2 = (
+            s.0 + (dir.x * 2.2 + perp.x * side * 1.1).round() as i32,
+            s.1 + (dir.y * 2.2 + perp.y * side * 1.1).round() as i32,
+        );
+        pb.plot(p1.0, p1.1, gold);
+        pb.plot(p2.0, p2.1, hot);
+    }
+}
+
+/// **Squeak Nova**: two or three thin concentric pale-cyan rings racing outward
+/// from `fx.nova_pos` and fading; evolved **Echo Chamber** rebounds inward as
+/// a crisp dashed hollow-white ring.
+pub fn draw_squeak_nova_ring(pb: &mut PixelBuffer, fx: &ActiveFx, cam: Vec2) {
+    if !fx.nova_active() || fx.nova_max_r <= 1.0 {
+        return;
+    }
+    let center = w2s(fx.nova_pos, cam);
+    let r = fx.nova_r.max(0.5);
+    let frac = (r / fx.nova_max_r).clamp(0.0, 1.0);
+    let inbound = fx.nova_echo && fx.nova_r < fx.nova_prev_r;
+
+    // Fade gently as the wave reaches its peak, staying legible at full reach.
+    let base_fade = if inbound {
+        (0.45 + 0.55 * frac).clamp(0.25, 0.92)
+    } else {
+        (1.0 - frac * 0.62).clamp(0.28, 1.0)
+    };
+
+    let lead_core: Rgb = (242, 255, 255);
+    let lead_cyan: Rgb = (112, 240, 255);
+    let mid_cyan: Rgb = (78, 212, 248);
+    let tail_cyan: Rgb = (52, 168, 220);
+    let dark_in: Rgb = (16, 30, 42);
+
+    // Three thin concentric rings (lead + two trailing harmonics).
+    let rings: [(f32, Rgb, f32, bool); 3] = if inbound {
+        // Echo Chamber inbound contraction: crisp dashed white rebound lead +
+        // dimmer pale-cyan trailing rings.
+        [
+            (r, (255, 255, 255), base_fade, true),
+            ((r * 1.12).min(fx.nova_max_r), lead_cyan, base_fade * 0.52, false),
+            ((r * 0.84).max(2.0), mid_cyan, base_fade * 0.36, false),
+        ]
+    } else {
+        [
+            (r, palette::mix(lead_core, lead_cyan, frac * 0.65), base_fade, false),
+            (r * 0.78, mid_cyan, base_fade * 0.65, false),
+            (r * 0.56, tail_cyan, base_fade * 0.38, false),
+        ]
+    };
+
+    for (rad, col, weight, dashed) in rings {
+        if rad < 2.0 || weight <= 0.04 {
+            continue;
+        }
+        let steps = (rad * 6.5).round().clamp(16.0, 320.0) as i32;
+        let mut seen = RingDedup::new();
+        for i in 0..steps {
+            if dashed && i % 3 == 2 {
+                continue;
+            }
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            let px = center.0 + (a.cos() * rad).round() as i32;
+            let py = center.1 + (a.sin() * rad).round() as i32;
+            if seen.repeat((px, py)) {
+                continue;
+            }
+            if dashed {
+                // Dark inner contrast pixel makes the inbound Echo ring read hollow white.
+                let ix = center.0 + (a.cos() * (rad - 1.2)).round() as i32;
+                let iy = center.1 + (a.sin() * (rad - 1.2)).round() as i32;
+                if (ix, iy) != (px, py) {
+                    blend_px(pb, ix, iy, dark_in, 0.55 * weight);
+                }
+                blend_px(pb, px, py, col, (0.95 * weight).clamp(0.0, 1.0));
+            } else {
+                pb.plot_add(px, py, palette::scale(col, weight));
+            }
+        }
+    }
+}
+
+/// **Sonic Squeak** (ACTIVE): a directional forward wedge of nested pure-white
+/// chevrons (`>`) pushing outward along `fx.squeak_facing` — NEVER a ring!
+pub fn draw_sonic_cone(pb: &mut PixelBuffer, fx: &ActiveFx, cam: Vec2) {
+    if !fx.squeak_active() || fx.squeak_max_r <= 2.0 {
+        return;
+    }
+    let dir = if fx.squeak_facing.len_sq() > 1e-4 {
+        fx.squeak_facing.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let half = if fx.squeak_half > 0.05 {
+        fx.squeak_half
+    } else {
+        0.66
+    };
+    let prog = (fx.squeak_r / fx.squeak_max_r).clamp(0.0, 1.0);
+    let fade = (1.0 - prog * 0.55).clamp(0.25, 1.0);
+
+    let white: Rgb = (255, 255, 255);
+    let ice: Rgb = (204, 238, 255);
+    let rim_dark: Rgb = (18, 26, 38);
+
+    let edge_l = dir.rotate(-half);
+    let edge_r = dir.rotate(half);
+
+    // Subtle cone-boundary dashed guide ticks so the forward wedge angle reads instantly.
+    let rail_r = fx.squeak_r.max(8.0);
+    let rail_steps = ((rail_r / 5.0) as i32).clamp(2, 16);
+    for i in 1..=rail_steps {
+        let d = i as f32 * (rail_r / rail_steps as f32);
+        let a = (0.35 * fade * (1.0 - i as f32 / (rail_steps as f32 + 2.0))).max(0.08);
+        for edge_dir in [edge_l, edge_r] {
+            let s = w2s(fx.squeak_pos + edge_dir * d, cam);
+            pb.plot_add(s.0, s.1, palette::scale(ice, a));
+        }
+    }
+
+    // Three nested crisp forward-pointing white chevrons (`>`) marching outward.
+    // Each chevron is two straight wings meeting at a sharp apex on `dir`
+    // (angular V-wedge silhouette — unmistakable against Squeak Nova's circular rings).
+    let layers: [(f32, f32, bool); 3] = [
+        (fx.squeak_r, 1.0, true),
+        (fx.squeak_r * 0.72, 0.76, false),
+        (fx.squeak_r * 0.45, 0.48, false),
+    ];
+
+    for (rad, weight, thick) in layers {
+        if rad < 5.0 {
+            continue;
+        }
+        let apex = fx.squeak_pos + dir * rad;
+        let wing_l = fx.squeak_pos + edge_l * (rad * 0.72);
+        let wing_r = fx.squeak_pos + edge_r * (rad * 0.72);
+        let alpha = (weight * fade).clamp(0.0, 1.0);
+
+        for wing in [wing_l, wing_r] {
+            let span = apex.dist(wing);
+            let steps = (span * 1.4).ceil().clamp(4.0, 96.0) as i32;
+            let mut last = (i32::MIN, i32::MIN);
+            for i in 0..=steps {
+                let t = i as f32 / steps as f32;
+                let p = apex + (wing - apex) * t;
+                let s = w2s(p, cam);
+                if s == last {
+                    continue;
+                }
+                last = s;
+                let taper = 1.0 - t * 0.35;
+                if thick {
+                    // Subtle dark backing directly ahead of the lead chevron so pure
+                    // white reads crisply even on bright Kitchen / Lab floors.
+                    let ahead = w2s(p + dir * 1.2, cam);
+                    if ahead != s {
+                        blend_px(pb, ahead.0, ahead.1, rim_dark, 0.45 * alpha * taper);
+                    }
+                    blend_px(pb, s.0, s.1, white, (0.96 * alpha * taper).clamp(0.0, 1.0));
+                    // 1px ice-white trailing thickness directly behind the lead chevron.
+                    let back = w2s(p - dir * 1.1, cam);
+                    if back != s {
+                        pb.plot_add(back.0, back.1, palette::scale(ice, 0.75 * alpha * taper));
+                    }
+                } else {
+                    blend_px(
+                        pb,
+                        s.0,
+                        s.1,
+                        palette::mix(white, ice, 0.35),
+                        (0.88 * alpha * taper).clamp(0.0, 1.0),
+                    );
+                }
+            }
+        }
+        // Bright apex glint right on the tip of the chevron.
+        let sa = w2s(apex, cam);
+        pb.plot(sa.0, sa.1, palette::scale(white, (0.85 + 0.15 * alpha).min(1.0)));
+    }
+}
+
+/// **Spore Orbit**: faint dotted mint-green orbit track circling the rat so the
+/// puffballs visibly ride a ring.
+pub fn draw_spore_orbit_track(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    radius: f32,
+    elapsed: f32,
+    evolved: bool,
+    cam: Vec2,
+) {
+    if radius < 4.0 {
+        return;
+    }
+    let c = w2s(center, cam);
+    let dots = ((radius * 1.2).round() as i32).clamp(16, 40);
+    let col: Rgb = if evolved { (114, 240, 178) } else { (68, 188, 118) };
+    let spin = elapsed * 0.45;
+    let mut seen = RingDedup::new();
+    for i in 0..dots {
+        let a = spin + i as f32 / dots as f32 * std::f32::consts::TAU;
+        let px = c.0 + (a.cos() * radius).round() as i32;
+        let py = c.1 + (a.sin() * radius).round() as i32;
+        if seen.repeat((px, py)) {
+            continue;
+        }
+        pb.plot_add(px, py, palette::scale(col, 0.36));
+    }
+}
+
+/// **Spore Orbit** base orbiter: a plump 5×5 round green puffball with soft
+/// organic tufts and a luminous mint-white core.
+pub fn draw_spore_orbiter(pb: &mut PixelBuffer, s: (i32, i32), elapsed: f32) {
+    let (cx, cy) = s;
+    let out: Rgb = (16, 46, 26);
+    let dark: Rgb = (34, 126, 62);
+    let mid: Rgb = (96, 236, 132);
+    let hi: Rgb = (228, 255, 224);
+
+    // Subtle dark outer silhouette rim on bottom/right for bright-floor contrast.
+    for &(dx, dy) in &[(2, 1), (1, 2), (0, 2), (-1, 2), (-2, 1)] {
+        blend_px(pb, cx + dx, cy + dy, out, 0.58);
+    }
+
+    // Plump rounded puffball body (3×3 core + cardinal shoulders).
+    pb.plot(cx - 1, cy - 1, hi);
+    pb.plot(cx, cy - 1, hi);
+    pb.plot(cx + 1, cy - 1, mid);
+    pb.plot(cx - 1, cy, hi);
+    pb.plot(cx, cy, mid);
+    pb.plot(cx + 1, cy, dark);
+    pb.plot(cx - 1, cy + 1, mid);
+    pb.plot(cx, cy + 1, dark);
+    pb.plot(cx + 1, cy + 1, dark);
+
+    // Soft cardinal puff tufts gently alternating with `elapsed`.
+    let alt = ((elapsed * 4.0) as i32).rem_euclid(2);
+    let tuft_hi = palette::scale(mid, 0.72);
+    let tuft_lo = palette::scale(dark, 0.72);
+    pb.plot_add(cx, cy - 2, tuft_hi);
+    pb.plot_add(cx - 2, cy, tuft_hi);
+    pb.plot_add(cx + 2, cy, tuft_lo);
+    pb.plot_add(cx, cy + 2, tuft_lo);
+    if alt == 0 {
+        pb.plot_add(cx - 2, cy - 1, palette::scale(mid, 0.45));
+        pb.plot_add(cx + 2, cy + 1, palette::scale(dark, 0.45));
+    } else {
+        pb.plot_add(cx + 1, cy - 2, palette::scale(mid, 0.45));
+        pb.plot_add(cx - 1, cy + 2, palette::scale(dark, 0.45));
+    }
+}
+
+/// **Acid Spit** in flight: a single large green blob travelling on a parabolic
+/// arc above its own travelling ground shadow.
+pub fn draw_acid_glob(
+    pb: &mut PixelBuffer,
+    pos: Vec2,
+    target: Vec2,
+    player_pos: Vec2,
+    vel: Vec2,
+    color: Rgb,
+    cam: Vec2,
+) {
+    let ground = w2s(pos, cam);
+    let dist_left = pos.dist(target);
+    let span = player_pos.dist(target).max(dist_left).max(16.0);
+    let u = (1.0 - dist_left / span).clamp(0.0, 1.0);
+    // Smooth parabolic arc: 0 at launch & landing, peaking cleanly mid-flight.
+    let arc = 4.0 * u * (1.0 - u);
+    let arc_h = (span * 0.22).clamp(6.0, 18.0);
+    let lift = (arc * arc_h).round() as i32;
+
+    // 1. Travelling elliptical ground shadow right on the floor at `pos`.
+    let sh = 0.34 + 0.24 * (1.0 - arc);
+    let rw = if arc > 0.55 { 2 } else { 3 };
+    for dx in -rw..=rw {
+        shade_px(pb, ground.0 + dx, ground.1, sh);
+        if dx.abs() < rw {
+            shade_px(pb, ground.0 + dx, ground.1 - 1, sh * 0.65);
+            shade_px(pb, ground.0 + dx, ground.1 + 1, sh * 0.65);
+        }
+    }
+    pb.plot_add(ground.0, ground.1, palette::scale(color, 0.22));
+
+    // 2. Single large green blob lifted above its ground shadow.
+    let (bx, by) = (ground.0, ground.1 - lift);
+    let rim: Rgb = (22, 54, 14);
+    let deep: Rgb = (68, 174, 30);
+    let body: Rgb = palette::mix(color, (148, 246, 56), 0.5);
+    let hi: Rgb = (238, 255, 162);
+
+    // Dark outline around the 5×5 rounded glob.
+    for &(dx, dy) in &[
+        (-2, -2), (2, -2), (-2, 2), (2, 2),
+        (-3, 0), (3, 0), (0, -3), (0, 3),
+    ] {
+        blend_px(pb, bx + dx, by + dy, rim, 0.62);
+    }
+    // Chunky bright-rimmed glob interior.
+    for dy in -2..=2i32 {
+        for dx in -2..=2i32 {
+            if dx.abs() == 2 && dy.abs() == 2 {
+                continue;
+            }
+            let col = if dx <= 0 && dy <= 0 && (dx + dy) >= -2 {
+                if dx == -1 && dy == -1 { hi } else { body }
+            } else if dx == 2 || dy == 2 {
+                deep
+            } else {
+                body
+            };
+            pb.plot(bx + dx, by + dy, col);
+        }
+    }
+    // Wet glossy specular core + trailing droplet behind velocity.
+    pb.plot(bx - 1, by - 1, hi);
+    pb.plot(bx, by - 1, hi);
+    if vel.len_sq() > 16.0 {
+        let dir = vel.normalized();
+        let tx = bx - (dir.x * 3.2).round() as i32;
+        let ty = by - (dir.y * 3.2).round() as i32;
+        pb.plot(tx, ty, deep);
+        pb.plot_add(tx, ty - 1, palette::scale(body, 0.7));
+    }
+}
+
+/// **Acid Spit** landed pool: a dark translucent toxic interior ringed by a
+/// bright sizzling lime rim and slow animated surface bubbles.
+pub fn draw_acid_pool(
+    pb: &mut PixelBuffer,
+    pool: &Pool,
+    s: (i32, i32),
+    elapsed: f32,
+    seed: u64,
+) {
+    let fade = (pool.life / 0.55).clamp(0.18, 1.0);
+    let r = (pool.radius.round() as i32).clamp(4, 24);
+    let rf = pool.radius.max(3.0);
+    let r2 = rf * rf;
+
+    let fill_dark: Rgb = (26, 72, 16);
+    let fill_mid: Rgb = (58, 152, 28);
+    let rim_bright: Rgb = (168, 255, 62);
+    let rim_hot: Rgb = (238, 255, 168);
+
+    // 1. Translucent dark toxic interior (clean, no noisy checkerboard).
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = (dx * dx + dy * dy) as f32;
+            if d2 <= r2 {
+                let norm = (d2 / r2).sqrt();
+                let col = if norm > 0.76 { fill_mid } else { fill_dark };
+                let a = (0.48 + 0.16 * norm) * fade;
+                blend_px(pb, s.0 + dx, s.1 + dy, col, a);
+            }
+        }
+    }
+
+    // 2. Bright sizzling lime perimeter rim (deduplicated, zero shimmer).
+    let steps = (r * 7).max(20);
+    let mut seen = RingDedup::new();
+    let shimmer_phase = ((elapsed * 3.0) as i32).wrapping_add(seed as i32);
+    for i in 0..steps {
+        let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+        let px = s.0 + (a.cos() * rf).round() as i32;
+        let py = s.1 + (a.sin() * rf).round() as i32;
+        if seen.repeat((px, py)) {
+            continue;
+        }
+        let hot_arc = (i + shimmer_phase).rem_euclid(7) <= 1;
+        let col = if hot_arc { rim_hot } else { rim_bright };
+        blend_px(pb, px, py, col, (0.92 * fade).clamp(0.0, 1.0));
+    }
+
+    // 3. 3..5 deterministic animated surface bubbles inside the pool.
+    let bubbles = (r / 4).clamp(3, 5) as u64;
+    for k in 0..bubbles {
+        let h = seed
+            .wrapping_mul(2654435761)
+            .wrapping_add(k.wrapping_mul(1013904223));
+        let ang = ((h & 0xFF) as f32 / 255.0) * std::f32::consts::TAU;
+        let dist = (((h >> 8) & 0xFF) as f32 / 255.0) * (rf * 0.65);
+        let cycle = (elapsed * 1.8 + ((h >> 16) & 0xFF) as f32 * 0.03).fract();
+        let bx = s.0 + (ang.cos() * dist).round() as i32;
+        let by = s.1 + (ang.sin() * dist).round() as i32;
+        if cycle < 0.45 {
+            // Rising small blister.
+            pb.plot(bx, by, palette::scale(rim_bright, fade));
+        } else if cycle < 0.80 {
+            // Plump 2×2 bubble with bright white-lime specular dot.
+            pb.plot(bx, by, palette::scale(rim_hot, fade));
+            pb.plot(bx + 1, by, palette::scale(rim_bright, fade));
+            pb.plot(bx, by + 1, palette::scale(rim_bright, fade));
+            pb.plot(bx + 1, by + 1, palette::scale(fill_dark, fade));
+        } else {
+            // Tiny pop ring.
+            for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                pb.plot_add(bx + ox, by + oy, palette::scale(rim_hot, 0.72 * fade));
+            }
+        }
+    }
+}
+
+/// **Spiked Tail** broken-off shard (L4+): a razor steel-grey thorn flying on
+/// past the overhead slam.
+pub fn draw_spike_shard(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2) {
+    let dir = if vel.len_sq() > 1.0 {
+        vel.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let white: Rgb = (255, 255, 255);
+    let steel: Rgb = (196, 206, 222);
+    let dark: Rgb = (58, 64, 78);
+
+    let tip = (
+        s.0 + (dir.x * 1.6).round() as i32,
+        s.1 + (dir.y * 1.6).round() as i32,
+    );
+    let tail = (
+        s.0 - (dir.x * 1.8).round() as i32,
+        s.1 - (dir.y * 1.8).round() as i32,
+    );
+    pb.plot(tail.0, tail.1, dark);
+    pb.plot(s.0, s.1, steel);
+    pb.plot(tip.0, tip.1, white);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1152,5 +1663,97 @@ mod tests {
             out.push(b);
         }
         std::fs::write(out_path, out).unwrap();
+    }
+
+    #[test]
+    fn batch12_weapon_shapes_render_distinctly_without_panic() {
+        let mut pb = PixelBuffer::new(96, 96);
+        let bg = (16, 20, 22);
+
+        let count_lit = |buf: &PixelBuffer| -> usize {
+            (0..buf.h)
+                .flat_map(|y| (0..buf.w).map(move |x| (x, y)))
+                .filter(|&(x, y)| buf.pixel_at(x, y) != bg)
+                .count()
+        };
+
+        // Cheese wedge + Fondue tine.
+        pb.clear(bg);
+        draw_cheese_wedge(&mut pb, (32, 32), Vec2::new(78.0, 0.0), 0.7, 0.4);
+        draw_fondue_tine(&mut pb, (60, 32), Vec2::new(110.0, 20.0));
+        assert!(count_lit(&pb) >= 14, "cheese wedge and tine should paint crisp shapes");
+
+        // Squeak Nova expanding ring + Echo Chamber inbound ring.
+        pb.clear(bg);
+        let mut fx = ActiveFx::default();
+        fx.nova_left = 0.25;
+        fx.nova_age = 0.15;
+        fx.nova_prev_r = 18.0;
+        fx.nova_r = 22.0;
+        fx.nova_max_r = 50.0;
+        fx.nova_pos = Vec2::new(48.0, 48.0);
+        draw_squeak_nova_ring(&mut pb, &fx, Vec2::ZERO);
+        assert!(count_lit(&pb) >= 40, "squeak nova rings should paint concentric cyan rings");
+        fx.nova_echo = true;
+        fx.nova_prev_r = 26.0;
+        fx.nova_r = 22.0;
+        draw_squeak_nova_ring(&mut pb, &fx, Vec2::ZERO);
+
+        // Sonic Squeak directional chevron cone (never a ring).
+        pb.clear(bg);
+        fx.squeak_left = 0.20;
+        fx.squeak_r = 34.0;
+        fx.squeak_max_r = 60.0;
+        fx.squeak_pos = Vec2::new(24.0, 48.0);
+        fx.squeak_facing = Vec2::new(1.0, 0.0);
+        fx.squeak_half = 0.66;
+        draw_sonic_cone(&mut pb, &fx, Vec2::ZERO);
+        assert!(count_lit(&pb) >= 30, "sonic cone should paint nested white chevrons");
+        // Verify nothing was painted behind the apex (proving it is a cone, never a ring).
+        let behind = (0..20usize)
+            .flat_map(|x| (0..pb.h).map(move |y| (x, y)))
+            .filter(|&(x, y)| pb.pixel_at(x, y) != bg)
+            .count();
+        assert_eq!(behind, 0, "sonic squeak cone must never draw behind its apex");
+
+        // Spore orbit track + puffball.
+        pb.clear(bg);
+        draw_spore_orbit_track(&mut pb, Vec2::new(48.0, 48.0), 22.0, 1.0, false, Vec2::ZERO);
+        draw_spore_orbiter(&mut pb, (70, 48), 1.0);
+        assert!(count_lit(&pb) >= 24, "spore orbit track and puffball should draw");
+
+        // Acid Spit lobbed glob + bubbling pool + Acid Rain vertical drop + Spike shard.
+        pb.clear(bg);
+        draw_acid_glob(
+            &mut pb,
+            Vec2::new(40.0, 48.0),
+            Vec2::new(72.0, 48.0),
+            Vec2::new(16.0, 48.0),
+            Vec2::new(110.0, 0.0),
+            (160, 255, 90),
+            Vec2::ZERO,
+        );
+        let pool = Pool {
+            pos: Vec2::new(72.0, 48.0),
+            radius: 10.0,
+            dps: 16.0,
+            life: 2.0,
+            color: (140, 220, 70),
+        };
+        draw_acid_pool(&mut pb, &pool, (72, 48), 1.3, 7);
+        draw_spike_shard(&mut pb, (20, 20), Vec2::new(150.0, 0.0));
+        assert!(count_lit(&pb) >= 80, "acid glob, pool and shard should draw");
+
+        // Zero-size buffer must never panic.
+        let mut zero = PixelBuffer::new(0, 0);
+        draw_cheese_wedge(&mut zero, (0, 0), Vec2::ZERO, 0.0, 0.0);
+        draw_fondue_tine(&mut zero, (0, 0), Vec2::ZERO);
+        draw_squeak_nova_ring(&mut zero, &fx, Vec2::ZERO);
+        draw_sonic_cone(&mut zero, &fx, Vec2::ZERO);
+        draw_spore_orbit_track(&mut zero, Vec2::ZERO, 20.0, 0.0, false, Vec2::ZERO);
+        draw_spore_orbiter(&mut zero, (0, 0), 0.0);
+        draw_acid_glob(&mut zero, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, (160, 255, 90), Vec2::ZERO);
+        draw_acid_pool(&mut zero, &pool, (0, 0), 0.0, 0);
+        draw_spike_shard(&mut zero, (0, 0), Vec2::ZERO);
     }
 }

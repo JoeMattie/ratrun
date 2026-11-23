@@ -47,19 +47,56 @@ fn update_boss(w: &mut World, dt: f32) {
 // ---- spawn ---------------------------------------------------------------
 
 #[test]
-fn boss_spawns_in_the_boss_room_when_due() {
+fn boss_spawns_out_of_sight_when_due() {
     let mut w = World::new(Theme::Sewer, 7);
-    let arena = w.level.boss_room().expect("generated level has a boss room").rect;
+    let arena = w.level.fight_rect_around(w.player.pos);
     spawn_boss(&mut w);
 
     let boss = boss_of(&mut w).expect("BossDue spawned the boss");
     assert_eq!(boss.kind, floor_boss(&w));
-    assert!(arena.contains_world(boss.pos), "boss must spawn in its arena");
+    assert!(arena.contains_world(boss.pos), "boss must spawn in its fight rectangle");
     assert!(boss.hp > 0.0);
     assert!(boss.max_hp > 0.0);
     assert_eq!(boss.phase, 1);
     // The boss's private rng stream is seeded from the run seed.
     assert!(!w.ecs.resource::<BossFight>().level_complete);
+}
+
+/// **Batch 12.** The boss used to arrive in a dedicated arena. It now arrives
+/// where the rat is: out of sight (outside the *widest* view, the same
+/// rectangle the horde's spawns are measured against) and in a fight rectangle
+/// of the floor's standard size that contains the rat and is centred on it.
+#[test]
+fn every_boss_arrives_out_of_sight_around_the_rat() {
+    use crate::game::ecs::systems::spawn::widest_view;
+    for (i, kind) in BossKind::all().iter().copied().enumerate() {
+        // A different seed per kind so no pool, map or rng state is shared.
+        let mut w = World::new(Theme::playable()[i % Theme::playable().len()], 100 + i as u64);
+        // A known viewport: the App's own default, so the widest view is the
+        // same rectangle a real run measures.
+        w.viewport = crate::math::Vec2::new(120.0, 74.0);
+        let rat = w.player.pos;
+        w.boss_override = Some(kind);
+        spawn_boss(&mut w);
+
+        let boss = boss_of(&mut w).expect("BossDue spawned the boss");
+        assert_eq!(boss.kind, kind);
+        let half = widest_view(w.viewport) * 0.5;
+        let d = boss.pos - rat;
+        assert!(
+            d.x.abs() > half.x - 1.0 || d.y.abs() > half.y - 1.0,
+            "{kind:?}: arrived inside the widest view ({d:?} vs {:?})",
+            half
+        );
+        let arena = boss.arena;
+        assert!(arena.contains_world(rat), "{kind:?}: the rectangle misses the rat");
+        assert!(arena.contains_world(boss.pos), "{kind:?}: the boss is outside its rectangle");
+        let centre = arena.center_world();
+        assert!(
+            (centre - rat).len() <= 16.0 * 1.5,
+            "{kind:?}: the rectangle is not centred on the rat ({centre:?} vs {rat:?})"
+        );
+    }
 }
 
 #[test]
@@ -851,11 +888,10 @@ fn open_arena(w: &mut World) {
     w.clear_pools();
 }
 
+/// The fight rectangle the boss's own arrival builds (batch 12 removed the
+/// arena): the nominal fight size centred on the rat.
 fn arena_rect(w: &World) -> TileRect {
-    w.level
-        .boss_room()
-        .map(|r| r.rect)
-        .unwrap_or_else(|| TileRect::new(0, 0, w.level.tiles.cols(), w.level.tiles.rows()))
+    w.level.fight_rect_around(w.player.pos)
 }
 
 /// A live boss of `kind` at `pos` with a real `max_hp`.
@@ -1355,15 +1391,13 @@ fn measure_campaign_boss_dps() {
                     b.damage_mult = 1.0;
                 }
             }
-            // The fight starts in the arena: put the rat there (the App leads
-            // the player to the boss room with the minimap bearing; this
-            // measurement is about the weapons' damage, not about the walk).
-            if let Some(room) = w.level.boss_room() {
-                let centre = room.rect.center_world();
+            // The fight starts where the boss arrived (batch 12 removed the
+            // arena, so there is no walk to measure): put the rat beside it.
+            if let Some(pos) = w.boss_marker() {
                 if let Some(open) = w
                     .level
                     .tiles
-                    .nearest_open_center(centre, crate::game::collision::SizeClass::Small, 16)
+                    .nearest_open_center(pos, crate::game::collision::SizeClass::Small, 16)
                 {
                     w.player.pos = open;
                 }

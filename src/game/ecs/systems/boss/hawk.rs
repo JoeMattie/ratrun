@@ -997,7 +997,17 @@ fn lane_plan(ctx: &BossContext<'_>, boss: &Boss) -> Option<(Vec2, Vec2, f32)> {
     let end_x = if dir > 0.0 { inner_max } else { inner_min };
     let start_x = boss.pos.x.clamp(inner_min, inner_max);
     let start = Vec2::new(start_x, lane_y);
-    let end = Vec2::new(end_x, lane_y);
+    let mut end = Vec2::new(end_x, lane_y);
+    // Batch 12: the fight rectangle is recentred on the rat, so it can hold real
+    // walls and props where the old arena's generator guaranteed a clear stage.
+    // The lane is clipped at the first solid rather than flown through it.
+    if let Some(t) = ctx
+        .level
+        .tiles
+        .segment_hit(start, end, art::BODY_RADIUS)
+    {
+        end = start + (end - start) * (t * 0.98).clamp(0.0, 1.0);
+    }
     if (end.x - start.x).abs() < art::RAKE_MIN_LEN {
         return None;
     }
@@ -1167,10 +1177,7 @@ mod tests {
 
     /// The arena's centre: the cab hold, which is flat open deck.
     fn arena_centre(w: &World) -> Vec2 {
-        w.level
-            .boss_room()
-            .map(|r| r.rect.center_world())
-            .expect("the flatbed has a cab hold")
+        w.level.fight_rect_around(w.player.pos).center_world()
     }
 
     /// Put the bird at `pos` and the rat at `rat`.
@@ -1202,11 +1209,7 @@ mod tests {
     }
 
     fn boss_context<'a>(w: &'a World, rng: &'a mut rand::rngs::StdRng) -> BossContext<'a> {
-        let arena = w
-            .level
-            .boss_room()
-            .map(|r| r.rect)
-            .unwrap_or_else(|| crate::game::level::TileRect::new(0, 0, 20, 20));
+        let arena = w.level.fight_rect_around(w.player.pos);
         BossContext {
             dt: DT,
             time: 0.0,
@@ -1818,7 +1821,7 @@ mod tests {
         let mut w = hawk_world(0);
         spawn_hawk(&mut w);
         let c = arena_centre(&w);
-        let arena = w.level.boss_room().expect("hold").rect;
+        let arena = w.level.fight_rect_around(w.player.pos);
         // A one-cell slot: walls north and south of the rat, so there is no
         // step off the reach.
         w.level.tiles.fill_cells(

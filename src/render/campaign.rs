@@ -202,7 +202,9 @@ impl<A: Copy, const N: usize> HitList<A, N> {
 // Public shared campaign view types (zero simulation dependencies)
 // ---------------------------------------------------------------------------
 
-/// The three sequential sectors of the Rat Run campaign.
+/// The four levels of the Rat Run campaign, in order (the original route; the
+/// side floors have plates of their own). The ride shares its plate with the
+/// finale — it is the campaign's fourth level and still a practice floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CampaignLevel {
     Sewer = 0,
@@ -212,23 +214,23 @@ pub enum CampaignLevel {
     Laundry = 3,
     /// Stage three's side route: the printworks.
     Printworks = 4,
-    /// The getaway ride's plate: the flatbed trailer. Not a campaign stage —
-    /// a bonus floor with its own boss (the Magpie) and its own name — but it
-    /// is a floor the player can pick, so the intro, complete and end plates
-    /// must be able to name it.
+    /// The getaway ride's plate: the flatbed trailer. The campaign's **finale**
+    /// (batch twelve) with its own bosses (the Magpie and the Redtail), and a
+    /// floor the player can practise alone.
     Trailer = 5,
 }
 
 impl CampaignLevel {
-    /// The three campaign **stages**, in order: the original route. The side
-    /// route floors and the getaway ride are reachable through
-    /// [`Self::from_theme`] but are not extra stages, so the progress pips
-    /// stay three steps long.
-    pub const fn all() -> [CampaignLevel; 3] {
+    /// The campaign's levels on the **original route**, in order: Sewer,
+    /// Kitchen, Lab, the Flatbed ride. The side-route floors are reachable
+    /// through [`Self::from_theme`] but are not extra steps, so the progress
+    /// pips stay four long.
+    pub const fn all() -> [CampaignLevel; 4] {
         [
             CampaignLevel::Sewer,
             CampaignLevel::Kitchen,
             CampaignLevel::Lab,
+            CampaignLevel::Trailer,
         ]
     }
 
@@ -249,44 +251,42 @@ impl CampaignLevel {
         self as usize
     }
 
-    /// The plate for a **campaign stage** index (`0 => Sewer`, `1 => Kitchen`,
-    /// `2+ => Lab` — the original route).
+    /// The plate for a **campaign level index** (`0 => Sewer`, `1 => Kitchen`,
+    /// `2 => Lab`, `3+ => the Flatbed ride` — the original route).
     ///
-    /// A stage is not a floor: the side routes and the getaway ride have
-    /// plates of their own, so a list of floors must carry themes or floor
-    /// indices, not call this.
+    /// A level is not a floor: the side routes have plates of their own, so a
+    /// list of floors must carry themes or floor indices, not call this.
     pub const fn from_index(index: usize) -> Self {
         match index {
             0 => CampaignLevel::Sewer,
             1 => CampaignLevel::Kitchen,
-            _ => CampaignLevel::Lab,
+            2 => CampaignLevel::Lab,
+            _ => CampaignLevel::Trailer,
         }
     }
 
-    /// The campaign **stage** this floor belongs to (`0`, `1`, `2`), or
-    /// `campaign::LEVEL_COUNT` for the getaway ride, which is not a stage.
+    /// The campaign **level index** this floor is played at (`0..=3`): the
+    /// fourth is the ride, which is both the finale and a practice floor.
     pub const fn stage(self) -> usize {
         match self {
             CampaignLevel::Sewer => 0,
             CampaignLevel::Kitchen | CampaignLevel::Laundry => 1,
             CampaignLevel::Lab | CampaignLevel::Printworks => 2,
-            // Not a stage: one past the last, like `campaign::is_getaway_sector`.
-            CampaignLevel::Trailer => crate::game::campaign::LEVEL_COUNT,
+            CampaignLevel::Trailer => 3,
         }
     }
 
-    /// The 1-based stage number a heading or pip shows (`1..=3`). The getaway
-    /// ride reads as the last stage rather than a fourth one.
+    /// The 1-based level number a heading or pip shows (`1..=4`).
     pub const fn stage_number(self) -> u8 {
         match self {
             CampaignLevel::Sewer => 1,
             CampaignLevel::Kitchen | CampaignLevel::Laundry => 2,
-            CampaignLevel::Lab | CampaignLevel::Printworks | CampaignLevel::Trailer => 3,
+            CampaignLevel::Lab | CampaignLevel::Printworks => 3,
+            CampaignLevel::Trailer => 4,
         }
     }
 
-    /// 1-based campaign level number (`1`, `2`, or `3`; the getaway ride is
-    /// numbered one past the stages on the title's sector row).
+    /// 1-based campaign level number (`1..=4`; the ride is the fourth).
     pub const fn number(self) -> u8 {
         match self {
             CampaignLevel::Sewer => 1,
@@ -300,13 +300,14 @@ impl CampaignLevel {
 
     /// The original route's next stage (the route's actual next floor is the
     /// campaign's choice — see `CampaignState::theme`). `None` once the run is
-    /// on a final-stage floor: the Lab, the Printworks and the getaway ride
-    /// all end their run.
+    /// on the finale: the ride ends every run, whichever stage-three floor was
+    /// played before it.
     pub const fn next(self) -> Option<CampaignLevel> {
         match self {
             CampaignLevel::Sewer => Some(CampaignLevel::Kitchen),
             CampaignLevel::Kitchen | CampaignLevel::Laundry => Some(CampaignLevel::Lab),
-            CampaignLevel::Lab | CampaignLevel::Printworks | CampaignLevel::Trailer => None,
+            CampaignLevel::Lab | CampaignLevel::Printworks => Some(CampaignLevel::Trailer),
+            CampaignLevel::Trailer => None,
         }
     }
 
@@ -339,7 +340,8 @@ impl CampaignLevel {
             CampaignLevel::Lab => "SECTOR 03",
             CampaignLevel::Laundry => "SECTOR 02B",
             CampaignLevel::Printworks => "SECTOR 03B",
-            CampaignLevel::Trailer => "GETAWAY",
+            // The finale: the rig is the way out, and it is still sector four.
+            CampaignLevel::Trailer => "SECTOR 04",
         }
     }
 
@@ -632,7 +634,7 @@ pub struct CampaignVictoryView<'a> {
     pub total_kills: u32,
     pub gold: u32,
     pub new_best: bool,
-    pub levels: [LevelBreakdown; 3],
+    pub levels: [LevelBreakdown; crate::game::campaign::LEVEL_COUNT],
     /// Final upgrades carried out the front door (rendered when space permits).
     pub final_loadout: &'a [UpgradeEntry<'a>],
     /// Optional custom finale copy.
@@ -681,11 +683,11 @@ pub struct LevelSlotView {
     pub floor: usize,
     /// The floor's plate: name, accent, boss and emblem.
     pub level: CampaignLevel,
-    /// The campaign stage the floor belongs to (`0..campaign::LEVEL_COUNT`),
-    /// or `campaign::LEVEL_COUNT` for the getaway ride. Drives the `S1`/`S2`/
-    /// `S3`/`GETAWAY` chip and groups the grid.
+    /// The campaign stage the floor belongs to (`0..campaign::LEVEL_COUNT`):
+    /// the ride reads its own fourth level rather than the Lab's stage. Drives
+    /// the `S1`/`S2`/`S3`/`S4` chip and groups the grid.
     pub stage: usize,
-    /// Is the floor selectable (its stage reachable, or the getaway ride)?
+    /// Is the floor selectable (its level reachable)?
     pub unlocked: bool,
     /// Best cleared run on this floor, if any. Floors on the same stage have
     /// separate records.
@@ -713,9 +715,9 @@ pub struct LevelSelectView<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct CampaignProgressView {
-    /// Active campaign level (`1..=3`).
+    /// Active campaign level (`1..=4`).
     pub current: CampaignLevel,
-    /// Number of levels already cleared (`0..=3`).
+    /// Number of levels already cleared (`0..=4`).
     pub cleared_count: u8,
     /// Optional background fill color (defaults to `PLATE`).
     pub bg: Option<Color>,
@@ -1112,7 +1114,12 @@ fn stamp_header_pips(
     let base = ink(MUTED).bg(PLATE);
     let mut cx = put_str(buf, x, y, " LV ", 4, base);
     let mut nb = StackBuf::<8>::new();
-    let _ = write!(nb, "{}/3 ", current.stage_number());
+    let _ = write!(
+        nb,
+        "{}/{} ",
+        current.stage_number(),
+        crate::game::campaign::LEVEL_COUNT
+    );
     cx = put_str(buf, cx, y, nb.as_str(), 4, heavy(COAT).bg(PLATE));
     // The pips are **stages**, so the current one is matched by stage: a side
     // route (Laundry, Printworks) is never equal to the original route's plate
@@ -2609,7 +2616,13 @@ pub fn draw_level_intro_with(
     let card = centered_rect(pw, ph, area);
 
     let buf = f.buffer_mut();
-    let cap = " ACCESS ROUTE ";
+    // The ride's card is captioned as the getaway: it is the campaign's last
+    // sector and the way out.
+    let cap = if view.level == CampaignLevel::Trailer {
+        " THE GETAWAY "
+    } else {
+        " ACCESS ROUTE "
+    };
     let inner = panel(buf, card, cap, None, accent);
     stamp_header_pips(
         buf,
@@ -2635,19 +2648,16 @@ pub fn draw_level_intro_with(
     }
 
     // Heading: SECTOR NN — NAME, the same words as level 1's access-route
-    // card (`lore::map_intro`) and STYLE.md's "Sector". The getaway ride is
-    // not a campaign stage, so it gets its own heading.
+    // card (`lore::map_intro`) and STYLE.md's "Sector". The ride is the
+    // campaign's fourth and last sector, and its caption names the getaway
+    // instead (batch twelve: the Flatbed is the finale).
     let mut heading = StackBuf::<40>::new();
-    if view.level == CampaignLevel::Trailer {
-        let _ = write!(heading, "THE GETAWAY — {}", view.level.short_name().to_uppercase());
-    } else {
-        let _ = write!(
-            heading,
-            "{} — {}",
-            view.level.sector_code(),
-            view.level.name()
-        );
-    }
+    let _ = write!(
+        heading,
+        "{} — {}",
+        view.level.sector_code(),
+        view.level.name()
+    );
     put_centered(buf, inner, y, heading.as_str(), heavy(COAT).bg(PLATE));
     y += if inner.height >= 15 { 2 } else { 1 };
 
@@ -2907,7 +2917,13 @@ pub fn draw_campaign_victory_with(
         " EXTRACTION COMPLETE "
     };
     let inner = panel(buf, card, cap, None, VICTORY_MINT);
-    stamp_header_pips(buf, card, cap, CampaignLevel::Lab, 3);
+    stamp_header_pips(
+        buf,
+        card,
+        cap,
+        CampaignLevel::Trailer,
+        crate::game::campaign::LEVEL_COUNT as u8,
+    );
 
     if inner.width < 10 || inner.height < 5 {
         return hits;
@@ -2946,11 +2962,13 @@ pub fn draw_campaign_victory_with(
         y += 4;
     }
 
-    // Finale narrative line.
+    // Finale narrative line. The run ends on the ride now (batch twelve), so
+    // the plate's own words count four sectors; a caller may override it with
+    // the ride's line (`lore::GETAWAY_WIN`).
     let default_blurb = if inner.width < 60 && inner.height < 20 {
-        "Three sectors breached. Open air smells like rain and asphalt."
+        "Four sectors breached. Open air smells like rain and asphalt."
     } else {
-        "Every alarm flatlines behind you. Three sectors, three apex threats — none of them held. Open air smells like rain and asphalt."
+        "Every alarm flatlines behind you. Four sectors, four apex threats — none of them held. The deck runs out onto open road."
     };
     let blurb = view.custom_blurb.unwrap_or(default_blurb);
     let inset = if inner.width >= 42 { 3 } else { 1 };
@@ -2983,7 +3001,7 @@ pub fn draw_campaign_victory_with(
                 ("FINAL SCORE", sb.as_str(), TRAIL_GOLD),
                 ("TOTAL TIME", ttime.as_str(), COAT),
                 ("TOTAL KILLS", kb.as_str(), COAT),
-                ("SECTORS", "3 / 3", HEAL_MINT),
+                ("SECTORS", "4 / 4", HEAL_MINT),
                 ("GOLD", gold_b.as_str(), TRAIL_GOLD),
             ];
             for (i, (k, v, vc)) in totals.iter().enumerate() {
@@ -3000,7 +3018,7 @@ pub fn draw_campaign_victory_with(
             let mut line = StackBuf::<64>::new();
             let _ = write!(
                 line,
-                "FINAL {} · {} · {} kills · 3 / 3 · Gold {}",
+                "FINAL {} · {} · {} kills · 4 / 4 · Gold {}",
                 view.final_score,
                 ttime.as_str(),
                 view.total_kills,
@@ -3210,8 +3228,9 @@ pub fn level_select_cols(area: Rect) -> usize {
     }
 }
 
-/// The short stage chip stamped on a slot's border: `S1`, `S2`, `S3` or
-/// `GETAWAY` (the getaway ride is not a campaign stage).
+/// The short stage chip stamped on a slot's border: `S1`, `S2`, `S3`, `S4`
+/// (the ride is the fourth level now; the defensive `GETAWAY` fallback covers a
+/// host that passes an out-of-range stage).
 fn slot_stage_chip(stage: usize) -> StackBuf<8> {
     let mut b = StackBuf::<8>::new();
     if stage >= crate::game::campaign::LEVEL_COUNT {
@@ -3243,13 +3262,13 @@ fn slot_status_style(slot: &LevelSlotView, bg: Color) -> Style {
     }
 }
 
-/// What a locked floor needs before it opens (its stage's reach rule).
+/// What a locked floor needs before it opens (its level's reach rule).
 fn slot_unlock_hint(slot: &LevelSlotView) -> &'static str {
     match slot.stage {
         0 => "Locked",
         1 => "Clear the Sewers first",
         2 => "Clear an S2 sector first",
-        _ => "Clear the campaign first",
+        _ => "Clear an S3 sector first",
     }
 }
 
@@ -3653,14 +3672,14 @@ pub fn draw_level_select_with(
 // 6. Compact Campaign Progress Indicator (HUD / Pause)
 // ---------------------------------------------------------------------------
 
-/// Draw a compact campaign progress indicator (`LV 1/3 ● ◆ ○ SEWER`) into `area`.
+/// Draw a compact campaign progress indicator (`LV 1/4 ● ◆ ○ ○ SEWER`) into `area`.
 ///
 /// Adapts gracefully across widths:
-/// - `>= 24`: `LV 2/3  ● ◆ ○  Kitchen`
-/// - `>= 14`: `LV 2/3  ● ◆ ○`
-/// - `>= 9`:  `2/3 ●◆○`
-/// - `>= 5`:  `● ◆ ○`
-/// - `>= 3`:  `●◆○`
+/// - `>= 24`: `LV 2/4  ● ◆ ○ ○  Kitchen`
+/// - `>= 14`: `LV 2/4  ● ◆ ○ ○`
+/// - `>= 9`:  `2/4 ●◆○○`
+/// - `>= 5`:  `● ◆ ○ ○`
+/// - `>= 3`:  `●◆○○`
 ///
 /// Returns the exact bounding [`Rect`] drawn inside `area`.
 pub fn draw_campaign_pips(
@@ -3682,7 +3701,12 @@ pub fn draw_campaign_pips(
     if r.width >= 14 {
         cx = put_str(buf, cx, y, "LV ", 3, ink(MUTED).bg(bg));
         let mut nb = StackBuf::<8>::new();
-        let _ = write!(nb, "{}/3  ", view.current.stage_number());
+        let _ = write!(
+            nb,
+            "{}/{}  ",
+            view.current.stage_number(),
+            crate::game::campaign::LEVEL_COUNT
+        );
         cx = put_str(buf, cx, y, nb.as_str(), 5, heavy(COAT).bg(bg));
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, true, bg);
         if r.width >= 24 {
@@ -3692,7 +3716,12 @@ pub fn draw_campaign_pips(
         }
     } else if r.width >= 9 {
         let mut nb = StackBuf::<8>::new();
-        let _ = write!(nb, "{}/3 ", view.current.stage_number());
+        let _ = write!(
+            nb,
+            "{}/{} ",
+            view.current.stage_number(),
+            crate::game::campaign::LEVEL_COUNT
+        );
         cx = put_str(buf, cx, y, nb.as_str(), 4, heavy(COAT).bg(bg));
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, false, bg);
     } else if r.width >= 5 {
@@ -3715,10 +3744,12 @@ fn draw_three_pips(
     spaced: bool,
     bg: Color,
 ) -> u16 {
-    // Matched by stage, like `stamp_header_pips`: a side-route floor is on
-    // stage two or three and must light that pip.
+    // Matched by level, like `stamp_header_pips`: a side-route floor is on
+    // stage two or three and must light that pip, and the ride lights the
+    // fourth.
     let current_stage = usize::from(current.stage_number().saturating_sub(1));
-    for idx in 0..CampaignLevel::all().len() {
+    let pips = CampaignLevel::all().len();
+    for idx in 0..pips {
         if cx >= max_x {
             break;
         }
@@ -3731,7 +3762,7 @@ fn draw_three_pips(
         };
         let mut g = [0u8; 4];
         cx = put_str(buf, cx, y, ch.encode_utf8(&mut g), 1, heavy(col).bg(bg));
-        if spaced && idx < 2 && cx < max_x {
+        if spaced && idx + 1 < pips && cx < max_x {
             cx = put_str(buf, cx, y, " ", 1, ink(MUTED).bg(bg));
         }
     }
@@ -4528,6 +4559,14 @@ mod tests {
                     player_level: 11,
                     boss: None,
                 },
+                LevelBreakdown {
+                    level: CampaignLevel::Trailer,
+                    time_secs: 268.0,
+                    kills: 355,
+                    score: 11200,
+                    player_level: 12,
+                    boss: None,
+                },
             ],
             final_loadout: &items[..4],
             custom_blurb: None,
@@ -4550,6 +4589,12 @@ mod tests {
             assert!(txt.contains("Sewer"));
             assert!(txt.contains("Kitchen"));
             assert!(txt.contains("Lab"));
+            // The plate names four floors, and the ride is the last of them.
+            assert_eq!(view.levels.len(), 4);
+            assert!(
+                txt.contains("Flatbed") || txt.contains("04 Flatbed"),
+                "{w}x{h}: the victory plate does not list the ride:\n{txt}"
+            );
         }
 
         for &(w, h) in &TINY_SIZES {
@@ -4563,26 +4608,20 @@ mod tests {
     }
 
     /// Six sample slots, one per playable floor, in the art's route order:
-    /// the Sewer cleared, the Kitchen open, the side routes and stage three
-    /// locked, the Flatbed always open.
+    /// the Sewer cleared, the Kitchen open, the side routes and the ride
+    /// locked (the ride is stage four, so it follows the same reach rule).
     fn sample_slots() -> Vec<LevelSlotView> {
         Theme::playable()
             .into_iter()
             .enumerate()
             .map(|(floor, theme)| {
                 let level = CampaignLevel::from_theme(theme);
-                let stage = if theme.is_trailer() {
-                    crate::game::campaign::LEVEL_COUNT
-                } else {
-                    level.stage()
-                };
+                let stage = crate::game::campaign::theme_stage(theme);
                 LevelSlotView {
                     floor,
                     level,
                     stage,
-                    unlocked: theme == Theme::Sewer
-                        || theme == Theme::Kitchen
-                        || theme == Theme::Trailer,
+                    unlocked: theme == Theme::Sewer || theme == Theme::Kitchen,
                     best: match theme {
                         Theme::Sewer => Some(LevelBest {
                             score: 6420,
@@ -4637,10 +4676,13 @@ mod tests {
         );
         assert_eq!(
             slots[5].stage,
-            crate::game::campaign::LEVEL_COUNT,
-            "the getaway ride is not a campaign stage"
+            crate::game::campaign::LEVEL_COUNT - 1,
+            "the ride is the campaign's fourth level"
         );
-        assert!(slots[5].unlocked, "the Flatbed is always open");
+        assert!(
+            !slots[5].unlocked,
+            "the sample has no stage-three clear, so the ride is locked"
+        );
     }
 
     #[test]
@@ -4673,7 +4715,8 @@ mod tests {
             assert!(txt.contains("CLEARED"), "no cleared status at {w}x{h}");
             assert!(txt.contains("LOCKED"), "no locked status at {w}x{h}");
             assert!(txt.contains("6420"), "no best score at {w}x{h}");
-            assert!(txt.contains("GETAWAY"), "no getaway chip at {w}x{h}");
+            // The ride's chip is its own level number now, not GETAWAY.
+            assert!(txt.contains("S4"), "no S4 chip at {w}x{h}");
             // Every floor is named on the screen: six slots, not three.
             for slot in &slots {
                 assert!(
@@ -5009,6 +5052,14 @@ mod tests {
                     kills: 340,
                     score: 10300,
                     player_level: 11,
+                    boss: None,
+                },
+                LevelBreakdown {
+                    level: CampaignLevel::Trailer,
+                    time_secs: 268.0,
+                    kills: 355,
+                    score: 11200,
+                    player_level: 12,
                     boss: None,
                 },
             ],
