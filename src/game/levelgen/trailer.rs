@@ -160,6 +160,7 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
         objects,
         boss: design.boss.clone(),
         trailer: deck,
+        puddles: Vec::new(),
     }
 }
 
