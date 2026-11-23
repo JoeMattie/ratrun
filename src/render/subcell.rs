@@ -121,6 +121,23 @@ pub enum Smooth {
 }
 
 impl Smooth {
+    /// Every level, in the order the Graphics page cycles them. **One list**:
+    /// a new variant is added here (and to [`Smooth::label`]) and nowhere
+    /// else — the options page walks this slice, so it can never fall behind
+    /// the enum.
+    pub const ALL: &'static [Smooth] = &[Smooth::Off, Smooth::Epx, Smooth::Strong];
+
+    /// The word the Graphics page prints for this level. Player-facing, so it
+    /// names what the player sees (`STYLE.md`: no internal jargon — `EPX` is an
+    /// algorithm's name, not a description of the picture).
+    pub fn label(self) -> &'static str {
+        match self {
+            Smooth::Off => "OFF",
+            Smooth::Epx => "SOFT",
+            Smooth::Strong => "SHARP",
+        }
+    }
+
     /// `0`/`off`, `1`/`on`/`epx`, `2`/`strong`.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -143,10 +160,17 @@ impl Smooth {
 
 /// The 1× edge treatment for the session: `RATRUN_SMOOTH=0` pins plain half
 /// blocks, `1` the EPX rounding, `2` the antialiasing; unset or unreadable
-/// leaves the default ([`Smooth::Strong`]). The console `smooth` command is the
-/// live A/B; this is the capture pin.
+/// leaves the default ([`Smooth::Strong`]). The console `smooth` command and the
+/// Graphics page are the live setting; this is the session pin, and it is
+/// reported as an `Option` so the app can tell a pin from a saved preference
+/// (a pinned session is never written back over the save).
+pub fn smooth_env() -> Option<Smooth> {
+    std::env::var("RATRUN_SMOOTH").ok().and_then(|v| Smooth::parse(&v))
+}
+
+/// [`smooth_env`], with the default standing in for "not pinned".
 pub fn smooth_from_env() -> Smooth {
-    std::env::var("RATRUN_SMOOTH").ok().and_then(|v| Smooth::parse(&v)).unwrap_or_default()
+    smooth_env().unwrap_or_default()
 }
 
 /// The set to draw with: the environment override wins, else whatever the

@@ -67,6 +67,11 @@ pub enum Target {
     OptionsBar(usize),
     /// The options screen's Back row: returns to wherever the player came from.
     OptionsBack,
+    /// A row on the **Graphics page** (`0..graphics::ROW_COUNT`): selects it and,
+    /// on a click, steps it forward.
+    GraphicsRow(usize),
+    /// The Graphics page's Back row: returns to the Options plate.
+    GraphicsBack,
     /// The gene-splice shop: the shelf row at this index (`0..shop::ROW_COUNT`).
     ShopRow(usize),
     /// The shop's Molt two-step list row at this index.

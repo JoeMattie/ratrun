@@ -259,6 +259,109 @@ pub struct SavedSchemeFile {
     pub pad: Vec<String>,
 }
 
+/// The Graphics page's preferences ([`crate::render::graphics`]): the
+/// render-only picture settings that used to be console/env switches only.
+///
+/// Every field is a *preference*, not run state: nothing here is read by the
+/// simulation (see the determinism rules in `CLAUDE.md`), so a hand-edited
+/// value can change what the player sees and nothing else. `#[serde(default)]`
+/// on the container means an old `scores.json` — written before the page
+/// existed — loads with today's defaults, and a single unreadable field keeps
+/// the rest.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphicsFile {
+    /// `full` | `hard` | `coarse` | `compact` — the lighting quality the console's
+    /// `lights` command sets. Absent means "whatever this terminal's colour
+    /// depth defaults to" (the only correct answer before the player picks).
+    pub lighting: Option<String>,
+    /// `off` | `on` | `strong` — the words `smooth` accepts.
+    pub smooth: String,
+    /// The parallax overhead layer (`render::foreground`).
+    pub foreground: bool,
+    /// The batch-13 lighting effects (`render::lighting::fx`).
+    pub fx: bool,
+    /// The round-glyph particle layer (`render::glyphfx`).
+    pub glyphfx: bool,
+    /// The camera's share of the simulation's shake (`World::shake_scale`),
+    /// one of [`crate::render::graphics::SHAKE_STEPS`].
+    pub shake_scale: f32,
+}
+
+impl Default for GraphicsFile {
+    /// Today's defaults, exactly what a build before the page ran: the
+    /// terminal's own lighting tier (no stored mode), the antialiased picture,
+    /// every layer on, and the 65 % shake every effect already had.
+    fn default() -> Self {
+        GraphicsFile {
+            lighting: None,
+            smooth: crate::render::subcell::Smooth::default().as_str().to_string(),
+            foreground: true,
+            fx: true,
+            glyphfx: true,
+            shake_scale: crate::game::world::SHAKE_SCALE,
+        }
+    }
+}
+
+impl GraphicsFile {
+    /// The saved lighting quality, if the player ever chose one and it is still
+    /// a mode this build knows (`null` for a fresh profile, `None` again for a
+    /// word a future build wrote).
+    pub fn lighting_mode(&self) -> Option<crate::render::lighting::LightingMode> {
+        use crate::render::lighting::LightingMode;
+        match self.lighting.as_deref()?.trim().to_ascii_lowercase().as_str() {
+            "full" | "on" => Some(LightingMode::Full),
+            "hard" => Some(LightingMode::Hard),
+            "coarse" => Some(LightingMode::Coarse),
+            "compact" => Some(LightingMode::Compact),
+            _ => None,
+        }
+    }
+
+    pub fn set_lighting(&mut self, mode: crate::render::lighting::LightingMode) {
+        self.lighting = Some(format!("{mode:?}").to_ascii_lowercase());
+    }
+
+    /// The saved 1× edge treatment; an unreadable word loads the default.
+    pub fn smooth(&self) -> crate::render::subcell::Smooth {
+        crate::render::subcell::Smooth::parse(&self.smooth)
+            .unwrap_or_default()
+    }
+
+    pub fn set_smooth(&mut self, level: crate::render::subcell::Smooth) {
+        self.smooth = level.as_str().to_string();
+    }
+
+    /// The saved shake share, clamped into `0.0..=1.0` (a hand-edited file, or
+    /// a NaN, loads the default).
+    pub fn shake(&self) -> f32 {
+        if self.shake_scale.is_finite() {
+            self.shake_scale.clamp(0.0, 1.0)
+        } else {
+            crate::game::world::SHAKE_SCALE
+        }
+    }
+
+    pub fn set_shake(&mut self, scale: f32) {
+        self.shake_scale = if scale.is_finite() {
+            scale.clamp(0.0, 1.0)
+        } else {
+            crate::game::world::SHAKE_SCALE
+        };
+    }
+
+    /// Clamp what a hand-edited file can get wrong (see
+    /// [`ScoreTable::normalize`]).
+    fn normalize(&mut self) {
+        if self.lighting_mode().is_none() {
+            self.lighting = None;
+        }
+        self.set_smooth(self.smooth());
+        self.set_shake(self.shake());
+    }
+}
+
 /// The persisted control configuration: scheme, per-scheme bindings and the
 /// pad tuning. Missing (an old `scores.json`) loads the defaults.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -400,6 +503,13 @@ pub struct ScoreTable {
     /// the default way to level up.
     #[serde(default)]
     pub auto_pick: bool,
+    /// **The Graphics page's** render-only preferences (lighting quality, light
+    /// effects, 1× smoothing, the foreground layer, the glyph particles and the
+    /// camera's shake share). Missing in any file written before the page
+    /// existed, which loads today's defaults; `null` for a field a future build
+    /// adds is that field's default too.
+    #[serde(default)]
+    pub graphics: GraphicsFile,
     // A build before batch nine saved a `detail: bool` here (the DETAIL
     // option). There is no option any more — the finest block glyphs the
     // terminal is known to draw are always used — so the field is gone; serde
@@ -429,6 +539,7 @@ impl Default for ScoreTable {
             library: Library::default(),
             controls: ControlsFile::default(),
             auto_pick: false,
+            graphics: GraphicsFile::default(),
             meta: crate::meta::MetaProfile::default(),
         }
     }
@@ -549,6 +660,10 @@ impl ScoreTable {
             self.controls.deadzone = crate::controls::DEFAULT_DEADZONE;
         }
         self.controls.deadzone = self.controls.deadzone.clamp(0.05, 0.9);
+        // The Graphics page: clamp the shake share a hand-edited file wrote and
+        // drop a word this build cannot read, so the page always shows a value
+        // it can cycle.
+        self.graphics.normalize();
         // The nest: drop unknown track keys and clamp a hand-edited level into
         // its track's range, so a corrupt save can never over-upgrade a run.
         self.meta.normalize();
