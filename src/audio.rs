@@ -302,11 +302,16 @@ pub enum Sfx {
     Splash,
     /// Heavier slosh (dash through water, heavy body landing, ~160 ms).
     SplashBig,
+    // ---- The Drake (Sewer guest): quack tell and woody beak peck ----
+    /// One dry nasal quack (~140 ms) when a peck volley's tell starts.
+    Quack,
+    /// Short hard woody tap (~50 ms) per peck that lands or misses.
+    Peck,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 167] = [
+    pub const ALL: [Sfx; 169] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -498,6 +503,9 @@ impl Sfx {
         // Wet floor puddles.
         Sfx::Splash,
         Sfx::SplashBig,
+        // The Drake (Sewer guest).
+        Sfx::Quack,
+        Sfx::Peck,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -670,6 +678,8 @@ impl Sfx {
             Sfx::ApproachWasher => "APPROACH_WASHER",
             Sfx::Splash => "SPLASH",
             Sfx::SplashBig => "SPLASH_BIG",
+            Sfx::Quack => "QUACK",
+            Sfx::Peck => "PECK",
         }
     }
 
@@ -830,6 +840,8 @@ impl Sfx {
             | Sfx::ApproachWasher => APPROACH_TAKES,
             // Wet-floor footstep splashes: three slight variations to avoid fatigue.
             Sfx::Splash | Sfx::SplashBig => 3,
+            // The Drake: three slight pitch/formant takes for quack and peck.
+            Sfx::Quack | Sfx::Peck => 3,
         }
     }
 
@@ -986,6 +998,9 @@ impl Sfx {
             | Sfx::ApproachWasher => 0,
             // Puddle splashes: lowest priority so footsteps never mask combat.
             Sfx::Splash | Sfx::SplashBig => 0,
+            // The Drake: quack is an enemy attack tell; peck stays under hits.
+            Sfx::Quack => 1,
+            Sfx::Peck => 0,
         }
     }
 
@@ -995,6 +1010,7 @@ impl Sfx {
     pub(crate) fn min_spacing_ms(self) -> u64 {
         match self {
             Sfx::Splash | Sfx::SplashBig => 70,
+            Sfx::Peck => 60,
             _ => 0,
         }
     }
@@ -10300,6 +10316,125 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.finish(0.23, 1.15, 3.5, 24.0)
         }
+
+        // The Drake's tell (~140 ms): one dry nasal reedy bark — falling saw/pulse
+        // (420 -> 295 Hz) through a narrow 1.4 kHz formant band-pass with a rough
+        // amplitude wobble and subtle lower throat body.
+        Sfx::Quack => {
+            const PITCH: [f32; 3] = [1.0, 0.91, 1.09];
+            const DUTY: [f32; 3] = [0.28, 0.22, 0.34];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.140);
+            // Main nasal reedy formant (~1.4 kHz narrow band-pass).
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.132,
+                f0: 420.0 * p,
+                f1: 295.0 * p,
+                pitch_pow: 0.72,
+                wave: Wave::Saw,
+                gain: 0.68,
+                attack_s: 0.005,
+                decay_pow: 1.05,
+                filter: FilterMode::BandPass,
+                fc0: 1520.0 * p,
+                fc1: 1240.0 * p,
+                q: 3.6,
+                vib_hz: 44.0,
+                vib_depth: 0.032,
+                trem_hz: 54.0,
+                trem_depth: 0.42,
+            });
+            // Lower bill/throat resonance (~840 -> 630 Hz) for dry waterfowl body.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.125,
+                f0: 420.0 * p,
+                f1: 295.0 * p,
+                pitch_pow: 0.72,
+                wave: Wave::Pulse(DUTY[v]),
+                gain: 0.38,
+                attack_s: 0.0045,
+                decay_pow: 1.15,
+                filter: FilterMode::BandPass,
+                fc0: 840.0 * p,
+                fc1: 630.0 * p,
+                q: 2.5,
+                trem_hz: 54.0,
+                trem_depth: 0.34,
+                ..Default::default()
+            });
+            // Short dry reed air chiff at onset.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.068,
+                pink: true,
+                gain: 0.18,
+                attack_s: 0.003,
+                decay_pow: 1.6,
+                filter: FilterMode::BandPass,
+                fc0: 1650.0 * p,
+                fc1: 1100.0 * p,
+                q: 2.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.30, 1.35, 2.2, 18.0)
+        }
+
+        // The Drake's peck (~50 ms): a short dry woody tap — crisp band-passed
+        // noise click + a ~900 Hz triangle ping decaying in ~30 ms + light wood body.
+        Sfx::Peck => {
+            const PITCH: [f32; 3] = [1.0, 1.09, 0.91];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.050);
+            // Short filtered noise click (beak tip impact).
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.015,
+                pink: false,
+                gain: 0.56,
+                attack_s: 0.0012,
+                decay_pow: 2.1,
+                filter: FilterMode::BandPass,
+                fc0: 2400.0 * p,
+                fc1: 1150.0 * p,
+                q: 2.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Dry woody ~900 Hz ping decaying in ~30 ms.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.036,
+                f0: 940.0 * p,
+                f1: 830.0 * p,
+                pitch_pow: 0.75,
+                wave: Wave::Triangle,
+                gain: 0.64,
+                attack_s: 0.0012,
+                decay_pow: 1.80,
+                filter: FilterMode::BandPass,
+                fc0: 1060.0 * p,
+                fc1: 860.0 * p,
+                q: 1.6,
+                ..Default::default()
+            });
+            // Subtle woody knock body underneath.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.044,
+                f0: 360.0 * p,
+                f1: 210.0 * p,
+                pitch_pow: 0.65,
+                wave: Wave::Sine,
+                gain: 0.34,
+                attack_s: 0.0015,
+                decay_pow: 1.70,
+                ..Default::default()
+            });
+            m.finish(0.28, 1.20, 1.5, 10.0)
+        }
     }
 }
 
@@ -13483,6 +13618,42 @@ mod tests {
         assert!(picker.allow_play(Sfx::SplashBig, 180));
         assert!(picker.allow_play(Sfx::Hit, 100));
         assert!(picker.allow_play(Sfx::Hit, 101));
+    }
+
+    #[test]
+    fn drake_quack_and_peck_render_quiet_finite_and_rate_limited() {
+        let tell_ref = peak(&sfx_samples(Sfx::Warn));
+        let hornet_ref = peak(&sfx_samples(Sfx::HornetBuzz));
+        let ref_pk = tell_ref.min(hornet_ref);
+
+        for (sfx, expected_ms) in [(Sfx::Quack, 140.0f32), (Sfx::Peck, 50.0f32)] {
+            assert_eq!(sfx.variant_count(), 3, "{sfx:?} should provide 3 variants");
+            for v in 0..sfx.variant_count() {
+                let s = sfx_variant_samples(sfx, v);
+                assert!(!s.is_empty(), "{sfx:?} v{v} must be non-empty");
+                assert!(
+                    s.iter().all(|x| x.is_finite() && x.abs() <= 1.0),
+                    "{sfx:?} v{v} must be finite and within [-1, 1]"
+                );
+                let dur_ms = s.len() as f32 * 1000.0 / SR_F;
+                assert!(
+                    (dur_ms - expected_ms).abs() <= 10.0,
+                    "{sfx:?} v{v} duration {dur_ms:.1} ms drifted from ~{expected_ms:.0} ms"
+                );
+                let pk = peak(&s);
+                assert!(
+                    pk <= ref_pk + 1e-4,
+                    "{sfx:?} v{v} peak {pk:.4} exceeded enemy-tell reference ({ref_pk:.4})"
+                );
+            }
+        }
+
+        // Peck is rate-limited so overlapping volleys cannot stack/phase.
+        assert!(Sfx::Peck.min_spacing_ms() >= 50);
+        let picker = VariantPicker::new();
+        assert!(picker.allow_play(Sfx::Peck, 100));
+        assert!(!picker.allow_play(Sfx::Peck, 120));
+        assert!(picker.allow_play(Sfx::Peck, 100 + Sfx::Peck.min_spacing_ms()));
     }
 
     /// The Flatbed is not a campaign floor, so the `Theme::all()` music tests
