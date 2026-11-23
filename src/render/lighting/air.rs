@@ -99,6 +99,10 @@ const AIR_MAX: u16 = 40 * 256;
 /// flat cells instead of repainting a band every frame.
 const AIR_STEP_LOW: i32 = 4;
 const FOG_STEP_LOW: i32 = 16;
+/// The same idea at truecolor, much finer: output steps of the interpolated
+/// air (levels) and fog (of 255), so a shallow wash keeps the encoder's runs.
+const AIR_STEP_OUT: i32 = 2;
+const FOG_STEP_OUT: i32 = 8;
 
 // The one theme whose drawn sconce wears a wire cage is the Sewer
 // (`fixtures::housing`: the caged amber bulkhead); `caged_sconce` keys on it.
@@ -421,6 +425,12 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
         for x in 0..w {
             let s = sx0 + x as i32 * step;
             let tx = (s & 0xFFFF) >> 8;
+            // Two cells share a horizontal weight, as the shade does.
+            let tx = if super::upsample::PAIR_X {
+                tx & !(2 * (256 / stride) - 1)
+            } else {
+                tx
+            };
             let x0 = (s >> 16).clamp(0, gw - 1) as usize;
             let x1 = ((s >> 16) + 1).clamp(0, gw - 1) as usize;
             // Bilinear weights, Q16; they sum to 65536 before the wall mask.
@@ -460,7 +470,13 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
                 // After the palette dither: flat steps, not a smooth wash.
                 air = air.map(|a| a / AIR_STEP_LOW * AIR_STEP_LOW);
             }
-            let fog = if low { fog / FOG_STEP_LOW * FOG_STEP_LOW } else { fog };
+            let fog = if low {
+                fog / FOG_STEP_LOW * FOG_STEP_LOW
+            } else {
+                // Truecolor: two-level air steps and 8/255 fog steps keep runs.
+                air = air.map(|a| a / AIR_STEP_OUT * AIR_STEP_OUT);
+                fog / FOG_STEP_OUT * FOG_STEP_OUT
+            };
             if air == [0, 0, 0] && fog == 0 {
                 continue;
             }

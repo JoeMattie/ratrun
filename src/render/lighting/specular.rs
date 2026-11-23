@@ -565,12 +565,26 @@ fn run(
                         } else {
                             normals.get(i).copied().unwrap_or([0, 0])
                         };
-                        let (nx, ny) = (i32::from(normal[0]), i32::from(normal[1]));
-                        let nz =
-                            i32::from(tables.nz[((nx * nx + ny * ny) >> 7).min(255) as usize]);
-                        let dot = nx * half[0] + ny * half[1] + nz * half[2];
-                        let index = (dot >> 7).clamp(0, (LUT - 1) as i32) as usize;
-                        add = highlight_add(i32::from(tables.lobe[slot][index]), energy, info.dom_rgb);
+                        // A flat, untagged face (a slab of floor or wall) takes
+                        // no sheen: its highlight would be one value for the
+                        // whole 4 px sample, and near a small light that
+                        // painted glowing slab-shaped boxes. The relief (grout,
+                        // cracks, edges) still catches the light.
+                        let flat_face =
+                            !creature && own == MaterialKind::Default && normal == [0, 0];
+                        if !flat_face {
+                            let (nx, ny) = (i32::from(normal[0]), i32::from(normal[1]));
+                            let nz = i32::from(
+                                tables.nz[((nx * nx + ny * ny) >> 7).min(255) as usize],
+                            );
+                            let dot = nx * half[0] + ny * half[1] + nz * half[2];
+                            let index = (dot >> 7).clamp(0, (LUT - 1) as i32) as usize;
+                            add = highlight_add(
+                                i32::from(tables.lobe[slot][index]),
+                                energy,
+                                info.dom_rgb,
+                            );
+                        }
                     }
                 }
                 // ---- the rim on a creature's silhouette ------------------

@@ -40,6 +40,25 @@ use crate::term::ColorDepth;
 /// tone curve below brings the peak back down softly.
 pub(super) const MUL_CEILING: i32 = 460;
 
+/// How far apart two taps' multipliers (`Q8`) and adds may be and still be
+/// shaded as flat blocks, and whether horizontally adjacent cell pairs share
+/// one interpolation weight. Both are byte budget, chosen by measurement
+/// (Sewer, 120x40, bot play at 5:00, bytes a frame; effects off is 55.3 k):
+///
+/// | near | pair | bytes |
+/// | --- | --- | --- |
+/// | exact | no | 101.7 k |
+/// | exact | yes | 79.9 k |
+/// | 12 | yes | 77.8 k |
+/// | 20 | yes | 71.7 k |
+///
+/// A smooth gradient over flat art gives every cell its own colour, so every
+/// cell needs its own SGR; pairs and near-flat blocks give the encoder runs
+/// back where the difference is not visible.
+const NEAR_MUL: i32 = 20;
+const NEAR_ADD: i32 = 5;
+pub(super) const PAIR_X: bool = true;
+
 /// Below this peak multiplier (`Q8.8`, 220 ≈ 0.86×) the tone curve is the
 /// identity, so ambient, shadow and ordinary pool light are untouched.
 pub(super) const KNEE: i32 = 220;
@@ -133,6 +152,19 @@ fn tone_sample(s: &Sample) -> Sample {
 #[inline]
 fn same(a: &Sample, b: &Sample) -> bool {
     a.mul == b.mul && a.add == b.add && a.tint == b.tint
+}
+
+/// Taps this close shade as flat blocks ([`NEAR_MUL`], [`NEAR_ADD`]): the
+/// step between two such blocks is under about five output levels on the
+/// dark floors, and a gradient that shallow costs a new colour on every cell
+/// of a flat run for nothing the eye can see.
+#[inline]
+fn near(a: &Sample, b: &Sample) -> bool {
+    a.tint == b.tint
+        && (0..3).all(|n| {
+            (i32::from(a.mul[n]) - i32::from(b.mul[n])).abs() <= NEAR_MUL
+                && (i32::from(a.add[n]) - i32::from(b.add[n])).abs() <= NEAR_ADD
+        })
 }
 
 /// The wall class of a sample (0 floor/props/bodies, 1 wall).
@@ -419,7 +451,7 @@ fn bilinear(
                 }
                 cols[sx * 2] = pair[0];
                 cols[sx * 2 + 1] = pair[1];
-                flat[sx] = ct == cb && same(&toned[it], &toned[ib]);
+                flat[sx] = ct == cb && near(&toned[it], &toned[ib]);
             }
         }
         let mut x = 0;
@@ -433,16 +465,24 @@ fn bilinear(
             let uniform = flat[l]
                 && flat[r]
                 && class(grid, tl) == class(grid, tr)
-                && same(&toned[tl], &toned[tr]);
+                && near(&toned[tl], &toned[tr]);
             if uniform {
-                // All four taps equal: the old composite's result exactly.
-                let sample = &toned[tl];
-                if low_colour {
-                    for (dx, pixel) in row[x..end].iter_mut().enumerate() {
-                        *pixel = palette_dither(sample.shade_exact(*pixel), depth, bx + dx, by);
+                // All four taps equal (or as good as): each pixel takes its own
+                // sample, which for equal taps is the old composite exactly.
+                let split = (((s0x + 1) * s).max(0) as usize).saturating_sub(ox).clamp(x, end);
+                for (lo, hi) in [(x, split), (split, end)] {
+                    if lo == hi {
+                        continue;
                     }
-                } else {
-                    sample.shade_run(&mut row[x..end]);
+                    let sample = &toned[own_row * gw + ((lo + ox) / stride).min(gw - 1)];
+                    if low_colour {
+                        for (dx, pixel) in row[lo..hi].iter_mut().enumerate() {
+                            *pixel =
+                                palette_dither(sample.shade_exact(*pixel), depth, lo + ox + dx, by);
+                        }
+                    } else {
+                        sample.shade_run(&mut row[lo..hi]);
+                    }
                 }
                 x = end;
                 continue;
@@ -470,6 +510,8 @@ fn bilinear(
                 for px in lo..hi {
                     let pbx = px + ox;
                     let wx = wx0 + (px - x) as i32 * dw;
+                    // Two cells share a horizontal weight (see `PAIR_X`).
+                    let wx = if PAIR_X { wx & !(2 * dw - 1) } else { wx };
                     let (hl, hr) = (256 - wx, wx);
                     let ws = hl * cl.w + hr * cr.w;
                     let sample = if ws <= 0 {
@@ -653,10 +695,12 @@ mod tests {
             m
         };
         let (new_step, old_step) = (max_step(&px), max_step(&old));
-        // Old: one hard 4 px stair (~94 per channel); new: a ramp in steps
-        // of a quarter of it.
+        // Old: one hard 4 px stair (~94 per channel); new: a ramp. Across a
+        // row it runs in cell pairs (`PAIR_X`), so the largest step is about
+        // half the old stair (a quarter without the pairing); down a column
+        // it is a quarter.
         assert!(old_step > 200, "old step {old_step}");
-        assert!(new_step * 3 < old_step, "new step {new_step} vs old {old_step}");
+        assert!(new_step * 10 < old_step * 6, "new step {new_step} vs old {old_step}");
     }
 
     #[test]
