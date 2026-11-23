@@ -42,6 +42,21 @@
 //! | `Hurt` | 0.45 s (0.90 s on a trap-sized hit) | — | — |
 //! | `Death` | 1.80 s | — | — |
 //!
+//! **Batch 13: the stagger is budgeted, and the cat has a closing leap.**
+//! `Hurt` is control, so it goes through the shared control budget
+//! ([`Boss::grant_control`], `mod.rs`): the durations above are what the cat
+//! *asks* for, the granted remainder (at most 0.30 s per 4 s window) is what it
+//! gets, and a burst landing inside a committed beat (`Crouch`, `Pounce`,
+//! `SwipeWindup`, `Swipe`, `Roar`) staggers nothing at all. Before that, a
+//! max-rank Spiked Tail (44 + 18 on one tick every 0.85 s), one Tail Thrash
+//! sweep (52 at rank 5, three in a second) or one Laser sweep (5 × 10 in a
+//! tick) re-tripped `Hurt` before any 0.55 s wind-up could finish, so the
+//! jaguar never attacked. The second half of the same report is reach: the rat
+//! stalks back at 58–114 px/s from 80–120 px while the cat walks at 24 px/s and
+//! its band ends at 95 px, so `start_attack` has a **closing pounce** — once the
+//! shared pursuit timer says the rat has held its distance for 3 s, the cat
+//! leaps the band's length at it (`CLOSING_POUNCE_MAX`).
+//!
 //! ## Per-kind scratch
 //!
 //! [`BossController`] is zero-sized; the cat keeps its memory in the shared
@@ -137,6 +152,20 @@ const FANG_PULSES: [f32; 2] = [0.42, 0.68];
 const FANG_COUNT: usize = 8;
 const FANG_SPEED: f32 = 65.0;
 const FANG_SPAWN_OFFSET: f32 = 4.0;
+
+/// How far the closing pounce may be aimed from (batch 13).
+///
+/// The rat outruns the cat: `STALK_SPEED_P1` is 24 px/s against the rat's
+/// 58-114 px/s, and the Spiked Tail lashes from 80-120 px while the pounce band
+/// ends at `POUNCE_MAX_DIST` 96. A rat that holds 100 px therefore sat outside
+/// every one of the cat's attacks for the whole fight — the reported "apex
+/// jaguar is never able to attack". A cat that has spent
+/// [`OUT_OF_RANGE_SECS`](super::OUT_OF_REACH_SECS) in `Stalk` outside its band
+/// leaps the band's length at the rat anyway: `pounce_landing` clamps the leap
+/// to 96 px, so this lands it inside the band and the next beat is a real
+/// pounce. The cap keeps it from teleporting across a room at a rat it cannot
+/// see.
+const CLOSING_POUNCE_MAX: f32 = 220.0;
 
 /// One tick of damage at (or above) this staggers the cat; double it is the
 /// art's extended "trap stun" (`0.90 s`). Absolute, not a fraction of the
@@ -436,6 +465,18 @@ fn start_attack(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput
         enter_roar(ctx, boss, out);
         return true;
     }
+    // 4. The closing pounce (batch 13, see `CLOSING_POUNCE_MAX`): the rat has
+    //    held whip or beam range for `OUT_OF_REACH_SECS`, so the cat leaps the
+    //    band's length at it instead of stalking forever. `enter_crouch`
+    //    already clamps the landing to the art's band, and both the landing
+    //    footprint and the rat's escape lane are still required.
+    if boss.out_of_reach > 0.0
+        && distance <= CLOSING_POUNCE_MAX
+        && ctx.los_clear(boss.pos, ctx.player_pos, PLAYER_RADIUS)
+        && enter_crouch(ctx, boss, out)
+    {
+        return true;
+    }
     false
 }
 
@@ -473,6 +514,11 @@ impl BossController for CatController {
         boss.scratch[S_LAST_HP] = boss.hp;
         boss.scratch[S_ROAR_CD] = (boss.scratch[S_ROAR_CD] + ctx.dt).min(ROAR_COOLDOWN + 1.0);
         let phase2 = boss.phase >= 2;
+        // A leap in flight is not staggered either: the art's airborne window
+        // (`Pounce` before the landing) is out of a ground weapon's reach, and
+        // the stagger would teleport the pose out from under the arc.
+        let airborne = state == BossCatState::Pounce
+            && boss.progress() < art_boss_cat::POUNCE_LAND_PROGRESS;
 
         // ---- crossing half health is the roar set piece (it outranks a
         //      stagger: the phase change must always read) ------------------
@@ -486,22 +532,32 @@ impl BossController for CatController {
         }
 
         // ---- heavy burst damage staggers; chip hits only flash ------------
-        let airborne = state == BossCatState::Pounce
-            && boss.progress() < art_boss_cat::POUNCE_LAND_PROGRESS;
-        if burst >= HURT_BURST
-            && !airborne
-            && !matches!(state, BossCatState::Hurt | BossCatState::Roar)
-        {
-            let duration = if burst >= HURT_STUN_BURST {
+        //
+        // Batch 13: a stagger is *control*, so it is paid for out of the shared
+        // budget (`Boss::grant_control`). Two rules come with that and both are
+        // the fix for "with certain weapons apex jaguar is never able to
+        // attack": the cat may not be staggered inside a committed beat (a
+        // wind-up that is cancelled can never fire — a max-rank Spiked Tail
+        // lands 44 + 18 on one tick every 0.85 s, and one Tail Thrash sweep is
+        // 52 at L5 three times a second, so every 0.55 s `SwipeWindup` and every
+        // 0.95 s `Crouch` died on the tick it started), and it may not be
+        // staggered more than `CONTROL_BUDGET_SECS` in a window. The art's
+        // `HURT_DURATION` is what we ask for; we enter the pose for what the
+        // budget granted.
+        if burst >= HURT_BURST && !airborne {
+            let want = if burst >= HURT_STUN_BURST {
                 2.0 * art_boss_cat::HURT_DURATION
             } else {
                 art_boss_cat::HURT_DURATION
             };
-            boss.flags = F_READY;
-            boss.target = ctx.player_pos;
-            boss.set_state(BossState::Cat(BossCatState::Hurt), duration);
-            out.cue(BossCue::CatHurt);
-            return;
+            let granted = boss.grant_control(want);
+            if granted > 0.0 {
+                boss.flags = F_READY;
+                boss.target = ctx.player_pos;
+                boss.set_state(BossState::Cat(BossCatState::Hurt), granted);
+                out.cue(BossCue::CatHurt);
+                return;
+            }
         }
 
         match state {
@@ -946,20 +1002,24 @@ mod tests {
             "the roar settles back into stalk"
         );
 
-        // A trap-sized hit staggers; the extended stun lasts 0.90 s.
+        // A trap-sized hit staggers. The cat *asks* for the art's
+        // `HURT_DURATION` (0.45 s, or 0.90 s on a trap-sized burst) and the
+        // shared control budget pays at most `CONTROL_BUDGET_SECS` of it —
+        // batch 13's stun budget, so no weapon cadence in the game can keep the
+        // jaguar out of every wind-up (see `mod.rs`, "The control budget").
         let mut c = Cat::new(6);
         c.tick();
         c.edit(|boss| boss.hp -= 60.0);
         c.tick();
         let hurt = c.boss();
         assert_eq!(hurt.state, BossState::Cat(BossCatState::Hurt));
-        assert_eq!(hurt.duration, art_boss_cat::HURT_DURATION);
+        assert_eq!(hurt.duration, CONTROL_BUDGET_SECS);
 
         let mut c = Cat::new(7);
         c.tick();
         c.edit(|boss| boss.hp -= 120.0);
         c.tick();
-        assert_eq!(c.boss().duration, 2.0 * art_boss_cat::HURT_DURATION);
+        assert_eq!(c.boss().duration, CONTROL_BUDGET_SECS);
 
         // Death is the art's collapse.
         let mut c = Cat::new(8);

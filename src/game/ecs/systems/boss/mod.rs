@@ -67,6 +67,48 @@
 //! * [`Boss::invuln`] / [`Boss::damage_mult`] — vulnerable/invulnerable windows.
 //! * [`Boss::hit_shapes`] — the art-defined hit shapes for player damage.
 //! * [`Boss::target_points`] — the targetable points for auto-aim (P4).
+//! * [`Boss::grant_control`] / [`Boss::shove`] — the boss **control budget**
+//!   (batch 13, see below).
+//!
+//! # The control budget (batch 13: no boss may be stun-locked)
+//!
+//! A player weapon may hurt a boss, slow it a little and nudge it a few pixels;
+//! it may not take the fight away from it. Two rules, both enforced here so
+//! every kind inherits them and no weapon file has to know about them:
+//!
+//! 1. **A committed beat is never touched.** Once a boss leaves its neutral
+//!    state ([`BossKind::initial_state`]) for a tell, a wind-up, the strike or
+//!    the recovery that follows it, nothing a player weapon does may cancel it,
+//!    restart it or displace the body. [`Boss::committed`] is that test;
+//!    [`Boss::grant_control`] and [`Boss::shove`] both refuse while it holds.
+//! 2. **Control has a hard budget.** A boss may spend at most
+//!    [`CONTROL_BUDGET_SECS`] (0.30 s) of stagger in any
+//!    [`CONTROL_WINDOW_SECS`] (4 s) window, and be displaced at most
+//!    [`SHOVE_PER_HIT_PX`] (4 px) a hit and [`SHOVE_PER_SEC_PX`] (12 px) a
+//!    second. A controller asks for the *art's* duration and gets back what the
+//!    budget can pay ([`Boss::grant_control`] returns the granted seconds, 0 =
+//!    refused); `resolve_hazards` is untouched, so hazards already painted
+//!    always finish.
+//!
+//! The measured failure this exists for: the Apex Jaguar's `Hurt` beat was
+//! re-tripped by any 55-damage tick (`cat::HURT_BURST`), and a max-rank Spiked
+//! Tail (44 lash + 18 burst on the same tick, every 0.85 s) or one Tail Thrash
+//! sweep (52 at L5, three sweeps in a second) clears that on every swing. Every
+//! `SwipeWindup` (0.55 s) and every `Crouch` (0.95 s) was cancelled before it
+//! could fire, so the cat never attacked at all. The same rule now also covers
+//! the Sweeper's poise hop, which could cancel a rake.
+//!
+//! # The pursuit rule (a kited boss closes instead of idling)
+//!
+//! A rat outruns most bosses (58-114 px/s against the cat's 24 px/s stalk) and
+//! the reach of its own weapons is longer than the boss's engage range (the
+//! Spiked Tail lashes at 80-120 px, the Laser beam reaches 54-86 px, the
+//! jaguar's pounce band ends at 95 px). A boss that cannot reach its target in
+//! [`OUT_OF_REACH_SECS`] (3 s) of its own neutral state stops idling: it
+//! **sprints** at [`PURSUIT_SPEED`] and, when the line is body-passable,
+//! **leaps** ([`LEAP_SPEED`] for [`LEAP_SECS`], [`LEAP_COOLDOWN`] between
+//! leaps). The Cat additionally uses its own `Crouch`/`Pounce` art as a closing
+//! leap (see `cat::start_attack`).
 //!
 //! # Determinism
 //!
@@ -758,6 +800,44 @@ impl BossKind {
             BossKind::Hawk => art_boss_hawk::CULL_MARGIN,
             BossKind::Cobra => art_boss_cobra::CULL_MARGIN,
         }
+    }
+
+    /// The distance (px) at which this kind's own attacks engage.
+    ///
+    /// Beyond it the boss is not fighting, it is following, and the shared
+    /// pursuit rule takes over ([`OUT_OF_REACH_SECS`]). The numbers are the
+    /// art's own reach constants, rounded out by a body radius: the Cat's
+    /// pounce band ends at `art_boss_cat::POUNCE_MAX_DIST` (96), the Sweeper's
+    /// dustpan at 56, the mower's scan cone is 72, the Cobra strikes at 92, the
+    /// MegaRat shrieks at 132, the Redtail darts at 118, the Magpie's gust
+    /// covers 190.
+    pub fn engage_range(self) -> f32 {
+        match self {
+            // `POUNCE_MAX_DIST` 96, less the one px the band test allows.
+            BossKind::Cat => 95.0,
+            BossKind::Broom => 64.0,
+            BossKind::Mower => 80.0,
+            BossKind::Mangle => 64.0,
+            BossKind::NightEdition => 96.0,
+            // A gust reaches 190 px, so the bird is *always* in range.
+            BossKind::Magpie => 190.0,
+            BossKind::HorseshoeCrab => 96.0,
+            BossKind::MegaRat => 132.0,
+            BossKind::Hawk => 118.0,
+            BossKind::Cobra => 116.0,
+        }
+    }
+
+    /// Does this kind close a gap with an art move of its own instead of the
+    /// shared pursuit leap?
+    ///
+    /// The Cat's `Crouch`/`Pounce` already is a leap and its controller drives
+    /// it (`cat::start_attack`'s closing pounce), so the shared leap would be a
+    /// second, art-less version of the same thing. Every other kind gets the
+    /// shared one.
+    #[inline]
+    pub fn own_gap_closer(self) -> bool {
+        matches!(self, BossKind::Cat)
     }
 
     /// The zero-sized controller for this kind.
@@ -1477,6 +1557,58 @@ pub struct BossProjectile {
 // Boss component
 // ============================================================================
 
+// ---- the control budget (see the module docs) ------------------------------
+
+/// Seconds of stagger a boss may be given inside one [`CONTROL_WINDOW_SECS`]
+/// window. The budget is a hard cap, not a rate: a controller that asks for
+/// more gets the remainder (and nothing once the window is spent).
+///
+/// It is one fixed window, anchored at the first grant, not a sliding one: a
+/// sliding window would let a fast weapon pay itself out of the next 4 s and
+/// still read as "under budget" on the tick it locked the boss out of a tell.
+pub const CONTROL_BUDGET_SECS: f32 = 0.30;
+/// Length of that window (s).
+///
+/// The brief: "at most 0.3 s of control per 4 s". 0.3 / 4 is 7.5 %, i.e. a
+/// boss keeps 92.5 % of its fight against any build in the game. The old cat
+/// `Hurt` beat was 0.45 s (0.90 s on a trap-sized burst) requested every
+/// 0.33 s by a max-rank Tail Thrash, i.e. 100 %.
+pub const CONTROL_WINDOW_SECS: f32 = 4.0;
+/// A grant shorter than this is refused outright: a 0.02 s `Hurt` pose is a
+/// frame of noise, not a readable stagger, and it would still burn the window.
+pub const CONTROL_MIN_SECS: f32 = 0.12;
+
+/// Most px a single weapon hit may shove a boss.
+pub const SHOVE_PER_HIT_PX: f32 = 4.0;
+/// Most px a boss may be shoved inside one [`SHOVE_WINDOW_SECS`] window.
+pub const SHOVE_PER_SEC_PX: f32 = 12.0;
+/// Length of the shove window (s).
+pub const SHOVE_WINDOW_SECS: f32 = 1.0;
+
+// ---- the pursuit rule (see the module docs) -------------------------------
+
+/// Seconds of its own neutral state a boss may spend with the rat beyond
+/// [`BossKind::engage_range`] before it stops following and starts closing.
+pub const OUT_OF_REACH_SECS: f32 = 3.0;
+/// The sprint a pursuing boss moves at (px/s).
+///
+/// Faster than the fastest rat a build can buy (`Stats::move_speed` 58 px/s,
+/// 6 MoveSpeed stacks = 114 px/s), so the sprint always closes, and slower
+/// than the leap, so a boss that can see its target still prefers to jump it.
+pub const PURSUIT_SPEED: f32 = 132.0;
+/// The leap a pursuing boss uses when the straight line to the rat is
+/// body-passable (px/s).
+pub const LEAP_SPEED: f32 = 300.0;
+/// How long the leap lasts (s): `LEAP_SPEED * LEAP_SECS` is 90 px, which is
+/// the longest gap any weapon out-reaches the cat's pounce band by.
+pub const LEAP_SECS: f32 = 0.30;
+/// Seconds between leaps.
+pub const LEAP_COOLDOWN: f32 = 3.0;
+
+/// Seconds between two recentrings of the fight rectangle (see
+/// `boss_update_system`): one is plenty, since the rectangle is 34 x 28 cells.
+pub const RECENTRE_COOLDOWN: f32 = 6.0;
+
 /// The boss entity's authoritative state.
 #[derive(Component, Clone, Debug)]
 pub struct Boss {
@@ -1543,6 +1675,23 @@ pub struct Boss {
     /// [`BossKind::REJOIN_DIST`] and [`RELOCATE_AFTER_SECS`]): the framework
     /// walks an off-screen, stranded boss back into the fight.
     pub lost: f32,
+    /// Seconds of stagger spent in the current control window, and the window's
+    /// remaining length (0 = the next [`Boss::grant_control`] opens a fresh
+    /// one). See [`CONTROL_BUDGET_SECS`].
+    pub control_used: f32,
+    pub control_window: f32,
+    /// Px shoved in the current shove window, and its remaining length. See
+    /// [`SHOVE_PER_SEC_PX`].
+    pub shove_used: f32,
+    pub shove_window: f32,
+    /// Seconds of its own neutral state the boss has spent with the rat beyond
+    /// [`BossKind::engage_range`] (the pursuit trigger).
+    pub out_of_reach: f32,
+    /// Seconds of leap left, and the cooldown before the next one can start.
+    pub leap_t: f32,
+    pub leap_cd: f32,
+    /// Seconds before the fight rectangle may be recentred again.
+    pub recentre_cd: f32,
     pub hazards: Vec<BossHazard>,
 }
 
@@ -1583,6 +1732,14 @@ impl Boss {
             call_at: pos,
             call_kind: EnemyKind::Skitterer,
             lost: 0.0,
+            control_used: 0.0,
+            control_window: 0.0,
+            shove_used: 0.0,
+            shove_window: 0.0,
+            out_of_reach: 0.0,
+            leap_t: 0.0,
+            leap_cd: 0.0,
+            recentre_cd: RECENTRE_COOLDOWN,
             hazards: Vec::with_capacity(16),
         }
     }
@@ -1613,6 +1770,104 @@ impl Boss {
     #[inline]
     pub fn set_contact_damage(&mut self, damage: f32) {
         self.contact_damage = damage.max(0.0);
+    }
+
+    /// Is this state the kind's own "the rat staggered it" beat?
+    ///
+    /// Only the Cat ([`BossCatState::Hurt`]) and the Sweeper
+    /// ([`BroomBossState::Hurt`]) have one: a short, art-drawn pose the boss
+    /// owes when a single burst of damage lands. It is *not* committed — it is
+    /// already control — so it cannot be re-entered or extended, and it is
+    /// never a beat a player weapon may cancel again.
+    #[inline]
+    pub fn is_stagger_state(&self) -> bool {
+        matches!(
+            self.state,
+            BossState::Cat(BossCatState::Hurt) | BossState::Broom(BroomBossState::Hurt { .. })
+        )
+    }
+
+    /// Is the boss inside a committed beat — a tell, a wind-up, the strike or
+    /// the recovery after it?
+    ///
+    /// Every state except the kind's neutral one, its death beat and its own
+    /// stagger pose. The framework reads this before it lets a player weapon
+    /// cancel, restart or displace anything (see the module docs).
+    #[inline]
+    pub fn committed(&self) -> bool {
+        !self.dead
+            && !self.is_stagger_state()
+            && self.state != self.kind.initial_state()
+            && self.state != self.kind.death_state()
+    }
+
+    /// Ask for `secs` of control (a stagger) from a player weapon. Returns the
+    /// seconds granted: `secs` itself when the budget can pay all of it, the
+    /// remainder when it can pay some ([`CONTROL_MIN_SECS`] or more), and
+    /// **0.0** when the boss is committed, dead, or out of budget.
+    ///
+    /// The controller is expected to enter its stagger pose with the *granted*
+    /// duration, so a boss under sustained fire still gets its beat instead of
+    /// a pose nobody can read. See [`CONTROL_BUDGET_SECS`].
+    pub fn grant_control(&mut self, secs: f32) -> f32 {
+        // A stagger pose already playing is not re-tripped: it is control the
+        // boss is *already* under, and re-entering it would extend the window's
+        // spend by the back door.
+        if secs <= 0.0 || self.dead || self.is_stagger_state() || self.committed() {
+            return 0.0;
+        }
+        let left = if self.control_window > 0.0 {
+            (CONTROL_BUDGET_SECS - self.control_used).max(0.0)
+        } else {
+            CONTROL_BUDGET_SECS
+        };
+        let granted = secs.min(left);
+        if granted < CONTROL_MIN_SECS {
+            return 0.0;
+        }
+        if self.control_window <= 0.0 {
+            self.control_window = CONTROL_WINDOW_SECS;
+            self.control_used = 0.0;
+        }
+        self.control_used += granted;
+        granted
+    }
+
+    /// Shove the boss up to `want_px` along `dir`, through the large-body
+    /// collision test. Returns the px actually moved.
+    ///
+    /// A player weapon may not displace a boss in a committed beat, at most
+    /// [`SHOVE_PER_HIT_PX`] a hit and [`SHOVE_PER_SEC_PX`] in any
+    /// [`SHOVE_WINDOW_SECS`] window. A shove into a wall is spent, not banked.
+    pub fn shove(&mut self, level: &Level, dir: Vec2, want_px: f32) -> f32 {
+        if want_px <= 0.0 || self.dead || self.committed() {
+            return 0.0;
+        }
+        let left = if self.shove_window > 0.0 {
+            (SHOVE_PER_SEC_PX - self.shove_used).max(0.0)
+        } else {
+            SHOVE_PER_SEC_PX
+        };
+        let granted = want_px.min(SHOVE_PER_HIT_PX).min(left);
+        if granted <= 0.0 {
+            return 0.0;
+        }
+        if self.shove_window <= 0.0 {
+            self.shove_window = SHOVE_WINDOW_SECS;
+            self.shove_used = 0.0;
+        }
+        self.shove_used += granted;
+        let step = dir.normalized() * granted;
+        if step.len_sq() <= 0.0 {
+            return 0.0;
+        }
+        let radius = self.kind.body_radius();
+        if level.tiles.circle_clear(self.pos + step, radius, SizeClass::Large) {
+            self.pos += step;
+            granted
+        } else {
+            0.0
+        }
     }
 
     /// This state deals no body-contact damage at all (the art's `0` states).
@@ -4070,6 +4325,87 @@ fn smash_wall(level: &mut Level, at: (i32, i32)) {
     level.tiles.rebuild_masks();
 }
 
+/// Recentre the fight rectangle on a rat that has genuinely left it.
+///
+/// Three gates, all of them there to stop a kiting rat from churning the
+/// rectangle (see the long comment at the call site): the neutral beat (every
+/// hazard an attack queued was painted against the old rectangle), a rate limit
+/// ([`RECENTRE_COOLDOWN`]), and "the rat is not already in reach" — a rat the
+/// boss can attack is a fight, not a departure.
+fn recentre_the_fight(boss: &mut Boss, level: &Level, rat: Vec2) {
+    if boss.recentre_cd > 0.0 || boss.state != boss.kind.initial_state() {
+        return;
+    }
+    if (rat - boss.pos).len() <= boss.kind.engage_range() {
+        return;
+    }
+    if !rat_left_the_fight(boss.arena, rat) {
+        return;
+    }
+    boss.arena = level.fight_rect_around(rat);
+    boss.dock = level
+        .tiles
+        .nearest_open_center(boss.arena.center_world(), SizeClass::Large, 16)
+        .unwrap_or_else(|| boss.arena.center_world());
+    boss.recentre_cd = RECENTRE_COOLDOWN;
+}
+
+/// The pursuit rule: a boss that cannot reach its target for
+/// [`OUT_OF_REACH_SECS`] stops following and starts closing — a sprint, and a
+/// leap when the straight line is body-passable (see the module docs).
+///
+/// Runs before the controller, and only in the neutral beat: a boss that is
+/// mid-tell is fighting, not idling, and a controller's own art decides what its
+/// committed beats look like. The leap never draws from the rng, so it cannot
+/// perturb a controller's stream.
+fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
+    if boss.dead || boss.state != boss.kind.initial_state() {
+        // An attack beat is the boss fighting. The timer restarts when the beat
+        // ends, so a boss that attacks from range never accrues a pursuit.
+        boss.out_of_reach = 0.0;
+        boss.leap_t = 0.0;
+        return;
+    }
+    let to = ctx.player_pos - boss.pos;
+    let gap = to.len();
+    if boss.leap_t > 0.0 {
+        // Committed to the leap: a straight dash at [`LEAP_SPEED`], steered at
+        // the rat each tick so it cannot be side-stepped by a pixel.
+        boss.leap_t = (boss.leap_t - dt).max(0.0);
+        let dir = if gap > 1e-3 { to / gap } else { boss.facing };
+        if !move_boss(ctx, boss, dir, LEAP_SPEED) {
+            // A leap into a wall ends early (the slide still moved it).
+            boss.leap_t = 0.0;
+        }
+        return;
+    }
+    if gap <= boss.kind.engage_range() {
+        boss.out_of_reach = 0.0;
+        return;
+    }
+    boss.out_of_reach += dt;
+    if boss.out_of_reach < OUT_OF_REACH_SECS {
+        return;
+    }
+    let radius = boss.kind.body_radius();
+    if boss.leap_cd <= 0.0
+        && !boss.kind.own_gap_closer()
+        && walkable_line(ctx.level, boss.pos, ctx.player_pos, radius, SizeClass::Large)
+    {
+        boss.leap_t = LEAP_SECS;
+        boss.leap_cd = LEAP_COOLDOWN;
+        boss.out_of_reach = 0.0;
+        let dir = if gap > 1e-3 { to / gap } else { boss.facing };
+        move_boss(ctx, boss, dir, LEAP_SPEED);
+        return;
+    }
+    // No lane for a leap (a corner, a doorway): sprint along the flow field.
+    let seek = ctx.seek(boss);
+    if move_boss(ctx, boss, seek, PURSUIT_SPEED) && seek.len_sq() > 1e-6 {
+        boss.facing = seek.normalized();
+    }
+}
+
 /// Advance the boss: phase, controller, hazards, projectiles, death.
 #[allow(clippy::too_many_arguments)]
 pub fn boss_update_system(
@@ -4109,6 +4445,23 @@ pub fn boss_update_system(
         boss.invuln = (boss.invuln - dt).max(0.0);
         boss.contact_cd = (boss.contact_cd - dt).max(0.0);
         boss.slow_t = (boss.slow_t - dt).max(0.0);
+        // The control budget's two windows and the pursuit clocks (see the
+        // module docs). A window that runs out clears what it paid, so the next
+        // grant opens a fresh one.
+        if boss.control_window > 0.0 {
+            boss.control_window = (boss.control_window - dt).max(0.0);
+            if boss.control_window <= 0.0 {
+                boss.control_used = 0.0;
+            }
+        }
+        if boss.shove_window > 0.0 {
+            boss.shove_window = (boss.shove_window - dt).max(0.0);
+            if boss.shove_window <= 0.0 {
+                boss.shove_used = 0.0;
+            }
+        }
+        boss.leap_cd = (boss.leap_cd - dt).max(0.0);
+        boss.recentre_cd = (boss.recentre_cd - dt).max(0.0);
         boss.elapsed += dt;
 
         // Lethal hit: the damage system runs before this one, so the death
@@ -4219,13 +4572,19 @@ pub fn boss_update_system(
         // same reason: every hazard an attack queued was painted against the old
         // rectangle, so moving it mid-attack would leave the tell detached from
         // the shape that resolves.
-        if boss.state == boss.kind.initial_state() && rat_left_the_fight(boss.arena, player.pos) {
-            boss.arena = level.fight_rect_around(player.pos);
-            boss.dock = level
-                .tiles
-                .nearest_open_center(boss.arena.center_world(), SizeClass::Large, 16)
-                .unwrap_or_else(|| boss.arena.center_world());
-        }
+        //
+        // Batch 13 (the bosslock fix): the gate is now rate-limited and refuses
+        // while the boss is in reach. A kiting rat left the rectangle every
+        // neutral tick, so the rectangle — and, for the kinds that walk to
+        // `boss.dock` (the mower docks, the broom's stomp clamps to the
+        // rectangle), the *target floor the boss was walking to* — was rewritten
+        // 2-3 times a second, several metres away from where the fight was
+        // actually happening. Those kinds spent their neutral beats walking to a
+        // rectangle that had moved again by the time they arrived, which is a
+        // third way to starve a boss of its attacks. One recentre per
+        // [`RECENTRE_COOLDOWN`] is plenty (the rectangle is 34 x 28 cells), and
+        // a rat the boss can already reach is a fight, not a departure.
+        recentre_the_fight(&mut boss, &level, player.pos);
 
         // Rejoin rule: a boss that is off screen and has not closed on the rat
         // for [`RELOCATE_AFTER_SECS`] is walked back into the fight. A level
@@ -4331,6 +4690,25 @@ pub fn boss_update_system(
             }
         } else {
             fight.siege = 0.0;
+        }
+
+        // Pursuit: a rat that kites from beyond the boss's engage range is
+        // closed down (sprint, then leap) instead of followed forever. Runs
+        // before the controller so a controller's own neutral walk composes on
+        // top of it rather than fighting it.
+        {
+            let mut ctx = BossContext {
+                dt,
+                time: boss.elapsed,
+                player_pos: player.pos,
+                player_vel: player.vel,
+                player_radius: PLAYER_RADIUS,
+                arena: boss.arena,
+                level: &level,
+                flow: &flow,
+                rng: &mut fight.rng.0,
+            };
+            pursue(&ctx, &mut boss, dt);
         }
 
         // Controller tick. The block scopes the rng borrow so hazards can
