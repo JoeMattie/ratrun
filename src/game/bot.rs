@@ -2818,10 +2818,12 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         // to a maxed weapon later: `upgrade_value` adds +6 per level pick.
         WeaponKind::TailThrash => 9.5,
         WeaponKind::SonicSqueak => 9.0,
-        // Wave 3: the laser is a damage stream with a narrow arc (a good pick
-        // once a second weapon covers the sides); Super Dash is escape damage
-        // that also thins a chase, so it ranks with the panic buttons.
-        WeaponKind::LaserEyes => 8.5,
+        // Wave 3: the laser is a damage stream that closes on the aim line from
+        // both edges of its arc (and from rank four, crosses and keeps going),
+        // with the longest reach on the rack (batch 13: ×1.6, 54–86 px): a good
+        // pick once a second weapon covers the sides; Super Dash is escape
+        // damage that also thins a chase, so it ranks with the panic buttons.
+        WeaponKind::LaserEyes => 9.0,
         WeaponKind::SuperDash => 8.8,
         // Wave 3: Acid Rain is area denial that needs no aiming (a horde
         // weapon, like Tail Whip); Hantavirus needs a pack around the host to

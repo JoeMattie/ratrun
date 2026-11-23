@@ -61,11 +61,11 @@
 //!   host finds no neighbour in reach; [`dead_letter_system`] ticks the fuse and
 //!   hands the chain to the first eligible body ([`Infection::can_seal`] is set
 //!   by the tag, [`Infection::sealed`] enforces one packet per chain).
-//! - **Carbon Copy** — `Laser Eyes + Lens Cap`. "Record the facing and origin of
-//!   a completed sweep. On the next sweep a fixed afterimage at that spot
-//!   repeats it backwards for half damage. Keep one copy." `LaserFx` keeps the
-//!   recorded sweep and the replay state; `weapons_wave3b::laser_eyes_system`
-//!   fires the afterimage's pulses in reverse order at
+//! - **Carbon Copy** — `Laser Eyes + Lens Cap`. "Record the origin and facing
+//!   of a completed sweep. On the next sweep a fixed afterimage at that spot
+//!   repeats it for half damage. Keep one copy." `LaserFx` keeps the recorded
+//!   sweep and the replay state; `weapons_wave3b::laser_eyes_system` replays it
+//!   a beat later — the same inward-closing pair of beams — at
 //!   [`CARBON_COPY_DAMAGE`] × the recorded damage.
 //! - **Ripcord** — `Super Dash + Spring Heel`. "After the dash, its actual route
 //!   stays taut for 0.6 s, then snaps. Enemies on it take one dash hit and slide
@@ -3058,12 +3058,13 @@ mod tests {
         );
     }
 
-    /// **Carbon Copy**: the previous sweep replays from its own origin, the
-    /// other way round the arc, at half damage — and only one copy is kept.
+    /// **Carbon Copy**: the previous sweep replays from its own origin, at half
+    /// damage — both beams, the same inward-closing pair — and only one copy is
+    /// kept.
     #[test]
     fn carbon_copy_replays_the_last_sweep_backwards_at_half_damage() {
         use crate::game::ecs::systems::weapons_wave3b;
-        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 10 per hit, 54 px
+        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 10 per hit, 86.4 px
         let origin = w.player.pos;
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
