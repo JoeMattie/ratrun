@@ -112,6 +112,11 @@ use super::{
 /// found the shake distracting, so every effect's amplitude is cut to 65 % in
 /// this one place (the only place the offset is applied); durations are the
 /// simulation's and unchanged, and nothing simulated reads the camera.
+///
+/// This is the **default** now: the Graphics page's SCREEN SHAKE row writes
+/// [`World::shake_scale`], and the App hands it to each new world. Render-only
+/// either way — the offset is applied where the camera is built for a draw, and
+/// no system reads it.
 pub const SHAKE_SCALE: f32 = 0.65;
 
 pub struct World {
@@ -313,6 +318,11 @@ pub struct World {
     // ---- Render-only lighting & smoke (never touched by the sim) ---------
     pub lighting: LightingMode,
     pub(crate) lighting_depth: crate::term::ColorDepth,
+    /// The share of the simulation's shake that reaches the camera
+    /// ([`SHAKE_SCALE`] by default; the Graphics page's SCREEN SHAKE row, via
+    /// the App). Render-only: read where `draw_scene` builds the camera and
+    /// nowhere else, so no system can see it and no golden can move.
+    pub shake_scale: f32,
     pub smoke_enabled: bool,
     light_map: LightMap,
     smoke: SmokeLayer,
@@ -572,6 +582,7 @@ impl World {
 
             lighting: LightingMode::default_for_depth(crate::term::color_depth()),
             lighting_depth: crate::term::color_depth(),
+            shake_scale: SHAKE_SCALE,
             smoke_enabled: true,
             light_map: LightMap::new(),
             smoke: SmokeLayer::new(seed, theme),
@@ -2243,7 +2254,7 @@ impl World {
         } else {
             cam.y.clamp(0.0, arena.y - vh)
         };
-        cam += self.shake_ofs * SHAKE_SCALE;
+        cam += self.shake_ofs * self.shake_scale;
         self.cam = cam;
         self.light_map.begin_frame();
         let mut _s = crate::prof::scope(crate::prof::Stage::SceneFloor);
@@ -4037,7 +4048,8 @@ mod draw_tests {
     }
 
     /// The camera takes [`super::SHAKE_SCALE`] of the simulation's shake
-    /// offset, and the simulation's own number is untouched.
+    /// offset (or `World::shake_scale` when the Graphics page set one), and the
+    /// simulation's own number is untouched.
     #[test]
     fn the_camera_takes_a_scaled_share_of_the_shake() {
         let mut w = World::new(Theme::Sewer, 1);
@@ -4051,6 +4063,37 @@ mod draw_tests {
         assert!((moved.y + 4.0 * super::SHAKE_SCALE).abs() < 1e-4, "{moved:?}");
         assert_eq!(w.shake_ofs, Vec2::new(10.0, -4.0), "the sim's offset changed");
         assert_eq!(super::SHAKE_SCALE, 0.65);
+        // A new world starts at the default.
+        assert_eq!(w.shake_scale, super::SHAKE_SCALE);
+    }
+
+    /// The Graphics page's SCREEN SHAKE row: the camera takes exactly the share
+    /// the setting holds (0 %, 50 %, 65 %, 100 %), and the simulation's own
+    /// offset is never touched by it.
+    #[test]
+    fn the_shake_share_setting_scales_the_camera_only() {
+        let mut w = World::new(Theme::Sewer, 1);
+        let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut pb);
+        let still = w.cam;
+        w.shake_ofs = Vec2::new(10.0, -4.0);
+        for (scale, x, y) in [
+            (0.0_f32, 0.0_f32, 0.0_f32),
+            (0.5, 5.0, -2.0),
+            (super::SHAKE_SCALE, 6.5, -2.6),
+            (1.0, 10.0, -4.0),
+        ] {
+            w.shake_scale = scale;
+            w.draw(&mut pb);
+            let moved = w.cam - still;
+            assert!((moved.x - x).abs() < 1e-3, "{scale}: {moved:?}");
+            assert!((moved.y - y).abs() < 1e-3, "{scale}: {moved:?}");
+            assert_eq!(
+                w.shake_ofs,
+                Vec2::new(10.0, -4.0),
+                "{scale}: nothing simulated may read the setting"
+            );
+        }
     }
 
     /// A blank map with a 2 × 2 block of solid cells and one rat-hole cell to

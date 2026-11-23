@@ -2,6 +2,7 @@
 name = "ratrun"
 version = "0.2.0"
 edition = "2021"
+license = "MIT"
 description = "Rat Run — a terminal bullet-hell horde survivor built with ratatui"
 
 [features]

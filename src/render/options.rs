@@ -36,10 +36,15 @@ pub const RUMBLE_ROW: usize = 10;
 /// Wipe the nest (`crate::meta`): the bank and every permanent upgrade. It
 /// takes two presses (the row reads `WIPE`, then `CONFIRM?`).
 pub const RESET_ROW: usize = 11;
-pub const BACK_ROW: usize = 12;
+/// The **Graphics page** (`crate::render::graphics`): the render-only picture
+/// settings. It opens a sub-page the way CONTROLS does, so this row is marked
+/// "open" rather than showing a value.
+pub const GRAPHICS_ROW: usize = 12;
+pub const BACK_ROW: usize = 13;
 /// How many rows the screen has. (Sub-cell detail used to have a row here; it
-/// is always on now — see `crate::render::subcell` — so the plate lost one row.)
-pub const ROW_COUNT: usize = 13;
+/// is always on now — see `crate::render::subcell` — so the plate lost one row.
+/// The Graphics page's row is the one that took a row back.)
+pub const ROW_COUNT: usize = 14;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -73,6 +78,8 @@ pub enum Row {
     AutoPick,
     /// The nest's reset (appended last: the legacy rows keep their order).
     Reset,
+    /// The Graphics page: the same "opens a sub-page" row CONTROLS has.
+    Graphics,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -89,6 +96,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Deadzone,
     Row::Rumble,
     Row::Reset,
+    Row::Graphics,
     Row::Back,
 ];
 
@@ -109,6 +117,7 @@ impl Row {
             Row::Rumble => "RUMBLE",
             Row::AutoPick => "AUTO-PICK",
             Row::Reset => "NEST",
+            Row::Graphics => "GRAPHICS",
         }
     }
 
@@ -280,6 +289,8 @@ fn value_text(view: &OptionsView, row: Row) -> String {
         // The value strip draws its own `‹ ›`, so the value itself is bare
         // (`CONTROLS ‹ OPEN › ›` was a doubled chevron).
         Row::Controls => "OPEN".to_string(),
+        // Same for the Graphics page's row.
+        Row::Graphics => "OPEN".to_string(),
         Row::Deadzone => format!("{:.2}", view.deadzone),
         Row::AutoPick => {
             if view.auto_pick {
@@ -684,10 +695,10 @@ mod tests {
     }
 
     /// On a 20-row terminal the plate's content is 18 rows and `legend + 2`
-    /// sits inside it, so the note has its blank row. With the DETAIL row gone
-    /// (thirteen rows) a 19-row terminal fits the note again: its content is
-    /// 17 rows, the legend lands on row 17 and the note on the plate's last
-    /// content row instead of over its bottom border.
+    /// sits inside it, so the note has its blank row. The GRAPHICS row took the
+    /// spare row back: at 19 rows the plate fits every row and the legend but
+    /// not the note, and the note is dropped rather than printed over the bottom
+    /// border (which is what this test is really guarding).
     #[test]
     fn the_note_stays_inside_the_plate_on_a_short_terminal() {
         for (w, h) in [(57u16, 19u16), (80, 19), (57, 20), (80, 24), (120, 40)] {
@@ -706,11 +717,20 @@ mod tests {
                 "{w}x{h}: text on the plate's bottom border: {border:?}"
             );
             let (text, _) = frame(w, h, &view(AUTO_PICK_ROW));
-            assert!(
-                text.contains("chests still open their card"),
-                "{w}x{h}: the auto-pick note does not fit its own plate:\n{text}"
-            );
-            assert!(text.contains("Esc back"), "{w}x{h}: legend missing");
+            if h >= 20 {
+                assert!(
+                    text.contains("chests still open their card"),
+                    "{w}x{h}: the auto-pick note does not fit its own plate:\n{text}"
+                );
+                assert!(text.contains("Esc back"), "{w}x{h}: legend missing");
+            } else {
+                // Nineteen rows: the legend is the last content row and there is
+                // no room for a note, so none is drawn (see the doc above).
+                assert!(
+                    !text.contains("chests still open their card"),
+                    "{w}x{h}: the note should be dropped at 19 rows:\n{text}"
+                );
+            }
         }
     }
 
