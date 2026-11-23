@@ -289,6 +289,9 @@ pub struct DirectorConsole<'w> {
 pub struct DirectorIds<'w> {
     pub next_id: ResMut<'w, NextSpawnId>,
     pub next_enemy_id: ResMut<'w, NextEnemyId>,
+    /// The guest's clock (the Drake): bundled here because the director is at
+    /// bevy's 16-parameter limit.
+    pub guest: ResMut<'w, DrakeSpawner>,
 }
 
 #[cfg(test)]
@@ -329,9 +332,6 @@ pub fn director_system(
     mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
     mut ids: DirectorIds,
-    // The guest's clock (the Drake): permanent scratch, so a refusal on a tick
-    // costs one `Copy`.
-    mut guest: ResMut<DrakeSpawner>,
     // `&mut`: the approach boost below is the one write the director makes to a
     // living body (its speed scale, never its position or its rng).
     mut enemies: Query<(&SpawnId, &mut Enemy)>,
@@ -625,8 +625,12 @@ pub fn director_system(
     // The theme and clock gate is first: the other five floors and the first
     // two and a half minutes of the Sewer pay one compare a tick (nothing can
     // exist before 2:30, so the death clock starts empty and correct).
+    // It spends no roster slot and no live *budget*, but it does respect the
+    // hard entity cap (and with it the slot the cap reserves for the boss): a
+    // guest must never be the body that crowds the boss out.
     if level.theme == Theme::Sewer
         && curve >= crate::game::ecs::systems::drake::FROM_CLOCK
+        && enemies.iter_mut().count() < cap
     {
         let live_drakes = enemies
             .iter_mut()
@@ -644,8 +648,8 @@ pub fn director_system(
             live_drakes,
             hp_mult: director::horde_hp_mult_for(difficulty.0, elapsed),
             mods,
-            spawner: &mut guest,
-            scratch: &mut *scratch,
+            spawner: &mut ids.guest,
+            scratch: &mut scratch,
             rng: &mut rng.0,
             next_id: &mut ids.next_id,
             next_enemy_id: &mut ids.next_enemy_id,
@@ -2672,6 +2676,10 @@ mod tests {
             // And it only ever spawned its own cast.
             let floor = crate::game::roster::floor(theme);
             for kind in kinds {
+                // The Drake is the Sewer's guest: on no roster slot by design.
+                if kind == EnemyKind::Drake && theme == Theme::Sewer {
+                    continue;
+                }
                 assert!(
                     floor.slot_of(kind).is_some(),
                     "{theme:?} ran the {:?} roster but spawned {kind:?}",

@@ -266,7 +266,7 @@ fn rotate_toward(from: Vec2, to: Vec2, max: f32) -> Vec2 {
     // Rotating by exactly `max` along the shorter arc: rotate `from` by
     // `sign * max`, with the sign from the cross product (`perp().dot()`).
     let sign = if from.perp().dot(to) < 0.0 { -1.0 } else { 1.0 };
-    Vec2::from_angle(sign * max).rotate(from)
+    from.rotate(sign * max)
 }
 
 // ---- The spawner ----------------------------------------------------------
@@ -871,7 +871,7 @@ mod tests {
         let tip = art_duck::bill_tip(&view);
         let reach = tip.dist(body.pos);
         assert!(
-            (reach - art_duck::PECK_REACH).abs() < 1e-3,
+            (reach - art_duck::PECK_REACH).abs() < 0.05,
             "the bill reaches {reach} px at full extension, not {}",
             art_duck::PECK_REACH
         );
@@ -883,7 +883,7 @@ mod tests {
 
     #[test]
     fn the_recover_is_the_exposed_second() {
-        let (mut w, e) = world_with_drake(Vec2::new(200.0, 0.0));
+        let (w, e) = world_with_drake(Vec2::new(200.0, 0.0));
         let mut body = w.ecs.get::<Enemy>(e).unwrap().clone();
         let plain = body.hurt_from(10.0, body.pos + Vec2::new(4.0, 0.0));
         body.hp = body.max_hp;

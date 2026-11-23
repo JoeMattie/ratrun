@@ -1937,7 +1937,7 @@ pub fn enemy_answer(k: EnemyKind) -> &'static str {
         EnemyKind::TollGull => "beak opens — reverse",
         EnemyKind::LooseBungee => "dotted cord — round the free end",
         // The guest.
-        EnemyKind::Drake => "lane locks, then 3 pecks — step off it",
+        EnemyKind::Drake => "lane locks, then 3 pecks",
     }
 }
 
