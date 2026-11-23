@@ -40,3 +40,4 @@ pub mod options;
 pub mod lighting;
 pub mod zoom;
 pub mod foreground;
+pub mod glyphfx;

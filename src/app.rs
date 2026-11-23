@@ -408,6 +408,12 @@ pub struct App {
     /// off for a session; the console `fx` command A/Bs them live).
     /// Render-only, like `foreground`.
     fx: bool,
+    /// Round-glyph particles over the playfield (`render::glyphfx`): dust motes,
+    /// hit sparks and rising bubbles. On by default (`RATRUN_GLYPHFX=0` pins it
+    /// off for a session; the console `glyphfx` command A/Bs it live).
+    /// Render-only, like `fx`, and drawn into the frame's cells rather than into
+    /// the cached picture, so it is not in `PictureKey`.
+    glyphfx: crate::render::glyphfx::GlyphFx,
     /// Options screen: the selected row (`0..options::ROW_COUNT`).
     options_row: usize,
     /// Where Esc/Back on the options screen returns to (`Title` or `Paused`).
@@ -613,6 +619,7 @@ impl App {
             smooth: crate::render::subcell::smooth_from_env(),
             foreground: crate::render::foreground::enabled_from_env(),
             fx: crate::render::lighting::fx_enabled_from_env(),
+            glyphfx: crate::render::glyphfx::GlyphFx::from_env(),
             options_row: options::MUSIC_ROW,
             options_return: Screen::Title,
             preview_cd: 0.0,
@@ -4121,6 +4128,37 @@ impl App {
         self.fx
     }
 
+    /// Turn the round-glyph particle layer on or off (the console `glyphfx`
+    /// command). Render-only: no run state, no save, no golden, and no world
+    /// redraw either — the layer is written into the frame's cells after the
+    /// cached picture is blitted, so the next frame carries the change on its
+    /// own.
+    pub(crate) fn set_glyphfx(&mut self, on: bool) {
+        self.glyphfx.set_enabled(on);
+    }
+
+    /// Whether the round-glyph particle layer is on.
+    pub(crate) fn glyphfx_enabled(&self) -> bool {
+        self.glyphfx.enabled()
+    }
+
+    /// Whether this screen draws the particle layer: only over a play field the
+    /// app is drawing anyway (live, or frozen under a plate), never over the
+    /// Library — whose specimens are their own cards — the title, or a plate
+    /// that owns the whole frame. The `--ai` wall never comes through
+    /// `draw_game` at all, so it cannot draw the layer either.
+    fn glyphfx_over_field(&self) -> bool {
+        match self.screen {
+            Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::Chest | Screen::Shop => {
+                true
+            }
+            // These plates can open over a paused run and keep its field.
+            Screen::Options | Screen::Controls => self.options_return == Screen::Paused,
+            Screen::Nest => self.nest_return == Screen::Paused,
+            _ => false,
+        }
+    }
+
     fn toggle_auto_pick(&mut self) {
         let on = !self.scores.auto_pick;
         self.scores.auto_pick = on;
@@ -5126,6 +5164,15 @@ impl App {
         }
 
         if let Some(w) = self.world.as_ref() {
+            // Round-glyph particles (`render::glyphfx`), written straight into
+            // the frame's cells: after the world picture, before every overlay,
+            // the HUD, the minimap and the cursor, so a mote can never cover one
+            // of them. Outside `PictureKey` — the picture it sits on is cached,
+            // the particles are not.
+            if self.glyphfx_over_field() {
+                self.glyphfx
+                    .draw(frame.buffer_mut(), game, &self.pixels, w);
+            }
             if matches!(self.screen, Screen::Playing) {
                 let _p = crate::prof::scope(crate::prof::Stage::Overlays);
                 overlay::draw_overlays(frame, game, w, &mut self.hud);
@@ -14255,6 +14302,80 @@ mod tests {
         h.app.set_foreground(true);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 2);
+    }
+
+    /// The round-glyph particle layer (`render::glyphfx`) is written straight
+    /// into the frame's cells, outside the cached picture: it never redraws the
+    /// world, a frozen field is cell-for-cell still, switching it off restores
+    /// that field exactly, and every cell it does touch carries one of its own
+    /// glyphs on the average of the two colours the cell had.
+    #[test]
+    fn the_glyph_layer_never_moves_the_frozen_field_and_off_restores_it() {
+        use crate::game::damage_number::DamageSource;
+
+        let mut h = paused_harness();
+        // A fresh hit a dozen cells to the right of the rat (one cell is one
+        // world pixel across at 1x): sparks have no lit-pool test, so plain
+        // floor cells are enough for the layer to have something to draw.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            let p = w.player.pos + Vec2::new(18.0 * w.zoom_scale.x, 0.0);
+            w.damage_numbers
+                .record(9001, p, 3.0, 12.0, false, DamageSource::Normal);
+        }
+
+        h.app.set_glyphfx(false);
+        h.frame(&[]);
+        let drawn = h.app.world_draws;
+        let off = h.terminal.backend().buffer().clone();
+        h.frame(&[]);
+        assert_eq!(
+            h.terminal.backend().buffer(),
+            &off,
+            "a frozen field with the layer off is still"
+        );
+
+        h.app.set_glyphfx(true);
+        h.frame(&[]);
+        let on = h.terminal.backend().buffer().clone();
+        assert_eq!(h.app.world_draws, drawn, "the layer never redraws the world");
+        let area = h.app.last_game;
+        let mut glyphs = 0;
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let (a, b) = (&off[(x, y)], &on[(x, y)]);
+                if a == b {
+                    continue;
+                }
+                let ch = b.symbol().chars().next().unwrap_or(' ');
+                assert!(
+                    crate::render::glyphfx::GLYPHS.contains(&ch),
+                    "only a particle glyph may change a cell, got {:?} at {x},{y}",
+                    b.symbol()
+                );
+                // The background is the mean of the cell's own two pixels.
+                let px = &h.app.pixels;
+                let (lx, ly) = ((x - area.x) as usize, (y - area.y) as usize);
+                let (top, bot) = (px.pixel_at(lx, ly * 2), px.pixel_at(lx, ly * 2 + 1));
+                let mean = Color::Rgb(
+                    ((u16::from(top.0) + u16::from(bot.0)) / 2) as u8,
+                    ((u16::from(top.1) + u16::from(bot.1)) / 2) as u8,
+                    ((u16::from(top.2) + u16::from(bot.2)) / 2) as u8,
+                );
+                assert_eq!(b.bg, mean, "a particle's cell background is the average");
+                glyphs += 1;
+            }
+        }
+        assert!(glyphs > 0, "the layer drew nothing at 1x on a lit floor");
+
+        h.app.set_glyphfx(false);
+        h.frame(&[]);
+        assert_eq!(
+            h.terminal.backend().buffer(),
+            &off,
+            "off restores the field cell for cell"
+        );
+        assert_eq!(h.app.world_draws, drawn, "and still nothing redrew the world");
     }
 
     /// The minimap's view box (and therefore the fog-of-war radar framing and
