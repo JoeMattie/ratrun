@@ -2921,10 +2921,11 @@ mod tests {
         assert!(!level_at_60.is_empty(), "no run reached the 60 s checkpoint");
         let mean_level = level_at_60.iter().sum::<f32>() / level_at_60.len() as f32;
         assert!(
-            // Batch twelve: level-ups cost four times the XP, and the first
-            // card lands at 40-80 s on a bare-Gnaw start (measured 1.2-1.6).
-            (1.0..3.0).contains(&mean_level),
-            "mean player level at 60 s is {mean_level:.1} (band 1.0-3): the XP curve moved"
+            // The release pass: the opening ramp (6 / 14 / 27 XP) and the
+            // longer bite put two to three cards in the first minute
+            // (measured 2.9-3.0).
+            (1.5..4.5).contains(&mean_level),
+            "mean player level at 60 s is {mean_level:.1} (band 1.5-4.5): the XP curve moved"
         );
         let mut firsts: Vec<f32> = all
             .iter()
@@ -2935,10 +2936,10 @@ mod tests {
         if !firsts.is_empty() {
             let median = firsts[firsts.len() / 2];
             assert!(
-                // Batch twelve: the first level costs 13 XP (it was 6) and the
-                // starting Gnaw is a bite; measured 41-77 s.
-                (20.0..110.0).contains(&median),
-                "first level-up median {median:.1} s (band 20-110 s): the opening moved"
+                // The release pass: the first level costs 6 XP again and the
+                // bite reaches 34 px; measured 16-19 s.
+                (8.0..45.0).contains(&median),
+                "first level-up median {median:.1} s (band 8-45 s): the opening moved"
             );
         }
     }

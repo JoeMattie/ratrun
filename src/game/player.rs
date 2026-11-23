@@ -168,25 +168,48 @@ pub fn base_xp_for_level(level: u32) -> u32 {
     cost.round().clamp(1.0, u32::MAX as f64) as u32
 }
 
+/// Old levels the first three cards cost: one, two, three. From the fourth
+/// card on every level costs [`OLD_LEVELS_PER_LEVEL`] of them.
+///
+/// The release pass measured level one with the flat four-old-level price: the
+/// first card came at 77 s there and the rat met the 3:00 appointment with two
+/// low ranks. The ramp puts the second weapon in the first half minute and the
+/// third and fourth cards inside the first two, without changing what a level
+/// costs for the rest of the floor.
+pub const OPENING_OLD_LEVELS: [u32; 3] = [1, 2, 3];
+
+/// The first old level `level`'s card is charged from, and how many it costs.
+fn old_level_block(level: u32) -> (u32, u32) {
+    let level = level.max(1);
+    let ramp = OPENING_OLD_LEVELS.len() as u32;
+    if level <= ramp {
+        let before: u32 = OPENING_OLD_LEVELS[..(level - 1) as usize].iter().sum();
+        (before + 1, OPENING_OLD_LEVELS[(level - 1) as usize])
+    } else {
+        let before: u32 = OPENING_OLD_LEVELS.iter().sum();
+        (
+            OLD_LEVELS_PER_LEVEL
+                .saturating_mul(level - ramp - 1)
+                .saturating_add(before + 1),
+            OLD_LEVELS_PER_LEVEL,
+        )
+    }
+}
+
 /// XP needed to go from `level` to `level + 1`.
 ///
-/// One level costs what **four** old levels did: the sum of
-/// [`base_xp_for_level`] over old levels `4(level-1)+1` through `4·level`. So
-/// reaching level `n` takes exactly the XP the old curve took to reach old
-/// level `4(n-1)+1`, and the old band of ~56 picks by the boss becomes ~14
-/// (`xp_to_reach(15)` is 12 404 XP — about what a fifteen-minute floor pays).
-///
-/// **The opening is discounted**: level 1 costs old levels 1-2 only (13 XP),
-/// because the first card has to offer the second weapon and four old levels
-/// of XP would have pushed it to ~45 s. Nothing else is shifted; level 2 costs
-/// old levels 5-8 as the rule says.
+/// One level costs what **four** old levels did, after a three-card opening
+/// ramp ([`OPENING_OLD_LEVELS`]): level 1 costs old level 1 (6 XP), level 2
+/// old levels 2-3 (14), level 3 old levels 4-6 (27), and from level 4 on each
+/// costs the next block of four ([`base_xp_for_level`] over old levels
+/// `4·level − 9` through `4·level − 6`: 50, 73, 106, 155, …). No old level is
+/// skipped, so reaching level `n ≥ 4` takes exactly the XP the old curve took
+/// to reach old level `4n − 9`, and the old band of ~56 picks by the boss is
+/// ~16 (`xp_to_reach(16)` is 10 254 XP and level 17 needs 15 040; a
+/// fifteen-minute floor pays about 12 300).
 pub fn xp_for_level(level: u32) -> u32 {
-    let level = level.max(1);
-    if level == 1 {
-        return (1..=2).map(base_xp_for_level).sum();
-    }
-    let first = OLD_LEVELS_PER_LEVEL * (level - 1) + 1;
-    (first..first + OLD_LEVELS_PER_LEVEL)
+    let (first, count) = old_level_block(level);
+    (first..first.saturating_add(count))
         .map(base_xp_for_level)
         .fold(0u32, |acc, cost| acc.saturating_add(cost))
 }
@@ -401,60 +424,60 @@ mod tests {
         assert!(base_xp_for_level(60) > base_xp_for_level(50));
     }
 
-    /// Batch twelve: one level costs four old levels' XP (the opening level
-    /// costs two, by design), so the ~56 old-level cards by the boss become
-    /// ~14 and the level-up pace is a quarter of what it was.
+    /// Batch twelve: one level costs four old levels' XP, after the opening
+    /// ramp of one, two and three (the release pass), so the ~56 old-level
+    /// cards by the boss become ~16 and the long-run pace is a quarter.
     #[test]
-    fn a_level_costs_four_old_levels() {
-        // The opening discount: old levels 1-2 only, so the second weapon
-        // still arrives in the first minute.
-        assert_eq!(xp_for_level(1), base_xp_for_level(1) + base_xp_for_level(2));
-        assert_eq!(xp_for_level(1), 13);
+    fn a_level_costs_four_old_levels_after_the_opening_ramp() {
+        // The opening: 6, then 7+7, then 8+9+10.
+        assert_eq!(OPENING_OLD_LEVELS, [1, 2, 3]);
+        assert_eq!(xp_for_level(0), 6);
+        assert_eq!(xp_for_level(1), 6);
+        assert_eq!(xp_for_level(2), 14);
+        assert_eq!(xp_for_level(3), 27);
 
-        // Every later level is exactly the block of four old levels from
-        // 4(level-1)+1: 9+10+11+12, then 13+14+16+17, …
-        for level in 2..=60 {
-            let first = OLD_LEVELS_PER_LEVEL * (level - 1) + 1;
+        // Every later level is exactly the next block of four old levels, from
+        // 4·level − 9: 11+12+13+14, then 16+17+19+21, …
+        for level in 4..=60 {
+            let first = OLD_LEVELS_PER_LEVEL * level - 9;
             let block: u32 = (first..first + OLD_LEVELS_PER_LEVEL)
                 .map(base_xp_for_level)
                 .fold(0, |a, c| a.saturating_add(c));
             assert_eq!(xp_for_level(level), block, "level {level}");
         }
-        assert_eq!(xp_for_level(2), 42);
-        assert_eq!(xp_for_level(3), 60);
-        assert_eq!(xp_for_level(10), 860);
-        assert_eq!(xp_for_level(12), 1845);
-        assert_eq!(xp_for_level(20), 38959);
+        assert_eq!(xp_for_level(4), 50);
+        assert_eq!(xp_for_level(5), 73);
+        assert_eq!(xp_for_level(10), 486);
+        assert_eq!(xp_for_level(12), 1042);
+        assert_eq!(xp_for_level(20), 21991);
     }
 
-    /// Cumulative anchors: the cumulative curve is the old one, four times
-    /// slower — reaching new level `n` = the old XP for old level `4(n-1)+1`
-    /// — shifted by the opening discount (13 XP instead of 28 for the first).
+    /// Cumulative anchors: no old level is skipped, so reaching new level
+    /// `n ≥ 4` costs exactly what old level `4n − 9` did.
     #[test]
     fn xp_to_reach_is_the_old_cumulative_curve_at_a_quarter_pace() {
         assert_eq!(xp_to_reach(0), 0);
         assert_eq!(xp_to_reach(1), 0);
-        assert_eq!(xp_to_reach(2), 13, "the discounted opening level");
-        assert_eq!(xp_to_reach(3), 55);
-        assert_eq!(xp_to_reach(5), 203);
-        assert_eq!(xp_to_reach(9), 1195);
-        assert_eq!(xp_to_reach(11), 2643);
-        // The measured XP of a fifteen-minute floor (~12.3k) buys level 15:
-        // ×1.56 weapon damage at the boss, where the old curve's level 56 read
-        // ×1.55. This is the whole point of the quarter pace.
-        assert_eq!(xp_to_reach(15), 12404);
-        // Old level 4(n-1)+1: the identity, less the 15 XP the opening saved.
+        assert_eq!(xp_to_reach(2), 6, "the first card is one old level");
+        assert_eq!(xp_to_reach(3), 20);
+        assert_eq!(xp_to_reach(4), 47);
+        assert_eq!(xp_to_reach(5), 97);
+        assert_eq!(xp_to_reach(9), 657);
+        assert_eq!(xp_to_reach(11), 1476);
+        // The measured XP of a fifteen-minute floor (~12.3k) buys level 16.
+        assert_eq!(xp_to_reach(16), 10254);
+        assert_eq!(xp_to_reach(17), 15040);
         let old_reach = |old_level: u32| -> u32 {
             (1..old_level).map(base_xp_for_level).fold(0, |a, c| a.saturating_add(c))
         };
-        for level in 2..=20u32 {
+        for level in 4..=20u32 {
             assert_eq!(
                 xp_to_reach(level),
-                old_reach(OLD_LEVELS_PER_LEVEL * (level - 1) + 1) - 15,
+                old_reach(OLD_LEVELS_PER_LEVEL * level - 9),
                 "new level {level}"
             );
         }
-        // Saturating, not wrapping: the curve passes u32::MAX at level 49.
+        // Saturating, not wrapping.
         assert_eq!(xp_to_reach(80), u32::MAX);
     }
 

@@ -3085,14 +3085,14 @@ mod tests {
         w.clear_bullets();
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
-        let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(40.0, 0.0), 400.0);
+        let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(48.0, 0.0), 400.0);
         arm(&mut w, WeaponKind::Gnaw);
         run_weapons(&mut w, 1.0 / 60.0);
         assert!(w.bullets().is_empty(), "Gnaw must not fire a projectile");
         assert_eq!(
             hp(&w, far),
             w.ecs.get::<Enemy>(far).unwrap().max_hp,
-            "a 20 px jaw must not reach 40 px"
+            "a 34 px jaw must not reach a body 48 px away"
         );
         // Cheese Spray reaches it with wedges and slows it.
         w.player.loadout.weapons = vec![Weapon {
@@ -4574,6 +4574,54 @@ mod tests {
         let lo = dealt_at_level(ratchet, 1, 600);
         let hi = dealt_at_level(ratchet, 6, 600);
         assert_ratio(hi, lo, 1.20, "Ratchet Tail");
+    }
+
+    /// Measurement, not a pin: how often Gnaw's bite actually lands in bot play
+    /// on level one (Sewer, the Skilled and Casual bots, eight seeds, the first
+    /// three minutes), with the kills and the first level-up beside it. The
+    /// ceiling is one bite per cooldown (0.55 s at L1: 109 a minute).
+    ///
+    /// `cargo test gnaw_bites_landed_in_bot_play -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement"]
+    fn gnaw_bites_landed_in_bot_play() {
+        use crate::autoplay::{AutoOpts, AutoRun};
+        use crate::game::bot::Skill;
+        for skill in [Skill::Skilled, Skill::Casual] {
+            let seeds = 8u64;
+            let mut per_min = [0.0f32; 3];
+            let (mut kills, mut first) = (0.0f32, 0.0f32);
+            for seed in 1000..1000 + seeds {
+                let mut run = AutoRun::new(seed, AutoOpts::practice(0, skill));
+                let mut lvl = None;
+                while !run.finished() && run.world().elapsed < 180.0 {
+                    run.step(1.0 / 60.0);
+                    let w = run.world_mut();
+                    let t = w.elapsed;
+                    let fresh = w
+                        .ecs
+                        .query::<&BiteSnap>()
+                        .iter(&w.ecs)
+                        .filter(|b| b.t >= b.total)
+                        .count();
+                    per_min[((t / 60.0) as usize).min(2)] += fresh as f32;
+                    if lvl.is_none() && w.player.level > 1 {
+                        lvl = Some(t);
+                    }
+                }
+                kills += run.world().kills as f32;
+                first += lvl.unwrap_or(180.0);
+            }
+            let n = seeds as f32;
+            println!(
+                "{skill:?}: bites/min {:.0} / {:.0} / {:.0} (minutes 1-3), kills by 3:00 {:.0}, first level-up {:.1}s",
+                per_min[0] / n,
+                per_min[1] / n,
+                per_min[2] / n,
+                kills / n,
+                first / n
+            );
+        }
     }
 
 }

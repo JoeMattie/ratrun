@@ -93,7 +93,12 @@ pub const WHIP_SWIPE_SECS: f32 = 0.12;
 // whole burst's damage: at L4+ the old two darts' worth lands as one bite.
 
 /// Reach of the bite in px, L1 → L5 (before Lens Cap's melee reach hook).
-pub const GNAW_BITE_REACH: [f32; 5] = [20.0, 21.0, 22.0, 23.0, 24.0];
+///
+/// The release pass: it was 20-24 px, and a rat that keeps moving was rarely
+/// that close to what chased it (the Skilled bot landed 8 bites in the first
+/// minute of level one, of 109 the cooldown allows). The damage per bite and
+/// the cooldown are unchanged, so dps on an adjacent body is what it was.
+pub const GNAW_BITE_REACH: [f32; 5] = [34.0, 35.5, 37.0, 38.5, 40.0];
 /// Half-angle of the bite's jaw (48°), in radians.
 pub const GNAW_BITE_HALF: f32 = 0.837_758;
 /// Seconds the drawn snap lives (`components::BiteSnap`).
