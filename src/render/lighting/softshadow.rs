@@ -735,7 +735,11 @@ pub(super) fn reflections(grid: &Grid, canvas: &mut Canvas<'_>, normals: &[Norma
         if done >= MAX_REFLECT {
             break;
         }
-        if l.tag == LightTag::Sun || !l.extent.is_finite() || l.gain < MIN_REFLECT_GAIN {
+        // Lamps only: a puddle shows the fixture that hangs over it. The
+        // rat's aura and every halo are lights without a lamp to mirror, and
+        // at this strength each drew a bright bar under the rat, a gem or a
+        // spore orb.
+        if !matches!(l.tag, LightTag::Fixture(_)) || !l.extent.is_finite() || l.gain < MIN_REFLECT_GAIN {
             continue;
         }
         if streak(grid, canvas, normals, frame, l, hard) {
@@ -1012,7 +1016,7 @@ mod tests {
             color: (255, 230, 190),
             gain: 300.0,
             extent: 120.0,
-            tag: LightTag::Moving { priority: 2 },
+            tag: LightTag::Fixture(crate::game::level::LightFixtureKind::Pendant),
             steady: 300.0,
         }
     }

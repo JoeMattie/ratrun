@@ -9000,7 +9000,13 @@ mod tests {
                 if let Some(w) = hh.app.world.as_mut() {
                     w.player.hp = w.player.max_hp();
                 }
-                let text = hh.frame(&[KeyCode::Right]);
+                // `RATRUN_DUMP_CHURN_KEY=none` stands still instead.
+                let still = std::env::var("RATRUN_DUMP_CHURN_KEY").is_ok_and(|v| v == "none");
+                let text = if still {
+                    hh.frame(&[])
+                } else {
+                    hh.frame(&[KeyCode::Right])
+                };
                 if text.contains("LEVEL UP") || text.contains("CHEST OPENED") {
                     hh.frame(&[KeyCode::Enter]);
                     prev = hh.terminal.backend().buffer().clone();
