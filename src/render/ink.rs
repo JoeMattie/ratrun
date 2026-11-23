@@ -57,6 +57,9 @@ use crate::render::palette::Rgb;
 /// Above this the view is "zoomed out": world pixels are being averaged into
 /// screen pixels, so the art can no longer carry a one-pixel mark.
 pub const ZOOMED_OUT: f32 = 1.05;
+/// From this zoom out the loot markers are drawn one size down
+/// (gem 1 px, coin 2x2, short bracket, 5x5 crate).
+pub const LOOT_SMALL_FROM: f32 = 1.2;
 
 /// Dark outline behind a re-stamped hostile pellet: the border the review asks
 /// for, so a pellet reads against both the bright floor and a white burst.
@@ -110,6 +113,11 @@ pub fn draw(pb: &mut PixelBuffer, view: &mut InkView) {
 /// the others *by shape* at 1x and 2x. Drawn at every zoom. Zero allocation.
 fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
     let (sw, sh) = (pb.w as i32, pb.h as i32);
+    // Zoomed out, small loot shrinks with the world (the owner: "when zoomed
+    // out, small items like coins should get visually smaller as well"): the
+    // same four shapes one size down, so a pulled-back view is not a field of
+    // full-size markers.
+    let small = v.scale.x.max(v.scale.y) >= LOOT_SMALL_FROM;
     let on = |s: (i32, i32), m: i32| s.0 + m >= 0 && s.1 + m >= 0 && s.0 - m < sw && s.1 - m < sh;
 
     // XP gems: a diamond of four pixels around the sprite (`<.>` read).
@@ -123,6 +131,11 @@ fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
             // The tier's own colour keeps the value readable (white → blue →
             // mint → warm 25); the diamond shape is the constant.
             let c = brighten(g.color, 0.35);
+            if small {
+                // One bright pixel in the tier's colour.
+                pb.plot(s.0, s.1, brighten(g.color, 0.6));
+                continue;
+            }
             pb.plot(s.0, s.1 - 1, c);
             pb.plot(s.0, s.1 + 1, c);
             pb.plot(s.0 - 1, s.1, c);
@@ -141,6 +154,13 @@ fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
                 continue;
             }
             let c = (255, 196, 64);
+            if small {
+                // A solid 2x2 square: still a closed square, a third the area.
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    pb.plot(s.0 + dx, s.1 + dy, c);
+                }
+                continue;
+            }
             for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
                 pb.plot(s.0 + dx, s.1 + dy, c);
             }
@@ -155,6 +175,17 @@ fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
         for (_, p) in q.iter(&*v.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
             let s = screen(p.pos, v.cam, v.scale);
             if !on(s, 3) {
+                continue;
+            }
+            if small {
+                // A short bracket pair hugging the sprite.
+                let c = brighten(p.kind.color(), 0.2);
+                for dy in -1..=1i32 {
+                    pb.plot(s.0 - 2, s.1 + dy, BRACKET_INK);
+                    pb.plot(s.0 + 2, s.1 + dy, BRACKET_INK);
+                }
+                pb.plot(s.0 - 3, s.1, c);
+                pb.plot(s.0 + 3, s.1, c);
                 continue;
             }
             bracket(pb, s, brighten(p.kind.color(), 0.2));
@@ -172,6 +203,12 @@ fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
                 continue;
             }
             let c = (255, 236, 168);
+            if small {
+                // The crate frame at 5x5 with its centre spark, no corner ticks.
+                rect_outline(pb, (s.0 - 2, s.1 - 2, s.0 + 2, s.1 + 2), c);
+                pb.plot(s.0, s.1, (255, 255, 244));
+                continue;
+            }
             rect_outline(pb, (s.0 - 3, s.1 - 3, s.0 + 3, s.1 + 3), c);
             // Corner ticks, so the 5×5 crate frame reads as a *box* and not as
             // the coin's 3×3 at a different size.
@@ -901,7 +938,7 @@ mod tests {
             );
             let (hx, hy) = at(40.0, 60.0);
             assert!(
-                lit_between(&pb, hx - 4, hy - 4, hx + 5, hy + 5) >= 20,
+                lit_between(&pb, hx - 4, hy - 4, hx + 5, hy + 5) >= 16,
                 "z={z}: no chest frame"
             );
         }

@@ -807,7 +807,7 @@ mod tests {
                     if plain[i].fg == plain[i].bg {
                         let (cx, cy) = (i % 32, i / 32);
                         let near = (0..24).any(|y| {
-                            (0..32).any(|x| {
+                            (0..32usize).any(|x| {
                                 x.abs_diff(cx) <= 1
                                     && y / 2 == cy
                                     && src.pixel_at(x, y) != plain[i].fg
@@ -947,7 +947,7 @@ mod tests {
                     if plain[i].fg == plain[i].bg {
                         let (cx, cy) = (i % 32, i / 32);
                         let near = (0..24).any(|y| {
-                            (0..32).any(|x| {
+                            (0..32usize).any(|x| {
                                 x.abs_diff(cx) <= 1
                                     && y / 2 == cy
                                     && src.pixel_at(x, y) != plain[i].fg

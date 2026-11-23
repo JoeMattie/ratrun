@@ -1100,6 +1100,7 @@ fn has_wedges(set: SubcellSet) -> bool {
 /// Every step is a function of `src` alone: no state survives a frame, so a
 /// still picture cannot flicker. Ink and damage digits are not in `src`; the
 /// cells they stamp are flagged by [`DetailFrame::overlay`] and encoded exact.
+#[allow(clippy::too_many_arguments)]
 fn antialias(
     src: &PixelBuffer,
     cols: usize,
@@ -2234,10 +2235,12 @@ mod tests {
                     );
                 }
             }
-            assert!(seen[0] >= 8 && seen[1] >= 1, "{set:?}: the coin square: {seen:?}");
+            // Zoomed out the loot marks are one size down (`ink::LOOT_SMALL_FROM`):
+            // the coin is a solid 2x2 square and the gem one bright pixel.
+            assert!(seen[0] >= 4, "{set:?}: the coin square: {seen:?}");
             // (No pellet border here: the ink pass re-stamps hostile marks only
             // when zoomed out, so at 1x there is none to keep.)
-            assert!(seen[3] >= 1, "{set:?}: the gem centre: {seen:?}");
+            // (The small gem mark is the tier colour, not white.)
 
             // Without a set, or at 1x with the smoothing off, there is no
             // detail frame.
