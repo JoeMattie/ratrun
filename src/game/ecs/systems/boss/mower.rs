@@ -84,12 +84,17 @@ const PATROL_SPEED: [f32; 3] = [24.0, 30.0, 36.0];
 /// spent 105 px from the rat at a third of the damage the charge windows take.
 const PATROL_DURATION: [f32; 3] = [1.50, 1.25, 1.00];
 /// The mid-range band patrol holds the rat at (art: `45..85 px`).
-const PATROL_BAND: [f32; 2] = [45.0, 85.0];
+// Batch 13: the far edge was 85 px, past the lidar's `SCAN_CONE_RANGE` (72):
+// a rat holding 73-85 px was circled, scanned, never locked and never charged.
+const PATROL_BAND: [f32; 2] = [45.0, 64.0];
 
 /// Scan beat per phase (art: 1.35 / 1.10 / 0.90 s).
 const SCAN_DURATION: [f32; 3] = [1.35, 1.10, 0.90];
 /// `progress` where the sweep snaps to a lock (art: sweep `0.0..0.70`).
 const SCAN_LOCK_PROGRESS: f32 = 0.70;
+/// `Boss::bounce_count` while a scan has seen the rat but not yet snapped
+/// (0 undecided, 1 locked, 2 no lock).
+const SCAN_SEEN: u8 = 3;
 /// Slow creep while scanning (art: "Stops or slows to `8 px/s`").
 const SCAN_CREEP_SPEED: f32 = 8.0;
 
@@ -361,6 +366,16 @@ fn tick_patrol(ctx: &mut BossContext<'_>, boss: &mut Boss) {
         boss.facing.perp() * boss.scratch[S_CIRCLE]
     };
     move_boss(ctx, boss, dir, PATROL_SPEED[slot]);
+    // Batch 13: a pursuit leap (`super::pursue`) that has just landed inside
+    // lidar range goes straight to the scan. Finishing the patrol beat first
+    // let a kiting rat run back out past `SCAN_CONE_RANGE` every time, so a
+    // rat holding 100 px was never locked and the mower never charged.
+    let just_leapt =
+        boss.leap_t <= 0.0 && boss.leap_cd > super::LEAP_COOLDOWN - super::LEAP_SECS - 0.1;
+    if just_leapt && dist <= art_boss_mower::SCAN_CONE_RANGE {
+        enter(boss, MowerState::Scan, SCAN_DURATION[slot]);
+        return;
+    }
     if boss.progress() < 1.0 {
         return;
     }
@@ -381,9 +396,19 @@ fn tick_scan(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
     move_boss(ctx, boss, boss.facing, SCAN_CREEP_SPEED);
 
     // One lock decision per scan, at the art's snap point. A solid wall, prop
-    // or gate breaks the lidar line: no lock, no charge.
-    if boss.bounce_count == 0 && boss.progress() >= SCAN_LOCK_PROGRESS {
-        let locked = dist <= art_boss_mower::SCAN_CONE_RANGE
+    // or gate breaks the lidar line: no lock, no charge. Batch 13: a rat the
+    // cone has *seen* before the snap (`SCAN_SEEN`) is locked even if it has
+    // run back out of range by then — backing off a scan is not an escape, the
+    // charge lane is.
+    let in_cone = dist <= art_boss_mower::SCAN_CONE_RANGE
+        && los_clear(ctx.level, boss.pos, ctx.player_pos, ctx.player_radius);
+    if boss.bounce_count == 0 && in_cone {
+        boss.bounce_count = SCAN_SEEN;
+    }
+    if (boss.bounce_count == 0 || boss.bounce_count == SCAN_SEEN)
+        && boss.progress() >= SCAN_LOCK_PROGRESS
+    {
+        let locked = boss.bounce_count == SCAN_SEEN
             && los_clear(ctx.level, boss.pos, ctx.player_pos, ctx.player_radius);
         boss.bounce_count = if locked { 1 } else { 2 };
         if locked {

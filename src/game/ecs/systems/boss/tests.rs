@@ -1968,15 +1968,20 @@ fn a_kited_jaguar_closes_the_gap_instead_of_idling() {
     let mut fight = ScriptedFight::new(BossKind::Cat, 4242);
     // No weapons at all: this is the pure pursue rule.
     // 150 px is outside the pounce band (45..95) and outside `engage_range`.
-    let start = fight.boss_pos().dist(fight.w.player.pos);
-    let mut closest = start;
+    // The rat starts at 100 px and runs out to its 150 px ring within a
+    // second; the closing pounce waits `OUT_OF_REACH_SECS`, so "closed" is
+    // measured against the ring it holds, once it is holding it.
+    const RING: f32 = 150.0;
+    let mut closest = f32::INFINITY;
     for i in 0..(12.0 / DT) as usize {
-        fight.kite(150.0, i as f32 * DT * 0.3);
+        fight.kite(RING, i as f32 * DT * 0.3);
         update_boss(&mut fight.w, DT);
-        closest = closest.min(fight.boss_pos().dist(fight.w.player.pos));
+        if i as f32 * DT > 1.5 {
+            closest = closest.min(fight.boss_pos().dist(fight.w.player.pos));
+        }
     }
     assert!(
-        closest < start - 30.0,
-        "the jaguar never closed (start {start} px, closest {closest})"
+        closest < RING - 30.0,
+        "the jaguar never closed (ring {RING} px, closest {closest})"
     );
 }

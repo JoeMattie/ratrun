@@ -650,6 +650,11 @@ mod tests {
         let mut frame = testkit::frame(&level, LightingMode::Full);
         frame.lights = &lights;
         let mut grid = testkit::flat_grid(24, 20, 4, [80, 90, 100]);
+        // A halo only lands where its own lamp dominates the sample.
+        for info in grid.info.iter_mut() {
+            info.dom = 400;
+            info.dom_rgb = (255, 255, 255);
+        }
         grid_pass(&mut grid, &frame);
         let peak = grid.info.iter().flat_map(|i| i.air).max().unwrap_or(0);
         assert!(peak > 0, "bright fixtures must bloom at all");
@@ -698,6 +703,8 @@ mod tests {
             &mut grid.info[0],
             &hit(&sconce_light(), Vec2::new(0.0, 20.0), 0.7, 1.0),
         );
+        // The fog amounts (no lights in the frame, so no bloom).
+        grid_pass(&mut grid, &frame);
         let mut pb = PixelBuffer::new(120, 80);
         pb.set_pen(0);
         pb.clear((85, 71, 78));

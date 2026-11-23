@@ -816,7 +816,8 @@ impl BossKind {
             // `POUNCE_MAX_DIST` 96, less the one px the band test allows.
             BossKind::Cat => 95.0,
             BossKind::Broom => 64.0,
-            BossKind::Mower => 80.0,
+            // `art_boss_mower::SCAN_CONE_RANGE`: past it the lidar cannot lock.
+            BossKind::Mower => 72.0,
             BossKind::Mangle => 64.0,
             BossKind::NightEdition => 96.0,
             // A gust reaches 190 px, so the bird is *always* in range.

@@ -8441,6 +8441,42 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            // `giant`: the Growth Serum (batch 13) a few seconds in: ~8 s of
+            // Sewer play to gather a crowd, then the buff, then 2.5 s of it
+            // (full size, the view pulled back, the stomp landing).
+            "giant" => {
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.elapsed = 150.0;
+                }
+                for tick in 0..630u32 {
+                    if tick == 480 {
+                        let w = hh.app.world.as_mut().unwrap();
+                        w.player.buffs.giant =
+                            crate::game::ecs::systems::powerups::GROWTH_SECS;
+                    }
+                    let mv = match (tick / 45) % 4 {
+                        0 => KeyCode::Right,
+                        1 => KeyCode::Down,
+                        2 => KeyCode::Left,
+                        _ => KeyCode::Up,
+                    };
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.player.hp = w.player.max_hp();
+                    }
+                    let text = hh.frame(&[mv]);
+                    if text.contains("LEVEL UP") || text.contains("CHEST OPENED") {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                }
+                for _ in 0..6 {
+                    if matches!(hh.app.screen, Screen::Playing) {
+                        break;
+                    }
+                    hh.frame(&[KeyCode::Enter]);
+                }
+            }
             t if t.starts_with("floor-") => {
                 let theme = match &t["floor-".len()..] {
                     "kitchen" => Theme::Kitchen,

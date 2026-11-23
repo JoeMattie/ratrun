@@ -1076,6 +1076,11 @@ mod tests {
         }
         assert!(!beats.is_empty(), "the cat must keep stalking");
         for beat in beats {
+            // Batch 13: a rat that holds its distance draws the closing pounce,
+            // and a miss is the art's own short punish beat.
+            if (beat - MISS_PUNISH).abs() < 1e-4 {
+                continue;
+            }
             assert!(
                 (STALK_BEAT_P1.0..=STALK_BEAT_P1.1).contains(&beat),
                 "phase-1 stalk beat {beat} outside the art's 2.0..3.5 s"

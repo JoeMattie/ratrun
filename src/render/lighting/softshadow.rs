@@ -699,8 +699,9 @@ const REFLECT_PEAK: f32 = 0.6;
 const GATE_SPEC: i32 = 80;
 /// Bump displacement of the streak, px at a full tangent normal.
 const BUMP_PX: i32 = 4;
-/// Additive steps of 8/256: flat steps, and nothing below one.
-const REFLECT_STEP_MASK: i32 = !7;
+/// Additive steps of 4/256: flat steps, and nothing below one (8 hid the tile
+/// floors' streak entirely: its peak is 9).
+const REFLECT_STEP_MASK: i32 = !3;
 /// Ink pads considered per light.
 const MAX_PADS: usize = 8;
 

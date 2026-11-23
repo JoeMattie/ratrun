@@ -3180,7 +3180,14 @@ impl World {
         };
         let started = std::time::Instant::now();
         self.light_map.apply_scene(pb, &scene);
-        self.light_map.observe_cost(scene.mode, started.elapsed() + ambience_cost, pb.w * pb.h);
+        // Tests never feed the wall clock to the tier controller: a loaded
+        // test machine would drop a tier in one harness and not its twin, and
+        // two "identical" frames would differ (the controller's own tests call
+        // `observe_cost` with synthetic durations).
+        if cfg!(not(test)) {
+            self.light_map
+                .observe_cost(scene.mode, started.elapsed() + ambience_cost, pb.w * pb.h);
+        }
     }
 
     /// The tier the next frame's lighting will run at: the setting, lowered
@@ -4687,6 +4694,11 @@ mod zoom_tests {
         for z in [1.0, zoom::MAX] {
             let mut w = World::new(Theme::Sewer, 11);
             w.smoke_enabled = true;
+            // The plain light pass: this pins where the rat's aura lands. The
+            // batch-13 effects add lamp shafts and wall sheen of their own,
+            // which may lift a corner by a larger *ratio* than the aura lifts
+            // the already-bright centre.
+            w.lighting_fx = false;
             w.set_zoom_instant(z);
 
             w.lighting = LightingMode::Off;

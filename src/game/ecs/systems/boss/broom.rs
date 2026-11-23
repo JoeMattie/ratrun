@@ -1640,9 +1640,10 @@ mod tests {
         );
 
         // From the neutral beat the hop does fire, for what the budget pays.
+        // (`enter` re-anchors the poise, so the burst lands after it.)
         rig.edit(|b| {
-            b.hp -= STAGGER_HP_FRAC * b.max_hp + 1.0;
             enter(b, BroomBossState::Idle, IDLE_P1);
+            b.hp -= STAGGER_HP_FRAC * b.max_hp + 1.0;
         });
         rig.tick();
         let boss = rig.boss();
