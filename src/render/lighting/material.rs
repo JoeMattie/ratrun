@@ -155,7 +155,7 @@ pub(super) const fn params(kind: MaterialKind) -> MaterialParams {
     match kind {
         MaterialKind::Default | MaterialKind::Stone => p(10, 8, 0, 160),
         MaterialKind::WetBrick => p(70, 24, 90, 200),
-        MaterialKind::Tile => p(60, 40, 40, 140),
+        MaterialKind::Tile => p(60, 40, 90, 140),
         MaterialKind::Wood => p(20, 10, 0, 180),
         MaterialKind::Metal => p(140, 48, 110, 90),
         MaterialKind::Glass => p(180, 96, 140, 0),

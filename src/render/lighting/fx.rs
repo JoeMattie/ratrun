@@ -40,30 +40,30 @@ pub(super) mod strength {
     /// Coloured bounce light (`upsample::bounce`).
     pub const BOUNCE: f32 = 0.5;
     /// Volumetric shafts from fixtures (`air`).
-    pub const SHAFTS: f32 = 0.5;
+    pub const SHAFTS: f32 = 1.0;
     /// Depth fog / distance fade (`air`).
     pub const FOG: f32 = 0.5;
     /// Bloom and halation (`air`): a quarter of bold.
-    pub const BLOOM: f32 = 0.25;
+    pub const BLOOM: f32 = 0.30;
     /// Bump-mapped floors and walls (`surface`).
-    pub const BUMP: f32 = 0.5;
+    pub const BUMP: f32 = 1.0;
     /// Per-material specular (`specular`).
-    pub const SPECULAR: f32 = 0.5;
+    pub const SPECULAR: f32 = 0.75;
     /// Directional rim light on creatures (`specular`).
     pub const RIM: f32 = 0.5;
     /// Soft penumbra (`softshadow`).
     pub const SOFT_SHADOW: f32 = 0.5;
     /// Long casts from low fixtures (`softshadow`).
-    pub const LONG_SHADOW: f32 = 0.5;
+    pub const LONG_SHADOW: f32 = 0.7;
     /// Wet-floor reflections (`softshadow::reflections`).
-    pub const REFLECTION: f32 = 0.5;
+    pub const REFLECTION: f32 = 1.0;
     /// Particulate in beams (`motes`).
-    pub const MOTES: f32 = 0.5;
+    pub const MOTES: f32 = 1.0;
     /// Caustics (`motes`).
     pub const CAUSTICS: f32 = 0.5;
     /// The overhead light's ground shadow: darkening at the shadow's core
     /// (absolute, 0.30 = 30 %; the owner asked for "somewhat", 30–40 %).
-    pub const OVERHEAD_DARKEN: f32 = 0.30;
+    pub const OVERHEAD_DARKEN: f32 = 0.42;
 }
 
 /// Are the lighting effects on by default? `RATRUN_FX=0` (or
@@ -77,6 +77,20 @@ pub fn enabled_from_env() -> bool {
         ),
         Err(_) => true,
     }
+}
+
+/// Capture aid, test builds only: `RATRUN_FX_SKIP=overhead,body,spec,...`
+/// leaves the named stages out of a dump, so one effect can be judged against
+/// the same frame without it. Always `false` in the game.
+#[cfg(test)]
+pub(crate) fn skip(stage: &str) -> bool {
+    std::env::var("RATRUN_FX_SKIP").is_ok_and(|v| v.split(',').any(|s| s.trim() == stage))
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn skip(_stage: &str) -> bool {
+    false
 }
 
 /// Where a splatted light came from (shafts, cages and bloom key on it).

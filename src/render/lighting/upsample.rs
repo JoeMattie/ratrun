@@ -58,6 +58,10 @@ pub(super) const MUL_CEILING: i32 = 460;
 const NEAR_MUL: i32 = 20;
 const NEAR_ADD: i32 = 5;
 pub(super) const PAIR_X: bool = true;
+/// Cell pairs share a weight only where the two taps' multipliers are within
+/// this (`Q8.8`) of each other: a pair then steps by at most half of it (about
+/// 5 % of the albedo), which does not read as a column.
+const PAIR_STEEP: i32 = 28;
 
 /// Below this peak multiplier (`Q8.8`, 220 ≈ 0.86×) the tone curve is the
 /// identity, so ambient, shadow and ordinary pool light are untouched.
@@ -507,11 +511,18 @@ fn bilinear(
                 let own = own_row * gw + ((lo + ox) / stride).min(gw - 1);
                 let k = class(grid, own);
                 let (cl, cr) = (&cols[l * 2 + k], &cols[r * 2 + k]);
+                // Where the light changes fast across this sample (the rim of
+                // the rat's aura, a pool's edge) paired cells showed as 2-cell
+                // columns: there every cell takes its own weight.
+                let pair = PAIR_X && {
+                    let (wl, wr) = (cl.w.max(1), cr.w.max(1));
+                    (0..3).all(|j| (cl.v[j] / wl - cr.v[j] / wr).abs() <= PAIR_STEEP)
+                };
                 for px in lo..hi {
                     let pbx = px + ox;
                     let wx = wx0 + (px - x) as i32 * dw;
                     // Two cells share a horizontal weight (see `PAIR_X`).
-                    let wx = if PAIR_X { wx & !(2 * dw - 1) } else { wx };
+                    let wx = if pair { wx & !(2 * dw - 1) } else { wx };
                     let (hl, hr) = (256 - wx, wx);
                     let ws = hl * cl.w + hr * cr.w;
                     let sample = if ws <= 0 {

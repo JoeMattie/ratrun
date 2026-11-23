@@ -33,7 +33,7 @@ pub(crate) use ambience::draw_ambience;
 pub(crate) use fixtures::draw_fixtures;
 // Batch-13 effects (`.review/handoff/lighting/CONTRACT.md`).
 pub(crate) use fx::enabled_from_env as fx_enabled_from_env;
-pub(crate) use overhead::{draw as draw_overhead_shadows, OverheadScene};
+pub(crate) use overhead::{draw_deferred as draw_overhead_shadows, OverheadScene};
 pub(crate) use specular::{boss_pen, enemy_pen, giant_rat_pen, pool_pen, prop_pen, rat_pen};
 #[cfg(test)]
 mod gallery;

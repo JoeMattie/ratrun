@@ -27,7 +27,7 @@ use crate::render::palette::Rgb;
 // ---------------------------------------------------------------------------
 
 /// World pixels per mote at Full: a 120×80 view gets 60, a 240×160 one 80.
-const MOTE_AREA_PER_MOTE: usize = 160;
+const MOTE_AREA_PER_MOTE: usize = 240;
 /// The contract's band: 30–80 sparse 1 px motes per view.
 const MOTE_COUNT_MIN: usize = 30;
 const MOTE_COUNT_MAX: usize = 80;
@@ -37,11 +37,13 @@ const STEAM_PUFFS: usize = 4;
 /// view's brightest air (1/8, at least one Q8.8 level). W2's absolute scale is
 /// its own; the ratio is the invariant — dust lives in the body of a beam, not
 /// only at its core, and nowhere in the dark.
-const AIR_GATE_SHIFT: u32 = 3;
+const AIR_GATE_SHIFT: u32 = 2;
+/// Other homes a mote in the dark may try (see `particulate`).
+const MOTE_RETRIES: usize = 2;
 /// A mote's lift in output levels at the beam gate / at the brightest air,
-/// before `fx::strength::MOTES` (0.5) halves it to 9..=32 levels.
-const MOTE_LIFT_MIN: i32 = 18;
-const MOTE_LIFT_SPAN: i32 = 46;
+/// before `fx::strength::MOTES` (1.0): 30..=80 levels.
+const MOTE_LIFT_MIN: i32 = 30;
+const MOTE_LIFT_SPAN: i32 = 50;
 /// Beam brightness buckets: flat steps, never a gradient creeping one level.
 const MOTE_REL_STEP: i32 = 85;
 
@@ -220,7 +222,24 @@ fn particulate(
         // the floor under a moving camera instead of sticking to the screen.
         let x = (i64::from(base_x) + i64::from(vx) * moves - cam.0).rem_euclid(canvas.w as i64) as i32;
         let y = (i64::from(base_y) + i64::from(vy) * moves - cam.1).rem_euclid(canvas.h as i64) as i32;
-        let Some((rel, tint)) = beam.at(grid, x as usize, y as usize) else {
+        // A mote in the dark tries its other homes (fixed per mote, so it
+        // is the same mote every step): most of the field then floats where
+        // there is a beam to show it, and the count stays the budget.
+        let mut found = beam.at(grid, x as usize, y as usize).map(|hit| (x, y, hit));
+        let mut hr = h1;
+        for _ in 0..MOTE_RETRIES {
+            if found.is_some() {
+                break;
+            }
+            hr = hash(hr ^ 0x2545_f491);
+            let cell = (hr % field) as i32;
+            let rx = (i64::from(cell % canvas.w as i32) + i64::from(vx) * moves - cam.0)
+                .rem_euclid(canvas.w as i64) as i32;
+            let ry = (i64::from(cell / canvas.w as i32) + i64::from(vy) * moves - cam.1)
+                .rem_euclid(canvas.h as i64) as i32;
+            found = beam.at(grid, rx as usize, ry as usize).map(|hit| (rx, ry, hit));
+        }
+        let Some((x, y, (rel, tint))) = found else {
             continue;
         };
         let lift = (lift_q8(rel, cold) * gains.motes) >> 8;
@@ -559,7 +578,7 @@ mod tests {
         // Nothing above the strength band either: a mote is a spark, not a lamp.
         for pixel in &b {
             let d = i32::from(pixel.0) - i32::from(85u8);
-            assert!(d <= 33, "a mote lifted a pixel by {d} levels");
+            assert!(d <= 80, "a mote lifted a pixel by {d} levels");
         }
     }
 
