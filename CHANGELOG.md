@@ -1,15 +1,50 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-22)
 
-Subject R-47's escape is now a campaign: three sectors, fifteen minutes each,
-a boss at the end of every one.
+Subject R-47's escape is now a campaign: four sectors, fifteen minutes each,
+a boss at the end of every one, and a getaway on the back of a truck.
+
+### New since the first notes were written
+
+- **Four sectors.** The Sewers, then the Kitchen or the Laundry, then the Lab
+  or the Printworks, then the Flatbed: the getaway is the finale.
+- **No boss arenas.** At 15:00 the boss comes to wherever the rat is.
+- **Forty-eight ordinary enemies and twenty-four named minibosses**, eight and
+  four to a floor, none shared between floors.
+- **Weapons reworked so each one looks and plays like itself.** Laser Eyes
+  sweeps a beam, Squeak Nova is an expanding ring, Sonic Squeak a forward
+  cone, Tail Whip a swipe in front, Gnaw a bite, and Spiked Tail a real whip
+  that cracks on a target most of the way across the screen.
+- **Slower, heavier levels.** A level takes about four times as long to earn
+  and adds 4 % weapon damage. The first three come quickly.
+- **Right click** fires the charged weapons in play and backs out of any menu.
+- **New music.** Six floor songs in a 16-bit voice (`RATRUN_MUSIC=chip` or
+  `classic` for the older sounds).
+- **Lighting.** Darker floors, pools of light with soft edges, wall lamps.
+- **Overhead things** slide past above the floor as the camera moves.
+- **Sharper zoom.** Zoomed-out views use finer block glyphs where the terminal
+  has them, and enemies never appear inside the widest view.
+- **The Library is alive.** The selected card plays the thing it describes.
+- **Half the CPU.** The frame is written to the terminal in one pass, and a
+  still screen sends nothing.
+
+### Known issues
+
+- The macOS build is not signed: right-click the app and choose Open the
+  first time.
+- Boss and miniboss fights run shorter than intended, and level one has a hard
+  minute around 6:00.
+- Wall lamps are very bright and their light has a stepped edge.
+- The overhead layer is faint and small; it is being redrawn larger.
+- Some Library cards are small or dim (boss plates, Tail Thrash).
+- Gamepad rumble has not been tried on a real controller.
 
 ### The run
 
-- **A three-sector campaign.** The Sewers, then the Kitchen or the Laundry,
-  then the Lab or the Printworks. You pick the next sector's floor between
-  levels and carry up to three powerups through.
+- **A campaign.** The Sewers, then the Kitchen or the Laundry, then the Lab
+  or the Printworks, then the Flatbed. You pick the next sector's floor
+  between levels and carry up to three powerups through.
 - **Fifteen minutes a sector.** The horde builds on a clock. Four named
   minibosses arrive at 3:00, 6:00, 9:00 and 12:00, and the sector's boss at
   15:00. A sector ends when the boss dies or you do.
