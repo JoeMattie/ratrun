@@ -296,8 +296,6 @@ pub fn fire_weapons_system(
             &mut bosses,
             &stats,
             &mut melee_nudge,
-            &scratch.infected,
-            &mut scratch.boss_virus,
             &mut scratch.evo,
             &mut scratch.moved,
             aim,
@@ -427,9 +425,13 @@ fn target_range(kind: WeaponKind) -> f32 {
         // Wave 3 weapons A mark/tag bodies with their own picks (they need the
         // *entities* and several marks per volley, which `nearest_visible`
         // deliberately does not return). `weapons_wave3a` uses the same reach
-        // (`RAIN_RANGE`, `VIRUS_RANGE`), the same cap and the same tie order.
+        // (`RAIN_RANGE`), the same cap and the same tie order.
         WeaponKind::AcidRain => crate::game::weapon::RAIN_RANGE,
-        WeaponKind::Hantavirus => crate::game::weapon::VIRUS_RANGE,
+        // Hantavirus tags nothing at range any more: the rat leaves a dropping
+        // where it stands and `weapons_wave3a::droppings_system` infects the
+        // first body that steps in one (`DROPPING_RADIUS`). It has no target to
+        // pick, so nothing here may hold its fire.
+        WeaponKind::Hantavirus => 0.0,
         // The lash picks through `weapon_spiketail::pick_lash_target` (it
         // needs the *entity*, not just a point, so the impact can follow the
         // body); this is the longest reach any level of it has.
@@ -636,12 +638,10 @@ pub struct FireScratch<'w, 's> {
     fallback_order: Local<'s, Vec<Entity>>,
     orbit_scratch: Local<'s, Vec<Entity>>,
     target_scratch: Local<'s, Vec<Candidate>>,
-    /// Wave 3 weapons A: the boss's Hantavirus mark. A boss is not an `Enemy`,
-    /// so its mark cannot be a component on it (`weapons_wave3a`).
-    boss_virus: ResMut<'w, crate::game::ecs::resources::BossVirus>,
-    /// Read-only view of the horde's Hantavirus marks: the tag pick skips
-    /// bodies an active chain already owns.
-    infected: Query<'w, 's, &'static crate::game::ecs::components::Infection>,
+    /// Hantavirus's live **droppings**: the weapon's shot is to leave one
+    /// (`weapons_wave3a::fire_hantavirus`), and the level's cap evicts the
+    /// oldest (`SpawnId`) first.
+    droppings: Query<'w, 's, (Entity, &'static crate::game::ecs::components::SpawnId, &'static crate::game::ecs::components::Dropping)>,
     /// Per-run evolution bookkeeping (**Fairy Ring**'s "every second cast"
     /// counter). A resource, not a `Local`: the schedule's copy of this system
     /// and any `run_system_cached` copy are different instances with their own
@@ -1537,8 +1537,6 @@ fn fire_one(
     // radius, Counterweight's shove) and the per-body melee-nudge log it needs.
     stats: &crate::game::loadout::Stats,
     melee_nudge: &mut MeleeNudge,
-    infected: &Query<&crate::game::ecs::components::Infection>,
-    boss_virus: &mut crate::game::ecs::resources::BossVirus,
     // Per-instance **Fairy Ring** parity (see `EvoRuntime::count_fairy_cast`).
     evo: &mut crate::game::ecs::resources::EvoRuntime,
     // Set when this shot moved a body: the grid has to be re-filed before the
@@ -2156,28 +2154,27 @@ fn fire_one(
             fired = crate::game::ecs::systems::weapons_wave3a::fire_hantavirus(
                 commands,
                 level,
-                order,
-                enemies,
-                infected,
-                boss_points,
-                boss_virus,
                 ppos,
-                // Lens Cap stretches both the tag reach and the jump reach
-                // the chain carries with it.
-                stats.ranged_reach(crate::game::weapon::VIRUS_RANGE),
+                pface,
                 dmg,
                 crate::game::weapon::VIRUS_JUMPS[i],
+                // Lens Cap stretches the jump reach the chain carries with it,
+                // and the dropping's trigger radius (both are ranged reaches).
                 stats.ranged_reach(crate::game::weapon::VIRUS_REACH[i]),
-                evolved,
-                particles,
-                rng,
-                aim,
+                stats.ranged_reach(crate::game::weapon::DROPPING_RADIUS),
+                crate::game::weapon::DROPPING_CAP[i],
+                // The cap's victims: the oldest live dropping goes first.
+                &scratch.droppings,
+                next_id,
             );
         }
     }
     // Only announce a shot when the weapon actually produced something
-    // (Gnaw with no target in range fires nothing).
-    if fired {
+    // (Gnaw with no target in range fires nothing). A weapon whose cue belongs
+    // to its effect rather than its cast pushes nothing here: **Hantavirus's
+    // drop is silent**, and `Sfx::Infect` plays on the tick a body actually
+    // steps in one (`weapons_wave3a::droppings_system`).
+    if fired && !matches!(kind, WeaponKind::Hantavirus) {
         let sound = match kind {
             WeaponKind::Gnaw => Sfx::Shoot,
             WeaponKind::CheeseSpray => Sfx::ShootSpray,
@@ -2192,6 +2189,7 @@ fn fire_one(
             WeaponKind::LaserEyes => Sfx::LaserEyes,
             WeaponKind::SuperDash => Sfx::SuperDash,
             WeaponKind::AcidRain => Sfx::ShootRain,
+            // Unreachable: filtered above (the drop is silent).
             WeaponKind::Hantavirus => Sfx::Infect,
             // The whip-crack. Announce it at the *bristle*, because the sample
             // itself spends `LASH_WINDUP` on a rising swish before its crack;
@@ -4584,7 +4582,14 @@ mod tests {
         // A pool (Acid Spit's lob lands as a damaging puddle) and a mark
         // (Hantavirus ticks): both carry the damage they were fired with.
         for kind in [WeaponKind::AcidSpit, WeaponKind::Hantavirus] {
-            let build = move |w: &mut World| w.player.loadout.weapons.push(Weapon::new(kind));
+            let build = move |w: &mut World| {
+                // Hantavirus is deployed by a **dropping** 5 px behind the rat's
+                // facing, so the fixture faces the drop at the planted body
+                // (14 px out) and measures the level bonus, not the drop's
+                // geometry.
+                w.player.face = Vec2::new(-1.0, 0.0);
+                w.player.loadout.weapons.push(Weapon::new(kind));
+            };
             let lo = dealt_at_level(build, 1, 600);
             let hi = dealt_at_level(build, 6, 600);
             assert_ratio(hi, lo, 1.20, kind.name());

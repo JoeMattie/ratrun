@@ -2915,6 +2915,29 @@ mod tests {
         w.ecs.get::<Infection>(entity).copied()
     }
 
+    /// Hantavirus is deployed by droppings now: fire one cycle and set the
+    /// dropping it left under `host`, armed, then step the drop so the body
+    /// standing there takes the chain the old ranged tag used to plant on it.
+    fn infect_by_dropping(w: &mut World, host: Entity) {
+        use crate::game::ecs::components::Dropping;
+        use crate::game::ecs::systems::{weapons, weapons_wave3a};
+        let at = w.ecs.get::<Enemy>(host).expect("host").pos;
+        w.player.loadout.weapons[0].timer = 0.0;
+        run(w, weapons::fire_weapons_system);
+        let mut live = w.ecs.query::<(Entity, &Dropping)>();
+        let dropping = live
+            .iter(&w.ecs)
+            .next()
+            .map(|(entity, _)| entity)
+            .expect("the weapon leaves a dropping");
+        {
+            let mut d = w.ecs.get_mut::<Dropping>(dropping).expect("dropping");
+            d.pos = at;
+            d.age = crate::game::weapon::DROPPING_ARM;
+        }
+        run(w, weapons_wave3a::droppings_system);
+    }
+
     /// **Downspout**: the volley marks one foe and then *walks* the rest of its
     /// drops back along the marking line, 10 px at a time; the last landing
     /// leaves 1 s of burning runoff.
@@ -2987,16 +3010,14 @@ mod tests {
     /// per chain, so the reopened chain that dies isolated simply ends.
     #[test]
     fn dead_letter_seals_an_isolated_chain_and_reopens_it_once() {
-        use crate::game::ecs::systems::{weapons, weapons_wave3a};
+        use crate::game::ecs::systems::weapons_wave3a;
         let mut w = evolved_world(WeaponKind::Hantavirus);
         w.player.loadout.weapons[0].level = 3; // 2 jumps, 18 px reach
         let origin = w.player.pos;
         let host = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(12.0, 0.0), 400.0);
-        w.player.face = Vec2::new(1.0, 0.0);
-        w.player.loadout.weapons[0].timer = 0.0;
-        run(&mut w, weapons::fire_weapons_system);
-        let mark = mark_of(&w, host).expect("the evolved tag plants a chain");
-        assert!(mark.can_seal, "an evolved tag may seal");
+        infect_by_dropping(&mut w, host);
+        let mark = mark_of(&w, host).expect("the evolved drop plants a chain");
+        assert!(mark.can_seal, "an evolved chain may seal");
         assert_eq!(mark.jumps_left, 2);
 
         // Killed with jumps left and nobody in reach: it seals instead of dying.
@@ -3031,13 +3052,11 @@ mod tests {
     /// art afterwards).
     #[test]
     fn dead_letter_packets_expire_after_their_fuse() {
-        use crate::game::ecs::systems::{weapons, weapons_wave3a};
+        use crate::game::ecs::systems::weapons_wave3a;
         let mut w = evolved_world(WeaponKind::Hantavirus);
         let origin = w.player.pos;
         let host = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(12.0, 0.0), 400.0);
-        w.player.face = Vec2::new(1.0, 0.0);
-        w.player.loadout.weapons[0].timer = 0.0;
-        run(&mut w, weapons::fire_weapons_system);
+        infect_by_dropping(&mut w, host);
         w.ecs.get_mut::<Enemy>(host).unwrap().hp = 0.0;
         run(&mut w, weapons_wave3a::hantavirus_death_system);
         assert_eq!(letters(&mut w).len(), 1);

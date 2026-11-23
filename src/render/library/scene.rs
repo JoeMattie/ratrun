@@ -186,6 +186,20 @@ const SHOT_LEAD: f32 = 22.0;
 const ARSENAL_RING: f32 = 30.0;
 /// How far Gnaw's targets stand from the rat: inside the level-5 jaw (24 px).
 const BITE_RING: f32 = 20.0;
+/// The Hantavirus plate: how fast (rad/s) the rat **turns on the spot**, so the
+/// dropping it leaves each cycle lands on a different point of a small ring
+/// around it instead of stacking on one spot.
+const DROP_TURN: f32 = 0.9;
+/// The Hantavirus plate: how often (seconds) the card lets the weapon drop. A
+/// max-rank weapon's own cycle is 2.8 s, which would put a single dropping in a
+/// five-second loop; the card is about the sequence (drop → step → infection →
+/// jump), not about the charge a card's facts state.
+const DROP_EVERY: f32 = 1.3;
+/// The Hantavirus plate: how fast (px/s) its three fodder walk in on the
+/// droppings, and how close to the rat they stop (a step away from the ring of
+/// drops the rat is laying, so one of them is inside a 7 px dropping).
+const DROP_WALK: f32 = 9.0;
+const DROP_STOP: f32 = 12.0;
 
 /// How much of a fitted plate the subject's footprint is allowed to take: the
 /// rest is the margin that keeps a clipped edge impossible.
@@ -1999,6 +2013,15 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         script.cue = Some(arsenal_bite_cue);
         script.lean = Vec2::new(BITE_RING * 0.5, 0.0);
     }
+    if kind == WeaponKind::Hantavirus {
+        // The weapon is deployed by **droppings**: the rat leaves one where it
+        // stands and the first body to step in it is infected. Targets standing
+        // still 30 px away would never step in one, so the rat turns slowly on
+        // the spot (the drops ring it) and the three fodder walk slowly in on
+        // the trail: one loop shows drop → step → infection → jump.
+        script.cue = Some(arsenal_droppings_cue);
+        script.loop_secs = 7.0;
+    }
     if kind == WeaponKind::SuperDash {
         // The dash leaves the fan of targets behind it. Its targets are laid
         // along the lane the charged dash runs, and the camera holds the lane's
@@ -2070,6 +2093,40 @@ fn arsenal_bite_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
 fn arsenal_sweep_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
     keep_actives_ready(world);
     arsenal_dummies(world, &dummy_homes(world.player.pos), SWEEP_TARGET_HP);
+}
+
+/// The Hantavirus's and the Dead Letter's plate: the rat turns slowly on the
+/// spot (so each cycle's dropping lands on a different point of a small ring
+/// around it) and its three targets walk slowly in until one stands in a
+/// dropping. The drop clock is the card's (see [`DROP_EVERY`]); the drop, its
+/// arm, the trigger and the chain are the weapon's own.
+fn arsenal_droppings_cue(world: &mut World, _subject: Option<Entity>, tick: u32) {
+    arsenal_dummies(world, &dummy_homes(world.player.pos), ARSENAL_HP);
+    let every = (DROP_EVERY / TICK).round() as u32;
+    if let Some(weapon) = world.player.loadout.weapons.first_mut() {
+        weapon.timer = if every > 0 && tick % every == 0 {
+            0.0
+        } else {
+            999.0
+        };
+    }
+    world.player.face = Vec2::from_angle(tick as f32 * TICK * DROP_TURN);
+    let rat = world.player.pos;
+    let mut q = world.ecs.query::<&mut Enemy>();
+    for body in q.iter_mut(&mut world.ecs) {
+        // Only the plate's own targets walk: they are the bodies the arsenal
+        // staged, and the zero gait is how they are found.
+        if body.speed_scale != 0.0 {
+            continue;
+        }
+        let to = rat - body.pos;
+        let d = to.len();
+        if d <= DROP_STOP || d <= 1e-3 {
+            continue;
+        }
+        let step = (DROP_WALK * TICK).min(d - DROP_STOP);
+        body.pos += to * (step / d);
+    }
 }
 
 /// The Super Dash's and the Ripcord's plate: the targets lie along the dash

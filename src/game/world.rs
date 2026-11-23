@@ -69,7 +69,7 @@ use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
 use super::ecs::components::{
-    AcidDrop, BiteSnap, CheeseString, ChestSpawn, CorrosiveChannel, EchoSpoke, FairyRing,
+    AcidDrop, BiteSnap, CheeseString, ChestSpawn, CorrosiveChannel, Dropping, EchoSpoke, FairyRing,
     FondueTine, Infection, MilkTooth, SpawnId, WhipCrack,
 };
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP, PLAYER_RADIUS};
@@ -1080,6 +1080,12 @@ impl World {
         collect_sorted(&mut self.ecs)
     }
 
+    /// Every live Hantavirus dropping, in stable `SpawnId` order (the order the
+    /// cap evicts them and the draw pass paints them in).
+    pub fn droppings(&mut self) -> Vec<Dropping> {
+        collect_sorted(&mut self.ecs)
+    }
+
     /// Live state of the two Space-triggered weapons, as of the last tick.
     ///
     /// The resource lives permanently in the ECS world (it is not a facade
@@ -1634,6 +1640,12 @@ impl World {
 
     pub fn clear_pools(&mut self) {
         self.clear_components::<Pool>();
+    }
+
+    /// Remove every Hantavirus dropping (tests and a floor reset; a new floor
+    /// is a new `World`, so this mirrors [`World::clear_pools`]).
+    pub fn clear_droppings(&mut self) {
+        self.clear_components::<Dropping>();
     }
 
     fn clear_components<T: bevy_ecs::component::Component>(&mut self) {
@@ -2364,6 +2376,25 @@ impl World {
                 for &(ox, oy) in &[(ri, 0), (-ri, 0), (0, ri), (0, -ri)] {
                     self.light_map.mark_emissive_rect(pb, s.0 + ox, s.1 + oy, 1, 1);
                 }
+            }
+        }
+
+        // Hantavirus droppings: the weapon's whole delivery, on the floor where
+        // the rat left it. Right after the pools and before the evolved ground
+        // effects (a dropping is floor litter, not an effect), in `SpawnId`
+        // order so overlapping sprites stack in spawn order, under the default
+        // (untagged floor) lighting pen. The sprite itself is
+        // `art_droppings::draw_dropping`'s; the order and the cull are here.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Dropping)>();
+            for (_, d) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(d.pos, cam);
+                if !on_screen(s, d.radius + 4.0, viewport) {
+                    continue;
+                }
+                let pen = pb.set_pen(0);
+                super::art_droppings::draw_dropping(pb, d, cam, self.elapsed);
+                pb.set_pen(pen);
             }
         }
 

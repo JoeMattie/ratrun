@@ -195,8 +195,29 @@ pub const RAIN_DROPS: [u8; 5] = [2, 2, 3, 3, 4];
 /// Splash radius (px), L1 → L5.
 pub const RAIN_RADIUS: [f32; 5] = [7.0, 8.0, 8.0, 9.0, 10.0];
 
-/// Hantavirus: how far from the rat the first host may be tagged, in px.
+/// Hantavirus: how far from the rat a foe may be marked, in px.
+///
+/// **Historical** (the weapon no longer tags at range): the drop's trigger
+/// radius is [`DROPPING_RADIUS`], and the Lens Cap scaling that used to stretch
+/// this reach now stretches that radius. Kept as the documented size of the
+/// old ranged tag so the wave-3 design doc still resolves.
+#[allow(dead_code)]
 pub const VIRUS_RANGE: f32 = 56.0;
+
+/// Hantavirus: seconds a dropping stays live on the floor.
+pub const DROPPING_LIFE: f32 = 14.0;
+/// Hantavirus: live droppings the weapon keeps, L1 → L5 (dropping one more
+/// removes the oldest, i.e. the lowest `SpawnId`, first).
+pub const DROPPING_CAP: [u8; 5] = [4, 5, 6, 7, 8];
+/// Hantavirus: a dropping's trigger radius in px. Lens Cap stretches it like
+/// any other ranged reach (`Stats::ranged_reach`, relative to this).
+pub const DROPPING_RADIUS: f32 = 7.0;
+/// Hantavirus: seconds a fresh dropping cannot be stepped in, so the rat's own
+/// footprint cannot trigger the drop it just left.
+pub const DROPPING_ARM: f32 = 0.25;
+/// Hantavirus: how far behind the rat's facing a dropping lands, in px (the
+/// rat's centre, less its back). Inside a wall it lands under the rat instead.
+pub const DROPPING_BACK: f32 = 5.0;
 /// Damage ticks per host (three pips, one lost per tick).
 pub const VIRUS_TICKS: u8 = 3;
 /// Seconds between ticks.
@@ -275,7 +296,7 @@ pub enum WeaponKind {
     LaserEyes,   // sweeping piercing beam, fired in a burst of pulses
     SuperDash,   // DASH: the dash itself is the attack (passive-triggered)
     AcidRain,    // marks floor spots, staggered drops, splash damage
-    Hantavirus,  // tagging infection that jumps down a pack
+    Hantavirus,  // leaves droppings; a body that steps in one is infected
     SpikedTail,  // single-target lash: spikes out, small burst at the hit
 }
 
@@ -381,7 +402,7 @@ impl WeaponKind {
             WeaponKind::LaserEyes => "Two beams close inward like scissors.",
             WeaponKind::SuperDash => "DASH: hold to charge, release to dash through foes.",
             WeaponKind::AcidRain => "Drops staggered acid splashes nearby.",
-            WeaponKind::Hantavirus => "Tags a foe for 3 hits, then jumps on.",
+            WeaponKind::Hantavirus => "Leaves droppings. A step tags 3 hits, then jumps.",
             WeaponKind::SpikedTail => "Lashes one foe, then bursts at the hit.",
         }
     }

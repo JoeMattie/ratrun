@@ -88,6 +88,39 @@ pub struct AcidDrop {
     pub volley: u8,
 }
 
+/// One **dropping** Hantavirus left on the floor: the weapon's whole delivery
+/// now (owner's rule: "make the hantavirus weapon deployed by poops").
+///
+/// The rat leaves one every weapon cycle where it stands (5 px behind its
+/// facing); the first unmarked body that steps inside `radius` takes the
+/// [`Infection`] the old ranged tag used to plant, with `damage`/`jumps`/`reach`
+/// snapshotted from the level **at drop time** (exactly as the old tag
+/// snapshotted them at tag time). A drop is silent and harmless until it has
+/// aged `DROPPING_ARM` seconds, lives `DROPPING_LIFE` seconds, and the weapon
+/// keeps at most `DROPPING_CAP[level]` of them, oldest (`SpawnId`) first out.
+///
+/// Spawned by `weapons_wave3a::fire_hantavirus`, aged and spent by
+/// `weapons_wave3a::droppings_system`, drawn by `art_droppings::draw_dropping`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Dropping {
+    /// Where it lies (world px).
+    pub pos: Vec2,
+    /// Seconds since it was dropped (the art's squash/fly age, and the arm).
+    pub age: f32,
+    /// Per-tick damage it was dropped with (the level's table times the rat's
+    /// damage multiplier at drop time).
+    pub damage: f32,
+    /// Transfers the chain it starts may still make.
+    pub jumps: u8,
+    /// Transfer reach the chain it starts will use.
+    pub reach: f32,
+    /// Trigger radius in px (Lens Cap stretches it at drop time).
+    pub radius: f32,
+    /// Art variation seed. The drop's own `SpawnId` truncated — a drop draws
+    /// no rng, so the picture cannot move a golden.
+    pub seed: u32,
+}
+
 /// Longest Hantavirus chain the visit history can record. The design's largest
 /// chain is `1 + VIRUS_JUMPS[4]` = 5 bodies; the array is fixed-size so a chain
 /// never allocates, with slack for future tuning.

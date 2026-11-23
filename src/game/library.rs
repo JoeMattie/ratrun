@@ -1287,9 +1287,10 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::Hantavirus => (
             "Level-up card · any floor",
-            "Somebody passed a note in Block C. A fictional arcade status, applied as \
-             three ticks, that jumps to a fresh body the moment its host stops being \
-             one.",
+            "Somebody passed a note in Block C, and the rat is the envelope. Every \
+             cycle it leaves one dropping where it stands; the first body to walk \
+             through carries three ticks and then hands them on to the next. Nobody \
+             signs for it.",
         ),
         WeaponKind::SpikedTail => (
             "Level-up card · any floor",

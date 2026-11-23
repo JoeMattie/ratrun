@@ -35,6 +35,7 @@
 //! | 11b2 | `weapon_spiketail::spiked_tail_system` | the Spiked Tail's wind-up, crack and recoil (wave 3) |
 //! | 11c | `weapons_wave3b::{laser_eyes,super_dash,melee_nudge}_system` | wave 3's self-driving weapons (new) |
 //! | 11d | `weapons_wave3a::acid_rain_system` | Acid Rain's locked drops landing (wave 3) |
+//! | 11d2 | `weapons_wave3a::droppings_system` | Hantavirus droppings age, expire and infect (`SpawnId` order; wave 3) |
 //! | 11e | `weapons_wave3a::hantavirus_system` | Hantavirus ticks + third-tick jumps (wave 3) |
 //! | 12 | `projectiles::bullets_system` | `update_bullets` |
 //! | 13 | `projectiles::pools_system` | `update_pools` |
@@ -215,9 +216,18 @@ pub fn build_tick_schedule() -> Schedule {
     // and the virus ticks land before `player_bullet_hits`/`reap_enemies`, and
     // both read the cached `EnemyIndex` order, which nothing has invalidated
     // since `grid_refresh`.
+    //
+    // 11d2: `droppings_system` sits immediately **before** the virus tick pass
+    // it feeds. It ages and expires the rat's droppings (11e's `SpawnId` order
+    // is the live one there: nothing has spawned or despawned an enemy since
+    // `grid_refresh`), and the infection it plants through `Commands` is
+    // applied by the `ApplyDeferred` that `chain()` inserts before
+    // `hantavirus_system` — so a body that steps on a dropping on this tick is
+    // ticked on the next, exactly as the old ranged tag's deferred insert was.
     schedule.add_systems(
         (
             weapons_wave3a::acid_rain_system,
+            weapons_wave3a::droppings_system,
             weapons_wave3a::hantavirus_system,
             projectiles::bullets_system,
             projectiles::pools_system,
