@@ -1253,6 +1253,7 @@ fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
         objects: LevelObjects::default(),
         boss: BossArena::default(),
         trailer: TrailerDeck::default(),
+        puddles: Vec::new(),
     }
 }
 
@@ -1307,6 +1308,7 @@ fn deck_patch() -> Level {
             wind: Vec::new(),
             slides: Vec::new(),
         },
+        puddles: Vec::new(),
     }
 }
 

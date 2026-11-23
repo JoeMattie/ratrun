@@ -48,3 +48,5 @@ pub mod art_roster_lab;
 pub mod art_roster_sewer;
 pub mod art_roster_flatbed;
 pub mod art_foreground;
+// Standing water: the wet floors' puddles and their ripples (`art_puddle`).
+pub mod art_puddle;

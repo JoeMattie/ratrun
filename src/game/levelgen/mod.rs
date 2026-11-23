@@ -72,6 +72,8 @@ pub mod trailer;
 #[cfg(test)]
 pub mod metrics;
 pub mod placement;
+/// Standing water (the wet floors' puddles); its own salted rng, run last.
+pub mod puddles;
 pub mod validate;
 
 use crate::math::Vec2;
@@ -138,6 +140,8 @@ pub struct StageTimings {
     pub nav: u64,
     /// Render-only fixtures and ambient emitter placement.
     pub lights: u64,
+    /// Standing water (`puddles::place`): the last stage of all.
+    pub puddles: u64,
 }
 
 impl StageTimings {
@@ -156,6 +160,7 @@ impl StageTimings {
             objects: self.objects.min(other.objects),
             nav: self.nav.min(other.nav),
             lights: self.lights.min(other.lights),
+            puddles: self.puddles.min(other.puddles),
         }
     }
 
@@ -171,6 +176,7 @@ impl StageTimings {
             + self.objects
             + self.nav
             + self.lights
+            + self.puddles
     }
 }
 
@@ -213,6 +219,8 @@ fn generate_stages(
     if theme == Theme::Trailer {
         let mut level = trailer::generate(tiles, &mut rng, seed);
         stage!(lights, lights::place(&mut level, attempt));
+        // No puddles on the Flatbed: `puddles::count_for` has no row for it and
+        // the stage is not run here at all, so the ride is dry.
         return strip_boss_arena(level);
     }
 
@@ -276,9 +284,16 @@ fn generate_stages(
         objects,
         boss: crate::game::level::BossArena::default(),
         trailer: crate::game::level::TrailerDeck::default(),
+        puddles: Vec::new(),
     };
     stage!(lights, lights::place(&mut level, attempt));
-    strip_boss_arena(level)
+    let mut level = strip_boss_arena(level);
+    // Standing water: the last stage of all, on its own salted rng over the
+    // finished grid (`puddles`'s module docs). It writes only
+    // `Level::puddles`, which the map pin does not fold, and it draws nothing
+    // another stage reads, so no earlier stage can move.
+    stage!(puddles, puddles::place(&mut level, attempt));
+    level
 }
 
 /// Make a generated level arena-free (batch 12).

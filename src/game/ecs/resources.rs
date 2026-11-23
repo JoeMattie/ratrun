@@ -131,6 +131,87 @@ pub struct RngRes(pub StdRng);
 #[derive(Resource, Default)]
 pub struct SfxQueue(pub Vec<Sfx>);
 
+// ---- Standing water ------------------------------------------------------
+
+/// How many ripples the rat may have alive at once (`PuddleSteps::ripples`).
+///
+/// Eight is the visual budget: the fastest a splash can start one is one per
+/// [`crate::game::ecs::systems::puddles::STEP_PX`] of wet travel, and a ripple
+/// lives 0.45 s, so a normal walk keeps two or three alive and only a hard
+/// corner of Super Dash could reach eight.
+pub const RIPPLE_SLOTS: usize = 8;
+
+/// One expanding ring on standing water.
+///
+/// Cosmetic only: `systems::puddles::puddle_steps_system` starts it and ages it
+/// and `World::draw_scene` draws it. Nothing reads it back into the simulation,
+/// so it draws no rng and cannot move a golden trace.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ripple {
+    /// Centre, world px (the rat's feet, or a body's position).
+    pub pos: Vec2,
+    /// Seconds since it started; dies at
+    /// [`crate::game::ecs::systems::puddles::RIPPLE_LIFE`].
+    pub age: f32,
+    /// A dash's heavier slosh rather than a step's small splash.
+    pub big: bool,
+    /// Is this slot in use?
+    pub live: bool,
+}
+
+/// One of the first [`crate::game::ecs::systems::puddles::ENEMY_RIPPLE_SLOTS`]
+/// ordinary ground bodies' ripple cooldowns, keyed by **slot** in
+/// `SpawnId` order (no component, so no body carries extra state and a spawn or
+/// despawn cannot invalidate it).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EnemyRippleSlot {
+    /// The `SpawnId` that held the slot when the cooldown started; a different
+    /// body taking the slot ripples at once rather than inheriting the wait.
+    pub id: u32,
+    /// Seconds until the slot may ripple again.
+    pub cooldown: f32,
+}
+
+/// The rat's wet-floor footsteps (`systems::puddles::puddle_steps_system`).
+///
+/// Permanent scratch, inserted once in `World::new` (like `ActiveFx` and
+/// `DashTrack`): written by that one system every tick and read between ticks
+/// by `World::draw_scene` for the ripples. It is the **only** state the system
+/// keeps — the rat is not slowed, no entity is touched and no rng number is
+/// drawn, so this resource is cosmetic from end to end.
+#[derive(Resource, Clone, Debug, PartialEq)]
+pub struct PuddleSteps {
+    /// Wet distance travelled since the last step splash, in px.
+    pub dist: f32,
+    /// Was the rat on water last tick? (the dry → wet edge splashes at once)
+    pub last_wet: bool,
+    /// Where the rat stood last tick, for this tick's travelled distance.
+    pub last_pos: Vec2,
+    /// Has this dash already pushed its one `Sfx::SplashBig`?
+    pub dash_splashed: bool,
+    /// Live ripples, at most [`RIPPLE_SLOTS`].
+    pub ripples: [Ripple; RIPPLE_SLOTS],
+    /// Per-slot enemy ripple cooldowns (see [`EnemyRippleSlot`]).
+    pub enemy_slots: [EnemyRippleSlot;
+        crate::game::ecs::systems::puddles::ENEMY_RIPPLE_SLOTS],
+}
+
+impl PuddleSteps {
+    /// A fresh level's state: the rat standing still at `start`, nothing
+    /// splashed yet.
+    pub fn at(start: Vec2) -> Self {
+        PuddleSteps {
+            dist: 0.0,
+            last_wet: false,
+            last_pos: start,
+            dash_splashed: false,
+            ripples: [Ripple::default(); RIPPLE_SLOTS],
+            enemy_slots: [EnemyRippleSlot::default();
+                crate::game::ecs::systems::puddles::ENEMY_RIPPLE_SLOTS],
+        }
+    }
+}
+
 // ---- Run counters / shake ------------------------------------------------
 
 /// The legacy `elapsed`, `kills`, `score`, `pending_levelups`, `game_over`,

@@ -1027,6 +1027,116 @@ pub const SLIDE_TRAVEL_SECS: f32 = 0.9;
 /// How long it sits at the end of its straps before returning.
 pub const SLIDE_HOLD_SECS: f32 = 1.6;
 
+// ---- Standing water --------------------------------------------------------
+
+/// Lobes around a puddle's rim ([`puddle_wobble`]).
+const PUDDLE_LOBES: usize = 8;
+
+/// Softness of a puddle's rim, in world px: [`Puddle::depth`] ramps from 0 to 1
+/// over the outer this many pixels, so the art can feather the edge and the
+/// lighting has a gradient to reflect in.
+pub const PUDDLE_EDGE_PX: f32 = 6.0;
+
+/// The rim wobble of a blob at `angle`, in `0..=1`.
+///
+/// A fixed [`PUDDLE_LOBES`]-lobe hash-lerp: one lobe's value is an integer hash
+/// of `(seed, lobe)`, and the angle lerps (smoothstepped, so the rim's slope is
+/// continuous too) between the two lobes it falls between. Integer hash + lerp
+/// only — no sin, no table, no rng — so [`Puddle::contains`], [`Puddle::depth`],
+/// the art and the lighting all read exactly the same edge.
+///
+/// The owner's brief ("the floor should be very wet") needs a shape that reads
+/// as water rather than as an ellipse; eight lobes is the fewest that gives a
+/// blob two independent bays without looking like a gear.
+pub fn puddle_wobble(seed: u32, angle: f32) -> f32 {
+    let turns = angle * std::f32::consts::FRAC_1_TAU;
+    let turns = turns.rem_euclid(1.0) * PUDDLE_LOBES as f32;
+    let lobe = turns.floor();
+    let frac = turns - lobe;
+    let k = (lobe as i32).rem_euclid(PUDDLE_LOBES as i32) as u32;
+    let a = puddle_lobe(seed, k);
+    let b = puddle_lobe(seed, (k + 1) % PUDDLE_LOBES as u32);
+    let s = frac * frac * (3.0 - 2.0 * frac);
+    a + (b - a) * s
+}
+
+/// One lobe's value, in `0..=1`: a small integer hash of `(seed, lobe)`.
+fn puddle_lobe(seed: u32, lobe: u32) -> f32 {
+    let mut h = seed ^ lobe.wrapping_mul(0x9e37_79b9);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b_3c6d);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297a_2d39);
+    h ^= h >> 15;
+    // The top 24 bits, so the value cannot round up to 1.0 from the full range.
+    (h >> 8) as f32 * (1.0 / 16_777_215.0)
+}
+
+/// One blob of standing water on a floor, in world pixels.
+///
+/// Puddles are **floor decoration with a gameplay hook**, not geometry: they
+/// never paint a tile, never block, never slow and are never read by the
+/// navigation, the spawn checks or the bot. `systems::puddles` reads
+/// [`Level::wet_at`] to splash under the rat's feet and the renderer draws them
+/// under the wet-floor material so lamps reflect in them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Puddle {
+    /// Centre, world px. Always on an open floor cell (the generator's rule).
+    pub pos: Vec2,
+    /// Half-width, world px (`24..=90` from the generator).
+    pub rx: f32,
+    /// Half-height, world px (`14..=60` from the generator).
+    pub ry: f32,
+    /// Shape variation (the rim's lobes).
+    pub seed: u32,
+}
+
+impl Puddle {
+    /// The rim factor at `angle`: `0.78` (pinched) to `1.0` (full).
+    pub fn edge_factor(&self, angle: f32) -> f32 {
+        0.78 + 0.22 * puddle_wobble(self.seed, angle)
+    }
+
+    /// Is `p` inside the blob?
+    ///
+    /// Irregular by design: inside when `(dx/rx)² + (dy/ry)² <= edge(angle)²`,
+    /// where `edge` is [`Self::edge_factor`] at the direction of `p`. The
+    /// bounding ellipse (`edge = 1`) therefore always contains the blob.
+    pub fn contains(&self, p: Vec2) -> bool {
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return false;
+        }
+        let d = p - self.pos;
+        let nx = d.x / self.rx;
+        let ny = d.y / self.ry;
+        let edge = self.edge_factor(d.y.atan2(d.x));
+        nx * nx + ny * ny <= edge * edge
+    }
+
+    /// `0.0` outside, `1.0` deep inside, linear over the outer
+    /// [`PUDDLE_EDGE_PX`] pixels — the soft edge the art and the lighting use.
+    pub fn depth(&self, p: Vec2) -> f32 {
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return 0.0;
+        }
+        let d = p - self.pos;
+        let edge = self.edge_factor(d.y.atan2(d.x));
+        let nx = d.x / (self.rx * edge);
+        let ny = d.y / (self.ry * edge);
+        let nr = (nx * nx + ny * ny).sqrt();
+        if nr >= 1.0 {
+            return 0.0;
+        }
+        if nr <= 1e-6 {
+            return 1.0;
+        }
+        // The rim along this ray sits at `|d| / nr`, so the distance still to
+        // travel is `|d| * (1 - nr) / nr` px.
+        let to_edge = d.len() * (1.0 - nr) / nr;
+        (to_edge / PUDDLE_EDGE_PX).clamp(0.0, 1.0)
+    }
+}
+
 // ---- The level -------------------------------------------------------------
 
 #[derive(bevy_ecs::resource::Resource)]
@@ -1068,6 +1178,12 @@ pub struct Level {
     /// The flatbed's bed, pits, wind stretches and sliding cargo. Empty on
     /// every theme but [`Theme::Trailer`].
     pub trailer: TrailerDeck,
+    /// Standing water on the floor (Sewer, Laundry, Kitchen). Render-only
+    /// decoration plus the rat's footstep splashes; placed by
+    /// [`super::levelgen::puddles`] on its own salted rng after every other
+    /// stage, so it cannot move the map pin. Empty on the Lab, the Printworks
+    /// and the Flatbed.
+    pub puddles: Vec<Puddle>,
 }
 
 /// The fight furniture a boss arena used to carry (`DESIGN_REVIEW.md` §5).
@@ -1145,6 +1261,7 @@ impl Level {
             objects: LevelObjects::default(),
             boss: BossArena::default(),
             trailer: TrailerDeck::default(),
+            puddles: Vec::new(),
         }
     }
 
@@ -1250,6 +1367,16 @@ impl Level {
     /// The fall hazard containing `p`, on the trailer level.
     pub fn pit_at(&self, p: Vec2) -> Option<&Pit> {
         self.trailer.pit_at(p)
+    }
+
+    /// Is `p` on standing water? The puddle test only, and **floor cells only**:
+    /// a blob's rim may spill over a wall face (the wall layer is drawn over it)
+    /// and that is not water the rat can step in.
+    pub fn wet_at(&self, p: Vec2) -> bool {
+        if self.puddles.is_empty() || !self.tiles.get_at(p).is_open() {
+            return false;
+        }
+        self.puddles.iter().any(|puddle| puddle.contains(p))
     }
 }
 
@@ -1485,5 +1612,115 @@ mod tests {
             }
         }
         assert!(probes > 200, "the property only saw {probes} probes");
+    }
+
+    // ---- Standing water ---------------------------------------------------
+
+    /// A blobby puddle for the shape tests: the generator's biggest bands.
+    fn test_puddle(seed: u32) -> Puddle {
+        Puddle {
+            pos: Vec2::new(400.0, 300.0),
+            rx: 64.0,
+            ry: 40.0,
+            seed,
+        }
+    }
+
+    #[test]
+    fn the_wobble_is_bounded_and_smooth() {
+        for seed in [0u32, 1, 7, 0xdead_beef, u32::MAX] {
+            // Bounded, and never flat: an eight-lobe hash must actually wobble.
+            let mut lo = f32::MAX;
+            let mut hi = f32::MIN;
+            let mut prev = puddle_wobble(seed, 0.0);
+            for i in 0..720 {
+                let angle = i as f32 * (std::f32::consts::TAU / 720.0);
+                let v = puddle_wobble(seed, angle);
+                assert!((0.0..=1.0).contains(&v), "seed {seed}: wobble {v} out of 0..=1");
+                lo = lo.min(v);
+                hi = hi.max(v);
+                assert!(
+                    (v - prev).abs() < 0.05,
+                    "seed {seed}: the rim jumps {prev} -> {v} at {angle} rad"
+                );
+                prev = v;
+            }
+            assert!(hi - lo > 0.05, "seed {seed}: the rim is (nearly) a circle");
+            // A full turn is a full turn: the function is periodic.
+            assert!((puddle_wobble(seed, 0.0) - puddle_wobble(seed, std::f32::consts::TAU)).abs() < 1e-5);
+            assert!((puddle_wobble(seed, 0.7) - puddle_wobble(seed, 0.7 + std::f32::consts::TAU * 3.0)).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn contains_is_inside_the_bounding_ellipse() {
+        for seed in 0..24u32 {
+            let p = test_puddle(seed);
+            for i in 0..360 {
+                let angle = i as f32 * (std::f32::consts::TAU / 360.0);
+                // Just outside the blob at that angle must be outside.
+                let r = p.edge_factor(angle) + 0.01;
+                let on = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
+                assert!(!p.contains(on), "seed {seed}: a point outside the edge is wet");
+                // And just inside must be inside.
+                let r = p.edge_factor(angle) * 0.99;
+                let inside = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
+                assert!(p.contains(inside), "seed {seed}: a point inside the edge is dry");
+                // The bounding ellipse holds every blob.
+                assert!(r <= 1.0);
+            }
+            // The blob never reaches the bounding ellipse's own rim: its edge
+            // factor tops out at 1.0 and the wobble is <= 1.
+            assert!(p.edge_factor(0.0) <= 1.0);
+            assert!(p.contains(p.pos));
+        }
+    }
+
+    #[test]
+    fn depth_is_zero_outside_and_one_at_the_centre() {
+        let p = test_puddle(11);
+        assert_eq!(p.depth(p.pos), 1.0);
+        assert_eq!(p.depth(p.pos + Vec2::new(0.0, -2.0)), 1.0, "a few px in is deep");
+        // Far outside is exactly zero, and the soft band ramps between.
+        assert_eq!(p.depth(p.pos + Vec2::new(p.rx, 0.0)), 0.0);
+        assert_eq!(p.depth(p.pos + Vec2::new(0.0, p.ry * 3.0)), 0.0);
+        let rim = p.pos + Vec2::new(p.rx * p.edge_factor(0.0) * 0.97, 0.0);
+        let d = p.depth(rim);
+        assert!(d > 0.0 && d < 1.0, "the outer band is a ramp, got {d}");
+        // `contains` and `depth > 0` are the same set.
+        for i in 0..200 {
+            let angle = i as f32 * 0.37;
+            let r = (i as f32 / 200.0) * 1.3;
+            let q = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
+            assert_eq!(p.contains(q), p.depth(q) > 0.0, "contains and depth disagree");
+        }
+        // A degenerate puddle is not water anywhere.
+        let flat = Puddle {
+            rx: 0.0,
+            ..p
+        };
+        assert!(!flat.contains(flat.pos));
+        assert_eq!(flat.depth(flat.pos), 0.0);
+    }
+
+    #[test]
+    fn wet_at_is_floor_only() {
+        // A blob over the start: the start cell is open floor, so it is wet,
+        // while a border-wall cell the blob also covers is not.
+        let mut level = Level::new(Theme::Sewer);
+        level.puddles = vec![Puddle {
+            pos: level.start,
+            rx: 90.0,
+            ry: 60.0,
+            seed: 5,
+        }];
+        assert!(level.wet_at(level.start), "the open start cell is not water");
+        assert!(
+            !level.wet_at(Vec2::new(4.0, 4.0)),
+            "a border wall cell is water"
+        );
+        // A dry level answers false everywhere without walking the list.
+        let dry = Level::empty(Theme::Sewer);
+        assert!(!dry.wet_at(dry.start));
     }
 }

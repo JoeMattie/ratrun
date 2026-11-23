@@ -15,6 +15,7 @@
 //! | 0b | `hazards::hazards_system` | steam grates + ink pads (Laundry / Printworks only); explicitly after 0 and before 1 |
 //! | 0c | `floor_sewer::floor_sewer_slow_system` | the Sump Leech's tongue slow folded into this tick's throttle (Sewer); explicitly after 0b and before 1 |
 //! | 1 | `player::player_system` | `update_player` |
+//! | 1a | `puddles::puddle_steps_system` | wet-floor footsteps + ripples (new); explicitly after 1 and before 2 — it reads this tick's rat position and `dash_active` and writes only `SfxQueue` and the cosmetic `PuddleSteps` |
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
 //! | 2a | `gates::{passage,cache,door}_system` | rat-holes, the maze cache, one-way doors (new); explicitly after 2 and before 3 |
 //! | 2b | `shop::threshold_system` | the mouse-hole shops' thresholds (new); chained right after the doors |
@@ -97,8 +98,8 @@ use super::resources::TickInput;
 use super::systems::{
     approach, boss, combat, enemy_move, enemy_wave3, enemy_wave4, evolutions, floor_flatbed,
     floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer, fog, fx, gates, hazards,
-    loot, miniboss, player, powerups, projectiles, shop, spawn, trailer, traps, weapon_spiketail,
-    weapons, weapons_wave3a, weapons_wave3b,
+    loot, miniboss, player, powerups, projectiles, puddles, shop, spawn, trailer, traps,
+    weapon_spiketail, weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -161,6 +162,17 @@ pub fn build_tick_schedule() -> Schedule {
         floor_sewer::floor_sewer_slow_system
             .after(hazards::hazards_system)
             .before(player::player_system),
+    );
+
+    // 1a: wet-floor footsteps, chained immediately after the player. It reads
+    // this tick's rat position, `dash_active` and the puddle test and writes
+    // **only** the `SfxQueue` and the cosmetic `PuddleSteps` resource: no rng, no
+    // entity, no simulated number (the rat is not slowed). Before the fog
+    // reveal so its order against the rest of the tick is fixed and obvious.
+    schedule.add_systems(
+        puddles::puddle_steps_system
+            .after(player::player_system)
+            .before(fog::reveal_system),
     );
 
     // 1-11b: the player through the active weapons (the first tuple of the

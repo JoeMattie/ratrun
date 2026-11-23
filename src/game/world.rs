@@ -78,7 +78,8 @@ use super::ecs::resources::{
     Cvars, DamageLedger, DashHold, DashTrack, DebugFlags, DifficultyLevel, EnemyIndex, EvoRuntime,
     GridScratch,
     LaserFx, LastPickups, LevelIndex, MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId,
-    NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport, XpBank,
+    NukeTick, PickupScratch, PuddleSteps, RngRes, RunCounters, SfxQueue, Shake, TickInput,
+    Viewport, XpBank,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
@@ -104,7 +105,7 @@ use super::{
     art_boss_magpie,
     art_boss_mangle, art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
-    art_props, art_rat, art_traps, art_walls, art_wave3a,
+    art_props, art_puddle, art_rat, art_traps, art_walls, art_wave3a,
 };
 
 /// How much of the simulation's screen shake reaches the camera. The owner
@@ -485,6 +486,12 @@ impl World {
         // Mouse-hole shop thresholds (the touch edge, the re-arm and the exit
         // grace). Permanent scratch like `GateRuntime`.
         ecs.insert_resource(super::ecs::systems::shop::ShopRuntime::default());
+        // Wet-floor footsteps (the rat's splashes, the ripple rings and the
+        // horde's per-slot cooldowns). Permanent scratch, written only by
+        // `puddles::puddle_steps_system` and read between ticks by
+        // `World::draw_scene` for the ripples; a fresh level starts with the rat
+        // standing still at the start, nothing splashed yet.
+        ecs.insert_resource(PuddleSteps::at(center));
 
         World {
             ecs,
@@ -2257,6 +2264,13 @@ impl World {
         // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
         self.particles.draw_stains(pb, cam);
 
+        // Standing water: the puddles, then the ripples the feet left in them.
+        // Right after the stains and before the boss ground layer, so a
+        // telegraph is drawn over a puddle and a puddle over a stain. Render-only;
+        // every pixel is tagged with the wet-floor material so the lighting pass
+        // reflects a lamp in it.
+        self.draw_puddles(pb, cam, viewport);
+
         // The overhead light's ground shadows (batch 13, `render::lighting::
         // overhead`): on the floor, before the walls, props and bodies, so
         // they cover it and the wall layers clip it. Render-only.
@@ -3532,6 +3546,50 @@ impl World {
         }
     }
 
+    /// Standing water: every visible puddle, then every live ripple, under the
+    /// wet-floor material (`render::lighting::pool_pen`, the same `Water` tag an
+    /// acid pool wears, so lamps and specular streaks land on it exactly as the
+    /// lighting's wet-floor reflections expect).
+    ///
+    /// Drawn with the floor, before the wall layers: a blob's rim may spill over
+    /// a wall face and the wall is painted over it, which is what makes a long
+    /// Sewer puddle read as water running along a corridor instead of a shape
+    /// cut out of it. Render-only — nothing here writes an entity, an rng or a
+    /// simulated value.
+    fn draw_puddles(&mut self, pb: &mut PixelBuffer, cam: Vec2, viewport: Vec2) {
+        if self.level.puddles.is_empty() {
+            return;
+        }
+        let pen = pb.set_pen(crate::render::lighting::pool_pen());
+        let theme = self.level.theme;
+        let elapsed = self.elapsed;
+        for puddle in &self.level.puddles {
+            let margin = puddle.rx.max(puddle.ry) + 2.0;
+            if !on_screen(self.w2s(puddle.pos, cam), margin, viewport) {
+                continue;
+            }
+            art_puddle::draw_puddle(pb, puddle, cam, elapsed, theme);
+        }
+        // The ripples come straight from the resource the footstep system
+        // writes; between ticks it is the ECS world's own (never a facade
+        // field), so read it there and skip the pass if a hand-built world has
+        // none.
+        if let Some(steps) = self.ecs.get_resource::<PuddleSteps>() {
+            for ripple in steps.ripples.iter().filter(|r| r.live) {
+                if !on_screen(self.w2s(ripple.pos, cam), RIPPLE_DRAW_MARGIN, viewport) {
+                    continue;
+                }
+                art_puddle::draw_ripple(
+                    pb,
+                    self.w2s(ripple.pos, cam),
+                    ripple.age,
+                    ripple.big,
+                );
+            }
+        }
+        pb.set_pen(pen);
+    }
+
     /// Boss-owned projectiles in the bullet pass (blade discs, shrapnel).
     fn draw_boss_projectiles(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
         let accent = self.level.palette.accent;
@@ -3871,6 +3929,11 @@ const DAMAGE_CLEAR_RADIUS: f32 = 26.0;
 /// Extra cells to draw around the viewport: wall art casts shadows up to 4 px
 /// south/east and the overhang layer reaches a few pixels up.
 const WALL_DRAW_MARGIN: i32 = 1;
+
+/// Screen-space margin a ripple can still paint into: the widest ring
+/// `art_puddle::draw_ripple` draws, in px (it is a screen-space effect, so this
+/// is not a world radius).
+const RIPPLE_DRAW_MARGIN: f32 = 26.0;
 
 /// **Growth Serum** (batch 13): half the side of the offscreen window the giant
 /// rat is rasterised into before it is blitted back at five times the size.

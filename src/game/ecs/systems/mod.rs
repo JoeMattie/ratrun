@@ -41,3 +41,6 @@ pub mod floor_sewer;
 pub mod floor_flatbed;
 // Fodder approach sounds (one pair per floor); not yet in the schedule.
 pub mod approach;
+// Standing water: the rat's wet-floor footsteps and the ripples (right after
+// `player` in the schedule).
+pub mod puddles;
