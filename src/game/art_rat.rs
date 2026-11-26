@@ -23,8 +23,10 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale, Rgb};
 
-use super::collision::TileMap;
+use super::collision::{SizeClass, TileMap};
 use super::ecs::components::{BiteSnap, Lash, LashPhase, WhipCrack};
+use super::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
+use super::ecs::systems::player::{dash_duration, DASH_BOOST, DASH_SECS};
 use super::player::Player;
 use super::weapon::{
     WeaponKind, LASH_DRAG_GAP, LASH_RECOIL_AT, LASH_TOTAL, LASH_WINDUP, WHIP_ARC_HALF,
@@ -1036,7 +1038,7 @@ fn pose_of(player: &Player, elapsed: f32) -> Pose {
     let speed = player.vel.len();
     let top = player.loadout.stats.move_speed.max(1.0);
     let moving = (speed / top).clamp(0.0, 1.0);
-    let dash = (player.dash_active / 0.16).clamp(0.0, 1.0).sqrt();
+    let dash = (player.dash_active / DASH_SECS).clamp(0.0, 1.0).sqrt();
     // The Super Dash charge pose: the rat coils (shorter and wider, the exact
     // opposite of the dash stretch) as the meter fills, so the release reads
     // as a spring let go. Zero unless the dash is being held, and a tap never
@@ -1096,10 +1098,6 @@ const CHARGE_COLOR: Rgb = (198, 230, 255);
 const CHARGE_FULL: Rgb = (255, 255, 255);
 const CHARGE_SOCKET: Rgb = (46, 58, 84);
 
-/// Length of the Super Dash **lane preview**, in world px, at an empty and at a
-/// full meter (the charged dash travels up to twice the ordinary one).
-const PREVIEW_MIN_LEN: f32 = 46.0;
-const PREVIEW_MAX_LEN: f32 = 96.0;
 /// The preview's colour: the weapon's blue-white, drawn faint. Friendly
 /// information, never a telegraph (those are red or amber and drawn on the
 /// hostile layer).
@@ -1165,7 +1163,7 @@ fn draw_charge_ring(pb: &mut PixelBuffer, centre: (i32, i32), charge: f32, elaps
 }
 
 /// The **Super Dash lane preview**: a faint blue-white line from the rat along
-/// its dash direction, at the length the current charge would carry it, stopped
+/// its dash direction, at the current charge's steady-speed reach, stopped
 /// by the first wall — so "where would this go" is answered before the release
 /// that spends the dash.
 ///
@@ -1183,22 +1181,29 @@ pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap,
     } else {
         Vec2::new(0.0, -1.0)
     };
-    let len = PREVIEW_MIN_LEN + (PREVIEW_MAX_LEN - PREVIEW_MIN_LEN) * charge;
+    let speed = player.loadout.stats.move_speed
+        * player.speed_mult.max(0.0)
+        * player.buffs.move_speed_scale()
+        * DASH_BOOST;
+    let len = speed * dash_duration(charge);
     let alpha = 0.10 + 0.20 * charge;
     // Two-pixel steps: a lane that reads as a line without drawing the whole
     // corridor pixel by pixel every frame.
-    let mut d = 8.0f32;
+    let mut d = PLAYER_SUBSTEP;
     while d <= len {
         let p = player.pos + face * d;
-        if tiles.get_at(p).is_wall() {
+        let resolved = tiles.resolve_circle(p, PLAYER_RADIUS, SizeClass::Small, Some(face));
+        if resolved != p {
             // The wall is where the dash stops: mark it faintly and stop.
             let s = w2s(p, cam);
             blend(pb, s.0, s.1, PREVIEW_COLOR, alpha + 0.18);
             break;
         }
-        let s = w2s(p, cam);
-        blend(pb, s.0, s.1, PREVIEW_COLOR, alpha);
-        d += 2.0;
+        if d >= 8.0 {
+            let s = w2s(p, cam);
+            blend(pb, s.0, s.1, PREVIEW_COLOR, alpha);
+        }
+        d += PLAYER_SUBSTEP;
     }
 }
 

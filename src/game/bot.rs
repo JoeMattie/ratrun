@@ -137,7 +137,7 @@ const FOE_ON_RAT_PX: f32 = 6.0;
 
 /// How far ahead a charged Super Dash is worth holding for, in px (the full
 /// charge travels about twice the ordinary dash's distance).
-const SUPER_DASH_LANE_PX: f32 = 96.0;
+const SUPER_DASH_LANE_PX: f32 = 192.0;
 /// Half-width of that lane, in px: the dash's swept radius plus a body's own
 /// radius has to overlap it for the body to be a reason to charge.
 const SUPER_DASH_LANE_HALF_W: f32 = 10.0;
@@ -2548,7 +2548,7 @@ impl Bot {
             let plate = pos + f * MOUSETRAP_TRIGGER_OFFSET_U;
             let to = plate - p;
             let d = to.len();
-            if !(6.0..=34.0).contains(&d) {
+            if !(6.0..=68.0).contains(&d) {
                 continue;
             }
             let dir = to.normalized();
@@ -3706,15 +3706,19 @@ mod tests {
         w.clear_enemies();
         bot.threats.clear();
         bot.threats.push(Threat::BossBody {
-            pos: p + Vec2::new(40.0, 0.0),
-            radius: 14.0,
+            pos: p + Vec2::new(190.0, 0.0),
+            radius: 1.0,
             damage: 20.0,
         });
         assert_eq!(
             bot.charge_for_lane(&w, ahead),
             1.0,
-            "the boss on the lane must be worth a charged dash"
+            "the boss on the extended lane must be worth a charged dash"
         );
+        if let Threat::BossBody { pos, .. } = &mut bot.threats[0] {
+            pos.x += 4.0;
+        }
+        assert_eq!(bot.charge_for_lane(&w, ahead), 0.0, "the lane still ends at 192 px");
         // …but not from behind.
         bot.threats.clear();
         bot.threats.push(Threat::BossBody {
@@ -3727,6 +3731,30 @@ mod tests {
             0.0,
             "a boss behind the rat is not a lane"
         );
+    }
+
+    #[test]
+    fn the_bot_plans_bait_dashes_out_to_the_longer_reach() {
+        use crate::game::art_traps::MOUSETRAP_TRIGGER_OFFSET_U;
+        use crate::game::collision::TileMap;
+
+        let mut w = World::new(Theme::Sewer, 42);
+        w.level.tiles = TileMap::new(200, 160, w.level.theme, 0);
+        w.player.pos = w.level.arena * 0.5;
+        let east = Vec2::new(1.0, 0.0);
+        let mut bot = seeded_bot(Skill::Expert, 42);
+        for (distance, expected) in [(67.0, Some(east)), (69.0, None)] {
+            bot.threats.clear();
+            bot.threats.push(Threat::Mousetrap {
+                pos: w.player.pos + east * (distance - MOUSETRAP_TRIGGER_OFFSET_U),
+                facing: east,
+                armed: true,
+                committed: false,
+                hair: false,
+                bait_good: true,
+            });
+            assert_eq!(bot.bait_dash(&w), expected);
+        }
     }
 
     /// Batch 6: the plate of an **ordinary** trap is as much a no-go as a hair

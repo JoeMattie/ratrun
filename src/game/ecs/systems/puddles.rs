@@ -41,16 +41,15 @@
 //!
 //! ## Schedule slot
 //!
-//! Chained **immediately after `player::player_system`**: the rat's position,
-//! `dash_active` and the level are all this tick's, and nothing between here and
-//! the render pass reads the water again.
+//! Runs after player movement and Outfall displacement. `DashTrack` also
+//! identifies the final dash tick, when the movement spent the last of the timer.
 
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{
-    EnemyRippleSlot, PuddleSteps, Ripple, RunCounters, SfxQueue, TickInput, Viewport,
+    DashTrack, EnemyRippleSlot, PuddleSteps, Ripple, RunCounters, SfxQueue, TickInput, Viewport,
 };
 use crate::game::ecs::systems::approach::in_sim_view;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -97,6 +96,7 @@ pub fn puddle_steps_system(
     counters: Res<RunCounters>,
     mut level: ResMut<Level>,
     player: Res<Player>,
+    dash: Res<DashTrack>,
     viewport: Res<Viewport>,
     mut sfx: ResMut<SfxQueue>,
     mut steps: ResMut<PuddleSteps>,
@@ -132,21 +132,27 @@ pub fn puddle_steps_system(
     let travelled = pos.dist(steps.last_pos);
     steps.last_pos = pos;
     let wet = level.wet_at(pos);
-    let dashing = player.dash_active > 0.0;
-    if !dashing {
-        // A dash's latch is re-armed when the dash ends, so the *next* dash
-        // through water splashes again.
+    if dash.started_this_tick {
+        // A refill can start a new dash before the previous one ends.
         steps.dash_splashed = false;
     }
     let feet = pos + Vec2::new(0.0, FEET_PX);
 
-    if wet && dashing {
+    if dash.live_this_tick {
         // One heavy slosh per dash, wherever in the dash the water is.
-        if !steps.dash_splashed {
+        let launch_wet = dash.started_this_tick && level.wet_at(input.previous_pos);
+        if !steps.dash_splashed && (wet || launch_wet) {
             steps.dash_splashed = true;
             steps.dist = 0.0;
             sfx.0.push(Sfx::SplashBig);
-            start_ripple(&mut steps, feet, true);
+            let splash_pos = if wet {
+                feet
+            } else {
+                input.previous_pos + Vec2::new(0.0, FEET_PX)
+            };
+            start_ripple(&mut steps, splash_pos, true);
+        } else if !wet {
+            steps.dist = 0.0;
         }
     } else if wet {
         if steps.last_wet {
@@ -425,6 +431,21 @@ mod tests {
             .filter(|r| r.live && r.big)
             .count();
         assert_eq!(big, 1, "the dash left exactly one big ripple");
+    }
+
+    #[test]
+    fn the_last_dash_tick_and_a_refilled_dash_can_each_splash() {
+        let (mut w, _) = wet_world();
+        w.player.loadout.stats.move_speed = 0.0;
+        w.player.dash_active = DT * 0.5;
+        assert_eq!(splashes(&run(&mut w, 1, Vec2::ZERO, false)), (0, 1));
+
+        w.player.dash_cd = 0.0;
+        assert_eq!(splashes(&run(&mut w, 1, Vec2::ZERO, true)), (0, 1));
+        assert!(w.player.dash_active > 0.0);
+        // Clean Socks reset this cooldown even during an active dash.
+        w.player.dash_cd = 0.0;
+        assert_eq!(splashes(&run(&mut w, 1, Vec2::ZERO, true)), (0, 1));
     }
 
     #[test]

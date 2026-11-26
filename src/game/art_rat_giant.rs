@@ -26,6 +26,7 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale as scale_rgb, Rgb};
 
 use super::art_rat::{tail_charge, TailCharge};
+use super::ecs::systems::player::DASH_SECS;
 use super::ecs::systems::powerups::{GIANT_STOMP_INTERVAL, GROWTH_SECS};
 use super::player::Player;
 
@@ -237,7 +238,7 @@ impl GiantPose {
         let speed = player.vel.len();
         let top = player.loadout.stats.move_speed.max(1.0);
         let moving = (speed / top).clamp(0.0, 1.0);
-        let dash = (player.dash_active / 0.16).clamp(0.0, 1.0).sqrt();
+        let dash = (player.dash_active / DASH_SECS).clamp(0.0, 1.0).sqrt();
         let coil = if player.dash_charging {
             player.dash_charge.clamp(0.0, 1.0) * (1.0 - dash)
         } else {

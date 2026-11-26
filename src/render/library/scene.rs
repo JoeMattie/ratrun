@@ -255,9 +255,9 @@ const ARSENAL_HP: f32 = 4000.0;
 /// A max-rank thrash kills a 4,000 hp fodder body on its **first** sweep, so
 /// the card showed the arc and an empty floor for the rest of the loop.
 const SWEEP_TARGET_HP: f32 = ARSENAL_HP * 50.0;
-/// The charged Super Dash's travel in world px (58 px/s × 3.2 × 0.32 s), with a
+/// The charged Super Dash's travel in world px (58 px/s × 3.2 × 0.64 s), with a
 /// little slack: the lane the dash card lays its targets along and frames.
-const DASH_LANE: f32 = 62.0;
+const DASH_LANE: f32 = 124.0;
 /// The window a floor card is framed on: 12 × 8 tiles around a furnished room.
 const FLOOR_WINDOW: (i32, i32) = (12, 8);
 /// How much world a floor card shows (world px per plate pixel). Two thirds of

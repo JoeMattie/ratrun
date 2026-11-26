@@ -1,6 +1,9 @@
 //! (a) Player movement, dash, sub-stepping and timers.
 //!
-//! Reproduces **verbatim** the legacy `World::update_player`:
+//! Based on the legacy `World::update_player`. Ordinary dashes now last 0.32 s
+//! at the same boost, with charge scaling that duration up to 0.64 s. The
+//! scripted dash traces deliberately move through player positions, immunity
+//! and the additional trail emissions. Level generation is unaffected.
 //!
 //! | legacy | here |
 //! | --- | --- |
@@ -43,9 +46,7 @@
 //!   player's velocity as the one-way-door permission). Do not move the whole
 //!   delta at once.
 //! - RNG: the dash-start burst and, while dashing, the trail are the only
-//!   draws, and they happen exactly where the legacy code-197 drew its cone
-//!   and where the neon hook inserted the trail, so the per-tick rng sequence
-//!   matches the other team's build.
+//!   draws. Start still precedes movement and trail still follows it.
 //! - Performance: this system allocates nothing per tick — no query, no
 //!   sorting, no `Vec` scratch. `stats` is a plain 8-`f32` stack copy (exactly
 //!   legacy's `clone()`), and `Particles` pushes into pre-allocated
@@ -71,7 +72,9 @@ pub const DASH_READY_SECS: f32 = 0.35;
 pub const DASH_DENIED_SECS: f32 = 0.16;
 /// How long an ordinary dash runs (seconds). A charged Super Dash scales this
 /// by up to [`SUPER_DASH_DISTANCE`], which is the distance.
-const DASH_SECS: f32 = 0.16;
+pub const DASH_SECS: f32 = 0.32;
+/// Dash speed as a multiple of the rat's current move speed.
+pub const DASH_BOOST: f32 = 3.2;
 /// Seconds of holding the dash input to fill the Super Dash meter at weapon
 /// level 1. Each weapon level takes [`SUPER_DASH_CHARGE_STEP`] less.
 pub const SUPER_DASH_CHARGE_SECS: f32 = 0.90;
@@ -84,12 +87,17 @@ pub const SUPER_DASH_TAP_SECS: f32 = 0.15;
 /// How far a full charge reaches, as a multiple of the ordinary dash's travel
 /// (the dash's own duration is scaled, so the boost stays the same).
 pub const SUPER_DASH_DISTANCE: f32 = 2.0;
-/// Immunity granted past the end of a charged dash's travel, so the whole route
+/// Immunity granted past the end of the dash's travel, so the whole route
 /// is covered and nothing can land on the frame it stops.
-const SUPER_DASH_IFRAME_PAD: f32 = 0.02;
+const DASH_IFRAME_PAD: f32 = 0.02;
 /// Screen shake on a charged release, in px, at full charge (the ordinary dash
 /// has none).
 const SUPER_DASH_SHAKE: f32 = 7.0;
+
+/// Travel time for a dash with a charge between zero and one.
+pub fn dash_duration(charge: f32) -> f32 {
+    DASH_SECS * (1.0 + (SUPER_DASH_DISTANCE - 1.0) * charge)
+}
 
 /// Seconds of holding that fill the Super Dash meter at weapon `level`
 /// (1..=5): 0.90 s at L1 down to 0.74 s at L5 ("a little faster per level").
@@ -253,19 +261,14 @@ pub fn player_system(
     } else {
         None
     };
+    dash_track.started_this_tick = false;
     if let Some(charge) = request {
         if player.dash_cd <= 0.0 {
             // Up to `SUPER_DASH_DISTANCE` times the ordinary travel: the boost
             // is unchanged, the dash simply lasts longer.
-            player.dash_active = DASH_SECS * (1.0 + (SUPER_DASH_DISTANCE - 1.0) * charge);
+            player.dash_active = dash_duration(charge);
             player.dash_cd = stats.dash_cd;
-            if charge > 0.0 {
-                // Immune for the whole travel of a charged dash (not while it
-                // is charging: the meter grants nothing until it is spent).
-                player.iframes = player.iframes.max(player.dash_active + SUPER_DASH_IFRAME_PAD);
-            } else {
-                player.iframes = player.iframes.max(0.18);
-            }
+            player.iframes = player.iframes.max(player.dash_active + DASH_IFRAME_PAD);
             let pos = player.pos;
             let face = player.face;
             vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face);
@@ -300,7 +303,9 @@ pub fn player_system(
     let w3b_from = player.pos;
 
     let dashing = player.dash_active > 0.0;
-    let dash_boost = if dashing { 3.2 } else { 1.0 };
+    let dash_boost = if dashing { DASH_BOOST } else { 1.0 };
+    // A partial final tick travels only the remaining dash time.
+    let move_dt = if dashing { dt.min(player.dash_active) } else { dt };
     // `move_dir` is a throttle vector: unit length = full speed (keyboard),
     // shorter = proportionally slower (mouse easing near the cursor).
     // A dash with no held direction launches along the facing instead of
@@ -319,13 +324,13 @@ pub fn player_system(
     // Copy out `vel` first (the legacy "disjoint borrow" convention) so the
     // arithmetic reads the pre-lerp velocity exactly once.
     let vel = player.vel;
-    player.vel = vel + (target_vel - vel) * (12.0 * dt).min(1.0);
+    player.vel = vel + (target_vel - vel) * (12.0 * move_dt).min(1.0);
 
     // Move in sub-steps shorter than the player radius. A dash at upgraded
     // speed can cover ~12 px per tick, which would otherwise skip straight
     // over a thin pipe and let nearest-face ejection pop the player out the
     // far side.
-    let delta = player.vel * dt;
+    let delta = player.vel * move_dt;
     let steps = ((delta.len() / PLAYER_SUBSTEP).ceil() as i32).clamp(1, 64);
     let step = delta * (1.0 / steps as f32);
     let arena = level.arena;
@@ -370,7 +375,7 @@ pub fn player_system(
     if dashing {
         let pos = player.pos;
         let vel = player.vel;
-        vfx::emit_dash_trail(&mut particles, &mut rng.0, pos, vel, dt);
+        vfx::emit_dash_trail(&mut particles, &mut rng.0, pos, vel, move_dt);
     }
 
     // Timers (legacy 233-240). Decay order matters: dash_cd, dash_active,
@@ -378,6 +383,11 @@ pub fn player_system(
     player.dash_cd = (player.dash_cd - dt).max(0.0);
     player.dash_active = (player.dash_active - dt).max(0.0);
     player.iframes = (player.iframes - dt).max(0.0);
+    if dashing && player.dash_active == 0.0 {
+        // Hit systems see the post-move state. Keep the pad when a long frame
+        // uses up the remaining dash time and would otherwise consume it too.
+        player.iframes = player.iframes.max(DASH_IFRAME_PAD);
+    }
     player.hurt_flash = (player.hurt_flash - dt).max(0.0);
     // Pure-visual dash feedback timers (no sim reads them, no rng involved).
     player.dash_ready_flash = (player.dash_ready_flash - dt).max(0.0);
@@ -396,7 +406,7 @@ pub fn player_system(
 mod tests {
     use super::player_system;
     use super::{
-        super_dash_charge_secs, DASH_DENIED_SECS, DASH_SECS, SUPER_DASH_CHARGE_SECS,
+        super_dash_charge_secs, DASH_DENIED_SECS, DASH_IFRAME_PAD, DASH_SECS, SUPER_DASH_CHARGE_SECS,
         SUPER_DASH_DISTANCE,
     };
     use crate::audio::Sfx;
@@ -432,6 +442,64 @@ mod tests {
     /// before the tile grid owned collision).
     fn open_map(w: &mut World) {
         w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    }
+
+    #[test]
+    fn dash_travel_doubles_at_every_charge_and_immunity_covers_the_pad() {
+        let east = Vec2::new(1.0, 0.0);
+        for dt in [DT, 0.05] {
+            for (charge, factor) in [(0.0, 2.0), (0.5, 3.0), (1.0, 4.0)] {
+                let mut w = World::new(Theme::Sewer, 19);
+                open_map(&mut w);
+                if charge > 0.0 {
+                    own_super_dash(&mut w);
+                }
+                let start = w.level.arena * 0.5;
+                w.player.pos = start;
+                let speed = w.player.loadout.stats.move_speed * 3.2;
+                // Start at steady boost speed to measure the duration alone.
+                w.player.vel = east * speed;
+                let cooldown = w.player.loadout.stats.dash_cd;
+
+                w.begin_tick_charged(dt, east, true, false, None, charge);
+                run_player(&mut w);
+                w.end_tick();
+                assert!((w.player.dash_cd - (cooldown - dt)).abs() < 1e-5);
+                let expected_iframes = factor * 0.16 + DASH_IFRAME_PAD - dt;
+                assert!((w.player.iframes - expected_iframes).abs() < 1e-5);
+                assert!(!w.player.take_damage(1.0));
+
+                for _ in 0..40 {
+                    if w.player.dash_active == 0.0 {
+                        break;
+                    }
+                    w.begin_tick(dt, east, false);
+                    run_player(&mut w);
+                    w.end_tick();
+                    assert!(
+                        !w.player.take_damage(1.0),
+                        "charge {charge} lost immunity mid-dash"
+                    );
+                }
+                assert_eq!(w.player.dash_active, 0.0);
+                let travel = w.player.pos.x - start.x;
+                assert!(
+                    (travel - factor * speed * 0.16).abs() < 0.02,
+                    "charge {charge}: {travel} px"
+                );
+                assert!((w.player.vel.x - speed).abs() < 1e-5);
+                assert!((w.player.iframes - 0.02).abs() < 1e-5);
+
+                w.begin_tick(0.01, Vec2::ZERO, false);
+                run_player(&mut w);
+                w.end_tick();
+                assert!(!w.player.take_damage(1.0), "the pad expired early");
+                w.begin_tick(0.011, Vec2::ZERO, false);
+                run_player(&mut w);
+                w.end_tick();
+                assert!(w.player.take_damage(1.0), "the pad failed to expire");
+            }
+        }
     }
 
     /// Legacy `fast_player_cannot_tunnel_a_thin_wall`: a dash-speed step must
@@ -528,6 +596,31 @@ mod tests {
             "the rat walked a gate against its direction to {:?} (leaf ends at {})",
             w.player.pos,
             gate.right()
+        );
+
+        // The same closed leaf stops a full charge, including at a long frame.
+        own_super_dash(&mut w);
+        w.player.pos = Vec2::new(centre.x + 36.0, centre.y);
+        let west = Vec2::new(-1.0, 0.0);
+        w.player.vel = west * (w.player.loadout.stats.move_speed * 3.2);
+        let stop = gate.right() + PLAYER_RADIUS;
+        for tick in 0..13 {
+            if tick == 0 {
+                w.begin_tick_charged(0.05, west, true, false, None, 1.0);
+            } else {
+                w.begin_tick(0.05, west, false);
+            }
+            run_player(&mut w);
+            w.end_tick();
+            assert!(
+                w.player.pos.x >= stop - 0.01,
+                "dash tunnelled through the closed leaf"
+            );
+        }
+        assert_eq!(w.player.dash_active, 0.0);
+        assert!(
+            (w.player.pos.x - stop).abs() < 0.01,
+            "dash did not stop at the leaf"
         );
     }
 
@@ -1181,33 +1274,38 @@ mod tests {
     /// phasing.
     #[test]
     fn a_charged_dash_is_stopped_by_a_wall() {
-        let mut w = World::new(Theme::Sewer, 89);
-        open_map(&mut w);
-        own_super_dash(&mut w);
-        let (cx, cy) = (40, 40);
-        w.level
-            .tiles
-            .fill_cells(cx + 2, cy - 4, 1, 9, TileKind::Wall(WallKind::Maze));
-        w.level.tiles.rebuild_masks();
-        w.player.pos = TileMap::tile_rect(cx, cy).center();
-        w.player.face = Vec2::new(1.0, 0.0);
-        w.player.dash_cd = 0.0;
+        let east = Vec2::new(1.0, 0.0);
+        // Solid cells fill their tile. Maze spines are inset by 4 px.
+        for (wall, inset) in [(WallKind::Solid, 0.0), (WallKind::Maze, 4.0)] {
+            let mut w = World::new(Theme::Sewer, 89);
+            open_map(&mut w);
+            own_super_dash(&mut w);
+            let (cx, cy) = (40, 40);
+            w.level
+                .tiles
+                .fill_cells(cx + 2, cy - 4, 1, 9, TileKind::Wall(wall));
+            w.level.tiles.rebuild_masks();
+            w.player.pos = TileMap::tile_rect(cx, cy).center();
+            w.player.vel = east * (w.player.loadout.stats.move_speed * 3.2);
+            w.player.dash_cd = 0.0;
+            let stop = TileMap::tile_rect(cx + 2, cy).x + inset - PLAYER_RADIUS;
 
-        w.begin_tick_charged(DT, Vec2::new(1.0, 0.0), true, false, None, 1.0);
-        run_player(&mut w);
-        w.end_tick();
-        for _ in 0..40 {
-            w.begin_tick(DT, Vec2::new(1.0, 0.0), false);
+            w.begin_tick_charged(0.05, east, true, false, None, 1.0);
             run_player(&mut w);
             w.end_tick();
+            for _ in 0..12 {
+                w.begin_tick(0.05, east, false);
+                run_player(&mut w);
+                w.end_tick();
+                assert!(w.player.pos.x <= stop + 0.01, "dash tunnelled through the wall");
+            }
+            assert_eq!(w.player.dash_active, 0.0);
+            assert!(
+                (w.player.pos.x - stop).abs() < 0.01,
+                "the charged dash did not stop at the wall face: {:?}",
+                w.player.pos
+            );
         }
-        // A `WallKind::Maze` cell is an 8 px spine in the middle of its cell.
-        let wall_left = TileMap::tile_rect(cx + 2, cy).x + 4.0;
-        assert!(
-            w.player.pos.x <= wall_left - PLAYER_RADIUS + 0.01,
-            "the charged dash went through the wall at {:?}",
-            w.player.pos
-        );
     }
 
     /// Without the weapon there is no release latency: the press is the dash,
