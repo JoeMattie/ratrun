@@ -16,12 +16,15 @@ use crate::game::level::{Level, Theme};
 use crate::game::player::Player;
 use crate::math::Vec2;
 use bevy_ecs::prelude::*;
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
+use std::f32::consts::FRAC_PI_2;
 
 const FEINT_APPROACH_SECS: f32 = 1.0;
 const FEINT_LURE_MIN: f32 = 20.0 * art::BODY_SCALE * art::LURE_PROPORTION;
-const COOLDOWN_STANDOFF: f32 = HEAD_RADIUS + 40.0;
+const COOLDOWN_STANDOFF: f32 = art::MOUTH_OFFSET + 8.0;
 const COOLDOWN_STEER_BAND: f32 = 16.0;
+const FEINT_START_GAP: f32 = HEAD_RADIUS + 68.0;
+const GAPE_START_GAP: f32 = art::MOUTH_OFFSET + 54.0;
+const ATTACK_APPROACH_SPEED: f32 = 85.0;
 
 #[derive(Clone, Copy, Debug)]
 struct AttackLock {
@@ -57,7 +60,7 @@ pub(super) struct LanternRuntime {
     next_feint: f32,
     next_gape: f32,
     next_snuff: f32,
-    dark_used: bool,
+    next_dark: f32,
     pub(super) snuff: Option<usize>,
     pub(super) decoy: Option<Decoy>,
     retaliation: Option<Vec2>,
@@ -75,7 +78,7 @@ impl Default for LanternRuntime {
             next_feint: 0.0,
             next_gape: 0.0,
             next_snuff: 0.0,
-            dark_used: false,
+            next_dark: 0.0,
             snuff: None,
             decoy: None,
             retaliation: None,
@@ -112,17 +115,6 @@ fn neutral(boss: &mut Boss) {
     enter(boss, neutral_state(boss.lantern.phase), 1.0);
 }
 
-pub(super) fn relocate(boss: &mut Boss, level: &Level) {
-    boss.lantern.pull = None;
-    boss.hazards.clear();
-    neutral(boss);
-    if boss.lantern.planted {
-        boss.target = boss.lantern.bulb.unwrap_or(boss.pos);
-    } else {
-        stow_lure(boss, level, art::STALK_LENGTH);
-    }
-}
-
 fn face(from: Vec2, to: Vec2, fallback: Vec2) -> Vec2 {
     let dir = (to - from).normalized();
     if dir == Vec2::ZERO {
@@ -132,23 +124,19 @@ fn face(from: Vec2, to: Vec2, fallback: Vec2) -> Vec2 {
     }
 }
 
-/// Legal standing footprint for launch, rejoin, shoves and attack locks.
-/// Pit rectangles are small, and the exact circle/rectangle test also checks
-/// the head at the edge of a pit when its centre is still over sand.
-pub fn head_fits(level: &Level, pos: Vec2) -> bool {
-    point_fits(level, pos, HEAD_RADIUS, SizeClass::Large)
+/// Keep the hittable head and the floating bulbs inside the map.
+pub(super) fn clamp_to_map(level: &Level, pos: Vec2, radius: f32) -> Vec2 {
+    let inset = Vec2::new(radius.min(level.arena.x * 0.5), radius.min(level.arena.y * 0.5));
+    pos.clamp_box(inset, level.arena - inset)
 }
 
 pub(super) fn arrival_body_fits(level: &Level, head: Vec2, facing: Vec2) -> bool {
-    head_fits(level, head)
-        && [(13.0, 29.0), (40.0, 18.0), (65.0, 20.0)]
-            .into_iter()
-            .all(|(back, radius)| {
-                let center = head - facing * (back * art::BODY_SCALE);
-                level.tiles.circle_clear(center, radius * art::BODY_SCALE, SizeClass::Large)
-            })
+    let (lo, hi) = art::body_bounds_at(head, facing);
+    lo.x >= 0.0 && lo.y >= 0.0 && hi.x <= level.arena.x && hi.y <= level.arena.y
+        && clamp_to_map(level, head, HEAD_RADIUS) == head
 }
 
+/// Floor-bound displacement for the rat and gems caught by Gape.
 fn point_fits(level: &Level, pos: Vec2, radius: f32, class: SizeClass) -> bool {
     let (cx, cy) = collision::cell_of(pos);
     if level.theme == Theme::Outfall {
@@ -165,7 +153,7 @@ fn point_fits(level: &Level, pos: Vec2, radius: f32, class: SizeClass) -> bool {
             .any(|pit| collision::circle_rect_overlap(pos, radius, &pit.rect.to_world()))
 }
 
-fn path_end(level: &Level, from: Vec2, step: Vec2, radius: f32, class: SizeClass) -> Vec2 {
+fn pull_path_end(level: &Level, from: Vec2, step: Vec2, radius: f32, class: SizeClass) -> Vec2 {
     if level.theme == Theme::Outfall {
         return clamp_outfall_displacement(level, from, step, radius, class);
     }
@@ -182,35 +170,18 @@ fn path_end(level: &Level, from: Vec2, step: Vec2, radius: f32, class: SizeClass
     end
 }
 
-pub(super) fn head_path_fits(level: &Level, from: Vec2, to: Vec2) -> bool {
-    head_fits(level, to)
-        && path_end(level, from, to - from, HEAD_RADIUS, SizeClass::Large).dist_sq(to) < 0.0001
-}
-
 fn stow_lure(boss: &mut Boss, level: &Level, reach: f32) {
-    boss.lantern.bulb = Some(path_end(
-        level,
-        boss.pos,
-        boss.facing * reach,
-        art::BULB_RADIUS,
-        SizeClass::Small,
-    ));
+    let target = boss.pos + boss.facing * reach;
+    boss.lantern.bulb = Some(clamp_to_map(level, target, art::BULB_RADIUS));
 }
 
 fn move_lure(boss: &mut Boss, ctx: &BossContext<'_>, reach: f32, speed: f32) {
     let pos = boss.lantern.bulb.unwrap_or(boss.pos);
-    let target = boss.pos + boss.facing * reach;
-    let limit = (target - pos).clamp_len(speed * ctx.dt);
-    let end = path_end(ctx.level, pos, limit, art::BULB_RADIUS, SizeClass::Small);
-    // The stalk never crosses a wall or stretches beyond its tether as the
-    // rat circles. Hold the last legal point when the bulb cannot follow.
-    if end.dist_sq(boss.pos) <= art::LURE_TETHER_MAX * art::LURE_TETHER_MAX + 0.01
-        && path_end(ctx.level, boss.pos, end - boss.pos, art::BULB_RADIUS, SizeClass::Small)
-            .dist_sq(end)
-            < 0.0001
-    {
-        boss.lantern.bulb = Some(end);
-    }
+    let target = clamp_to_map(ctx.level, boss.pos + boss.facing * reach, art::BULB_RADIUS);
+    let next = pos + (target - pos).clamp_len(speed * ctx.dt);
+    boss.lantern.bulb = Some(
+        boss.pos + (next - boss.pos).clamp_len(art::LURE_TETHER_MAX),
+    );
 }
 
 fn rect(center: Vec2, facing: Vec2, half: f32, half_perp: f32) -> HazardShape {
@@ -224,7 +195,7 @@ fn attack(origin: Vec2, facing: Vec2, shape: HazardShape) -> AttackLock {
 fn jaw(boss: &Boss) -> AttackLock {
     let bulb = boss.lantern.bulb.unwrap_or(boss.pos);
     let facing = face(boss.pos, bulb, boss.facing);
-    let center = art::jaw_center(boss.pos, bulb, facing);
+    let center = art::jaw_center(boss.pos, facing);
     let shape = rect(center, facing, art::JAW_CRESCENT_WIDTH * 0.5, art::JAW_CRESCENT_LEN * 0.5);
     attack(center, facing, shape)
 }
@@ -252,47 +223,19 @@ fn trench(origin: Vec2, end: Vec2, facing: Vec2, width: f32) -> AttackLock {
     lock
 }
 
-fn fits_rect(level: &Level, shape: HazardShape) -> bool {
-    let HazardShape::Rect { center, facing, half, half_perp } = shape else {
-        return false;
-    };
-    [-half_perp, 0.0, half_perp].into_iter().all(|across| {
-        let edge = center + facing.perp() * across;
-        let from = edge - facing * half;
-        let to = edge + facing * half;
-        point_fits(level, from, 0.25, SizeClass::Small)
-            && path_end(level, from, to - from, 0.25, SizeClass::Small).dist_sq(to) < 0.0001
-    })
-}
-
-fn leaves_escape(ctx: &BossContext<'_>, boss: &Boss, shape: HazardShape, pad: f32) -> bool {
-    let rat = ctx.player_pos;
-    if !shape.contains(rat, pad) {
-        return true;
-    }
-    let separation = HEAD_RADIUS + ctx.player_radius;
-    let separation_sq = separation * separation;
-    [16.0, 28.0, 44.0, 60.0].into_iter().any(|distance| {
-        (0..16).any(|i| {
-            let delta = Vec2::from_angle(i as f32 * TAU / 16.0) * distance;
-            let end = path_end(ctx.level, rat, delta, ctx.player_radius, SizeClass::Small);
-            !shape.contains(end, pad)
-                && (end.dist_sq(boss.pos) > separation_sq
-                    || rat.dist_sq(boss.pos) <= separation_sq)
-        })
-    })
-}
-
-fn valid_gape(ctx: &BossContext<'_>, boss: &Boss, lock: AttackLock) -> bool {
-    lock.stamp.is_some_and(|stamp| {
-        fits_rect(ctx.level, stamp)
-            && leaves_escape(ctx, boss, lock.shape, 0.0)
-            && leaves_escape(ctx, boss, stamp, 0.0)
-    })
-}
-
 fn body_path(ctx: &BossContext<'_>, boss: &Boss, facing: Vec2, reach: f32) -> Vec2 {
-    path_end(ctx.level, boss.pos, facing * reach, HEAD_RADIUS, SizeClass::Large)
+    let step = facing * reach;
+    let allowed = clamp_to_map(ctx.level, boss.pos + step, HEAD_RADIUS) - boss.pos;
+    let fraction = |d: f32, clipped: f32| if d == 0.0 { 1.0 } else { clipped / d };
+    let t = fraction(step.x, allowed.x).min(fraction(step.y, allowed.y)).clamp(0.0, 1.0);
+    boss.pos + step * t
+}
+
+fn close_to(ctx: &BossContext<'_>, boss: &mut Boss, facing: Vec2, gap: f32, reach: f32) {
+    if gap > reach {
+        let speed = ATTACK_APPROACH_SPEED.min((gap - reach) / ctx.dt);
+        move_boss(ctx, boss, facing, speed);
+    }
 }
 
 fn feint_reach(gap: f32) -> f32 {
@@ -320,9 +263,7 @@ fn swim(ctx: &BossContext<'_>, boss: &mut Boss, speed: f32) {
 fn cooldown_swim(ctx: &BossContext<'_>, boss: &mut Boss, speed: f32) {
     let facing = face(boss.pos, ctx.player_pos, boss.facing);
     let gap = boss.pos.dist(ctx.player_pos);
-    let dir = if gap <= COOLDOWN_STANDOFF + COOLDOWN_STEER_BAND
-        && ctx.los_clear(boss.pos, ctx.player_pos, art::BULB_RADIUS)
-    {
+    let dir = if gap <= COOLDOWN_STANDOFF + COOLDOWN_STEER_BAND {
         let radial = ((gap - COOLDOWN_STANDOFF) / COOLDOWN_STEER_BAND).clamp(-2.0, 1.0);
         facing.perp() + facing * radial
     } else {
@@ -338,42 +279,33 @@ fn snuff(ctx: &BossContext<'_>, boss: &mut Boss) {
     boss.lantern.next_snuff = boss.anim + art::SNUFF_INTERVAL;
     let mount = ctx.level.nearest_live_sconce(boss.pos, art::SNUFF_REACH);
     boss.lantern.snuff = mount.map(|(index, _)| index);
-    let mount_pos = mount.map(|(_, pos)| pos).filter(|&pos| {
-        point_fits(ctx.level, pos, 0.25, SizeClass::Small)
-    });
-    let Some(pos) = mount_pos.or_else(|| {
-        [-1.0, 1.0].into_iter().find_map(|side| {
-        let point = boss.pos + boss.facing.perp() * (side * 28.0 * art::BODY_SCALE);
-            point_fits(ctx.level, point, art::BULB_RADIUS, SizeClass::Small).then_some(point)
-        })
-    }) else {
-        return;
-    };
-    let away = mount_pos.map_or(boss.facing, |p| face(p, boss.pos, boss.facing));
-    // A wall sconce is half a pixel inside its mounting face. Its visual
-    // centre can leave that face even though the 4 px projectile target
-    // overlaps it at birth.
-    let reach = art::DECOY_SPEED * art::DECOY_LIFE;
-    let mut end = pos;
-    for angle in [0.0, -FRAC_PI_4, FRAC_PI_4, -2.0 * FRAC_PI_4, 2.0 * FRAC_PI_4] {
-        let p = path_end(ctx.level, pos, away.rotate(angle) * reach, 0.25, SizeClass::Small);
-        if p.dist_sq(pos) > end.dist_sq(pos) {
-            end = p;
-        }
-        if end.dist_sq(pos) >= (reach - 0.01) * (reach - 0.01) {
-            break;
-        }
-    }
+    let pos = mount.map_or_else(
+        || clamp_to_map(
+            ctx.level,
+            boss.pos + boss.facing * (HEAD_RADIUS + 28.0),
+            art::BULB_RADIUS,
+        ),
+        |(_, pos)| pos,
+    );
+    let toward_rat = face(pos, ctx.player_pos, boss.facing);
+    let end = clamp_to_map(
+        ctx.level,
+        pos + toward_rat * (art::DECOY_SPEED * art::DECOY_LIFE),
+        art::BULB_RADIUS,
+    );
     boss.lantern.decoy = Some(Decoy { pos, end, life: art::DECOY_LIFE });
 }
 
-fn advance_decoy(level: &Level, boss: &mut Boss, dt: f32) {
+fn advance_decoy(boss: &mut Boss, dt: f32, rat: Vec2) {
     if let Some(decoy) = &mut boss.lantern.decoy {
         let step = (decoy.end - decoy.pos).clamp_len(art::DECOY_SPEED * dt.min(decoy.life));
-        decoy.pos = path_end(level, decoy.pos, step, 0.25, SizeClass::Small);
+        decoy.pos += step;
         decoy.life -= dt;
         if decoy.life <= 0.0 {
             boss.lantern.decoy = None;
+            if boss.pos.dist(rat) <= boss.kind.engage_range() {
+                boss.lantern.retaliation = Some(rat);
+            }
         }
     }
 }
@@ -418,13 +350,13 @@ fn commit_phase(ctx: &BossContext<'_>, boss: &mut Boss) {
     boss.lantern.snuff = None;
     boss.lantern.decoy = None;
     boss.lantern.retaliation = None;
-    boss.lantern.next_snuff = boss.anim + art::SNUFF_INTERVAL;
+    boss.lantern.next_snuff = boss.anim + 1.2;
+    boss.lantern.next_dark = boss.anim;
     boss.lantern.next_feint = boss.anim;
     boss.lantern.attack = None;
     boss.leap_t = 0.0;
     if boss.phase == 3 {
-        // A planted bulb is safe sand near the head even if the extended
-        // lure was interrupted or had just gone dark.
+        // Plant the resting lure even if the extended one was interrupted.
         stow_lure(boss, ctx.level, art::STALK_LENGTH);
         boss.lantern.planted = true;
         boss.target = boss.lantern.bulb.unwrap_or(boss.pos);
@@ -460,33 +392,10 @@ fn start_strike(
     out.cue(BossCue::LanternStrike);
 }
 
-fn move_on_lock(ctx: &BossContext<'_>, boss: &mut Boss) -> bool {
-    let Some(lock) = boss.lantern.attack else {
-        return false;
-    };
-    let next = lock.origin + (lock.end - lock.origin) * boss.progress();
-    if !head_path_fits(ctx.level, boss.pos, next) {
-        boss.hazards.clear();
-        return false;
+fn move_on_lock(boss: &mut Boss) {
+    if let Some(lock) = boss.lantern.attack {
+        boss.pos = lock.origin + (lock.end - lock.origin) * boss.progress();
     }
-    boss.pos = next;
-    true
-}
-
-fn stalk_lamp(ctx: &BossContext<'_>, boss: &mut Boss) {
-    let gap = boss.pos.dist(ctx.player_pos);
-    let lamp = boss.lantern.bulb.unwrap_or(boss.pos);
-    let radial = face(lamp, boss.pos, boss.facing);
-    let orbit = lamp + radial.rotate(0.28) * art::GAPE_ORBIT_DIST;
-    let dir = if gap > art::GAPE_CONE_RANGE - 8.0 || !head_path_fits(ctx.level, boss.pos, orbit) {
-        ctx.seek(boss)
-    } else {
-        (orbit - boss.pos).normalized()
-    };
-    if boss.leap_t <= 0.0 {
-        move_boss(ctx, boss, dir, art::GAPE_SWIM_SPEED);
-    }
-    boss.facing = face(boss.pos, ctx.player_pos, boss.facing);
 }
 
 pub(super) struct LanternController;
@@ -527,7 +436,7 @@ impl BossController for LanternController {
             return;
         }
 
-        advance_decoy(ctx.level, boss, ctx.dt);
+        advance_decoy(boss, ctx.dt, ctx.player_pos);
         if boss.lantern.phase == 2 && boss.anim >= boss.lantern.next_snuff {
             snuff(ctx, boss);
         }
@@ -548,32 +457,16 @@ impl BossController for LanternController {
                 }
             }
             Swim | DarkSwim => {
-                let dark_end = boss.pos + facing * art::DARK_LUNGE_LEN;
-                if state == DarkSwim
-                    && !boss.lantern.dark_used
-                    && gap <= 70.0 * art::BODY_SCALE
-                    && head_path_fits(ctx.level, boss.pos, dark_end)
-                {
-                    let lock = trench(boss.pos, dark_end, facing, art::DARK_LUNGE_WIDTH);
-                    if leaves_escape(ctx, boss, lock.shape, ctx.player_radius) {
-                        boss.lantern.dark_used = true;
-                        boss.lantern.attack = Some(lock);
-                        boss.leap_t = 0.0;
-                        boss.facing = facing;
-                        enter(boss, DarkTell, art::DARK_TELL_DURATION);
-                        out.cue(BossCue::LanternTell);
-                        return;
-                    }
-                }
                 if state == DarkSwim {
                     if let Some(target) = boss.lantern.retaliation.take() {
-                        // The target is captured by the projectile pass;
-                        // the current neutral head supplies the start point.
+                        // The pop or expiry fixes the target. The current
+                        // neutral head supplies the start of the warned leap.
                         let dir = face(boss.pos, target, facing);
-                        let end = body_path(ctx, boss, dir, art::DECOY_LEAP_MAX_DIST);
+                        let reach = boss.pos.dist(target).clamp(24.0, art::DECOY_LEAP_MAX_DIST);
+                        let end = body_path(ctx, boss, dir, reach);
                         let lock = trench(boss.pos, end, dir, art::DECOY_LEAP_WIDTH);
                         boss.leap_t = 0.0;
-                        if boss.pos.dist(end) >= 24.0 && leaves_escape(ctx, boss, lock.shape, ctx.player_radius) {
+                        if boss.pos.dist(end) >= 24.0 {
                             boss.facing = dir;
                             stow_lure(boss, ctx.level, art::STALK_LENGTH);
                             boss.lantern.attack = Some(lock);
@@ -586,10 +479,21 @@ impl BossController for LanternController {
                         return;
                     }
                 }
-                if boss.anim >= boss.lantern.next_feint
-                    && gap <= art::LURE_TETHER_MAX / art::LURE_PROPORTION + art::FEINT_STOP_SHORT
-                    && ctx.los_clear(boss.pos, ctx.player_pos, art::BULB_RADIUS)
+                if state == DarkSwim && boss.anim >= boss.lantern.next_dark
+                    && gap <= 70.0 * art::BODY_SCALE
                 {
+                    let end = body_path(ctx, boss, facing, art::DARK_LUNGE_LEN);
+                    if boss.pos.dist(end) >= 24.0 {
+                        boss.lantern.next_dark = boss.anim + art::DARK_COOLDOWN;
+                        boss.lantern.attack = Some(trench(boss.pos, end, facing, art::DARK_LUNGE_WIDTH));
+                        boss.leap_t = 0.0;
+                        boss.facing = facing;
+                        enter(boss, DarkTell, art::DARK_TELL_DURATION);
+                        out.cue(BossCue::LanternTell);
+                        return;
+                    }
+                }
+                if boss.anim >= boss.lantern.next_feint && gap <= FEINT_START_GAP {
                     boss.facing = facing;
                     boss.leap_t = 0.0;
                     stow_lure(boss, ctx.level, art::STALK_LENGTH.min(feint_reach(gap)));
@@ -598,43 +502,25 @@ impl BossController for LanternController {
                     swim(ctx, boss, art::SWIM_SPEED);
                 }
             }
-            FeintApproach => {
-                boss.facing = facing;
-                let reach = feint_reach(gap);
-                move_lure(boss, ctx, reach, art::FEINT_LURE_SPEED);
-                let bulb = boss.lantern.bulb.unwrap_or(boss.pos);
-                if done || bulb.dist_sq(boss.pos + facing * reach) <= 0.25 {
-                    let lock = jaw(boss);
-                    if fits_rect(ctx.level, lock.shape) {
-                        boss.lantern.attack = Some(lock);
-                        enter(boss, FeintTell, art::FEINT_TELL_DURATION);
-                        out.cue(BossCue::LanternTell);
-                    } else {
-                        boss.lantern.next_feint = boss.anim + 0.4;
-                        neutral(boss);
-                    }
-                }
-            }
-            FeintTell => {
+            FeintApproach | FeintTell => {
                 if !boss.lantern.locked {
+                    close_to(ctx, boss, facing, gap, art::MOUTH_OFFSET);
                     boss.facing = facing;
-                    let reach = feint_reach(gap);
+                    let reach = feint_reach(boss.pos.dist(ctx.player_pos));
                     move_lure(boss, ctx, reach, art::FEINT_LURE_SPEED);
                     let lock = jaw(boss);
                     boss.lantern.attack = Some(lock);
-                    if boss.elapsed >= art::FEINT_LOCK_TIME {
-                        if !fits_rect(ctx.level, lock.shape)
-                            || !leaves_escape(ctx, boss, lock.shape, ctx.player_radius)
-                        {
-                            boss.lantern.next_feint = boss.anim + 0.4;
-                            neutral(boss);
-                            return;
+                    if state == FeintApproach {
+                        if done || gap <= art::MOUTH_OFFSET + 18.0 {
+                            enter(boss, FeintTell, art::FEINT_TELL_DURATION);
+                            out.cue(BossCue::LanternTell);
                         }
+                    } else if boss.elapsed >= art::FEINT_LOCK_TIME {
                         boss.facing = lock.facing;
                         boss.lantern.locked = true;
                     }
                 }
-                if done {
+                if state == FeintTell && done {
                     start_strike(boss, out, JawSnap, art::JAW_SNAP_DURATION, art::JAW_SNAP_DAMAGE, ctx.dt);
                 }
             }
@@ -644,60 +530,45 @@ impl BossController for LanternController {
             }
             FeintRecover | DecoyRecover | DarkRecover | GapeRecover if done => neutral(boss),
             DecoyLeapTell if done => {
-                if let Some(lock) = boss.lantern.attack.filter(|lock| {
-                    head_path_fits(ctx.level, boss.pos, lock.end)
-                }) {
+                if let Some(lock) = boss.lantern.attack {
                     let secs = lock.origin.dist(lock.end) / art::DECOY_LEAP_SPEED;
                     start_strike(boss, out, DecoyLeap, secs, art::DECOY_LEAP_DAMAGE, ctx.dt);
-                } else {
-                    enter(boss, DecoyRecover, art::DECOY_RECOVER_DURATION);
                 }
             }
             DecoyLeap => {
-                let moved = move_on_lock(ctx, boss);
+                move_on_lock(boss);
                 stow_lure(boss, ctx.level, art::STALK_LENGTH);
-                if !moved || done {
+                if done {
                     enter(boss, DecoyRecover, art::DECOY_RECOVER_DURATION);
                 }
             }
             DarkTell => {
                 if !boss.lantern.locked {
-                    let end = boss.pos + facing * art::DARK_LUNGE_LEN;
-                    if head_path_fits(ctx.level, boss.pos, end) {
-                        let lock = trench(boss.pos, end, facing, art::DARK_LUNGE_WIDTH);
-                        if leaves_escape(ctx, boss, lock.shape, ctx.player_radius) {
-                            boss.lantern.attack = Some(lock);
-                            boss.facing = facing;
-                        }
+                    let end = body_path(ctx, boss, facing, art::DARK_LUNGE_LEN);
+                    if boss.pos.dist(end) >= 24.0 {
+                        boss.lantern.attack = Some(trench(boss.pos, end, facing, art::DARK_LUNGE_WIDTH));
+                        boss.facing = facing;
                     }
                     if boss.elapsed >= art::DARK_TELL_DURATION * art::DARK_LOCK_PROGRESS {
                         boss.lantern.locked = true;
                     }
                 }
                 if done {
-                    if boss.lantern.attack.is_some_and(|lock| head_path_fits(ctx.level, boss.pos, lock.end)) {
-                        start_strike(boss, out, DarkLunge, art::DARK_LUNGE_DURATION, art::DARK_LUNGE_DAMAGE, ctx.dt);
-                    } else {
-                        enter(boss, DarkRecover, art::DARK_RECOVER_DURATION);
-                    }
+                    start_strike(boss, out, DarkLunge, art::DARK_LUNGE_DURATION, art::DARK_LUNGE_DAMAGE, ctx.dt);
                 }
             }
             DarkLunge => {
-                if !move_on_lock(ctx, boss) || done {
+                move_on_lock(boss);
+                if done {
                     enter(boss, DarkRecover, art::DARK_RECOVER_DURATION);
                     stow_lure(boss, ctx.level, art::STALK_LENGTH);
                 }
             }
             DropLamp if done => neutral(boss),
             GapeSwim => {
-                let lock = gape(boss, facing);
-                if boss.anim >= boss.lantern.next_gape
-                    && gap <= art::GAPE_CONE_RANGE + HEAD_RADIUS
-                    && ctx.los_clear(lock.shape.center(), ctx.player_pos, 0.0)
-                    && valid_gape(ctx, boss, lock)
-                {
+                if boss.anim >= boss.lantern.next_gape && gap <= GAPE_START_GAP {
                     boss.lantern.next_gape = boss.anim + art::GAPE_COOLDOWN;
-                    boss.lantern.attack = Some(lock);
+                    boss.lantern.attack = Some(gape(boss, facing));
                     boss.leap_t = 0.0;
                     boss.facing = facing;
                     enter(boss, GapeTell, art::GAPE_TELL_DURATION);
@@ -705,37 +576,27 @@ impl BossController for LanternController {
                 } else if boss.anim < boss.lantern.next_gape {
                     cooldown_swim(ctx, boss, art::GAPE_SWIM_SPEED);
                 } else {
-                    stalk_lamp(ctx, boss);
+                    if boss.leap_t <= 0.0 {
+                        move_boss(ctx, boss, ctx.seek(boss), art::GAPE_SWIM_SPEED);
+                    }
+                    boss.facing = facing;
                 }
             }
             GapeTell => {
                 if !boss.lantern.locked {
-                    let lock = gape(boss, facing);
-                    if valid_gape(ctx, boss, lock) {
-                        boss.facing = facing;
-                        boss.lantern.attack = Some(lock);
-                    }
+                    close_to(ctx, boss, facing, gap, art::MOUTH_OFFSET + 8.0);
+                    boss.facing = facing;
+                    boss.lantern.attack = Some(gape(boss, facing));
                     if boss.elapsed >= art::GAPE_LOCK_TIME {
-                        if !boss.lantern.attack.is_some_and(|lock| valid_gape(ctx, boss, lock)) {
-                            neutral(boss);
-                            return;
-                        }
                         boss.lantern.locked = true;
                     }
                 }
                 if done {
-                    if boss.lantern.attack.and_then(|lock| lock.stamp)
-                        .is_some_and(|stamp| fits_rect(ctx.level, stamp))
-                    {
-                        // Carry only the part of the tick after the tell
-                        // completed into the first pull.
-                        let overflow = (boss.elapsed - boss.duration).clamp(0.0, ctx.dt);
-                        enter(boss, GapePull, art::GAPE_PULL_DURATION);
-                        boss.elapsed = overflow;
-                        record_pull(boss, overflow);
-                    } else {
-                        neutral(boss);
-                    }
+                    // Carry only the part of the tick after the tell completed.
+                    let overflow = (boss.elapsed - boss.duration).clamp(0.0, ctx.dt);
+                    enter(boss, GapePull, art::GAPE_PULL_DURATION);
+                    boss.elapsed = overflow;
+                    record_pull(boss, overflow);
                 }
             }
             GapePull => {
@@ -747,8 +608,9 @@ impl BossController for LanternController {
             }
             GapeStamp if done => enter(boss, GapeRecover, art::GAPE_RECOVER_DURATION),
             GapeRecover => {
-                let away = face(ctx.player_pos, boss.pos, -boss.facing);
-                move_boss(ctx, boss, away, art::GAPE_RECOVER_SPEED);
+                if gap < COOLDOWN_STANDOFF {
+                    move_boss(ctx, boss, -facing, art::GAPE_RECOVER_SPEED);
+                }
                 boss.facing = face(boss.pos, ctx.player_pos, boss.facing);
             }
             _ => {}
@@ -787,7 +649,7 @@ fn pull_point(
         return pos;
     }
     let step = (mouth - pos).clamp_len(reach);
-    path_end(level, pos, step, radius, class)
+    pull_path_end(level, pos, step, radius, class)
 }
 
 /// Runs immediately after the boss controller. It consumes the frozen cone's
@@ -890,7 +752,7 @@ mod tests {
     fn lantern_opens_distance_between_attacks() {
         let level = Level::empty(Theme::Outfall);
         let head = Vec2::new(800.0, 800.0);
-        let rat = head + Vec2::new(65.0, 0.0);
+        let rat = head + Vec2::new(COOLDOWN_STANDOFF - 12.0, 0.0);
         let arena = level.fight_rect_around(head);
         let mut boss = Boss::new(BossKind::Lantern, head, 1600.0, arena, head, false);
         let flow = FlowField::new(&level.tiles);
@@ -909,7 +771,7 @@ mod tests {
         };
         cooldown_swim(&ctx, &mut boss, art::SWIM_SPEED);
         assert!(boss.pos.dist(rat) > head.dist(rat));
-        assert!(head_fits(&level, boss.pos));
+        assert_eq!(clamp_to_map(&level, boss.pos, HEAD_RADIUS), boss.pos);
     }
 
     #[test]
@@ -928,56 +790,36 @@ mod tests {
     }
 
     #[test]
-    fn lantern_pull_and_head_travel_stop_on_the_dry_side_of_a_pit() {
+    fn lantern_body_crosses_the_wall_and_pit_that_stop_a_gape_pull() {
         let mut level = Level::empty(Theme::Outfall);
         level.objects.tidal_pits.push(Pit::new(TileRect::new(50, 50, 1, 1), PitKind::TidalDrop));
+        level.tiles.fill_cells(48, 48, 1, 5, TileKind::Wall(WallKind::Solid));
+        level.tiles.rebuild_masks();
         let from = Vec2::new(832.0, 808.0);
-        let cone = HazardShape::Arc {
-            center: Vec2::new(780.0, 808.0),
-            facing: Vec2::new(1.0, 0.0),
-            inner: 0.0,
-            outer: art::GAPE_CONE_RANGE,
-            half_angle: art::GAPE_CONE_HALF_ANGLE,
+        let facing = Vec2::new(-1.0, 0.0);
+        let rat = Vec2::new(720.0, 808.0);
+        let arena = level.fight_rect_around(from);
+        let mut boss = Boss::new(BossKind::Lantern, from, 1600.0, arena, from, false);
+        let flow = FlowField::new(&level.tiles);
+        let mut rng = StdRng::seed_from_u64(1);
+        let ctx = BossContext {
+            dt: 1.0,
+            time: 0.0,
+            player_pos: rat,
+            player_vel: Vec2::ZERO,
+            player_radius: PLAYER_RADIUS,
+            player_hurt_radius: PLAYER_RADIUS,
+            arena,
+            level: &level,
+            flow: &flow,
+            rng: &mut rng,
         };
+        assert_eq!(ctx.seek(&boss), facing);
+        assert!(move_boss(&ctx, &mut boss, facing, 112.0));
+        assert_eq!(boss.pos, rat);
+        let cone = gape(&boss, -facing).shape;
         let to = pull_point(&level, cone, from, art::GAPE_PULL_SPEED, PLAYER_RADIUS, SizeClass::Small);
         assert!(from.x > to.x && to.x > 816.0);
         assert!(outfall_sand_clear(&level, to, PLAYER_RADIUS, SizeClass::Small));
-        assert!(!head_fits(&level, from), "the head overlaps the pit edge");
-        let clear = Vec2::new(880.0, 808.0);
-        assert!(head_fits(&level, clear));
-        assert!(!head_path_fits(&level, clear, Vec2::new(730.0, 808.0)));
-    }
-
-    #[test]
-    fn lantern_gape_fits_both_bearings_in_a_corridor_but_rejects_a_closed_end() {
-        let mut level = Level::empty(Theme::Outfall);
-        for y in [45, 53] {
-            level.tiles.fill_cells(44, y, 15, 1, TileKind::Wall(WallKind::Solid));
-        }
-        level.tiles.rebuild_masks();
-        let head = Vec2::new(800.0, 792.0);
-        let arena = level.fight_rect_around(head);
-        let boss = Boss::new(BossKind::Lantern, head, 1600.0, arena, head, false);
-        let dir = Vec2::new(1.0, 0.0);
-        let flow = FlowField::new(&level.tiles);
-        let mut rng = StdRng::seed_from_u64(1);
-        for facing in [dir, -dir] {
-            let ctx = BossContext {
-                dt: 1.0 / 60.0,
-                time: 0.0,
-                player_pos: head + facing * 60.0,
-                player_vel: Vec2::ZERO,
-                player_radius: PLAYER_RADIUS,
-                player_hurt_radius: PLAYER_RADIUS,
-                arena,
-                level: &level,
-                flow: &flow,
-                rng: &mut rng,
-            };
-            assert!(valid_gape(&ctx, &boss, gape(&boss, facing)));
-        }
-        level.tiles.fill_cells(52, 46, 1, 7, TileKind::Wall(WallKind::Solid));
-        level.tiles.rebuild_masks();
-        assert!(!fits_rect(&level, gape(&boss, dir).stamp.unwrap()));
     }
 }

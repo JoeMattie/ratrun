@@ -1785,7 +1785,7 @@ impl LightMap {
         // The Lantern owns its darkness: skip the generic 168 px presence aura
         // so Arrival, DarkTell and Death stay abyssal around the cyan lure.
         if let Some(view) = boss.lantern_view() {
-            self.gather_lantern_lights(&view.floating_body(), boss, cam, vw, vh, elapsed);
+            self.gather_lantern_lights(&view, boss, cam, vw, vh, elapsed);
             return;
         }
 

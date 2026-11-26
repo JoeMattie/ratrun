@@ -923,6 +923,11 @@ impl Bot {
         }
     }
 
+    /// The Lantern can warn across the screen while its head is still outside it.
+    fn sees_lantern_hazard(&self, w: &World, rat: Vec2, shape: HazardShape) -> bool {
+        self.sees(w, rat, shape.center()) || shape.contains(rat, R + 16.0)
+    }
+
     /// Is a rat-sized circle free of walls, as far as this skill knows? A
     /// screen-only skill trusts the minimap: explored walls block, unexplored
     /// cells are assumed open (it discovers a wall by bumping into it).
@@ -1112,13 +1117,15 @@ impl Bot {
                 // neighbourhood filter.
                 self.boss_pos = Some(boss.pos);
                 self.boss_kind = Some(boss.kind);
-                if !self.sees(w, p, boss.pos) {
+                let sees_head = self.sees(w, p, boss.pos);
+                let is_lantern = boss.kind == BossKind::Lantern;
+                if !sees_head && !is_lantern {
                     continue;
                 }
                 // A boss that is out of reach (the hawk overhead) is only a
                 // shadow: dodging it would be dodging nothing, and the bot must
                 // spend that movement reading the deck marks instead.
-                if !boss.overhead() && (boss.kind != BossKind::Lantern || boss.contact_damage > 0.0) {
+                if sees_head && !boss.overhead() && (!is_lantern || boss.contact_damage > 0.0) {
                     self.threats.push(Threat::BossBody {
                         pos: boss.pos,
                         radius: boss.kind.body_radius(),
@@ -1131,7 +1138,9 @@ impl Bot {
                     // as lethal made the bot break its orbit and step into the
                     // gust's own line to get away from it. The pushing still
                     // moves the rat; there is nothing to dodge.
-                    if h.is_expired() || !h.hit_player || h.damage <= 0.0 {
+                    if h.is_expired() || !h.hit_player || h.damage <= 0.0
+                        || (!sees_head && !self.sees_lantern_hazard(w, p, h.shape))
+                    {
                         continue;
                     }
                     self.threats.push(Threat::Hazard {
@@ -1182,7 +1191,9 @@ impl Bot {
                         GapePull => view.attack.map(|shape| (shape, 0.0, 8.0)),
                         _ => None,
                     };
-                    if let Some((shape, warn, damage)) = warning {
+                    if let Some((shape, warn, damage)) = warning
+                        .filter(|(shape, _, _)| sees_head || self.sees_lantern_hazard(w, p, *shape))
+                    {
                         self.threats.push(Threat::Hazard {
                             shape,
                             warn_left: self.quantise_warn(warn),
@@ -1191,7 +1202,9 @@ impl Bot {
                         });
                     }
                     if matches!(view.state, GapeTell | GapePull) {
-                        if let Some(shape) = view.stamp {
+                        if let Some(shape) = view.stamp
+                            .filter(|&shape| sees_head || self.sees_lantern_hazard(w, p, shape))
+                        {
                             let until_stamp = remaining + if view.state == GapeTell {
                                 GAPE_PULL_DURATION
                             } else {
@@ -3254,6 +3267,34 @@ mod tests {
         let mut bot = Bot::new(skill, seed);
         bot.on_new_level(0);
         bot
+    }
+
+    #[test]
+    fn casual_reads_a_lantern_trench_that_reaches_in_from_offscreen() {
+        use crate::game::ecs::systems::boss::BossHazard;
+
+        let mut world = World::new(Theme::Outfall, 11);
+        world.viewport = Vec2::new(120.0, 76.0);
+        let rat = world.player.pos;
+        let facing = Vec2::new(1.0, 0.0);
+        let head = rat - facing * 218.0;
+        let arena = world.level.fight_rect_around(rat);
+        let mut boss = Boss::new(BossKind::Lantern, head, 1600.0, arena, head, false);
+        let lane = HazardShape::Rect {
+            center: head + facing * 126.0,
+            facing,
+            half: 100.0,
+            half_perp: 18.0,
+        };
+        boss.push_hazard(BossHazard::new(lane, 0.4, 0.3, 22.0));
+        world.ecs.spawn(boss);
+
+        let mut bot = seeded_bot(Skill::Casual, 3);
+        assert!(!bot.sees(&world, rat, head) && !bot.sees(&world, rat, lane.center()));
+        bot.scan(&world);
+        assert!(bot.threats.iter().any(|threat| {
+            matches!(threat, Threat::Hazard { shape, damage: 22.0, .. } if shape.contains(rat, 0.0))
+        }));
     }
 
     #[test]

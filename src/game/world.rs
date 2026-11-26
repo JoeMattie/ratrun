@@ -2040,13 +2040,7 @@ impl World {
         if self.ecs.iter_entities().any(|e| e.contains::<Boss>()) {
             return false;
         }
-        let large = crate::game::collision::SizeClass::Large;
         let arena = self.boss_arena_around(self.player.pos);
-        let dock = self
-            .level
-            .tiles
-            .nearest_open_center(arena.center_world(), large, 16)
-            .unwrap_or_else(|| arena.center_world());
         let landing = if kind == BossKind::Lantern {
             super::ecs::systems::boss::lantern_arrival_beside(&self.level, self.player.pos)
         } else {
@@ -2060,6 +2054,7 @@ impl World {
         } else {
             arena
         };
+        let dock = super::ecs::systems::boss::boss_dock(&self.level, kind, arena);
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
         let id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
@@ -2080,6 +2075,7 @@ impl World {
                     id,
                     seed: self.level.seed,
                 },
+                &self.player.loadout.weapons,
             );
             // The arrival's burst draws from the boss's own stream, exactly as
             // the scheduled spawn's does, so it never perturbs the run rng.
@@ -2812,7 +2808,7 @@ impl World {
 
         _s = crate::prof::scope(crate::prof::Stage::SceneActors);
         // Boss bodies in the entity pass (airborne ones go over the player).
-        self.draw_boss_body(pb, cam, false);
+        self.draw_boss_body(pb, cam, BossBodyLayer::Ground);
 
         // Friendly bullets (the rat's own). Hostile pellets are *not* drawn
         // here: they are the thing that can kill the player, so they belong to
@@ -3004,7 +3000,7 @@ impl World {
         }
 
         // The cat's airborne pounce passes visibly overhead.
-        self.draw_boss_body(pb, cam, true);
+        self.draw_boss_body(pb, cam, BossBodyLayer::Airborne);
 
         // Overhang layer: lintels over rat-holes, doorways and one-way doors,
         // so the rat is visibly ducking *under* them; then the foreground half
@@ -3014,6 +3010,7 @@ impl World {
         self.draw_wall_layer(pb, cam, WallLayer::Overhang);
         self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
+        self.draw_boss_body(pb, cam, BossBodyLayer::AboveWalls);
 
         _s = crate::prof::scope(crate::prof::Stage::SceneSmoke);
         // Brief smoke from combat and moving machinery, under bright sparks.
@@ -3554,7 +3551,7 @@ impl World {
                     }
                     BossArtView::Lantern(v) => {
                         art_boss_lantern::draw_tell_overlay(
-                            pb, &v.floating_body(), cam, self.level.palette.accent,
+                            pb, &v, cam, self.level.palette.accent,
                         );
                     }
                     _ => {}
@@ -3949,13 +3946,18 @@ impl World {
         }
     }
 
-    /// Boss entity layer. `airborne_only` selects the cat's leaping pass, which
-    /// the art draws after the player so it visibly passes overhead.
-    fn draw_boss_body(&mut self, pb: &mut PixelBuffer, cam: Vec2, airborne_only: bool) {
+    fn draw_boss_body(&mut self, pb: &mut PixelBuffer, cam: Vec2, layer: BossBodyLayer) {
         let accent = self.level.palette.accent;
         let mut query = self.ecs.query::<&Boss>();
         for boss in query.iter(&self.ecs) {
-            if boss.is_airborne() != airborne_only {
+            let body_layer = if boss.kind == BossKind::Lantern {
+                BossBodyLayer::AboveWalls
+            } else if boss.is_airborne() {
+                BossBodyLayer::Airborne
+            } else {
+                BossBodyLayer::Ground
+            };
+            if body_layer != layer {
                 continue;
             }
             if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), self.render_viewport) {
@@ -3977,7 +3979,7 @@ impl World {
                 BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
                 BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
                 BossArtView::Lantern(v) => {
-                    art_boss_lantern::draw(pb, &v.floating_body(), cam, accent);
+                    art_boss_lantern::draw(pb, &v, cam, accent);
                 }
             }
             pb.set_pen(pen);
@@ -4434,6 +4436,13 @@ fn carried_player(center: Vec2, carried: Loadout) -> Player {
     player.hp = carried.stats.max_hp;
     player.loadout = carried;
     player
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BossBodyLayer {
+    Ground,
+    Airborne,
+    AboveWalls,
 }
 
 /// Which layer of the wall art [`World::draw_wall_layer`] is drawing.

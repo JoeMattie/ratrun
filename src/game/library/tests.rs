@@ -866,7 +866,13 @@ fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
             })
             .unwrap_or(0);
         let pool = kind.base_hp() * kind.hp_scale() * director::boss_hp_mult_for(level, director::BOSS_TIME);
-        assert_eq!(hp.value, format!("{pool:.0}"), "{kind:?}");
+        let expected = if kind == BossKind::Lantern {
+            let high = pool * crate::game::art_boss_lantern::BOSS_AREA_KIT_HP_MULT;
+            format!("{pool:.0}–{high:.0}")
+        } else {
+            format!("{pool:.0}")
+        };
+        assert_eq!(hp.value, expected, "{kind:?}");
         assert!(pool >= 2_500.0, "{kind:?}: {pool} is not a boss pool");
         assert!((0.0..=1.0).contains(&hp.bar), "{kind:?}: bar {}", hp.bar);
     }
