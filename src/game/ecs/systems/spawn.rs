@@ -286,6 +286,15 @@ pub struct DirectorConsole<'w> {
     pub debug: Res<'w, DebugFlags>,
 }
 
+#[derive(SystemParam)]
+pub struct DirectorRun<'w> {
+    schedule: Res<'w, MinibossSchedule>,
+    opening: Res<'w, super::floor_sewer::OpeningSpawns>,
+    tuning: Res<'w, crate::tuning::RunTuning>,
+    sfx: ResMut<'w, SfxQueue>,
+    damage: Res<'w, DamageLedger>,
+}
+
 /// The two monotonic id counters, bundled for the same reason.
 #[derive(SystemParam)]
 pub struct DirectorIds<'w> {
@@ -328,10 +337,7 @@ pub fn director_system(
     level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
-    (schedule, opening, tuning, mut sfx, damage): (
-        Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>,
-        Res<crate::tuning::RunTuning>, ResMut<SfxQueue>, Res<DamageLedger>,
-    ),
+    DirectorRun { schedule, opening, tuning, mut sfx, damage }: DirectorRun,
     // Console tunables: `set enemy_cap/spawn_rate`, `peace`. Neutral defaults.
     console: DirectorConsole,
     mut boss_due: ResMut<BossDue>,
