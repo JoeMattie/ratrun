@@ -3081,9 +3081,10 @@ mod tests {
     /// damage — both beams, the same inward-closing pair — and only one copy is
     /// kept.
     #[test]
-    fn carbon_copy_replays_the_last_sweep_backwards_at_half_damage() {
+    fn carbon_copy_replays_the_last_sweep_with_half_damage_and_falloff() {
         use crate::game::ecs::systems::weapons_wave3b;
-        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 10 per hit, 86.4 px
+        use crate::game::weapon::LASER_EYE_OFFSET;
+        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 10 damage inside 58 px
         let origin = w.player.pos;
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
@@ -3098,8 +3099,9 @@ mod tests {
             }
         }
         let recorded = w.ecs.resource::<LaserFx>().copy.expect("a completed sweep is kept");
-        assert!((recorded.origin.x - origin.x).abs() < 1e-4);
+        assert_eq!(recorded.origin, origin + Vec2::new(LASER_EYE_OFFSET, 0.0));
         assert!((recorded.facing.x - 1.0).abs() < 1e-4);
+        assert_eq!(recorded.full_damage_radius, 58.0);
 
         // The rat turns and walks out of range; the afterimage stays where the
         // recorded sweep fired from, and the live beam can no longer reach the
@@ -3107,12 +3109,18 @@ mod tests {
         w.player.pos = origin + Vec2::new(0.0, 90.0);
         w.player.face = Vec2::new(0.0, 1.0);
         let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(20.0, 0.0), 400.0);
+        let far = w.spawn_enemy(EnemyKind::Brute, recorded.origin + Vec2::new(116.0, 0.0), 400.0);
         let hp = hp_of(&w, body);
+        let far_hp = hp_of(&w, far);
         w.player.loadout.weapons[0].timer = 0.0;
         let mut ticks = 0;
         while ticks < 200 {
             run(&mut w, weapons_wave3b::laser_eyes_system);
             ticks += 1;
+            if ticks == 1 {
+                let fx = w.ecs.resource::<LaserFx>();
+                assert!(fx.copy_beams.iter().all(|&len| len > 0.0));
+            }
             if ticks > 1 && !w.ecs.resource::<LaserFx>().active() {
                 // The afterimage may still be running after the live sweep.
                 if w.ecs.resource::<LaserFx>().copy_left <= 0.0 {
@@ -3127,10 +3135,11 @@ mod tests {
             hp,
             hp_of(&w, body)
         );
+        assert_eq!(far_hp - hp_of(&w, far), 1.25, "twice the radius takes a quarter hit");
         // One copy is kept, and the newest completed sweep replaces it.
         let kept = w.ecs.resource::<LaserFx>().copy.expect("still one copy");
         assert!(
-            (kept.origin.y - (origin.y + 90.0)).abs() < 1e-4,
+            (kept.origin.y - (w.player.pos.y + LASER_EYE_OFFSET)).abs() < 1e-4,
             "the newest completed sweep replaces the old negative"
         );
     }

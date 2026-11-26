@@ -26,6 +26,87 @@ use super::*;
 /// crowd is past what the eye separates anyway.
 const MAX_RIMS: usize = 512;
 
+const LASER_LIGHT_SPACING: f32 = 12.0;
+const LASER_LIGHT_RADIUS: f32 = 14.0;
+const MAX_LASER_LIGHTS: usize = 16;
+
+/// A stopped beam ray, shared by the light sampler and the water mirror.
+#[derive(Clone, Copy)]
+pub(super) struct LaserSegment {
+    pub start: Vec2,
+    pub end: Vec2,
+    pub brightness: f32,
+}
+
+impl LaserSegment {
+    fn new(start: Vec2, angle: f32, len: f32, brightness: f32) -> Option<Self> {
+        (len > 0.0 && brightness > 0.02).then(|| Self {
+            start,
+            end: start + Vec2::from_angle(angle) * len,
+            brightness,
+        })
+    }
+
+    pub(super) fn lights(self) -> impl Iterator<Item = Light> {
+        let ray = self.end - self.start;
+        let count = ((ray.len() / LASER_LIGHT_SPACING).ceil() as usize + 1)
+            .clamp(2, MAX_LASER_LIGHTS);
+        (0..count).map(move |i| {
+            let pos = self.start + ray * (i as f32 / (count - 1) as f32);
+            let mut light = Light::radial(
+                pos,
+                LASER_LIGHT_RADIUS,
+                crate::game::particle::vfx::LASER_GLOW,
+                0.56 * self.brightness,
+            );
+            light.falloff = Falloff::Small;
+            light.casts_shadow = false;
+            light
+        })
+    }
+}
+
+pub(super) fn laser_segments(ecs: &bevy_ecs::world::World) -> [Option<LaserSegment>; 4] {
+    let mut rays = [None; 4];
+    if let Some(laser) = ecs.get_resource::<LaserFx>() {
+        if laser.active() {
+            let gain = laser.brightness();
+            rays[0] = LaserSegment::new(laser.origin, laser.angle, laser.beam, gain);
+            rays[1] = LaserSegment::new(laser.origin, laser.angle_b, laser.beam_b, gain);
+        }
+        if laser.copy_active() {
+            if let Some(copy) = laser.copy {
+                let gain = laser.copy_brightness();
+                rays[2] = LaserSegment::new(
+                    copy.origin, laser.copy_prev_angle, laser.copy_beams[0], gain,
+                );
+                rays[3] = LaserSegment::new(
+                    copy.origin, laser.copy_prev_angle_b, laser.copy_beams[1], gain,
+                );
+            }
+        }
+    }
+    rays
+}
+
+#[cfg(test)]
+#[test]
+fn laser_line_lights_cover_both_ends_with_bounded_samples() {
+    let start = Vec2::new(10.0, 20.0);
+    for (distance, expected_count) in [(3.0, 2), (36.0, 4), (180.0, 16), (320.0, 16)] {
+        let end = start + Vec2::new(distance, 0.0);
+        let ray = LaserSegment { start, end, brightness: 1.0 };
+        let lights: Vec<_> = ray.lights().collect();
+        assert_eq!(lights.len(), expected_count);
+        assert_eq!(lights.first().unwrap().pos, start);
+        assert_eq!(lights.last().unwrap().pos, end);
+        for light in lights {
+            assert!(matches!(light.shape, LightShape::Radial { radius } if radius == 14.0));
+            assert!(light.falloff == Falloff::Small && !light.casts_shadow);
+        }
+    }
+}
+
 impl LightMap {
     /// Gather all lights from world state; returns the active boss phase if any.
     pub(super) fn gather_lights(
@@ -156,81 +237,33 @@ impl LightMap {
             }
         }
 
-        // 2b. Laser Eyes: amber muzzle glow + stepped amber beam pools when lit.
-        if let Some(lfx) = scene.ecs.get_resource::<LaserFx>() {
-            if lfx.active() {
-                let lit = (1.0
-                    - lfx.since_pulse / (0.5 * crate::game::weapon::LASER_PULSE_INTERVAL))
-                    .clamp(0.0, 1.0);
-                let fade = 1.0 - (lfx.progress() - 0.85).max(0.0) / 0.15;
-                let b = (lit * fade).clamp(0.0, 1.0);
-                let face = if scene.player.face.len_sq() > 1e-4 {
-                    scene.player.face.normalized()
-                } else {
-                    Vec2::new(0.0, -1.0)
-                };
-                let muzzle = scene.player.pos + face * 3.4;
-                let mx = muzzle.x - cam.x;
-                let my = muzzle.y - cam.y;
-                if in_range(mx, my, 30.0) {
-                    let m = 0.55 + 0.45 * b;
+        // 2b. Muzzle glows. The narrow bars are submitted separately so
+        // the dynamic-light budget cannot clip their far ends.
+        if let Some(laser) = scene.ecs.get_resource::<LaserFx>() {
+            if laser.active() {
+                let muzzle = laser.origin - cam;
+                if in_range(muzzle.x, muzzle.y, 18.0) {
                     self.lights.push(PointLight {
-                        x: mx,
-                        y: my,
-                        radius: 28.0,
-                        color: (255, 96, 90),
-                        intensity: (175.0 * m) as u16,
-                        scatter: (44.0 * m) as u16,
+                        x: muzzle.x,
+                        y: muzzle.y,
+                        radius: 18.0,
+                        color: crate::game::particle::vfx::LASER_GLOW,
+                        intensity: 108,
+                        scatter: 16,
                         priority: 3,
                         occlude: false,
                         hard: false,
                     });
                 }
-                if b > 0.05 && lfx.beam > 2.0 {
-                    let dir = Vec2::from_angle(lfx.angle);
-                    let mut beam = Light::radial(muzzle, lfx.beam + 18.0, (255, 86, 84), 0.85 * b);
-                    beam.shape = LightShape::Beam {
-                        dir,
-                        length: lfx.beam + 12.0,
-                        half_width: 16.0,
-                    };
-                    beam.scatter = 0.22 * b;
-                    beam.height = 7.0;
-                    self.push_shaped(beam, 3);
-                }
-                // Both beams exist at every rank (batch 13): the second bar
-                // lights the floor too.
-                if b > 0.05 && lfx.beam_b > 2.0 {
-                    let dir = Vec2::from_angle(lfx.angle_b);
-                    let mut beam =
-                        Light::radial(muzzle, lfx.beam_b + 18.0, (255, 86, 84), 0.85 * b);
-                    beam.shape = LightShape::Beam {
-                        dir,
-                        length: lfx.beam_b + 12.0,
-                        half_width: 16.0,
-                    };
-                    beam.scatter = 0.22 * b;
-                    beam.height = 7.0;
-                    self.push_shaped(beam, 3);
-                }
             }
-            // Carbon Copy: warm amber glow at the recorded eye pair + stepped
-            // copper-amber pools along the two inward-closing replay beams.
-            if lfx.copy_active() {
-                if let Some(copy) = lfx.copy {
-                    let cf = if copy.facing.len_sq() > 1e-4 {
-                        copy.facing.normalized()
-                    } else {
-                        Vec2::new(0.0, -1.0)
-                    };
-                    let eye = copy.origin + cf * 2.6;
-                    let ex = eye.x - cam.x;
-                    let ey = eye.y - cam.y;
-                    let pulse = 0.80 + 0.20 * (elapsed * 18.0).sin().abs();
-                    if in_range(ex, ey, 30.0) {
+            if laser.copy_active() {
+                if let Some(copy) = laser.copy {
+                    let eye = copy.origin - cam;
+                    if in_range(eye.x, eye.y, 28.0) {
+                        let pulse = 0.80 + 0.20 * (elapsed * 18.0).sin().abs();
                         self.lights.push(PointLight {
-                            x: ex,
-                            y: ey,
+                            x: eye.x,
+                            y: eye.y,
                             radius: 28.0,
                             color: (255, 192, 58),
                             intensity: (190.0 * pulse) as u16,
@@ -239,47 +272,6 @@ impl LightMap {
                             occlude: false,
                             hard: false,
                         });
-                    }
-                    let ct = (lfx.copy_age / lfx.copy_secs.max(1e-4)).clamp(0.0, 1.0);
-                    let base = cf.angle();
-                    let pair = [
-                        base - lfx.copy_half + lfx.copy_span * ct,
-                        base + lfx.copy_half - lfx.copy_span * ct,
-                    ];
-                    let reach = copy.reach.clamp(12.0, 120.0);
-                    for ang in pair {
-                        let dir = Vec2::from_angle(ang);
-                        // Stop the pools at the first wall, the same test the
-                        // hit uses.
-                        let stop = scene
-                            .level
-                            .tiles
-                            .segment_hit(
-                                copy.origin,
-                                copy.origin + dir * reach,
-                                crate::game::weapon::LASER_HALF_WIDTH,
-                            )
-                            .map(|t| t.clamp(0.0, 1.0))
-                            .unwrap_or(1.0);
-                        let len = reach * stop;
-                        for &frac in &[0.42f32, 0.82] {
-                            let p = copy.origin + dir * (len * frac);
-                            let sx = p.x - cam.x;
-                            let sy = p.y - cam.y;
-                            if in_range(sx, sy, 26.0) {
-                                self.lights.push(PointLight {
-                                    x: sx,
-                                    y: sy,
-                                    radius: 24.0,
-                                    color: (242, 154, 44),
-                                    intensity: (162.0 * pulse) as u16,
-                                    scatter: (42.0 * pulse) as u16,
-                                    priority: 2,
-                                    occlude: false,
-                                    hard: false,
-                                });
-                            }
-                        }
                     }
                 }
             }

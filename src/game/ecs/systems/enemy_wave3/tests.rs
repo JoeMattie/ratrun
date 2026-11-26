@@ -1286,7 +1286,7 @@ fn the_shell_reaches_every_later_damage_source() {
                 origin: p + Vec2::new(0.0, 60.0),
                 facing: Vec2::new(0.0, -1.0),
                 pulses: 3,
-                reach: 40.0,
+                full_damage_radius: 40.0,
                 dmg: 10.0,
             });
         },

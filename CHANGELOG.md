@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Laser Eyes beams reach the screen edge at every zoom, stopping at
+  walls.** The thinner beams light their path and reflect brightly in puddles.
+  Damage falls off with distance, and higher ranks deal full damage farther
+  from the muzzle.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

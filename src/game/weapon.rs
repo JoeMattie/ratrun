@@ -132,8 +132,8 @@ pub const CHEESE_FAN_SLACK: f32 = 0.174_532_9;
 // inward, meeting on the aim direction when the sweep ends. From L4 they do not
 // stop there: they cross and carry on to the opposite edges over the same
 // sweep, so they move twice as fast and end swapped (an X-shaped scissor).
-// Both beams share one per-sweep hit set, so a body the pair covers takes the
-// whole sweep's damage exactly once — one old pulse's worth (`laser_hit_damage`).
+// Both beams share one hit set. A body the pair covers takes one pulse per
+// sweep, scaled by its distance from the muzzle.
 
 /// Seconds one sweep lasts, L1 → L5 (batch 13: the sweep is faster, the cycle
 /// is unchanged, so a cycle now spends more of itself not firing).
@@ -147,16 +147,13 @@ pub const LASER_ARC_DEG: [f32; 5] = [60.0, 70.0, 80.0, 95.0, 110.0];
 /// still cut once per sweep.
 pub const LASER_TWIN_LEVEL: u8 = 4;
 
-/// The old per-pulse cadence, kept only because two render readers still scale
-/// a light's brightness by it (`world::laser_visual`, `lighting::sources`).
-/// Nothing in the simulation pulses any more: `LaserFx::since_pulse` stays 0, so
-/// those readers see a steady (unblinking) beam.
-pub const LASER_PULSE_INTERVAL: f32 = 0.10;
-/// Reference half-arc for the render side's beam light pools (the sweep's real
+/// Reference half-arc for Library staging (the sweep's real
 /// half-arc per level is `LASER_ARC_DEG` / 2, carried live on `LaserFx::half`).
 pub const LASER_SWEEP_HALF: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// The beam's half-width in px (the design's "3 px wide" bar).
 pub const LASER_HALF_WIDTH: f32 = 1.5;
+/// Distance from the rat's centre to the midpoint of its eyes.
+pub const LASER_EYE_OFFSET: f32 = 3.4;
 
 /// Number of weapon slots every per-weapon bookkeeping array needs
 /// (`ecs::resources::DamageLedger`, the balance reports).
@@ -687,13 +684,8 @@ const LASER_DAMAGE: [f32; 5] = [6.0, 7.0, 8.0, 9.0, 10.0];
 const LASER_CYCLE: [f32; 5] = [2.0, 1.9, 1.8, 1.7, 1.6];
 /// Laser Eyes: pulses per burst, L1 → L5.
 const LASER_PULSES: [u32; 5] = [3, 3, 4, 4, 5];
-/// Laser Eyes: beam length in px before the wall stop, L1 → L5, as the design
-/// row reads it. Batch 13 stretches every rank by [`LASER_REACH_SCALE`];
-/// `Weapon::laser_reach` is the only place that applies it.
-const LASER_REACH: [f32; 5] = [34.0, 40.0, 40.0, 48.0, 54.0];
-/// Laser Eyes: how much longer every rank's beam is than the original table
-/// ("longer"): 54.4 / 64 / 64 / 76.8 / 86.4 px, before Lens Cap.
-pub const LASER_REACH_SCALE: f32 = 1.6;
+/// Laser Eyes: full-damage radius in px from the eyes, L1 → L5.
+const LASER_FULL_DAMAGE_RADIUS: [f32; 5] = [28.0, 34.0, 40.0, 48.0, 58.0];
 /// Super Dash: damage per crossed body, L1 → L5.
 const DASH_DAMAGE: [f32; 5] = [14.0, 20.0, 26.0, 32.0, 38.0];
 /// Super Dash: swept radius around the travelled segment, L1 → L5.
@@ -778,9 +770,7 @@ impl Weapon {
 
     /// Laser Eyes: the old burst's pulses (3 / 3 / 4 / 4 / 5). A sweep no
     /// longer pulses; the count is kept as the size of the burst the sweep
-    /// replaces (the Carbon Copy afterimage's spark count). The per-body hit is
-    /// [`Weapon::laser_hit_damage`], so a body the beams cross takes one old
-    /// pulse's damage per sweep and its dps is unchanged.
+    /// replaces (the Carbon Copy afterimage's spark count).
     pub fn laser_pulses(&self) -> u32 {
         match self.kind {
             WeaponKind::LaserEyes => LASER_PULSES[self.tier()],
@@ -788,10 +778,7 @@ impl Weapon {
         }
     }
 
-    /// Laser Eyes: what one body the beam crosses takes per sweep: one old
-    /// pulse's damage (`Weapon::damage()` is the per-pulse table). The old
-    /// burst fanned its pulses at distinct angles, so a body normally took
-    /// one; the sweep's gain is its coverage, not its per-body damage.
+    /// Laser Eyes: base pulse damage per body per sweep, before falloff.
     #[inline]
     pub fn laser_hit_damage(&self) -> f32 {
         match self.kind {
@@ -825,12 +812,10 @@ impl Weapon {
         self.kind == WeaponKind::LaserEyes && self.level >= LASER_TWIN_LEVEL
     }
 
-    /// Laser Eyes: beam length in px, before the wall stop and Lens Cap
-    /// (`Stats::ranged_reach`). Batch 13's ×1.6 is applied here, so the design
-    /// row in `LASER_REACH` stays the number it always was.
-    pub fn laser_reach(&self) -> f32 {
+    /// Laser Eyes: distance in px before inverse-square falloff starts.
+    pub fn laser_full_damage_radius(&self) -> f32 {
         match self.kind {
-            WeaponKind::LaserEyes => LASER_REACH[self.tier()] * LASER_REACH_SCALE,
+            WeaponKind::LaserEyes => LASER_FULL_DAMAGE_RADIUS[self.tier()],
             _ => 0.0,
         }
     }
@@ -1164,23 +1149,18 @@ mod tests {
             w.level = level;
             w
         };
-        for (level, (dmg, cycle, pulses, reach)) in [
-            (1u8, (6.0f32, 2.0f32, 3u32, 54.4f32)),
-            (2, (7.0, 1.9, 3, 64.0)),
-            (3, (8.0, 1.8, 4, 64.0)),
-            (4, (9.0, 1.7, 4, 76.8)),
-            (5, (10.0, 1.6, 5, 86.4)),
+        for (level, (dmg, cycle, pulses, radius)) in [
+            (1u8, (6.0f32, 2.0f32, 3u32, 28.0f32)),
+            (2, (7.0, 1.9, 3, 34.0)),
+            (3, (8.0, 1.8, 4, 40.0)),
+            (4, (9.0, 1.7, 4, 48.0)),
+            (5, (10.0, 1.6, 5, 58.0)),
         ] {
             let w = at(WeaponKind::LaserEyes, level);
             assert_eq!(w.damage(), dmg, "laser L{level} damage");
             assert_eq!(w.cooldown(), cycle, "laser L{level} cycle");
             assert_eq!(w.laser_pulses(), pulses, "laser L{level} pulses");
-            // Batch 13: every rank's beam is ×1.6 the design row's length.
-            assert!(
-                (w.laser_reach() - reach).abs() < 1e-4,
-                "laser L{level} reach"
-            );
-            assert!((w.laser_reach() - LASER_REACH[(level - 1) as usize] * 1.6).abs() < 1e-4);
+            assert_eq!(w.laser_full_damage_radius(), radius, "laser L{level} full damage radius");
         }
         for (level, (dmg, radius)) in [
             (1u8, (14.0f32, 4.0f32)),
@@ -1320,11 +1300,8 @@ mod tests {
             );
             assert!((w.laser_sweep_secs() - secs).abs() < 1e-6, "L{level} sweep");
             assert_eq!(w.laser_twin(), twin, "L{level} crossing beams");
-            // One body takes one old pulse's damage per sweep.
+            // At close range a body takes one pulse's damage per sweep.
             assert!((w.laser_hit_damage() - w.damage()).abs() < 1e-6);
-            // Both beams exist at every rank; the flag only says whether they
-            // cross, which is what makes the pair move twice as fast.
-            assert!((w.laser_reach() - LASER_REACH[(level - 1) as usize] * 1.6).abs() < 1e-4);
         }
     }
 

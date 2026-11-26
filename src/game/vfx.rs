@@ -998,68 +998,6 @@ pub fn emit_laser_muzzle(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, dir:
     }
 }
 
-/// One pulse of a Laser Eyes burst: a hot amber bar from `origin` along
-/// `angle` for `len` px (already wall-stopped), with a splash of sparks where
-/// it landed. `hits` is how many bodies it pierced (only used for the sparks).
-pub fn emit_laser_pulse(
-    ps: &mut Particles,
-    rng: &mut impl Rng,
-    origin: Vec2,
-    angle: f32,
-    len: f32,
-    hits: u32,
-) {
-    let dir = Vec2::from_angle(angle);
-    let perp = dir.perp();
-    // The bar itself: a dense row of additive dots along the ray, brightest at
-    // the muzzle. `budget_count` caps the row so a crowded frame still draws
-    // the beam, just sparser.
-    let want = (len * 0.25) as usize;
-    let dots = ps.budget_count(want.clamp(3, 10), true);
-    for i in 0..dots {
-        let t = i as f32 / dots.max(1) as f32;
-        let p = origin + dir * (2.0 + len * t);
-        let life = rng.random_range(0.07..0.13);
-        let jitter = perp * rng.random_range(-0.6..0.6);
-        ps.push(Particle {
-            pos: p + jitter,
-            vel: perp * rng.random_range(-10.0..10.0),
-            life,
-            max_life: life,
-            drag: 9.0,
-            gravity: 0.0,
-            ramp: Ramp::Custom(LASER_CORE, LASER_GLOW),
-            additive: true,
-            shape: Shape::Dot,
-        });
-    }
-    // A spark + faint floor scorch mark where the beam cuts/terminates.
-    let end = origin + dir * len;
-    ps.push_stain(Stain {
-        pos: end,
-        radius: 1.8,
-        color: (22, 10, 12),
-        life: 3.5,
-        max_life: 3.5,
-        seed: rng.random::<u16>(),
-        kind: StainKind::Scorch,
-    });
-    let n = ps.budget_count(2 + hits.min(3) as usize, true);
-    ps.cone_shaped(
-        rng,
-        end,
-        -dir,
-        n,
-        46.0,
-        0.9,
-        Ramp::Custom(LASER_CORE, LASER_GLOW),
-        0.16,
-        true,
-        Shape::Streak,
-        5.0,
-    );
-}
-
 /// Impact fleck on a body a Laser Eyes beam cut: white-hot core + crimson sparks.
 pub fn emit_laser_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir: Vec2, killed: bool) {
     let dir = if out_dir.len_sq() > 0.01 {

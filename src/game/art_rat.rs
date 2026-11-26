@@ -1229,170 +1229,68 @@ const LASER_MEET_ARC: f32 = 0.30;
 /// rat's own eyes.
 const LASER_MEET_AT: f32 = 0.55;
 
-/// Laser Eyes' **twin red muzzle dots** and its **two beams**.
-///
-/// The dots sit on the rat's eyes (the same local `(3.4, ±0.85)`
-/// [`draw_face`] plots), so the beams visibly leave the rat rather than the
-/// floor, and they stay lit for the whole sweep while the bars fade at the end —
-/// that alternation is what reads as "laser eyes" in one half-block frame.
-/// Both bars are drawn every frame (batch 13's pair is symmetrical: one from
-/// each edge of the arc, closing inward), plus a brief hot flash where the two
-/// coincide on the aim line — the meeting at L1–L3, the cross at L4–L5.
-///
-/// Each bar is drawn additively in three passes (a white core and two red-white
-/// shoulders) because a 1-px line disappears against a busy floor.
-pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, cam: Vec2) {
+/// Paint the two eye dots over the rat, with a compact red halo.
+pub fn draw_laser_muzzle(pb: &mut PixelBuffer, player: &Player, muzzle: f32, cam: Vec2) {
     let face = if player.face.len_sq() > 1e-4 {
         player.face.normalized()
     } else {
         Vec2::new(0.0, -1.0)
     };
-    let perp = face.perp();
-    let eye_u = 3.4;
-    // One red-white palette with the muzzle sparks and cut sparks
-    // (`vfx::LASER_CORE`/`LASER_GLOW`): `amber` is the sheath and `orange`
-    // the corona, named for the roles they have always had.
-    let hot: Rgb = crate::game::particle::vfx::LASER_CORE;
-    let amber: Rgb = crate::game::particle::vfx::LASER_GLOW;
-    let orange: Rgb = scale(crate::game::particle::vfx::LASER_GLOW, 0.8);
-
-    // 1. Twin muzzle dots on the eyes (always live through the whole sweep,
-    //    brightening with the bars and glowing warm amber as they fade).
-    let m = beam.muzzle.clamp(0.0, 1.0);
-    let eye_l = player.pos + face * eye_u + perp * -0.85;
-    let eye_r = player.pos + face * eye_u + perp * 0.85;
-    for eye_w in [eye_l, eye_r] {
-        let e = w2s(eye_w, cam);
-        pb.plot(e.0, e.1, mix(amber, hot, 0.45 + 0.55 * m));
-        for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            plot_add(pb, e.0 + dx, e.1 + dy, scale(amber, 0.35 + 0.45 * m));
-        }
-        if m > 0.65 {
-            for &(dx, dy) in &[(1, 1), (-1, 1), (1, -1), (-1, -1)] {
-                plot_add(pb, e.0 + dx, e.1 + dy, scale(orange, 0.38 * m));
-            }
-        }
-    }
-
-    // 2. Both bars, from the one eye line (pure additive — never overwrites the
-    //    floor with muddy dark brown). The pair is symmetrical, so the same read
-    //    is drawn twice.
-    let b = beam.brightness.clamp(0.0, 1.0);
-    if b <= 0.02 {
-        return;
-    }
-    let start = player.pos + face * eye_u;
-    for (angle, len) in [(beam.angle, beam.len), (beam.angle_b, beam.len_b)] {
-        if len <= 1.0 {
-            continue;
-        }
-        let dir = Vec2::from_angle(angle);
-        // 2a. Twin converging filaments from each eye into the fused beam neck.
-        let fuse_pt = start + dir * len.min(5.5);
-        for eye_w in [eye_l, eye_r] {
-            let steps = 6i32;
-            for i in 1..=steps {
-                let t = i as f32 / steps as f32;
-                let p = eye_w + (fuse_pt - eye_w) * t;
-                let s = w2s(p, cam);
-                plot_add(pb, s.0, s.1, scale(hot, 0.72 * b));
-                plot_add(pb, s.0, s.1 + 1, scale(amber, 0.30 * b));
-            }
-        }
-        // 2b. The bar itself and 2c. its focal scorch.
-        laser_bar(pb, start, dir, len, b, cam);
-    }
-
-    // 3. The flash where the pair meets (L1–L3) or crosses (L4–L5): strongest
-    //    while the two bars are within `LASER_MEET_ARC` of each other, on the
-    //    aim line, out along the shorter bar.
-    if beam.len > 1.0 && beam.len_b > 1.0 {
-        let sep = (beam.angle - beam.angle_b).abs();
-        let meet = (1.0 - sep / LASER_MEET_ARC).clamp(0.0, 1.0);
-        if meet > 0.02 {
-            let f = meet * b;
-            let aim = Vec2::from_angle(beam.aim);
-            let at = start + aim * (beam.len.min(beam.len_b) * LASER_MEET_AT);
-            let fc = w2s(at, cam);
-            blend(pb, fc.0, fc.1, hot, (0.92 * f).clamp(0.0, 1.0));
-            for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                plot_add(pb, fc.0 + dx, fc.1 + dy, scale(hot, 0.82 * f));
-                plot_add(pb, fc.0 + dx * 2, fc.1 + dy * 2, scale(amber, 0.52 * f));
-            }
-            for &(dx, dy) in &[(1, 1), (-1, 1), (1, -1), (-1, -1)] {
-                plot_add(pb, fc.0 + dx, fc.1 + dy, scale(amber, 0.66 * f));
-            }
-            for &(dx, dy) in &[(3, 0), (-3, 0), (0, 3), (0, -3)] {
-                plot_add(pb, fc.0 + dx, fc.1 + dy, scale(orange, 0.28 * f));
-            }
+    let hot = crate::game::particle::vfx::LASER_CORE;
+    let glow = crate::game::particle::vfx::LASER_GLOW;
+    let center = player.pos + face * crate::game::weapon::LASER_EYE_OFFSET;
+    for side in [-0.85, 0.85] {
+        let (x, y) = w2s(center + face.perp() * side, cam);
+        pb.plot(x, y, mix(glow, hot, 0.45 + 0.55 * muzzle));
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            plot_add(pb, x + dx, y + dy, scale(glow, 0.35 * muzzle));
         }
     }
 }
 
-/// One **Laser Eyes** bar: a white-hot core with its amber shoulders, and the
-/// focal scorch where it terminates (a wall stop or the beam's own reach) — a
-/// charcoal smear under a hot star, so a sweep leaves a mark on the surface it
-/// cut rather than a floating spark.
-fn laser_bar(pb: &mut PixelBuffer, start: Vec2, dir: Vec2, len: f32, b: f32, cam: Vec2) {
-    let hot: Rgb = crate::game::particle::vfx::LASER_CORE;
-    let amber: Rgb = crate::game::particle::vfx::LASER_GLOW;
-    let orange: Rgb = scale(crate::game::particle::vfx::LASER_GLOW, 0.8);
-    let perp_b = dir.perp();
-
-    // The bar: white-hot core + red-white sheath + soft orange corona. A
-    // **steady** bar: the sweep is one continuous cut, so the beam holds one
-    // brightness for its whole length instead of blinking per pulse. It only
-    // fades in and out with the sweep's own progress.
-    let steps = (len * 1.4).ceil().max(2.0) as i32;
-    let mut last_core = (i32::MIN, i32::MIN);
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let p = start + dir * (t * len);
-        let sc = w2s(p, cam);
-        if sc == last_core {
-            continue;
-        }
-        last_core = sc;
-        let gain = b;
-        // Core pixel: crisp white-gold blend lifted brightly above any floor.
-        blend(pb, sc.0, sc.1, hot, (0.78 * gain).clamp(0.0, 0.95));
-        plot_add(pb, sc.0, sc.1, scale(hot, 0.45 * gain));
-        // Golden-amber inner shoulders (±1 px).
-        for side in [-1.0f32, 1.0] {
-            let s1 = w2s(p + perp_b * side, cam);
-            if s1 != sc {
-                plot_add(pb, s1.0, s1.1, scale(amber, 0.78 * gain));
-            }
-            let s2 = w2s(p + perp_b * (side * 2.0), cam);
-            if s2 != s1 && s2 != sc {
-                plot_add(pb, s2.0, s2.1, scale(orange, 0.34 * gain));
-            }
-        }
+/// Draw the live pair as self-lit hairlines from the stopped simulation rays.
+pub fn draw_laser_eyes(pb: &mut PixelBuffer, beam: LaserBeam, cam: Vec2) {
+    let b = beam.brightness;
+    for (angle, len) in [(beam.angle, beam.len), (beam.angle_b, beam.len_b)] {
+        draw_laser_bar(pb, beam.origin, angle, len, b, cam);
     }
 
-    // The scorch where the beam terminates.
-    let se = w2s(start + dir * len, cam);
-    let soot: Rgb = (54, 30, 16);
-    for &(dx, dy) in &[
-        (0, 0),
-        (1, 1),
-        (-1, 1),
-        (1, -1),
-        (-1, -1),
-        (2, 0),
-        (-2, 0),
-        (0, 2),
-        (0, -2),
-    ] {
-        blend(pb, se.0 + dx, se.1 + dy, soot, 0.55 * b);
+    // A compact flash where the pair meets (L1–L3) or crosses (L4–L5).
+    let len = beam.len.min(beam.len_b);
+    let sep = (beam.angle - beam.angle_b).abs();
+    let flash = (1.0 - sep / LASER_MEET_ARC).clamp(0.0, 1.0) * b;
+    if len > 1.0 && flash > 0.02 {
+        let at = beam.origin + Vec2::from_angle(beam.aim) * (len * LASER_MEET_AT);
+        let (x, y) = w2s(at, cam);
+        let hot = crate::game::particle::vfx::LASER_CORE;
+        blend(pb, x, y, hot, 0.92 * flash);
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            plot_add(pb, x + dx, y + dy, scale(hot, 0.40 * flash));
+        }
     }
-    blend(pb, se.0, se.1, hot, (0.90 * b).clamp(0.0, 1.0));
-    for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        plot_add(pb, se.0 + dx, se.1 + dy, scale(hot, 0.70 * b));
-        plot_add(pb, se.0 + dx * 2, se.1 + dy * 2, scale(amber, 0.42 * b));
+}
+
+/// One core pixel per step along the major axis, with a faint 1 px shoulder
+/// on either side. Live and Carbon Copy beams use the same raster.
+pub fn draw_laser_bar(pb: &mut PixelBuffer, origin: Vec2, angle: f32, len: f32, b: f32, cam: Vec2) {
+    if b <= 0.02 || len <= 0.0 {
+        return;
     }
-    for &(dx, dy) in &[(1, 1), (-1, 1), (1, -1), (-1, -1)] {
-        plot_add(pb, se.0 + dx, se.1 + dy, scale(amber, 0.55 * b));
+    let hot = crate::game::particle::vfx::LASER_CORE;
+    let glow = scale(crate::game::particle::vfx::LASER_GLOW, 0.18 * b);
+    let (x, y) = w2s(origin, cam);
+    let (end_x, end_y) = w2s(origin + Vec2::from_angle(angle) * len, cam);
+    let (dx, dy) = (end_x - x, end_y - y);
+    let steps = dx.abs().max(dy.abs());
+    let inv_steps = 1.0 / steps.max(1) as f32;
+    let (gx, gy) = if dx.abs() >= dy.abs() { (0, 1) } else { (1, 0) };
+    for step in 0..=steps {
+        let t = step as f32 * inv_steps;
+        let px = x + (dx as f32 * t).round() as i32;
+        let py = y + (dy as f32 * t).round() as i32;
+        blend(pb, px, py, hot, b);
+        plot_add(pb, px - gx, py - gy, glow);
+        plot_add(pb, px + gx, py + gy, glow);
     }
 }
 
