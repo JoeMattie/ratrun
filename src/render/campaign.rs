@@ -662,8 +662,6 @@ pub struct CampaignVictoryView<'a> {
     pub hovered: Option<CampaignVictoryAction>,
     /// The bound to-menu key's name (`Action::Quit`), printed on its button.
     pub menu_key: &'a str,
-    /// The dated stamp when this was a Daily run.
-    pub daily_stamp: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2948,11 +2946,7 @@ pub fn draw_campaign_victory_with(
     let card = centered_rect(pw, ph, area);
 
     let buf = f.buffer_mut();
-    let mut daily_caption = StackBuf::<48>::new();
-    let cap = if let Some(stamp) = view.daily_stamp {
-        let _ = write!(daily_caption, " EXTRACTION COMPLETE / {stamp} ");
-        daily_caption.as_str()
-    } else if card.width >= 60 {
+    let cap = if card.width >= 60 {
         " EXTRACTION COMPLETE   /   SUBJECT R-47 "
     } else {
         " EXTRACTION COMPLETE "
@@ -3193,9 +3187,7 @@ pub fn draw_campaign_victory_with(
 
     // Bottom buttons: Play Again & Menu.
     let mut play = StackBuf::<64>::new();
-    let _ = if view.daily_stamp.is_some() {
-        write!(play, " ▸ {}  replay Daily ", keys.confirm)
-    } else if inner.width >= 44 {
+    let _ = if inner.width >= 44 {
         write!(play, " ▸ {}  new campaign ", keys.confirm)
     } else {
         write!(play, " {} replay ", keys.confirm)
@@ -4601,7 +4593,6 @@ mod tests {
         let items = sample_upgrades();
         let view = CampaignVictoryView {
             menu_key: "Q",
-            daily_stamp: None,
             final_score: 24860,
             total_time_secs: 764.0,
             total_kills: 942,
@@ -5091,7 +5082,6 @@ mod tests {
 
         let victory = CampaignVictoryView {
             menu_key: "Q",
-            daily_stamp: None,
             final_score: 24860,
             total_time_secs: 764.0,
             total_kills: 942,
