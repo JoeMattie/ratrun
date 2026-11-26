@@ -308,6 +308,8 @@ pub struct World {
     /// Render-only Verlet physics whip chain for Spiked Tail / Barbed Wire.
     /// Never simulated, never round-tripped, never reads `World::rng`.
     whip_chain: art_rat::WhipChain,
+    /// The scaled rat's render-only gait, sampled at tick cadence so draws can be skipped.
+    rat_gait: Option<art_rat_giant::RatGait>,
 
     // ---- Facade round-trip placeholders ----------------------------------
     rng_spare: Option<StdRng>,
@@ -615,6 +617,7 @@ impl World {
             sfx: Vec::new(),
             tail_ready_at: f32::NEG_INFINITY,
             whip_chain: art_rat::WhipChain::new(),
+            rat_gait: None,
 
             // Unused twin of each round-tripped value. `swap_in` leaves the
             // facade holding this while the real value lives in the ECS
@@ -1398,6 +1401,10 @@ impl World {
             self.end_tick();
             return;
         }
+        let start_pos = self.player.pos;
+        let start_face = self.player.face;
+        let start_scale = self.player.buffs.draw_scale();
+        let start_elapsed = self.elapsed;
         // Legacy `update` line 123.
         self.elapsed += dt;
 
@@ -1405,6 +1412,16 @@ impl World {
         self.schedule.run(&mut self.ecs);
         self.end_tick();
         self.try_revive();
+        let scale = self.player.buffs.draw_scale();
+        if scale == 1.0 {
+            self.rat_gait = None;
+        } else {
+            let gait = self.rat_gait.get_or_insert_with(|| {
+                art_rat_giant::RatGait::legacy(start_pos, start_face, start_elapsed)
+            });
+            let distance = (self.player.pos - start_pos).len();
+            gait.advance(distance, dt, (start_scale + scale) * 0.5);
+        }
     }
 
     /// Get up once per run (the nest's **Ninth Life**).
@@ -3892,14 +3909,13 @@ impl World {
 
     /// Draw the rat procedurally at the current size buff's scale.
     ///
-    /// Calls [`art_rat_giant::draw_giant_rat`] directly into the scene buffer so
+    /// Calls [`art_rat_giant::draw_giant_rat_with_outfit`] into the scene buffer so
     /// the giant rat renders at full detail rather than as a nearest-neighbour
     /// upscale of the 1× sprite. The long weapon effects (Laser Eyes' beam, the
     /// Spiked Tail's live whip and its impact star, and the Tail Thrash arc)
     /// keep their ordinary size from the same rat centre.
     ///
-    /// Render-only: it reads the player, the frame clock and the render-only
-    /// whip chain, and writes pixels.
+    /// Reads the player, frame clock, gait and whip chain to paint the sprite.
     fn draw_scaled_rat(
         &self,
         pb: &mut PixelBuffer,
@@ -3917,6 +3933,7 @@ impl World {
             scale,
             tail_flash,
             outfit,
+            self.rat_gait,
         );
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
@@ -6431,5 +6448,36 @@ mod outfall_diver_tests {
             brute_pen,
             "Sewer body must stay grounded at its true position"
         );
+    }
+
+    #[test]
+    fn life_size_frames_match_the_ordinary_rat_art() {
+        let mut w = World::new(Theme::Sewer, 42);
+        w.player.pos = Vec2::new(60.0, 40.0);
+        w.player.face = Vec2::new(0.6, -0.8);
+        w.player.vel = w.player.face * 52.0;
+        w.rat_gait = Some(art_rat_giant::RatGait::legacy(Vec2::ZERO, Vec2::ZERO, 0.0));
+
+        for theme in [Theme::Sewer, Theme::Outfall] {
+            for elapsed in [0.1, 0.45, 1.3] {
+                let actual = draw_rat_on_theme(&mut w, theme, (120, 80), elapsed, 0.0, 0.0);
+                let mut expected = PixelBuffer::new(120, 80);
+                expected.set_materials(true);
+                expected.clear(BG);
+                expected.set_pen(crate::render::lighting::rat_pen());
+                art_rat::draw_rat_with_outfit(
+                    &mut expected,
+                    &w.player,
+                    elapsed,
+                    Vec2::ZERO,
+                    0.0,
+                    None,
+                    None,
+                    art_rat::RatOutfit::for_theme(theme),
+                );
+                assert_eq!(actual.pixels(), expected.pixels());
+                assert_eq!(actual.mat(), expected.mat());
+            }
+        }
     }
 }
