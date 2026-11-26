@@ -12,7 +12,9 @@
 //!   cached rays. A blocker search over a few neighbouring rays gives the mean
 //!   blocker distance `d_b`; the penumbra is `LIGHT_SIZE · (d − d_b) / d_b`
 //!   wide, so it widens with the distance past the blocker, and is filtered
-//!   with five taps. A blocker lower than the light casts a *finite* shadow of
+//!   with five fractional taps. Each tap interpolates the visibility of its
+//!   two neighbouring rays, keeping the penumbra continuous between them.
+//!   A blocker lower than the light casts a *finite* shadow of
 //!   length `d_b · h / (H − h)` (similar triangles), so a low fixture (a sconce
 //!   at 9 px, a fire at 6) throws long casts and a high pendant short ones.
 //!   Hard is the crisp old tap, Coarse/Compact the old path.
@@ -169,9 +171,10 @@ pub(super) fn visibility(profile: &ShadowProfile, soft: Option<&SoftProfile>, q:
         _ => return profile.visibility(q.delta, q.surface, q.softness),
     };
     let dist = q.delta.x.abs().max(q.delta.y.abs());
-    let Some(index) = ShadowProfile::ray_index(q.delta) else {
+    let Some(ray) = ShadowProfile::ray_position(q.delta) else {
         return 1.0;
     };
+    let index = ray.round() as usize;
     let depth = profile.depth();
     let floor = q.surface.height == 0.0;
     // As the old tap: a raised receiver's leading edge and cap catch light.
@@ -186,6 +189,13 @@ pub(super) fn visibility(profile: &ShadowProfile, soft: Option<&SoftProfile>, q:
             inf
         }
     };
+    let filtered_tap = |ray: f32| {
+        let lower = ray.floor();
+        let i = lower as isize as usize;
+        let a = tap(i & (RAYS - 1));
+        let b = tap(i.wrapping_add(1) & (RAYS - 1));
+        a + (b - a) * (ray - lower)
+    };
     // Blocker search: the mean distance of the tall blockers around this ray.
     let mut sum = 0.0;
     let mut n = 0u32;
@@ -197,7 +207,7 @@ pub(super) fn visibility(profile: &ShadowProfile, soft: Option<&SoftProfile>, q:
         }
     }
     if n == 0 {
-        return tap(index);
+        return filtered_tap(ray);
     }
     let blocker = (sum / n as f32).max(4.0);
     let size = match q.light.shadow_softness {
@@ -208,12 +218,12 @@ pub(super) fn visibility(profile: &ShadowProfile, soft: Option<&SoftProfile>, q:
     let width_px = size * (dist - blocker).max(0.0) / blocker;
     // One ray spans dist/32 px across at this distance.
     let spread = (width_px * 32.0 / dist.max(1.0)).min(MAX_SPREAD);
-    if spread < 0.5 {
-        return tap(index);
-    }
-    let full = spread.round() as isize;
-    let half = (spread * 0.5).round() as isize;
-    (tap(at(-full)) + 2.0 * tap(at(-half)) + 2.0 * tap(index) + 2.0 * tap(at(half)) + tap(at(full)))
+    let half = spread * 0.5;
+    (filtered_tap(ray - spread)
+        + 2.0 * filtered_tap(ray - half)
+        + 2.0 * filtered_tap(ray)
+        + 2.0 * filtered_tap(ray + half)
+        + filtered_tap(ray + spread))
         / 8.0
 }
 
@@ -965,6 +975,34 @@ mod tests {
             between(&near),
             between(&far)
         );
+    }
+
+    #[test]
+    fn a_diagonal_penumbra_does_not_jump_at_angular_bin_boundaries() {
+        let (level, light) = wall_scene();
+        let (profile, soft) = baked(&level, &light);
+        let sample = |y| {
+            vis(
+                &profile,
+                &soft,
+                &light,
+                Vec2::new(180.0, y),
+                LightingMode::Full,
+            )
+        };
+        // At x = 180 the angular bins are 150/32 px apart. The old rounded
+        // lookup could drop a quarter of the lamp's visibility at once.
+        let mut penumbra_bins = 0;
+        for ray in 4..15 {
+            let boundary = light.pos.y + (ray as f32 + 0.5) * 150.0 / 32.0;
+            let before = sample(boundary - 0.01);
+            let after = sample(boundary + 0.01);
+            if (0.02..0.98).contains(&before) || (0.02..0.98).contains(&after) {
+                penumbra_bins += 1;
+            }
+            assert!((before - after).abs() < 0.02, "at {boundary}: {before} -> {after}");
+        }
+        assert!(penumbra_bins > 0, "the sample crosses the penumbra");
     }
 
     #[test]

@@ -412,9 +412,9 @@ impl ShadowProfile {
         &self.depth
     }
 
-    /// The ray of the angular atlas that `delta` (receiver - light) falls on,
-    /// as [`ShadowProfile::visibility`] picks it; `None` at the light itself.
-    pub(super) fn ray_index(delta: Vec2) -> Option<usize> {
+    /// The fractional ray of the angular atlas that `delta` falls on.
+    /// `None` at the light itself.
+    pub(super) fn ray_position(delta: Vec2) -> Option<f32> {
         let (x, y) = (delta.x, delta.y);
         let dist = x.abs().max(y.abs());
         if dist < 0.5 {
@@ -429,7 +429,7 @@ impl ShadowProfile {
         } else {
             (192, x)
         };
-        Some((quadrant + (32.0 + 32.0 * n / dist).round() as usize) & (RAYS - 1))
+        Some(quadrant as f32 + (32.0 + 32.0 * n / dist))
     }
 
     pub(super) fn visibility(

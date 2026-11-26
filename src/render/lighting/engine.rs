@@ -1412,6 +1412,7 @@ impl Grid {
             && theme == Theme::Outfall
             && matches!(mode, LightingMode::Full | LightingMode::Hard);
         let floor_glint = !fx_on || softshadow::keep_floor_glint(mode);
+        let skip_occluders = fx_on && fx::skip("occluder");
         let ceiling = if fx_on {
             upsample::MUL_CEILING
         } else {
@@ -1432,7 +1433,7 @@ impl Grid {
                 if surface.layer & light.layers.0 == 0 {
                     continue;
                 }
-                let visibility = match shadow {
+                let visibility = match shadow.filter(|_| !skip_occluders) {
                     None => 1.0,
                     Some(s) if fx_on => softshadow::visibility(
                         s,
@@ -1516,6 +1517,11 @@ impl Grid {
                 // every pickup and projectile on the floor.
                 if fx_on && matches!(light.blend, Blend::Add) && !halo {
                     let shadowed = (1.0 - visibility) * light.shadow_color.opacity;
+                    if shadowed > 0.0 {
+                        let info = &mut self.info[i];
+                        let lost = (amount * shadowed * curve.gain()) as u8;
+                        info.shadow = info.shadow.saturating_add(lost);
+                    }
                     fx::note_light(
                         &mut self.info[i],
                         &light,

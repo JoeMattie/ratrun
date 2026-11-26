@@ -62,6 +62,19 @@ pub(super) const PAIR_X: bool = true;
 /// this (`Q8.8`) of each other: a pair then steps by at most half of it (about
 /// 5 % of the albedo), which does not read as a column.
 const PAIR_STEEP: i32 = 28;
+/// Keep fine interpolation when this many Q8.8 levels of cast-shadow loss
+/// vary across a tap quad. The total multiplier alone can look nearly flat
+/// where light from another source fills the penumbra.
+const SHADOW_EDGE: u8 = 18;
+
+#[inline]
+fn shadow_edge(grid: &Grid, taps: [usize; 4]) -> bool {
+    if grid.info.len() != grid.samples.len() || grid.info.is_empty() {
+        return false;
+    }
+    let [a, b, c, d] = taps.map(|i| grid.info[i].shadow);
+    a.max(b).max(c).max(d) - a.min(b).min(c).min(d) >= SHADOW_EDGE
+}
 
 /// Below this peak multiplier (`Q8.8`, 220 ≈ 0.86×) the tone curve is the
 /// identity, so ambient, shadow and ordinary pool light are untouched.
@@ -422,6 +435,8 @@ fn bilinear(
     let low_colour = depth != ColorDepth::Truecolor;
     let clamp_x = |i: i32| i.clamp(0, gw as i32 - 1) as usize;
     let clamp_y = |i: i32| i.clamp(0, gh as i32 - 1) as usize;
+    let skip_flat = super::fx::skip("near");
+    let skip_pair = super::fx::skip("pair");
     cols.clear();
     cols.resize(gw * 2, Col::default());
     flat.clear();
@@ -468,11 +483,14 @@ fn bilinear(
             let end = (((s0x + 1) * s + half) as usize - ox).min(w);
             let (l, r) = (clamp_x(s0x), clamp_x(s0x + 1));
             let (tl, tr) = (top * gw + l, top * gw + r);
-            let uniform = flat[l]
+            let (bl, br) = (bot * gw + l, bot * gw + r);
+            let edge = shadow_edge(grid, [tl, tr, bl, br]);
+            let uniform = !edge
+                && flat[l]
                 && flat[r]
                 && class(grid, tl) == class(grid, tr)
                 && near(&toned[tl], &toned[tr]);
-            if uniform {
+            if uniform && !skip_flat {
                 // All four taps equal (or as good as): each pixel takes its own
                 // sample, which for equal taps is the old composite exactly.
                 let split = (((s0x + 1) * s).max(0) as usize).saturating_sub(ox).clamp(x, end);
@@ -494,7 +512,6 @@ fn bilinear(
                 continue;
             }
             // Without tint on any tap the tint channels stay zero: blend six.
-            let (bl, br) = (bot * gw + l, bot * gw + r);
             let nch = if (toned[tl].tint[3] | toned[tr].tint[3] | toned[bl].tint[3] | toned[br].tint[3]) == 0 {
                 6
             } else {
@@ -516,7 +533,7 @@ fn bilinear(
                 // Where the light changes fast across this sample (the rim of
                 // the rat's aura, a pool's edge) paired cells showed as 2-cell
                 // columns: there every cell takes its own weight.
-                let pair = PAIR_X && {
+                let pair = PAIR_X && !skip_pair && !edge && {
                     let (wl, wr) = (cl.w.max(1), cr.w.max(1));
                     (0..3).all(|j| (cl.v[j] / wl - cr.v[j] / wr).abs() <= PAIR_STEEP)
                 };
@@ -715,6 +732,31 @@ mod tests {
         // it is a quarter.
         assert!(old_step > 200, "old step {old_step}");
         assert!(new_step * 10 < old_step * 6, "new step {new_step} vs old {old_step}");
+    }
+
+    #[test]
+    fn a_diagonal_shadow_crosses_one_pixel_at_a_time_under_fill_light() {
+        let level = Level::empty(Theme::Lab);
+        let (gw, gh, stride) = (8, 6, 4);
+        let (w, h) = (gw * stride, gh * stride);
+        let mut grid = testkit::flat_grid(gw, gh, stride, [80; 3]);
+        // A weak diagonal on the final multipliers despite a stronger shadow
+        // in one lamp. Every neighbouring pair of taps meets NEAR_MUL.
+        for y in 0..gh {
+            for x in 0..gw {
+                let i = y * gw + x;
+                let phase = (16 * x + 8 * y) as u8;
+                grid.samples[i].mul = [80 + u16::from(phase); 3];
+                grid.info[i].shadow = 160 - phase;
+            }
+        }
+        let mut px = vec![(192, 192, 192); w * h];
+        run(&grid, &mut px, w, h, LightingMode::Full, &level);
+        let edge: Vec<usize> = (4..20)
+            .map(|y| px[y * w..(y + 1) * w].iter().position(|p| p.0 >= 111).unwrap())
+            .collect();
+        assert!(edge.windows(2).all(|pair| pair[0].abs_diff(pair[1]) <= 1), "{edge:?}");
+        assert!(edge.windows(3).all(|run| run[0] != run[2]), "{edge:?}");
     }
 
     #[test]
