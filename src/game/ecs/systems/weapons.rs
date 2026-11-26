@@ -437,6 +437,7 @@ fn target_range(kind: WeaponKind) -> f32 {
         // body); this is the longest reach any level of it has.
         WeaponKind::SpikedTail => crate::game::weapon::LASH_REACH[4],
         WeaponKind::LavaBreath => 0.0,
+        WeaponKind::GlassBead | WeaponKind::PlumbBob | WeaponKind::HoldPoint => 0.0,
     }
 }
 
@@ -450,7 +451,7 @@ fn aim_dir(ppos: Vec2, aim: Option<Vec2>) -> Option<Vec2> {
 
 /// The unit direction a whole-cast weapon fires along (batch 12's cone
 /// weapons): the reticle when the player aims, else the rat's facing, else up.
-fn cast_dir(ppos: Vec2, pface: Vec2, aim: Option<Vec2>) -> Vec2 {
+pub(super) fn cast_dir(ppos: Vec2, pface: Vec2, aim: Option<Vec2>) -> Vec2 {
     aim_dir(ppos, aim).unwrap_or_else(|| {
         if pface.len_sq() > 1e-4 {
             pface.normalized()
@@ -2177,6 +2178,14 @@ fn fire_one(
             );
             fired = true;
         }
+        WeaponKind::GlassBead => {
+            super::weapons_wave5::fire_beads(
+                commands, next_id, ppos, cast_dir(ppos, pface, aim), dmg, projs, evolved,
+            );
+            fired = true;
+        }
+        // These two own their timers in weapons_wave5.
+        WeaponKind::PlumbBob | WeaponKind::HoldPoint => {}
     }
     // Only announce a shot when the weapon actually produced something
     // (Gnaw with no target in range fires nothing). A weapon whose cue belongs
@@ -2208,6 +2217,9 @@ fn fire_one(
             // never change a body's HP.
             WeaponKind::SpikedTail => Sfx::Lash,
             WeaponKind::LavaBreath => Sfx::ShootAcid,
+            WeaponKind::GlassBead => Sfx::Shoot,
+            WeaponKind::PlumbBob => Sfx::ShootWhip,
+            WeaponKind::HoldPoint => Sfx::ShootNova,
         };
         sfx.0.push(sound);
     }

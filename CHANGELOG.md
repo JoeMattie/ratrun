@@ -4,6 +4,11 @@
 
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
+- **Glass Bead.** Shots bounce off walls. Pair it with Lens Cap for Last Bounce.
+- **Plumb Bob.** A weight sweeps out on a chain. Pair it with Counterweight for
+  Shed Bob.
+- **Hold Point.** Stand still to charge a knockback pulse. Pair it with Thick
+  Hide for Clamp.
 
 ## 0.3.0 (2026-11-25)
 

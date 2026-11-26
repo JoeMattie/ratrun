@@ -49,3 +49,4 @@ pub mod approach;
 // `player` in the schedule).
 pub mod puddles;
 pub mod weapon_lava;
+pub mod weapons_wave5;

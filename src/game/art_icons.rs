@@ -1568,6 +1568,105 @@ const LONG_FINGERS: Icon = {
     }
 };
 
+const fn wave5_icon(large: [&[u8; 8]; 8], small: [&[u8; 4]; 4], accent: Rgb) -> Icon {
+    let palette = [(b'X', accent)];
+    Icon {
+        large: grid8(large, &palette),
+        small: grid4(small, &palette),
+        accent,
+    }
+}
+
+const GLASS_BEAD: Icon = wave5_icon(
+    [
+        b"........",
+        b".....XX.",
+        b"....XXXX",
+        b"....XXXX",
+        b".....XX.",
+        b"...X....",
+        b".X......",
+        b"........",
+    ],
+    [b"..X.", b"..XX", b".X..", b"X..."],
+    (138, 244, 255),
+);
+
+const LAST_BOUNCE: Icon = wave5_icon(
+    [
+        b"...X....",
+        b"...X..X.",
+        b"X..X.X..",
+        b".XXXXX..",
+        b"..XXXXXX",
+        b".XXXXX..",
+        b"X..X.X..",
+        b"...X..X.",
+    ],
+    [b".X.X", b"XXXX", b".XX.", b"X..X"],
+    (173, 234, 255),
+);
+
+const PLUMB_BOB: Icon = wave5_icon(
+    [
+        b"...X....",
+        b"...X....",
+        b"...X....",
+        b"...X....",
+        b"..XXX...",
+        b".XXXXX..",
+        b"..XXX...",
+        b"...X....",
+    ],
+    [b".X..", b".X..", b"XXX.", b".X.."],
+    (255, 212, 110),
+);
+
+const SHED_BOB: Icon = wave5_icon(
+    [
+        b"........",
+        b"X.......",
+        b".X......",
+        b"..XXXX..",
+        b".....XX.",
+        b"....XXXX",
+        b".....XX.",
+        b"......X.",
+    ],
+    [b"X...", b".XX.", b"..XX", b"...X"],
+    (255, 228, 137),
+);
+
+const HOLD_POINT: Icon = wave5_icon(
+    [
+        b"..XXXX..",
+        b".X....X.",
+        b"X......X",
+        b"X......X",
+        b"X......X",
+        b"X......X",
+        b".X....X.",
+        b"..XXXX..",
+    ],
+    [b".XX.", b"X..X", b"X..X", b".XX."],
+    (215, 236, 255),
+);
+
+const CLAMP: Icon = wave5_icon(
+    [
+        b"...XX...",
+        b".XX..XX.",
+        b"XX....XX",
+        b"X.X..X.X",
+        b"X.X..X.X",
+        b"XX....XX",
+        b".XX..XX.",
+        b"...XX...",
+    ],
+    [b"XXXX", b"XX.X", b"X.XX", b"XXXX"],
+    (188, 228, 255),
+);
+
 // ============================================================================
 // Lookup API
 // ============================================================================
@@ -1592,6 +1691,9 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
         WeaponKind::Hantavirus => &HANTAVIRUS,
         WeaponKind::SpikedTail => &SPIKED_TAIL,
         WeaponKind::LavaBreath => &LAVA_BREATH,
+        WeaponKind::GlassBead => &GLASS_BEAD,
+        WeaponKind::PlumbBob => &PLUMB_BOB,
+        WeaponKind::HoldPoint => &HOLD_POINT,
     }
 }
 
@@ -1614,6 +1716,9 @@ pub fn evolution(kind: WeaponKind) -> Option<&'static Icon> {
         WeaponKind::SuperDash => &RIPCORD,
         WeaponKind::SpikedTail => &BARBED_WIRE,
         WeaponKind::LavaBreath => &CALDERA,
+        WeaponKind::GlassBead => &LAST_BOUNCE,
+        WeaponKind::PlumbBob => &SHED_BOB,
+        WeaponKind::HoldPoint => &CLAMP,
     })
 }
 
@@ -1713,6 +1818,12 @@ pub fn by_name(name: &str) -> &'static Icon {
         "Lens Cap" => &LENS_CAP,
         "Lava Breath" => &LAVA_BREATH,
         "Caldera" => &CALDERA,
+        "Glass Bead" => &GLASS_BEAD,
+        "Last Bounce" => &LAST_BOUNCE,
+        "Plumb Bob" => &PLUMB_BOB,
+        "Shed Bob" => &SHED_BOB,
+        "Hold Point" => &HOLD_POINT,
+        "Clamp" => &CLAMP,
         _ => &PLACEHOLDER,
     }
 }

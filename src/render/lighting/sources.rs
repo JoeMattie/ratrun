@@ -407,6 +407,17 @@ impl LightMap {
         let mut boss_phase: Option<u8> = None;
         let mut lava = Vec::new();
         for entity in scene.ecs.iter_entities() {
+            if let Some(bob) = entity.get::<crate::game::ecs::systems::weapons_wave5::PlumbBob>() {
+                let radius = if bob.evolved { 18.0 } else { 12.0 };
+                let s = bob.pos - cam;
+                if in_range(s.x, s.y, radius) {
+                    let mut light = Light::radial(bob.pos, radius, (255, 212, 110), 0.52);
+                    light.height = 5.0;
+                    light.falloff = Falloff::Small;
+                    light.casts_shadow = false;
+                    self.push_shaped(light, 1);
+                }
+            }
             if let Some(id) = entity.get::<SpawnId>() {
                 let source = if let Some(glob) = entity.get::<LavaGlob>() {
                     let height = glob.height();

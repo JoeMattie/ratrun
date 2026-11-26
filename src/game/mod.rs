@@ -86,3 +86,4 @@ pub mod art_puddle;
 // Hantavirus's droppings on the floor (`art_droppings`).
 pub mod art_droppings;
 pub mod art_lava;
+pub mod art_wave5;

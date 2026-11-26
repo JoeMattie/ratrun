@@ -469,6 +469,8 @@ impl World {
         // not a system `Local`, so it starts at zero with every level and the
         // schedule and any `run_system_cached` copy of the firing pass agree.
         ecs.insert_resource(EvoRuntime::default());
+        ecs.insert_resource(super::ecs::resources::BeadHitClock::default());
+        ecs.insert_resource(super::ecs::resources::HoldPointFx::default());
         // Wave 3 weapons A: the Hantavirus mark on the boss (a boss is not an
         // `Enemy`, so its mark cannot be a component on it). Permanent scratch,
         // like `ActiveFx`; a fresh level starts unmarked.
@@ -2700,6 +2702,26 @@ impl World {
             }
         }
 
+        {
+            use super::ecs::systems::weapons_wave5::{GlassBead, PlumbBob};
+            let mut beads = self.ecs.query::<(&SpawnId, &GlassBead)>();
+            for (_, bead) in beads.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(bead.pos, cam);
+                if bead.delay <= 0.0 && on_screen(s, 5.0, viewport) {
+                    super::art_wave5::draw_bead(pb, bead.pos, bead.vel, cam, bead.bounces);
+                    self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                }
+            }
+            let mut bobs = self.ecs.query::<(&SpawnId, &PlumbBob)>();
+            for (_, bob) in bobs.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if on_screen(self.w2s(bob.pivot, cam), 96.0, viewport) {
+                    super::art_wave5::draw_bob(pb, bob.pivot, bob.pos, cam, bob.evolved);
+                    let s = self.w2s(bob.pos, cam);
+                    self.light_map.mark_emissive_highlights(pb, s, 3);
+                }
+            }
+        }
+
         // Fondue Fork outer tines in flight (before both plant their CheeseString).
         {
             let mut query = self.ecs.query::<(&SpawnId, &FondueTine)>();
@@ -3028,6 +3050,15 @@ impl World {
     /// single call site: floor/loot/actors first, lighting, then this.
     fn draw_hostile_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
         let viewport = self.render_viewport;
+
+        let hold = self.ecs.resource::<super::ecs::resources::HoldPointFx>();
+        if !self.player.buffs.is_giant()
+            && on_screen(self.w2s(hold.centre, cam), 32.0, viewport)
+        {
+            if let Some((charge, fired, cracked)) = hold.visual() {
+                super::art_wave5::draw_hold(pb, hold.centre, cam, charge, fired, cracked);
+            }
+        }
 
         // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground
         // hazard the rat steps out of, so the ring is a warning, not decor.

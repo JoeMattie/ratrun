@@ -155,6 +155,7 @@ pub fn enemy_steering_system(
     minibosses: Query<&crate::game::ecs::systems::miniboss::Miniboss>,
     // Console `freeze on`: the horde holds still. Default false = normal.
     debug: Res<DebugFlags>,
+    hold: Res<crate::game::ecs::resources::HoldPointFx>,
 ) {
     let dt = input.dt;
     if debug.freeze {
@@ -282,7 +283,8 @@ pub fn enemy_steering_system(
         // Sewer: the Pipe Eel eases its velocity at half the rate (`floor_sewer`).
         // `None` for every other kind, so nothing else changes.
         let eel_before = crate::game::ecs::systems::floor_sewer::pipe_eel_before(&e);
-        e.steer(target, flow_dir, dt, speed_mult * glue * ink);
+        let clamp = hold.gait_at(&player, &level, e.pos);
+        e.steer(target, flow_dir, dt, speed_mult * glue * ink * clamp);
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.

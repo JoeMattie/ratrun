@@ -121,6 +121,21 @@ pub fn segment_rect_hit(a: Vec2, b: Vec2, r: f32, rect: &Rectf) -> Option<f32> {
     Some(t0)
 }
 
+/// Outward normal of a swept circle's entry face. The caller has already
+/// found an intersection. A corner tie uses X before Y.
+pub(crate) fn segment_rect_normal(from: Vec2, to: Vec2, radius: f32, rect: &Rectf) -> Vec2 {
+    let delta = to - from;
+    let entry_x = if delta.x > 0.0 { rect.x - radius } else { rect.right() + radius };
+    let entry_y = if delta.y > 0.0 { rect.y - radius } else { rect.bottom() + radius };
+    let tx = if delta.x.abs() < 1e-9 { f32::NEG_INFINITY } else { (entry_x - from.x) / delta.x };
+    let ty = if delta.y.abs() < 1e-9 { f32::NEG_INFINITY } else { (entry_y - from.y) / delta.y };
+    if tx >= ty {
+        Vec2::new(-delta.x.signum(), 0.0)
+    } else {
+        Vec2::new(0.0, -delta.y.signum())
+    }
+}
+
 // ---- Tile grid ------------------------------------------------------------
 
 /// One grid cell in world pixels ([`art_walls::CELL_SIZE`]).
@@ -701,13 +716,29 @@ impl TileMap {
     /// against a wall, as a `0..=1` parameter. One-way gate leaves do not stop
     /// projectiles; their permanent jambs do.
     pub fn segment_hit(&self, from: Vec2, to: Vec2, radius: f32) -> Option<f32> {
+        self.segment_wall(from, to, radius).map(|(t, _, _)| t)
+    }
+
+    /// The first projectile contact, its outward face normal, and the struck
+    /// tile. A corner tie uses the X face before the Y face.
+    pub fn segment_hit_face(
+        &self, from: Vec2, to: Vec2, radius: f32,
+    ) -> Option<(f32, Vec2, (i32, i32))> {
+        let (t, rect, tile) = self.segment_wall(from, to, radius)?;
+        Some((t, segment_rect_normal(from, to, radius, &rect), tile))
+    }
+
+    #[inline]
+    fn segment_wall(
+        &self, from: Vec2, to: Vec2, radius: f32,
+    ) -> Option<(f32, Rectf, (i32, i32))> {
         let area = Rectf::new(
             from.x.min(to.x) - radius - TILE_F,
             from.y.min(to.y) - radius - TILE_F,
             (from.x - to.x).abs() + 2.0 * (radius + TILE_F),
             (from.y - to.y).abs() + 2.0 * (radius + TILE_F),
         );
-        let mut best: Option<f32> = None;
+        let mut best: Option<(f32, Rectf, (i32, i32))> = None;
         let (x0, y0, x1, y1) = self.cell_range(area);
         for cy in y0..=y1 {
             for cx in x0..=x1 {
@@ -718,7 +749,9 @@ impl TileMap {
                 let n = art_walls::wall_colliders(&self.wall_view(cx, cy), &mut out);
                 for r in out.iter().take(n) {
                     if let Some(t) = segment_rect_hit(from, to, radius, r) {
-                        best = Some(best.map_or(t, |b: f32| b.min(t)));
+                        if best.is_none_or(|(previous, _, _)| t < previous) {
+                            best = Some((t, *r, (cx, cy)));
+                        }
                     }
                 }
             }
