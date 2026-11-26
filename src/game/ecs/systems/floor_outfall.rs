@@ -239,7 +239,7 @@ fn nearest_water(level: &Level, from: Vec2, radius: f32) -> Option<Vec2> {
     let mut best: Option<(f32, Vec2)> = None;
     let mut consider = |sample: Option<(f32, Vec2)>| {
         if let Some((distance, at)) = sample {
-            if best.map_or(true, |(best_distance, _)| distance < best_distance) {
+            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
                 best = Some((distance, at));
             }
         }

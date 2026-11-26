@@ -110,7 +110,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::game::bullet::{Bullet, Faction};
-use crate::game::collision::{cell_of, segment_rect_hit, SizeClass, SpatialGrid};
+use crate::game::collision::{cell_of, segment_rect_hit, SizeClass, SpatialGrid, TileMap};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::resources::{
@@ -483,7 +483,7 @@ pub fn grid_build_system(
 /// `SizeClass::of_enemy(kind)`, **not** `of_radius(radius)`: a miniboss's and a
 /// bunched Fry School's radius is retuned after spawn, their class is not.
 #[derive(Clone, Copy)]
-struct SepBody {
+pub(crate) struct SepBody {
     pos: Vec2,
     radius: f32,
     class: SizeClass,
@@ -1258,10 +1258,15 @@ mod tests {
     fn separation_reaches_across_grid_cells() {
         let mut w = World::new(Theme::Lab, 19);
         w.clear_enemies();
-        // 15.9 (cell 0) and 32.5 (cell 2) are 16.6 px apart; a radius-14 boss
-        // and a radius-4 cat overlap (sum 18) but span two cells.
-        w.spawn_enemy(EnemyKind::Boss, Vec2::new(15.9, 100.0), 1.0);
-        w.spawn_enemy(EnemyKind::Cat, Vec2::new(32.5, 100.0), 1.0);
+        // 0.1 px short of a cell edge and 0.5 px into the cell after next are
+        // 16.6 px apart; a radius-14 boss and a radius-4 cat overlap (sum 18)
+        // but span two cells. On the start room's open floor: the shipped
+        // passes are swept, and a body standing in the border wall (where this
+        // pair used to be put) is refused its shove.
+        let rat = w.player.pos;
+        let edge = (rat.x / GRID_CELL).floor() * GRID_CELL;
+        w.spawn_enemy(EnemyKind::Boss, Vec2::new(edge - 0.1, rat.y), 1.0);
+        w.spawn_enemy(EnemyKind::Cat, Vec2::new(edge + GRID_CELL + 0.5, rat.y), 1.0);
 
         run_one(&mut w, grid_build_system);
         w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);

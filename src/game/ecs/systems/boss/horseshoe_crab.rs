@@ -410,7 +410,7 @@ fn tick_burrow_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
             }
             // The visible dive's own clock: the sink plus the ground it has to
             // cover at the crab's top speed, never a teleport.
-            let dive = burrow_dive_time(boss, ctx);
+            let dive = burrow_dive_time(boss);
             boss.scratch[S_DIVE] = dive;
             // `push_hazard` scales the warn by the tell multiplier below, so
             // divide the dive half out here: the eruption then lands exactly
@@ -441,7 +441,7 @@ fn tick_burrow_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 /// How long the visible dive takes (s): the sink, then the distance from where
 /// the shell goes down to the marked exit at [`art::BURROW_TRAVEL_SPEED`] (the
 /// crab's own top speed).
-fn burrow_dive_time(boss: &Boss, ctx: &BossContext<'_>) -> f32 {
+fn burrow_dive_time(boss: &Boss) -> f32 {
     let slot = phase_slot(boss);
     let ground = boss.pos.dist(boss.target) / art::BURROW_TRAVEL_SPEED[slot].max(1.0);
     (art::BURROW_SINK * boss.attack_tuning.tell_time_mult + ground).max(0.05)
@@ -460,19 +460,29 @@ fn tick_burrow(ctx: &BossContext<'_>, boss: &mut Boss) {
         let landing = burrow_landing(ctx, boss.target, boss.pounce_origin, radius);
         if landing.dist(boss.target) > 0.5 {
             boss.target = landing;
-            let travel = burrow_dive_time(boss, ctx);
+            let travel = burrow_dive_time(boss);
             boss.scratch[S_DIVE] = travel;
             boss.duration = boss.elapsed + travel;
         }
     }
     let slot = phase_slot(boss);
+    // The shell sinks where it stands first (the share of the dive clock
+    // `burrow_dive_time` budgets for it), then the mound sets off. Without
+    // the hold the mound arrived a sink early and the shell was up and
+    // recovering before the published eruption burst.
+    let sink = art::BURROW_SINK * boss.attack_tuning.tell_time_mult;
+    if boss.elapsed < sink {
+        return;
+    }
     let to = boss.target - boss.pos;
     let gap = to.len();
     let step = art::BURROW_TRAVEL_SPEED[slot] * ctx.dt;
     if gap > 1e-3 {
         boss.pos += to * (step.min(gap) / gap);
     }
-    if boss.progress() >= 1.0 || boss.pos.dist(boss.target) <= 1.0 {
+    // It comes up on arrival, never before: a mound that is late (a phase
+    // change slowed it mid-dive) keeps walking instead of being placed.
+    if boss.pos.dist(boss.target) <= 1.0 {
         boss.pos = boss.target;
         enter(boss, CrabState::Emerge, art::EMERGE);
     }

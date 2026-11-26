@@ -23,9 +23,18 @@ const DIAG: f32 = std::f32::consts::FRAC_1_SQRT_2;
 // One sine period in eighths, with exact zero offsets at both ends.
 const WAVE: [f32; 9] = [0.0, DIAG, 1.0, DIAG, 0.0, -DIAG, -1.0, -DIAG, 0.0];
 
+/// Slices the active push is cut into when the crests' drift is summed along
+/// its wandering direction. Twelve keeps the path within a fraction of a
+/// pixel of the simulation's per-tick push.
+const DRIFT_SLICES: usize = 12;
+
 struct Current {
     dir: Vec2,
-    travel: f32,
+    /// How far the crest field has drifted since the warning began, summed
+    /// along the direction the surge had at each moment. A surge bends while
+    /// it runs, so this is a path, not `dir` times a distance: a field moved
+    /// by the current heading alone would swing sideways as the push turned.
+    offset: Vec2,
     index: u64,
     alpha: f32,
     strength: f32,
@@ -36,25 +45,36 @@ impl Current {
         let surge = outfall_surge(seed, elapsed);
         let clock = elapsed % SURGE_PERIOD;
         let index = (elapsed / SURGE_PERIOD).floor() as u64;
-        let (travel, index, alpha, strength) = match surge.phase {
+        let (offset, index, alpha, strength) = match surge.phase {
             SurgePhase::Quiet => return None,
             SurgePhase::Warning => {
+                // The warning holds the direction the burst will open with.
                 let age = clock - (SURGE_PERIOD - SURGE_WARN_SECS);
                 let alpha = 0.24 * smoothstep(age / 0.85);
-                (DRIFT_PX_PER_SEC * age, index + 1, alpha, 0.0)
+                (surge.dir * (DRIFT_PX_PER_SEC * age), index + 1, alpha, 0.0)
             }
             SurgePhase::Active => {
                 let progress = (clock / SURGE_ACTIVE_SECS).clamp(0.0, 1.0);
                 let strength = (std::f32::consts::PI * progress).sin().max(0.0);
                 let fade = 1.0 - smoothstep((progress - 0.55) / 0.45);
-                let travel = DRIFT_PX_PER_SEC * (SURGE_WARN_SECS + clock)
-                    + outfall_surge_distance(elapsed - clock, elapsed);
-                (travel, index, (0.24 + 0.04 * strength) * fade, strength)
+                // The warning's drift, along the opening direction, then the
+                // push so far along the direction it had in each slice.
+                let start = elapsed - clock;
+                let mut offset =
+                    outfall_surge(seed, start).dir * (DRIFT_PX_PER_SEC * SURGE_WARN_SECS);
+                let slice = clock / DRIFT_SLICES as f32;
+                for i in 0..DRIFT_SLICES {
+                    let from = start + slice * i as f32;
+                    let step = DRIFT_PX_PER_SEC * slice
+                        + outfall_surge_distance(from, from + slice);
+                    offset += outfall_surge(seed, from + slice * 0.5).dir * step;
+                }
+                (offset, index, (0.24 + 0.04 * strength) * fade, strength)
             }
         };
         Some(Self {
             dir: surge.dir,
-            travel,
+            offset,
             index,
             alpha,
             strength,
@@ -74,7 +94,7 @@ impl Current {
         let density = 1.0 - 0.5 * smoothstep((zoom - 1.5) / 0.5);
         let cap = (MAX_CRESTS as f32 * density) as usize;
         let gap = (14.0 * zoom).max((size.x * size.y / 48.0).sqrt()) / density.sqrt();
-        let origin = cam - self.dir * self.travel;
+        let origin = cam - self.offset;
         let first = origin * (1.0 / gap);
         let last = (origin + size) * (1.0 / gap);
         let mut count = 0;
@@ -248,9 +268,14 @@ mod tests {
         {
             let first = Current::sample(23, start).unwrap();
             let next = Current::sample(23, end).unwrap();
-            *travel = next.travel - first.travel;
+            // The field moves as one, along the push: downstream of both the
+            // heading it left and the one it arrived with (a surge bends by
+            // at most 35 degrees over its whole run).
+            let shift = next.offset - first.offset;
+            *travel = shift.len();
             assert!(*travel > 0.0);
-            let shift = first.dir * *travel;
+            assert!(shift.dot(first.dir) > 0.8 * *travel, "{start}: {shift:?}");
+            assert!(shift.dot(next.dir) > 0.8 * *travel, "{end}: {shift:?}");
             let after = centres(&next);
             let before = centres(&first);
             assert!(before.iter().filter(|&&p| {
@@ -258,6 +283,31 @@ mod tests {
             }).count() > before.len() / 2);
         }
         assert!(distances[2] > 4.0 * distances[0]);
+    }
+
+    /// The drift is summed along the bending push, so over a whole surge the
+    /// crests travel the simulation's own 64 px plus their idle drift, and
+    /// the field never jumps between two frames.
+    #[test]
+    fn outfall_crest_drift_follows_the_bending_push_without_a_jump() {
+        use crate::game::hazards::SURGE_DISTANCE;
+        for seed in [0u64, 23, 0xdead_beef] {
+            let mut previous = Current::sample(seed, SURGE_PERIOD - SURGE_WARN_SECS).unwrap().offset;
+            let mut path = 0.0;
+            let mut elapsed = SURGE_PERIOD - SURGE_WARN_SECS;
+            let end = SURGE_PERIOD + SURGE_ACTIVE_SECS;
+            while elapsed < end - 1.0 / 60.0 {
+                elapsed += 1.0 / 60.0;
+                let offset = Current::sample(seed, elapsed).unwrap().offset;
+                let step = offset.dist(previous);
+                // The push peaks near 92 px/s on top of the 9 px/s drift.
+                assert!(step < 2.2, "seed {seed}: the field jumped {step} px at {elapsed}");
+                path += step;
+                previous = offset;
+            }
+            let want = SURGE_DISTANCE + DRIFT_PX_PER_SEC * (SURGE_WARN_SECS + SURGE_ACTIVE_SECS);
+            assert!((path - want).abs() < 3.0, "seed {seed}: drifted {path}, want {want}");
+        }
     }
 
     #[test]
@@ -277,17 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn outfall_strokes_point_downstream_with_bright_heads_in_all_eight_directions() {
-        let mut seen = Vec::new();
+    fn outfall_strokes_point_downstream_with_bright_heads_at_any_angle() {
+        // A surge pushes at any angle, so the streak has to read downstream
+        // off the compass points too. Sixty-four seeds cover every octant.
+        let mut octants = [false; 8];
         for seed in 0..64 {
             let warning = Current::sample(seed, 8.9).unwrap();
-            if seen.contains(&warning.dir) {
-                continue;
-            }
-            seen.push(warning.dir);
             let active = Current::sample(seed, 9.55).unwrap();
+            let turn = warning.dir.y.atan2(warning.dir.x).rem_euclid(std::f32::consts::TAU);
+            octants[((turn / std::f32::consts::FRAC_PI_4) as usize).min(7)] = true;
             for current in [warning, active] {
                 for zoom in [0.5, 1.0, 2.0] {
+                    // A half-zoom streak is two pixels long: its rounded ends
+                    // can sit further off the true heading than a longer one.
+                    let aligned = if zoom < 1.0 { 0.7 } else { 0.9 };
                     let stroke = Stroke::new(current.dir, current.strength, zoom);
                     for centre in [Vec2::new(16.0, 16.0), Vec2::new(16.25, 16.5)] {
                         let mut pixels: Vec<(Vec2, Rgb)> = Vec::new();
@@ -307,12 +360,16 @@ mod tests {
                         let head = Vec2::new(tip.x.round(), tip.y.round());
                         let (_, head_color) = pixels.iter().copied().find(|&(p, _)| p == head).unwrap();
                         let heading = head - tail;
-                        assert!(heading.dot(current.dir) > 0.9 * heading.len());
+                        assert!(
+                            heading.dot(current.dir) > aligned * heading.len(),
+                            "seed {seed} at {zoom}×: {heading:?} against {:?}",
+                            current.dir,
+                        );
                         assert!(head_color.1 > tail_color.1);
                     }
                 }
             }
         }
-        assert_eq!(seen.len(), 8);
+        assert!(octants.iter().all(|&hit| hit), "{octants:?}");
     }
 }

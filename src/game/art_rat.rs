@@ -2162,7 +2162,7 @@ fn draw_tail(
         // The impact star: six spikes and a dashed ring at the burst radius, so
         // the small AoE is legible in the one frame the tail lands in. It stays
         // where the tail landed while the chain recoils.
-        draw_lash_impact_star(pb, l, cam);
+        draw_lash_impact_star(pb, &l, cam);
     }
 
     // Ready halo: a soft additive spill *around* the tail, drawn after the

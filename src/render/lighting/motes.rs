@@ -583,6 +583,7 @@ pub(super) fn ambient_mote_count(w: usize, h: usize, mode: LightingMode) -> usiz
         LightingMode::Compact => (base * AMBIENT_COMPACT_NUM / AMBIENT_COMPACT_DEN)
             .max(AMBIENT_COMPACT_MIN)
             .min(base),
+        #[cfg(test)]
         LightingMode::Off => 0,
     }
 }

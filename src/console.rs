@@ -3041,6 +3041,8 @@ mod tests {
     fn the_gi_command_cycles_modes_without_flagging_cheat() {
         use crate::render::lighting::GlobalLight;
         let mut app = fresh_app();
+        assert_eq!(app.global_light(), GlobalLight::AoGi, "AO + GI is the default");
+        run_command(&mut app, "gi").expect("gi steps to off");
         assert_eq!(app.global_light(), GlobalLight::Off);
         run_command(&mut app, "gi").expect("gi steps to ao");
         assert_eq!(app.global_light(), GlobalLight::AoOnly);

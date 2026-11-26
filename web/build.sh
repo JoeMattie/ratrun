@@ -36,7 +36,9 @@ mkdir -p "$dist"
 cp LICENSE web/index.html web/game.js web/canvas.js "$dist/"
 cp web/manifest.webmanifest "$dist/"
 if [ -d web/icons ]; then
-    cp -R web/icons "$dist/"
+    # The PNGs only: make_icons.py is the generator, not a page asset.
+    mkdir -p "$dist/icons"
+    cp web/icons/*.png "$dist/icons/"
 else
     printf 'web/icons is missing; the page links icons the art pass has not delivered yet\n' >&2
 fi

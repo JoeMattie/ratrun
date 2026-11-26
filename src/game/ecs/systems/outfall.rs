@@ -287,6 +287,7 @@ mod tests {
     use rand::RngExt;
 
     use super::*;
+    use crate::detmath::DetF32;
     use crate::game::hazards::{
         LureTrap, SurgePhase, SURGE_ACTIVE_SECS, SURGE_DISTANCE, SURGE_PERIOD,
     };
@@ -361,7 +362,7 @@ mod tests {
             for index in 2..24u64 {
                 let dir = outfall_surge(seed, index as f32 * SURGE_PERIOD).dir;
                 let cos = previous.dot(dir).clamp(-1.0, 1.0);
-                let turn = cos.acos().to_degrees();
+                let turn = cos.dacos().to_degrees();
                 assert!(
                     turn >= 60.0,
                     "seed {seed}: surge {index} turned only {turn:.1}° from the last"
@@ -380,7 +381,7 @@ mod tests {
             while elapsed < SURGE_PERIOD + SURGE_ACTIVE_SECS {
                 let dir = outfall_surge(seed, elapsed).dir;
                 let cos = previous.dot(dir).clamp(-1.0, 1.0);
-                let turn = cos.acos().to_degrees();
+                let turn = cos.dacos().to_degrees();
                 assert!(
                     turn < 1.0,
                     "seed {seed}: the push jumped {turn:.2}° in {STEP} s at {elapsed}"
@@ -399,7 +400,7 @@ mod tests {
         let mut buckets = [false; 45];
         for index in 1..=64u64 {
             let dir = outfall_surge(11, index as f32 * SURGE_PERIOD).dir;
-            let offset = dir.y.atan2(dir.x).to_degrees().rem_euclid(45.0);
+            let offset = dir.y.datan2(dir.x).to_degrees().rem_euclid(45.0);
             buckets[(offset as usize).min(buckets.len() - 1)] = true;
         }
         let spread = buckets.iter().filter(|&&hit| hit).count();

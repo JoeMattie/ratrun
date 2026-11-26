@@ -1713,9 +1713,13 @@ fn fire_one(
             }
             if let Some(bit_at) = bit_at {
                 // The snap's anchor follows the giant's pose, so a giant bites
-                // from its own snout rather than its belly. Zero offset on an
-                // ordinary rat, so its geometry is unchanged.
+                // from its own snout rather than its belly. At ordinary size
+                // this is the 4 px the jaw always sat ahead of the rat.
                 let mouth = ppos + dir * crate::game::weapon::GNAW_MOUTH_OFFSET * pose_scale;
+                // The tooth and the muzzle puff leave the rat's centre at
+                // ordinary size, as they always did, and move out to the
+                // giant's mouth as the pose grows.
+                let spit = ppos + dir * crate::game::weapon::GNAW_MOUTH_OFFSET * (pose_scale - 1.0);
                 // A decoration, not a body: it carries no `SpawnId`, so the
                 // spawn-order sequence every other system orders by is not
                 // perturbed by a jaw snap.
@@ -1735,11 +1739,11 @@ fn fire_one(
                     let spread = to.normalized().perp() * SPREAD[evo.milk_slot];
                     evo.milk_slot = (evo.milk_slot + 1) % SPREAD.len();
                     let reach = stats.ranged_reach(evolutions::MILK_REACH);
-                    let target = mouth + (to + spread).clamp_len(reach);
-                    let landing = super::weapon_lava::landing_floor(level, mouth, target);
-                    commands.spawn((MilkTooth::new(mouth, landing, dmg), next_id.take()));
+                    let target = spit + (to + spread).clamp_len(reach);
+                    let landing = super::weapon_lava::landing_floor(level, spit, target);
+                    commands.spawn((MilkTooth::new(spit, landing, dmg), next_id.take()));
                 }
-                vfx::emit_weapon_fire(particles, &mut rng.0, kind, mouth, dir, 0.0);
+                vfx::emit_weapon_fire(particles, &mut rng.0, kind, spit, dir, 0.0);
                 fired = true;
             }
         }
@@ -4671,8 +4675,8 @@ mod tests {
         use crate::game::weapon::{GNAW_BITE_REACH, WHIP_REACH};
 
         // The tuning promise the const doc makes: scaling clears the stomp.
-        assert!(GIANT_WEAPON_SCALE * GNAW_BITE_REACH[0] > GIANT_STOMP_RADIUS);
-        assert!(GIANT_WEAPON_SCALE * WHIP_REACH[0] > GIANT_STOMP_RADIUS);
+        const { assert!(GIANT_WEAPON_SCALE * GNAW_BITE_REACH[0] > GIANT_STOMP_RADIUS) };
+        const { assert!(GIANT_WEAPON_SCALE * WHIP_REACH[0] > GIANT_STOMP_RADIUS) };
 
         // Gnaw: a body 50 px out is past the ordinary bite and inside the
         // giant's, and well outside the stomp's 30 px.

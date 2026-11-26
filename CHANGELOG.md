@@ -2,10 +2,39 @@
 
 ## Unreleased
 
-- **Glue boards.** A stuck body's strands stay on the board. A board holding a
-  body used to trail stray amber specks off toward the bottom of the screen.
+## 0.5.0 (2026-11-26)
+
+- **Phones.** The web build plays on a phone. Landscape only: portrait shows
+  `TURN YOUR PHONE` over a stopped grid. The first touch goes fullscreen,
+  holds the screen awake and asks for a landscape lock, and the grid sizes
+  itself to about 120 columns and at least 26 rows. The page installs to the
+  home screen with its own rat icon, opens fullscreen and keeps itself
+  cached for offline play. Mouse, pen and keyboard behave as before.
+- **Touch controls (web).** The game draws its controls in the grid: a stick
+  that floats to wherever your thumb lands on the left, Dash at the bottom
+  right and the ACTIVE weapons beside it when you carry one. Hold Dash to
+  charge a Super Dash. The top-left button pauses, and it is Back on every
+  menu that takes one. The top-right button opens the map. A tap presses
+  what it lands on, a swipe scrolls a list and a pinch steps the zoom. The
+  controls appear on the first touch and leave on any key or mouse move, so
+  a desktop run is exactly as it was.
+- **Global light.** `GLOBAL LIGHT` now starts at `AO + GI`. A save still on
+  the old default `OFF` moves to it once. Set it back in Graphics and it
+  stays where you put it. `AO ONLY` grounds the room: contact shadows at
+  walls, inside corners, prop bases and bodies are about twice as deep and
+  reach about twice as far, and the wall itself darkens down to the floor
+  line. `AO + GI` is no longer a general brightening: bounce is about twice
+  as strong but only beside the surface that emitted it, so a lamp, lava or
+  a sconce wash tints what it faces and the rest of the frame stays dark.
+- **Outfall floor.** The little lakes are gone. The seabed is mixed gravel,
+  pebbles, shell grit and broad silt and shingle fields, and it no longer
+  splashes, ripples or reflects like water. Pale motes drift through the
+  water in dim and lit areas alike.
+- **Outfall surges.** Each surge pushes its own way. The direction changes
+  every nine seconds, at least 60° from the last, and the push wanders a
+  little while it runs. The warning shows where it will go.
 - **Bosses never vanish.** The Bell Diver and the other burrowing
-  minibosses no longer disappear and come up somewhere else: the dive is a
+  minibosses no longer disappear and come up somewhere else. The dive is a
   mound that travels from where they went down to the warned spot at no
   more than their own sprint, and the body stays on screen and hittable
   the whole way.
@@ -13,58 +42,24 @@
   and hit, not a body that goes under and reappears under your feet. The
   marked eruption still lands where it was drawn, and the shell arrives
   with it.
-- **Lost bosses walk back.** A boss that has been stranded off the fight
-  for five seconds is called back: it sprints and leaps home over the
-  floor instead of being placed beside you. There is no pop-in and no
-  arrival flash anywhere.
-- **Global light.** `AO ONLY` now grounds the room at a glance: contact
-  shadows at walls, inside corners, prop bases and bodies are about twice as
-  deep and reach about twice as far, and the wall itself darkens down to the
-  floor line. `AO + GI` is no longer a general brightening: bounce is about
-  twice as strong but only beside the surface that emitted it, so a lamp,
-  lava, water or the sconce wash tints what it faces and the rest of the
-  frame stays as dark as before.
+- **Lost bosses walk back.** A boss stranded off the fight for five seconds
+  is called back: it sprints and leaps home over the floor instead of being
+  placed beside you. There is no pop-in and no arrival flash anywhere.
+- **Weapons on the Growth Serum.** Every weapon still fires while you are
+  giant, and its effects now read at giant size. Bites, sprays, lobs, beads
+  and the laser leave the giant's own face. Melee, cone, ring and orbit
+  weapons reach twice as far, so a bite or a whip still lands past the stomp
+  ring, and the Spiked Tail's burst and impact star grow with them. Weapon
+  effects draw over the giant body instead of under it. Damage is unchanged.
 - **Overlap.** A crowd of enemies spreads out instead of stacking on top of
   itself. Bodies push each other apart harder, and a body pushed into a wall
   is pushed back out before the tick ends. A balance file can restore the
   looser crowd; see [TUNING.md](TUNING.md).
 - **Super Dash.** The lane preview fades out at its tip instead of ending
   abruptly. A wall that cuts it short keeps its faint mark.
-- **Weapons on the Growth Serum.** Every weapon still fires while you are
-  giant, and its effects now read at giant size. The mouth, eye and tail
-  origins follow the giant's pose, so bites, sprays, lobs, beads and the
-  laser leave the giant's own face. Melee, cone, ring and orbit weapons
-  reach twice as far (`GIANT_WEAPON_SCALE`), so a bite or a whip still
-  lands past the stomp ring; the Spiked Tail's burst and its impact star
-  grow with them. The weapon effects draw over the giant body instead of
-  under it. Damage is unchanged.
-- **Outfall.** Each surge pushes its own way. The direction changes every
-  nine seconds, at least 60° from the last, and the push wanders a little
-  while it runs; the warning shows where it will go.
-- **Outfall floor.** The little lakes are gone. The seabed is mixed gravel,
-  pebbles, shell grit and broad silt and shingle fields, and it no longer
-  splashes, ripples or reflects like water.
-- **The Outfall.** Seabed gravel, shell grit, pebbles, silt and shingle patches
-  replace standing puddles on the ocean floor, and pale drifting motes float
-  through the water in both dim and lit areas.
-- **Touch controls (web).** On a phone the game draws its controls in the
-  grid: a stick that floats to wherever your thumb lands on the left, Dash
-  at the bottom right and the ACTIVE weapons beside it when you carry one.
-  Hold Dash to charge a Super Dash. The top-left button pauses, and it is
-  Back on every menu that takes one; the top-right one opens the map. A tap
-  presses what it lands on, a swipe scrolls a list and a pinch steps the
-  zoom. They appear on the first touch and leave on any key or mouse move,
-  so a desktop run is exactly as it was.
-- **Touch controls and app icon.** On-screen translucent floating stick and
-  Dash, Active, Pause, Back and Map plates drawn directly in the terminal
-  grid, plus pixel-art PWA home-screen icons based on the title rat plate.
-- **Phones.** The web build plays on a phone. The left half is a stick, the
-  rest of the grid is touch, and mouse, pen and keyboard behave as before.
-  Landscape only: portrait shows `TURN YOUR PHONE` over a stopped grid. The
-  first touch goes fullscreen, holds the screen awake and asks for a landscape
-  lock, and the grid sizes itself to about a hundred and twenty columns of
-  touch with at least 26 rows. The page installs to the home screen, opens
-  fullscreen in landscape, and keeps itself cached for offline play.
+- **Glue boards.** A stuck body's strands stay on the board. A board holding
+  a body used to trail stray amber specks off toward the bottom of the
+  screen.
 
 ## 0.4.4 (2026-11-26, playtest build)
 

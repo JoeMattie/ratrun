@@ -12700,7 +12700,8 @@ mod tests {
         assert_eq!(h.app.world_draws, drawn + 6, "the level-up ring must redraw");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 6, "and stay frozen while paused");
-        h.app.set_global_light(crate::render::lighting::GlobalLight::AoGi);
+        // AO + GI is the default, so step to a mode the picture is not in.
+        h.app.set_global_light(crate::render::lighting::GlobalLight::AoOnly);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 7, "global light must redraw");
 
@@ -16949,9 +16950,17 @@ mod tests {
         h.frame(&[KeyCode::Left]);
         assert!(h.app.fx_enabled());
 
-        // GLOBAL LIGHT: OFF -> AO ONLY -> AO + GI -> OFF, synced onto World and saved.
-        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::Off);
+        // GLOBAL LIGHT starts at AO + GI (0.5.0) and cycles
+        // AO + GI -> OFF -> AO ONLY -> AO + GI, synced onto World and saved.
+        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::AoGi);
         h.app.graphics_row = graphics::GLOBAL_LIGHT_ROW;
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::Off);
+        assert_eq!(
+            h.app.scores.graphics.global_light(),
+            crate::render::lighting::GlobalLight::Off,
+            "an explicit Off is saved"
+        );
         h.frame(&[KeyCode::Right]);
         assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::AoOnly);
         assert_eq!(
@@ -16964,8 +16973,6 @@ mod tests {
         );
         h.frame(&[KeyCode::Right]);
         assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::AoGi);
-        h.frame(&[KeyCode::Right]);
-        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::Off);
 
         // SMOOTHING: `Off -> SMOOTH -> CRISP`, left and right.
         assert_eq!(h.app.smooth_level(), Smooth::default());
@@ -17095,7 +17102,7 @@ mod tests {
         table.graphics.set_lighting(LightingMode::Coarse);
         table.graphics.set_smooth(Smooth::Xbr);
         table.graphics.fx = false;
-        table.graphics.set_global_light(crate::render::lighting::GlobalLight::AoGi);
+        table.graphics.set_global_light(crate::render::lighting::GlobalLight::AoOnly);
         table.graphics.foreground = false;
         table.graphics.glyphfx = false;
         table.graphics.set_shake(1.0);
@@ -17110,7 +17117,7 @@ mod tests {
         assert_eq!(app.lighting_mode(), LightingMode::Coarse);
         assert_eq!(app.smooth_level(), Smooth::Xbr);
         assert!(!app.fx_enabled());
-        assert_eq!(app.global_light(), crate::render::lighting::GlobalLight::AoGi);
+        assert_eq!(app.global_light(), crate::render::lighting::GlobalLight::AoOnly);
         assert!(!app.foreground_enabled());
         assert!(!app.glyphfx_enabled());
         assert_eq!(app.shake_scale(), 1.0);
@@ -17121,7 +17128,7 @@ mod tests {
         h.enter_playing();
         let w = h.app.world.as_ref().unwrap();
         assert_eq!(w.lighting, LightingMode::Coarse);
-        assert_eq!(w.global_light, crate::render::lighting::GlobalLight::AoGi);
+        assert_eq!(w.global_light, crate::render::lighting::GlobalLight::AoOnly);
         assert_eq!(w.shake_scale, 1.0);
     }
 
@@ -17138,7 +17145,7 @@ mod tests {
         assert_eq!(table.graphics.smooth(), Smooth::default());
         assert!(table.graphics.foreground);
         assert!(table.graphics.fx && table.graphics.glyphfx);
-        assert_eq!(table.graphics.global_light(), crate::render::lighting::GlobalLight::Off);
+        assert_eq!(table.graphics.global_light(), crate::render::lighting::GlobalLight::AoGi);
         assert_eq!(table.graphics.shake(), crate::game::world::SHAKE_SCALE);
 
         // A partial object keeps the defaults for the fields it omits.

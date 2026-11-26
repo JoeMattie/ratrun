@@ -821,7 +821,7 @@ mod tests {
             (Theme::Sewer, MinibossKind::BellDiver),
             (Theme::Lab, MinibossKind::PetriMother),
             (Theme::Laundry, MinibossKind::SudsBailiff),
-            (Theme::Flatbed, MinibossKind::TarpaulinPup),
+            (Theme::Trailer, MinibossKind::TarpaulinPup),
         ] {
             let (mut w, entity) = setup(theme, kind, 48.0);
             let speed_cap = kind.temperament().speed * 3.0;

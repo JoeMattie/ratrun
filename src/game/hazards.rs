@@ -27,6 +27,7 @@
 //! (`EnemyKind::Bat`) and a dash ignore it entirely — that is the whole
 //! counter-play.
 
+use crate::detmath::DetF32;
 use crate::game::collision::{cell_of, segment_rect_hit, SizeClass, TileMap, TILE_F};
 use crate::game::level::Level;
 use crate::math::Vec2;
@@ -49,7 +50,7 @@ pub const SURGE_DISTANCE: f32 = 64.0;
 /// direction and not a repeat).
 const SURGE_STEP: f32 = 2.399_963_2;
 /// Jitter added to one surge's step, in radians (±30°).
-const SURGE_JITTER: f32 = 0.523_598_8;
+const SURGE_JITTER: f32 = std::f32::consts::FRAC_PI_6;
 /// How far a surge's push may wander from its starting direction over the
 /// 1.1 s it runs, in radians (±35°).
 pub const SURGE_WANDER: f32 = 0.610_865_4;
@@ -71,10 +72,12 @@ fn surge_unit(seed: u64, index: u64, salt: u64) -> f32 {
     (surge_hash(seed ^ salt, index) >> 40) as f32 * (1.0 / 16_777_216.0)
 }
 
-/// The push direction a surge starts with: a hashed phase, its index on the
-/// golden-angle step, and a hashed ±30° jitter.
+/// The push direction a surge starts with: the level's own hashed phase, the
+/// surge's index on the golden-angle step, and a hashed ±30° jitter. The
+/// phase belongs to the seed alone: hashed per surge it would undo the step,
+/// and two bursts in a row could push nearly the same way.
 fn surge_start_angle(seed: u64, index: u64) -> f32 {
-    let phase = surge_unit(seed, index, 0x51ed_2b1f_00c3_a5d9) * std::f32::consts::TAU;
+    let phase = surge_unit(seed, 0, 0x51ed_2b1f_00c3_a5d9) * std::f32::consts::TAU;
     let jitter = (surge_unit(seed, index, 0x2f9e_4a77_1b6d_c03b) * 2.0 - 1.0) * SURGE_JITTER;
     phase + index as f32 * SURGE_STEP + jitter
 }

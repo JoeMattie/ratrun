@@ -273,6 +273,7 @@ pub struct SavedSchemeFile {
 #[serde(default)]
 pub struct GraphicsFile {
     /// Version 2 reset smoothing to off. Version 3 starts foreground on.
+    /// Version 4 moves a global light still at `off` to AO + GI.
     #[serde(default)]
     pub graphics_version: u32,
     /// `full` | `hard` | `coarse` | `compact` — the lighting quality the console's
@@ -291,15 +292,17 @@ pub struct GraphicsFile {
     /// one of [`crate::render::graphics::SHAKE_STEPS`].
     pub shake_scale: f32,
     /// `off` | `ao` | `gi` — ambient occlusion and one-bounce global
-    /// illumination (`render::lighting::GlobalLight`). Defaults to `off`.
+    /// illumination (`render::lighting::GlobalLight`). Defaults to `gi`
+    /// (`GlobalLight::SHIPPED`).
     pub global_light: String,
 }
 
-const GRAPHICS_VERSION: u32 = 3;
+const GRAPHICS_VERSION: u32 = 4;
 
 impl Default for GraphicsFile {
-    /// The terminal's own lighting tier, smoothing and global light off,
-    /// foreground, light effects and glyph particles on, and 65 % shake.
+    /// The terminal's own lighting tier, smoothing off, global light at
+    /// AO + GI, foreground, light effects and glyph particles on, and 65 %
+    /// shake.
     fn default() -> Self {
         GraphicsFile {
             graphics_version: GRAPHICS_VERSION,
@@ -309,7 +312,7 @@ impl Default for GraphicsFile {
             fx: true,
             glyphfx: true,
             shake_scale: crate::game::world::SHAKE_SCALE,
-            global_light: crate::render::lighting::GlobalLight::default().as_str().to_string(),
+            global_light: crate::render::lighting::GlobalLight::SHIPPED.as_str().to_string(),
         }
     }
 }
@@ -343,9 +346,11 @@ impl GraphicsFile {
         self.smooth = level.as_str().to_string();
     }
 
-    /// The saved global-light mode; an unreadable word loads `Off`.
+    /// The saved global-light mode; an unreadable word loads the shipped
+    /// default (AO + GI).
     pub fn global_light(&self) -> crate::render::lighting::GlobalLight {
-        crate::render::lighting::GlobalLight::parse(&self.global_light).unwrap_or_default()
+        use crate::render::lighting::GlobalLight;
+        GlobalLight::parse(&self.global_light).unwrap_or(GlobalLight::SHIPPED)
     }
 
     pub fn set_global_light(&mut self, mode: crate::render::lighting::GlobalLight) {
@@ -384,10 +389,18 @@ impl GraphicsFile {
         };
         if self.graphics_version < 3 {
             self.foreground = true;
-            self.graphics_version = GRAPHICS_VERSION;
         }
+        // 0.5.0 turned global light on. A file from before version 4 cannot
+        // say whether its `off` was chosen or merely the old default, so it
+        // moves to AO + GI once; `ao` was always a choice and is kept, and so
+        // is anything a version 4 file holds.
+        let mut global = self.global_light();
+        if self.graphics_version < 4 && global == crate::render::lighting::GlobalLight::Off {
+            global = crate::render::lighting::GlobalLight::SHIPPED;
+        }
+        self.graphics_version = self.graphics_version.max(GRAPHICS_VERSION);
         self.set_smooth(smooth);
-        self.set_global_light(self.global_light());
+        self.set_global_light(global);
         self.set_shake(self.shake());
     }
 }
@@ -993,14 +1006,14 @@ mod tests {
                  "fx":false,"glyphfx":false,"shake_scale":0.5}}"#,
         );
         let graphics = table.graphics;
-        assert_eq!(graphics.graphics_version, 3);
+        assert_eq!(graphics.graphics_version, 4);
         assert_eq!(graphics.smooth(), Smooth::Off);
         assert_eq!(graphics.lighting.as_deref(), Some("coarse"));
         assert!(graphics.foreground && !graphics.fx && !graphics.glyphfx);
         assert_eq!(graphics.shake(), 0.5);
 
         let table = ScoreTable::parse(r#"{"graphics":{"graphics_version":1,"smooth":"wedge"}}"#);
-        assert_eq!(table.graphics.graphics_version, 3);
+        assert_eq!(table.graphics.graphics_version, 4);
         assert_eq!(table.graphics.smooth(), Smooth::Off);
     }
 
@@ -1010,7 +1023,7 @@ mod tests {
         let table = ScoreTable::parse(
             r#"{"graphics":{"graphics_version":2,"smooth":"crisp","foreground":false}}"#,
         );
-        assert_eq!(table.graphics.graphics_version, 3);
+        assert_eq!(table.graphics.graphics_version, 4);
         assert_eq!(table.graphics.smooth(), Smooth::XbrCrisp);
         assert!(table.graphics.foreground);
 
@@ -1025,6 +1038,27 @@ mod tests {
     }
 
     #[test]
+    fn global_light_starts_at_ao_gi_and_an_old_off_moves_to_it_once() {
+        use crate::render::lighting::GlobalLight;
+        assert_eq!(ScoreTable::default().graphics.global_light(), GlobalLight::AoGi);
+        // No graphics object at all: today's defaults.
+        assert_eq!(ScoreTable::parse("{}").graphics.global_light(), GlobalLight::AoGi);
+        // A version 3 file holding the old default moves once.
+        let old = ScoreTable::parse(r#"{"graphics":{"graphics_version":3,"global_light":"off"}}"#);
+        assert_eq!(old.graphics.global_light(), GlobalLight::AoGi);
+        assert_eq!(old.graphics.graphics_version, 4);
+        // `ao` was always a choice, so it is kept.
+        let ao = ScoreTable::parse(r#"{"graphics":{"graphics_version":3,"global_light":"ao"}}"#);
+        assert_eq!(ao.graphics.global_light(), GlobalLight::AoOnly);
+        // An explicit Off written by this build survives the round trip.
+        let mut table = old;
+        table.graphics.set_global_light(GlobalLight::Off);
+        let loaded = ScoreTable::parse(&table.to_json());
+        assert_eq!(loaded.graphics.global_light(), GlobalLight::Off);
+        assert_eq!(loaded.graphics.graphics_version, 4);
+    }
+
+    #[test]
     fn version_three_graphics_saves_keep_chosen_smoothing_and_foreground() {
         use crate::render::subcell::Smooth;
         let mut table = ScoreTable::default();
@@ -1032,7 +1066,7 @@ mod tests {
         table.graphics.foreground = false;
         let json = table.to_json();
         let saved: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(saved["graphics"]["graphics_version"].as_u64(), Some(3));
+        assert_eq!(saved["graphics"]["graphics_version"].as_u64(), Some(4));
         let loaded = ScoreTable::parse(&json);
         assert_eq!(loaded.graphics.smooth(), Smooth::Xbr);
         assert!(!loaded.graphics.foreground);

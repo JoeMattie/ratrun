@@ -2071,9 +2071,11 @@ mod tests {
         assert!(shapes[1].grounded, "the exposed gills are the punish target");
         assert_eq!(shapes[1].radius, GILL_RADIUS);
 
+        // Mid-burrow the shell is under the mound the renderer draws, so the
+        // dome stays a target; the gills are still hidden.
         v.state = CrabState::Burrow;
         let shapes = hit_shapes(&v);
-        assert!(!shapes[0].grounded && !shapes[1].grounded);
+        assert!(shapes[0].grounded && !shapes[1].grounded);
     }
 
     #[test]
