@@ -11,7 +11,7 @@ import time
 import modal
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-OUTPUT = ROOT / ".review" / "model3"
+OUTPUT = ROOT / ".review" / "model4"
 TIMEOUT = 1_500
 SIM_SECONDS = 7_200
 MAX_SHARDS = 700
@@ -21,6 +21,7 @@ CPU_PRICE = 0.0000131
 MEMORY_PRICE = 0.00000222
 RATE = CPU * CPU_PRICE + MEMORY_MIB / 1024 * MEMORY_PRICE
 SKILLS = ("expert", "skilled", "casual")
+META = ("none", "mid", "max")
 BUILD_INPUTS = ("src", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "assets/rat.png")
 
 image = (
@@ -49,6 +50,7 @@ def run_command(binary, job):
         command = [
             str(binary), "--bot-batch", str(job["runs"]), "--seed", str(job["seed"]),
             "--seed-exact", "--skill", job["skill"], "--threads", "1",
+            "--meta", job.get("meta", "none"),
             "--max-sim-seconds", str(SIM_SECONDS),
             "--tuning", str(tuning), "--json",
         ]
@@ -97,7 +99,8 @@ def read_manifest(path):
     for job in jobs:
         if not re.fullmatch(r"[a-z0-9-]+", job["id"]):
             raise ValueError("invalid job ID")
-        if job["skill"] not in SKILLS or not 1 <= job["runs"] <= 8 or job["seed"] < 0:
+        if (job["skill"] not in SKILLS or job.get("meta", "none") not in META
+                or not 1 <= job["runs"] <= 8 or job["seed"] < 0):
             raise ValueError(f"invalid shard inputs for {job['id']}")
     return manifest
 

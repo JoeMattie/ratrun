@@ -14,14 +14,14 @@ from matplotlib.patches import Patch
 import numpy as np
 
 from app import OUTPUT, RATE, SKILLS
-from design import CONFIRM_RUNS, CONFIRM_SEED, KNOBS, SCREEN_POINTS, SCREEN_SEED
+from design import CONFIRM_RUNS, CONFIRM_SEED, EXPERIMENT_RUNS, KNOBS, META_RUNS, SCREEN_POINTS, SCREEN_SEED
 from fit import (
     BOSSES, FLOORS, FLOOR_DEATH, PHASES, WEIGHTS, WINDOW_DEATH, WIN_BANDS,
-    load_stage, observe, sensitivity_step,
+    load_stage, objective, observe, sensitivity_step,
 )
 
 COLORS = ("#17705b", "#2d6397", "#b75328")
-PRIOR_STYLES = (("#8f9399", ":"), ("#353a40", "-."))
+PRIOR_STYLES = (("#8f9399", ":"), ("#353a40", "-."), ("#775c8b", "--"))
 
 
 def wilson(rate, n, z=1.959964):
@@ -69,8 +69,8 @@ def write_plots(output, result, actual, previous):
             for (round_no, profile), (ink, stroke) in zip(previous, PRIOR_STYLES):
                 prior = [measured(profile[skill], key) for key in keys]
                 ax.plot(seconds / 60, prior, stroke, color=ink, linewidth=1.0, label=f"Round {round_no} measured")
-            ax.plot(seconds / 60, forecast, "--", color=color, linewidth=1.2, label="Round 3 predicted")
-            ax.plot(seconds / 60, observed, color=color, linewidth=1.6, label="Round 3 measured")
+            ax.plot(seconds / 60, forecast, "--", color=color, linewidth=1.2, label="Round 4 predicted")
+            ax.plot(seconds / 60, observed, color=color, linewidth=1.6, label="Round 4 measured")
             ax.set(xlim=(0, 15), ylim=(0, 1.02), xticks=[0, 3, 6, 9, 12, 15])
             if not row:
                 ax.set_title(floor)
@@ -102,7 +102,7 @@ def write_plots(output, result, actual, previous):
     handles = [
         Patch(facecolor="#dedede", label="Target band"),
         Line2D([], [], color="#333333", marker="x", linestyle="none", label="Model prediction"),
-        Line2D([], [], color="#333333", marker="o", linestyle="none", label="Round 3, 95% CI"),
+        Line2D([], [], color="#333333", marker="o", linestyle="none", label="Round 4, 95% CI"),
     ]
     for (round_no, _), (ink, _) in zip(previous, PRIOR_STYLES):
         handles.append(Line2D([], [], color=ink, marker="o", markerfacecolor="white",
@@ -166,14 +166,14 @@ def confirmation(lines, cohort, actual, prediction, previous):
             label = f"{3 * idx}:00–{3 * (idx + 1)}:00"
         return f"{label}, {share(profile[key])}"
 
-    change = " → ".join([*(f"Round {round_no}" for round_no, _ in previous), "Round 3"])
+    change = " → ".join([*(f"Round {round_no}" for round_no, _ in previous), "Round 4"])
     rows = []
     for i, skill in enumerate(SKILLS):
         low, high = WIN_BANDS[i]
         rows.append((skill, f"{low:.0%}–{high:.0%}", percent(prediction[skill]["win"]),
                      comparison(skill, "win", win_record),
                      "Within band" if low <= actual[skill]["win"][0] <= high else "Outside band"))
-    table(lines, ("Skill", "Target", "Round 3 predicted", change, "Round 3 result"), rows)
+    table(lines, ("Skill", "Target", "Round 4 predicted", change, "Round 4 result"), rows)
     lines += ["![Win bands and floor deaths](targets.png)", "",
               "Floor and window shares use losses as the denominator. Each three-minute window "
               "starts on the floor clock and pools losses across floors."]
@@ -191,7 +191,7 @@ def confirmation(lines, cohort, actual, prediction, previous):
             available = actual[skill][keys[0]][1] > 0
             within_band = available and max(rates) <= .40 and (window or min(rates) >= .05)
             rows.append((skill, name, " → ".join(values), "Within target" if within_band else "Outside target"))
-    table(lines, ("Skill", "Peak death share", change, "Round 3 result"), rows)
+    table(lines, ("Skill", "Peak death share", change, "Round 4 result"), rows)
     for skill in SKILLS:
         causes = Counter(r["death"]["cause"] for r in cohort[skill] if r["death"])
         if causes:
@@ -224,9 +224,9 @@ def confirmation(lines, cohort, actual, prediction, previous):
             dips = [hp[0] - hp[1], hp[2] - hp[1], hp[2] - hp[3]] if all(x is not None for x in hp) else []
             rows.append((skill, floor, *(comparison(skill, k, share) for k in keys),
                          "Both dips" if dips and min(dips) >= .05 else "Outside target"))
-    table(lines, ("Skill", "Floor", "1:00–3:00", "3:00–6:00", "6:00–11:00", "11:00–14:00", "Round 3 result"), rows)
+    table(lines, ("Skill", "Floor", "1:00–3:00", "3:00–6:00", "6:00–11:00", "11:00–14:00", "Round 4 result"), rows)
     lines += ["![Predicted and measured HP curves](health.png)"]
-    table(lines, ("Skill", "Win below 30% HP, predicted", f"Win below 30% HP ({change})", "Round 3 result"), [
+    table(lines, ("Skill", "Win below 30% HP, predicted", f"Win below 30% HP ({change})", "Round 4 result"), [
         (skill, percent(prediction[skill]["close_win"]), comparison(skill, "close_win", record),
          "Within target" if actual[skill]["close_win"][1] and actual[skill]["close_win"][0] >= .55 else "Outside target")
         for skill in SKILLS
@@ -236,8 +236,8 @@ def confirmation(lines, cohort, actual, prediction, previous):
 def design_and_fit(lines, result):
     lines += ["## Design and fit", "",
               f"The design used {SCREEN_POINTS - 1} randomized Latin hypercube settings optimized for "
-              f"low discrepancy, plus shipped defaults. Each point used the same eight seeds ({SCREEN_SEED}–{SCREEN_SEED + 7}) "
-              f"for each skill, for {SCREEN_POINTS * 24:,} campaign runs. "
+              f"low discrepancy, plus one nominal enabled setting. Each point used the same eight seeds ({SCREEN_SEED}–{SCREEN_SEED + 7}) "
+              f"for each skill, for {SCREEN_POINTS * 24:,} fit campaigns. Round 3 and the experiment were independent controls. "
               "Later floors inherited the actual keep choices.", "",
               f"The fit had {len(result['train'])} training settings and {len(result['holdout'])} untouched holdout settings. "
               "Four-fold validation within training chose regularization and linear or quadratic features by "
@@ -318,6 +318,65 @@ def design_and_fit(lines, result):
                       "Sewer first card s", "Flatbed boss s", "Sewer cards"), rows)
 
 
+class MeasuredProfile:
+    """Expose campaign observations through the model's objective interface."""
+
+    def __init__(self, observed):
+        self.observed = observed
+        self.support = {key: n for key, (_, n) in observed.items()}
+
+    def predict(self, _values, *, curves):
+        return {key: np.array([value if n or key.startswith("clear_") else np.nan])
+                for key, (value, n) in self.observed.items()}
+
+
+def confirmed_cohorts(campaigns):
+    sizes = {"candidate": CONFIRM_RUNS, "round3": CONFIRM_RUNS, "power-off": CONFIRM_RUNS,
+             "half-hp-double-enemy": EXPERIMENT_RUNS, "candidate-mid": META_RUNS, "candidate-max": META_RUNS}
+    cohorts = {}
+    for point, size in sizes.items():
+        cohorts[point] = {}
+        for skill in SKILLS:
+            runs = sorted((r for r in campaigns[point] if r["skill"] == skill), key=lambda r: r["seed"])
+            if [r["seed"] for r in runs] != list(range(CONFIRM_SEED, CONFIRM_SEED + size)):
+                raise ValueError(f"confirmation cohort mismatch for {point}/{skill}")
+            cohorts[point][skill] = runs
+    return cohorts
+
+
+def profile_comparison(lines, cohorts, profiles):
+    lines += ["## Same-seed controls and Nest ladder", "",
+              "The half-HP experiment, mid Nest, and max Nest use the first 96 seeds of the fresh cohort. "
+              "Power-off keeps the candidate's other tuning settings. Deaths through 5:00 use the Sewer floor clock."]
+    rows = []
+    for point, cohort in cohorts.items():
+        for skill in SKILLS:
+            runs = cohort[skill]
+            profile = profiles[point][skill]
+            win, count = profile["win"]
+            lo, hi = wilson(win, count)
+            first = [r["levels"][0]["second_weapon_at"] for r in runs
+                     if r["levels"][0]["second_weapon_at"] is not None]
+            early = [r["death"]["at"] for r in runs if r["death"] and r["death"]["level"] == 0]
+            card = measured(profile, "first_card_1")
+            rows.append((point, skill, f"{round(win * count)}/{count} ({win:.1%})",
+                         f"{lo:.1%}–{hi:.1%}", number(card),
+                         f"{number(float(np.median(first)))} ({len(first)}/{count})" if first else "—",
+                         f"{sum(t < 180 for t in early)}/{sum(180 <= t < 300 for t in early)} / {count} runs"))
+    table(lines, ("Profile", "Skill", "Wins", "95% CI", "Mean first card (s)",
+                  "Median second weapon (s)", "Sewer deaths before 3:00 / 3:00–5:00"), rows)
+    rows = []
+    for point in ("candidate", "power-off", "round3"):
+        models = [MeasuredProfile(profiles[point][skill]) for skill in SKILLS]
+        scores = {name: float(loss[0]) for name, loss in objective(models, None).items()}
+        rows.append((point, sum(scores.values()), scores))
+    table(lines, ("Profile", "Weighted loss", *WEIGHTS), [
+        (point, number(total, 3), *(number(scores[name], 3) for name in WEIGHTS))
+        for point, total, scores in rows
+    ])
+    return {point: {"total": total, **scores} for point, total, scores in rows}
+
+
 def report(output, baselines=()):
     result = json.loads((output / "solution.json").read_bytes())
     budget = json.loads((output / "cost-estimate.json").read_bytes())
@@ -329,14 +388,12 @@ def report(output, baselines=()):
         raise ValueError("confirmation must use the fitted simulation revision and a matched pilot")
     if confirm["points"]["candidate"] != result["values"]:
         raise ValueError("confirmation used a different candidate")
-    cohort = {s: [r for r in campaigns["candidate"] if r["skill"] == s] for s in SKILLS}
-    for s in SKILLS:
-        if sorted(r["seed"] for r in cohort[s]) != list(range(CONFIRM_SEED, CONFIRM_SEED + CONFIRM_RUNS)):
-            raise ValueError(f"confirmation cohort mismatch for {s}")
-    actual = {s: observe(cohort[s]) for s in SKILLS}
+    cohorts = confirmed_cohorts(campaigns)
+    profiles = {point: {s: observe(cases[s]) for s in SKILLS} for point, cases in cohorts.items()}
+    actual = profiles["candidate"]
     previous = []
-    lines = ["# Rat Run pressure beats study, round 3", "",
-             f"Round 3 used the pressure-beats revision `{result['revision']}`. "
+    lines = ["# Rat Run horde power study, round 4", "",
+             f"Round 4 used simulation revision `{result['revision']}`. "
              "Campaigns followed Sewer, Kitchen, Lab and Flatbed with a fresh Nest. "
              f"Confirmation used seeds {CONFIRM_SEED}–{CONFIRM_SEED + CONFIRM_RUNS - 1} for every skill.", ""]
     for round_no, baseline in enumerate(baselines, 1):
@@ -344,7 +401,8 @@ def report(output, baselines=()):
         previous.append((round_no, prior["observed_mean_and_count"]))
         seed = 4000 + round_no * 1000
         lines += [f"Round {round_no} used `{prior['source_revision']}` and seeds {seed}–{seed + 299}.", ""]
-    confirmation(lines, cohort, actual, result["candidate"], previous)
+    confirmation(lines, cohorts["candidate"], actual, result["candidate"], previous)
+    measured_scores = profile_comparison(lines, cohorts, profiles)
     design_and_fit(lines, result)
     seconds = pilot_seconds + confirm_seconds + result["screen_seconds"]
     lines += ["## Determinism and spend", "",
@@ -356,7 +414,7 @@ def report(output, baselines=()):
               "at the configured CPU and memory caps. The estimate excludes image building, startup, "
               "failed attempts and workspace credits. [Modal list pricing](https://modal.com/pricing).", "",
               "Raw JSON and checksummed receipts are in raw/. Fit scores and training cohort sizes are in solution.json.",
-              "", "Integrated-by: pressure-beats (Sol worker)", ""]
+              "", "Integrated-by: power-scaling (Sol worker)", ""]
     with (output / "sensitivity.csv").open("w", newline="") as dest:
         writer = csv.writer(dest)
         writer.writerow(["skill", "knob", "knob_delta", "outcome", "modeled_effect"])
@@ -370,11 +428,13 @@ def report(output, baselines=()):
         "predicted": result["candidate"],
         "observed_mean_and_count": actual,
         "skill_win_wilson95": {s: wilson(*actual[s]["win"]) for s in SKILLS},
+        "observed_profiles": profiles,
+        "measured_weighted_loss": measured_scores,
     }, indent=2))
     (output / "report.md").write_text("\n".join(lines))
     summary = ", ".join(f"{s} {actual[s]['win'][0]:.1%}" for s in SKILLS)
     (output / "recommended.toml").write_text(
-        "# Rat Run pressure beats candidate.\n"
+        "# Rat Run round 4 power-scaling candidate.\n"
         f"# Fresh seeds {CONFIRM_SEED}–{CONFIRM_SEED + CONFIRM_RUNS - 1}, measured campaign wins {summary}.\n"
         "# See report.md for target conformance, uncertainty and predictions.\n\n"
         + result["defaults_overlay"],
