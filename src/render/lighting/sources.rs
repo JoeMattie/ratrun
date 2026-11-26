@@ -1822,6 +1822,8 @@ impl LightMap {
             let r = r * TAIL_REACH;
             sx + r >= 0.0 && sy + r >= 0.0 && sx - r < vw && sy - r < vh
         };
+        let horseshoe = matches!(boss.state, BossState::HorseshoeCrab(_));
+        let size = if horseshoe { crate::game::art_boss_horseshoe_crab::BODY_SCALE } else { 1.0 };
         let bsx = boss.pos.x - cam.x;
         let bsy = boss.pos.y - cam.y;
         let face = if boss.facing.len_sq() > 0.01 {
@@ -1840,11 +1842,11 @@ impl LightMap {
             2 => (252, 75, 118),
             _ => (202, 75, 255),
         };
-        if in_range(bsx, bsy, 168.0) {
+        if in_range(bsx, bsy, 168.0 * size) {
             self.lights.push(PointLight {
                 x: bsx,
                 y: bsy,
-                radius: 168.0,
+                radius: 168.0 * size,
                 color: tint,
                 intensity: 85,
                 scatter: 23,
@@ -2559,11 +2561,11 @@ impl LightMap {
             }
             _ => {
                 // Fallback aura for future wave-3 bosses.
-                if in_range(bsx, bsy, 58.0) {
+                if in_range(bsx, bsy, 58.0 * size) {
                     self.lights.push(PointLight {
                         x: bsx,
                         y: bsy,
-                        radius: 56.0,
+                        radius: 56.0 * size,
                         color: (255, 145, 95),
                         intensity: 210,
                         scatter: 48,
@@ -2584,18 +2586,21 @@ impl LightMap {
             let sx = c.x - cam.x;
             let sy = c.y - cam.y;
             let active = hazard.is_active();
-            let r = if active { 46.0 } else { 36.0 };
+            let r = (if active { 46.0 } else { 36.0 }) * size;
+            let blue_blood = horseshoe && hazard.slow > 0.0;
             if in_range(sx, sy, r) {
                 self.lights.push(PointLight {
                     x: sx,
                     y: sy,
                     radius: r,
-                    color: if active {
+                    color: if blue_blood {
+                        (89, 145, 252)
+                    } else if active {
                         (255, 92, 66)
                     } else {
                         (255, 195, 76)
                     },
-                    intensity: if active { 260 } else { 205 },
+                    intensity: if blue_blood { 115 } else if active { 260 } else { 205 },
                     scatter: if active { 68 } else { 44 },
                     priority: 3,
                     occlude: false,

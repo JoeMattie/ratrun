@@ -45,8 +45,8 @@
 //! [`TELSON_TELL`] s; the arc covers [`TELSON_HALF_ANGLE`] either side of the
 //! crab's **rear**, from [`TELSON_INNER`] to [`TELSON_OUTER`] px. `TelsonSweep`
 //! drags the spike through it in [`TELSON_SWEEP`] s and the band is live for
-//! [`TELSON_ACTIVE`] s, once. One sidestep leaves it (the cone is 120°: at
-//! melee range that is 10 px of walking), and the rat that reads it gets
+//! [`TELSON_ACTIVE`] s, once. One sidestep leaves it (the cone is 120°: the rat can also
+//! step back out of reach), and the rat that reads it gets
 //! [`RECOVER`] s of a limp tail to punish.
 //!
 //! ## The bulldoze
@@ -112,29 +112,34 @@ use crate::render::palette::{mix, Rgb};
 // Collision & gameplay constants (art <-> controller <-> framework contract)
 // ============================================================================
 
+/// Uniform scale for the sprite, collision and body-derived hazards.
+pub const BODY_SCALE: f32 = 1.5;
+
 /// Framework movement/contact circle (world px). The dome is wider than this at
 /// its shoulders; the circle is the body's walking footprint.
-pub const BODY_RADIUS: f32 = 14.0;
+pub const BODY_RADIUS: f32 = 14.0 * BODY_SCALE;
+
+const DOME_LOCAL_HALF_LEN: f32 = 15.0;
 
 /// Half the dome's length along the facing axis (front is `+u`).
-pub const DOME_HALF_LEN: f32 = 15.0;
+pub const DOME_HALF_LEN: f32 = DOME_LOCAL_HALF_LEN * BODY_SCALE;
 
 /// Half the dome's width at its widest shoulders (world px).
-pub const DOME_HALF_PERP: f32 = 16.0;
+pub const DOME_HALF_PERP: f32 = 16.0 * BODY_SCALE;
 
 /// The dome's hit-box half extents (a touch tighter than the paint, so a shot
 /// that clips the very rim of the carapace is a graze, not a hit).
-pub const HIT_HALF_LEN: f32 = 14.0;
-pub const HIT_HALF_PERP: f32 = 15.5;
+pub const HIT_HALF_LEN: f32 = 14.0 * BODY_SCALE;
+pub const HIT_HALF_PERP: f32 = 15.5 * BODY_SCALE;
 
 /// The telson's hinge, behind the dome centre.
-pub const TELSON_HINGE: f32 = 13.0;
+pub const TELSON_HINGE: f32 = 13.0 * BODY_SCALE;
 
 /// The telson's full length from the hinge (the culling/length figure).
-pub const TELSON_LENGTH: f32 = 26.0;
+pub const TELSON_LENGTH: f32 = 26.0 * BODY_SCALE;
 
 /// Longest sprite reach for culling: dome + tail + a little dust.
-pub const CULL_MARGIN: f32 = 58.0;
+pub const CULL_MARGIN: f32 = 58.0 * BODY_SCALE;
 
 /// The art's recommended base pool, before `BossKind::hp_scale` and the
 /// director's boss curve.
@@ -172,10 +177,10 @@ pub const WEDGE_DAMAGE_MULT: f32 = 1.35;
 pub const GILL_DAMAGE_MULT: f32 = 2.0;
 
 /// Radius of the exposed gill fans (their hit circle).
-pub const GILL_RADIUS: f32 = 6.5;
+pub const GILL_RADIUS: f32 = 6.5 * BODY_SCALE;
 
 /// The gill fans sit under the rear rim, this far behind the body centre.
-pub const GILL_BACK: f32 = 7.0;
+pub const GILL_BACK: f32 = 7.0 * BODY_SCALE;
 
 /// Incoming damage while it is on its back (fully vulnerable).
 pub const FLIP_DAMAGE_MULT: f32 = 1.5;
@@ -189,7 +194,7 @@ pub const DOME_DURATION: [f32; 3] = [0.90, 0.82, 0.72];
 pub const DOME_SPEED: [f32; 3] = [30.0, 35.0, 40.0];
 
 /// The band `Dome` holds the rat at, in px (`near`, `far`).
-pub const DOME_BAND: [f32; 2] = [20.0, 46.0];
+pub const DOME_BAND: [f32; 2] = [20.0 * BODY_SCALE, 46.0 * BODY_SCALE];
 
 /// Extra speed multiplier while hunting a rat that has left the arena.
 pub const HUNT_SPEED_MULT: f32 = 1.8;
@@ -221,10 +226,10 @@ pub const TELSON_ACTIVE: f32 = 0.18;
 pub const TELSON_ACTIVE_PROGRESS: f32 = 0.30;
 
 /// The arc's inner radius (the body is not in its own sweep).
-pub const TELSON_INNER: f32 = 13.0;
+pub const TELSON_INNER: f32 = 13.0 * BODY_SCALE;
 
 /// The arc's outer radius (a long spike).
-pub const TELSON_OUTER: f32 = 40.0;
+pub const TELSON_OUTER: f32 = 40.0 * BODY_SCALE;
 
 /// Half the arc's width, either side of dead astern (60° → a 120° fan).
 pub const TELSON_HALF_ANGLE: f32 = PI / 3.0;
@@ -247,13 +252,13 @@ pub const BULLDOZE_LOCK_PROGRESS: f32 = 0.60;
 pub const BULLDOZE_SPEED: [f32; 3] = [112.0, 124.0, 138.0];
 
 /// Half the marked lane's width.
-pub const BULLDOZE_HALF_WIDTH: f32 = 14.0;
+pub const BULLDOZE_HALF_WIDTH: f32 = 14.0 * BODY_SCALE;
 
 /// The shortest lane worth committing to (a lane shorter than this is a nudge).
 pub const BULLDOZE_MIN: f32 = 64.0;
 
 /// The furthest the crab will look for a wall to wedge into.
-pub const BULLDOZE_MAX: f32 = 230.0;
+pub const BULLDOZE_MAX: f32 = 230.0 * BODY_SCALE;
 
 /// What a full charge costs.
 pub const BULLDOZE_DAMAGE: f32 = 18.0;
@@ -285,7 +290,8 @@ pub const BURROW_TRAVEL: f32 = 0.50;
 pub const EMERGE: f32 = 0.40;
 
 /// The marked circle's radius.
-pub const BURROW_RADIUS: f32 = 17.0;
+pub const BURROW_LOCAL_RADIUS: f32 = 17.0;
+pub const BURROW_RADIUS: f32 = BURROW_LOCAL_RADIUS * BODY_SCALE;
 
 /// What the eruption costs.
 pub const EMERGE_DAMAGE: f32 = 16.0;
@@ -305,8 +311,8 @@ pub const FLIPPED_DURATION: [f32; 3] = [2.40, 2.40, 2.20];
 pub const RIGHTING: f32 = 0.75;
 
 /// The thrashing legs' ring.
-pub const LEGS_INNER: f32 = 5.0;
-pub const LEGS_OUTER: f32 = 27.0;
+pub const LEGS_INNER: f32 = 5.0 * BODY_SCALE;
+pub const LEGS_OUTER: f32 = 27.0 * BODY_SCALE;
 
 /// What a leg costs.
 pub const LEGS_DAMAGE: f32 = 12.0;
@@ -314,7 +320,7 @@ pub const LEGS_DAMAGE: f32 = 12.0;
 // ---- the blue blood -------------------------------------------------------
 
 /// A shed pool's radius.
-pub const BLOOD_RADIUS: f32 = 11.0;
+pub const BLOOD_RADIUS: f32 = 11.0 * BODY_SCALE;
 
 /// How long a pool lasts (it stops when the crab dies: it is the boss's).
 pub const BLOOD_LIFE: f32 = 6.0;
@@ -460,7 +466,7 @@ fn clamp01(v: f32) -> f32 {
 #[inline]
 pub fn dome_box(view: &CrabView) -> (Vec2, Vec2, f32, f32) {
     let f = unit_facing(view);
-    (view.pos + f * 1.0, f, HIT_HALF_LEN, HIT_HALF_PERP)
+    (view.pos + f * BODY_SCALE, f, HIT_HALF_LEN, HIT_HALF_PERP)
 }
 
 /// The exposed gill fans (the weak point). While flipped the whole underside is
@@ -566,7 +572,7 @@ pub fn blood_pool_shape(center: Vec2) -> (Vec2, f32) {
 /// * `1.0` — everywhere else.
 pub fn incoming_multiplier(view: &CrabView, dir: Vec2, at: Vec2) -> f32 {
     if is_exposed(view.state) {
-        return if at.dist(gill_pos(view)) <= GILL_RADIUS + 2.0 {
+        return if at.dist(gill_pos(view)) <= GILL_RADIUS + 2.0 * BODY_SCALE {
             GILL_DAMAGE_MULT
         } else {
             1.0
@@ -580,7 +586,7 @@ pub fn incoming_multiplier(view: &CrabView, dir: Vec2, at: Vec2) -> f32 {
             return 0.0;
         }
     }
-    if at.dist(gill_pos(view)) <= GILL_RADIUS + 2.0 {
+    if at.dist(gill_pos(view)) <= GILL_RADIUS + 2.0 * BODY_SCALE {
         // Hidden under the rim: not a weak point until it lifts the shell.
         return 1.0;
     }
@@ -819,6 +825,7 @@ fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, das
 }
 
 fn ring(pb: &mut PixelBuffer, center: Vec2, radius: f32, col: Rgb, alpha: f32, width: f32) {
+    let width = width * BODY_SCALE;
     let Some((x0, x1, y0, y1)) = bbox(pb, center, radius + width, radius + width) else {
         return;
     };
@@ -936,9 +943,6 @@ fn smooth_dir(v: Vec2) -> Vec2 {
 ///
 /// **Layer**: ground — after the floor and stains, before props/enemies/the rat.
 pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb) {
-    if !in_view(pb, view, cam) {
-        return;
-    }
     let c = w2s(view.pos, cam);
     let p = clamp01(view.progress);
     let pulse = 0.5 + 0.5 * (view.anim * 8.5).sin();
@@ -951,12 +955,15 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
         _ => 0.34,
     };
     if shadow_a > 0.0 {
-        let sc = c + Vec2::new(0.0, 2.0);
-        for y in -8..=8 {
-            for x in -18..=18 {
-                let e = (x as f32 / 18.0).powi(2) + (y as f32 / 8.0).powi(2);
-                if e <= 1.0 {
-                    blend_px(pb, sc.x as i32 + x, sc.y as i32 + y, (4, 6, 8), shadow_a * (1.0 - e * 0.4));
+        let sc = c + Vec2::new(0.0, 2.0 * BODY_SCALE);
+        let (rx, ry) = (18.0 * BODY_SCALE, 8.0 * BODY_SCALE);
+        if let Some((x0, x1, y0, y1)) = bbox(pb, sc, rx, ry) {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let e = ((x as f32 - sc.x) / rx).powi(2) + ((y as f32 - sc.y) / ry).powi(2);
+                    if e <= 1.0 {
+                        blend_px(pb, x, y, (4, 6, 8), shadow_a * (1.0 - e * 0.4));
+                    }
                 }
             }
         }
@@ -969,7 +976,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             for side in [-1.0f32, 1.0] {
                 for k in 0..3 {
                     let along = (k as f32 - 1.0) * 7.0 + step * side * 1.4;
-                    let q = c + w2s(f * along + f.perp() * side * 12.0, Vec2::ZERO);
+                    let q = c + (f * along + f.perp() * side * 12.0) * BODY_SCALE;
                     blend_px(pb, q.x.round() as i32, q.y.round() as i32, (24, 30, 32), 0.22);
                     blend_px(pb, q.x.round() as i32 + 1, q.y.round() as i32, (24, 30, 32), 0.14);
                 }
@@ -983,17 +990,17 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             let fill = inner + (outer - inner) * t;
             let col = if t > 0.85 { WARN_HOT } else { WARN_AMBER };
             arc_band(pb, sc, (inner, fill), af, half, col, 0.16 + 0.10 * pulse);
-            arc_band(pb, sc, (fill - 1.4, fill), af, half, col, 0.62);
-            arc_band(pb, sc, (outer, outer + 1.2), af, half, col, 0.50 + 0.25 * pulse);
-            arc_band(pb, sc, (inner, inner + 1.0), af, half, col, 0.40);
+            arc_band(pb, sc, (fill - 1.4 * BODY_SCALE, fill), af, half, col, 0.62);
+            arc_band(pb, sc, (outer, outer + 1.2 * BODY_SCALE), af, half, col, 0.50 + 0.25 * pulse);
+            arc_band(pb, sc, (inner, inner + BODY_SCALE), af, half, col, 0.40);
             // Radial tick marks, so the fan reads as a swept sector.
             for k in 0..9 {
                 let a = -half + 2.0 * half * (k as f32 / 8.0);
                 let d = af.rotate(a);
                 line_solid(
                     pb,
-                    sc + d * (inner + 1.0),
-                    sc + d * (inner + 3.2),
+                    sc + d * (inner + BODY_SCALE),
+                    sc + d * (inner + 3.2 * BODY_SCALE),
                     col,
                     0.55,
                 );
@@ -1005,7 +1012,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             let side = if view.sweep_side >= 0.0 { 1.0 } else { -1.0 };
             let ang = -side * half + (2.0 * half) * smoothstep(p);
             // The live band, flashing as the spike crosses it.
-            let live = (TELSON_ACTIVE_PROGRESS..=TELSON_ACTIVE_PROGRESS + 0.30).contains(&p);
+            let live = (TELSON_ACTIVE_PROGRESS..TELSON_ACTIVE_PROGRESS + TELSON_ACTIVE / TELSON_SWEEP).contains(&p);
             let col = if live { WARN_HOT } else { WARN_AMBER };
             arc_band(pb, sc, (inner, outer), af, half, col, if live { 0.16 } else { 0.08 });
             // The spike's own leading edge.
@@ -1022,8 +1029,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             }
         }
         CrabState::BulldozeTell | CrabState::Bulldoze => {
-            let (center, lf, half, half_perp) = bulldoze_lane(view);
-            let sc = w2s(center, cam);
+            let (_, lf, _, half_perp) = bulldoze_lane(view);
             let start = w2s(view.lane_start, cam);
             let end = w2s(view.target, cam);
             let telling = matches!(view.state, CrabState::BulldozeTell);
@@ -1052,14 +1058,13 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
                 );
                 u += 2.0;
             }
-            rect_outline(pb, sc, lf, len.max(1.0), half_perp, col, 0.62);
-            let _ = half;
+            rect_outline(pb, (start + tip) * 0.5, lf, len * 0.5, half_perp, col, 0.62);
             // Arrowheads pointing at the wall it is going to hit.
             for k in 0..3 {
                 let at = end - (end - start) * (0.10 + 0.18 * k as f32);
                 let q = at;
-                line_solid(pb, q - lf * 3.0 + lf.perp() * 3.0, q, col, 0.70);
-                line_solid(pb, q - lf * 3.0 - lf.perp() * 3.0, q, col, 0.70);
+                line_solid(pb, q - lf * (3.0 * BODY_SCALE) + lf.perp() * (3.0 * BODY_SCALE), q, col, 0.70);
+                line_solid(pb, q - lf * (3.0 * BODY_SCALE) - lf.perp() * (3.0 * BODY_SCALE), q, col, 0.70);
             }
             if matches!(view.state, CrabState::Bulldoze) {
                 // Dust boiling off the trailing edge.
@@ -1068,7 +1073,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
                     let q = start + (end - start) * (0.0 - 0.15 * t);
                     let side = if k % 2 == 0 { 1.0 } else { -1.0 };
                     let q = q + lf.perp() * side * (half_perp * 0.7);
-                    fill_disc(pb, q, 1.4 + t * 2.6, (86, 74, 52), 0.20 * (1.0 - t));
+                    fill_disc(pb, q, (1.4 + t * 2.6) * BODY_SCALE, (86, 74, 52), 0.20 * (1.0 - t));
                 }
             }
         }
@@ -1078,16 +1083,16 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             for k in 0..7 {
                 let a = -0.9 + k as f32 * 0.3;
                 let d = f.rotate(a);
-                line_solid(pb, nose, nose + d * 4.0, (150, 140, 110), 0.28);
+                line_solid(pb, nose, nose + d * (4.0 * BODY_SCALE), (150, 140, 110), 0.28);
             }
             let g = w2s(gill_pos(view), cam);
-            ring(pb, g, GILL_RADIUS + 3.0 + 2.0 * pulse, WEAK_GOLD, 0.30 + 0.25 * pulse, 1.2);
-            ring(pb, g, GILL_RADIUS + 8.0, WEAK_GOLD, 0.16, 1.0);
+            ring(pb, g, GILL_RADIUS + (3.0 + 2.0 * pulse) * BODY_SCALE, WEAK_GOLD, 0.30 + 0.25 * pulse, 1.2);
+            ring(pb, g, GILL_RADIUS + 8.0 * BODY_SCALE, WEAK_GOLD, 0.16, 1.0);
             // The pull-out scratch: it is trying to reverse.
-            let back = c - w2s(f * (DOME_HALF_LEN + 4.0), Vec2::ZERO);
+            let back = c - w2s(f * (DOME_HALF_LEN + 4.0 * BODY_SCALE), Vec2::ZERO);
             for k in 0..3 {
-                let q = back + w2s(f.perp() * ((k as f32 - 1.0) * 5.0), Vec2::ZERO);
-                line_solid(pb, q, q - w2s(f * 4.0, Vec2::ZERO), (110, 100, 78), 0.35);
+                let q = back + w2s(f.perp() * ((k as f32 - 1.0) * 5.0 * BODY_SCALE), Vec2::ZERO);
+                line_solid(pb, q, q - f * (4.0 * BODY_SCALE), (110, 100, 78), 0.35);
             }
         }
         CrabState::BurrowTell | CrabState::Emerge => {
@@ -1106,7 +1111,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             ring(pb, sc, r, col, 0.75, 1.2);
             for k in 0..8 {
                 let d = Vec2::from_angle(k as f32 * TAU / 8.0);
-                line_solid(pb, sc + d * (r - 2.0), sc + d * (r + 1.5), col, 0.45);
+                line_solid(pb, sc + d * (r - 2.0 * BODY_SCALE), sc + d * (r + 1.5 * BODY_SCALE), col, 0.45);
             }
             if !telling {
                 // Boiling spoil and blue seep out of the crater.
@@ -1123,9 +1128,9 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             let q = w2s(view.lane_start, cam);
             fill_disc(pb, q, BURROW_RADIUS * 0.8, (6, 8, 10), 0.55);
             ring(pb, q, BURROW_RADIUS * 0.8, (96, 82, 56), 0.35, 1.2);
-            ring(pb, q, BURROW_RADIUS * 0.8 + 1.5, BLOOD_MID, 0.22, 1.0);
+            ring(pb, q, BURROW_RADIUS * 0.8 + 1.5 * BODY_SCALE, BLOOD_MID, 0.22, 1.0);
             // The dotted run toward the mark.
-            line_dashed(pb, q, w2s(view.target, cam), BLOOD_MID, 0.20, 4.0, view.anim * 8.0);
+            line_dashed(pb, q, w2s(view.target, cam), BLOOD_MID, 0.20, 4.0 * BODY_SCALE, view.anim * 8.0 * BODY_SCALE);
         }
         CrabState::FlipTell => {
             // Rocking arcs either side of the dome: which way it is going over.
@@ -1136,8 +1141,8 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
                 for k in 0..4 {
                     let a = a0 + (a1 - a0) * ((k as f32 + 0.5) / 4.0);
                     let d = f.rotate(a);
-                    let q = c + d * (DOME_HALF_LEN + 2.0);
-                    line_solid(pb, q, q + d * (2.0 + 2.0 * t), WARN_AMBER, 0.30 + 0.35 * t);
+                    let q = c + d * (DOME_HALF_LEN + 2.0 * BODY_SCALE);
+                    line_solid(pb, q, q + d * ((2.0 + 2.0 * t) * BODY_SCALE), WARN_AMBER, 0.30 + 0.35 * t);
                 }
             }
         }
@@ -1158,22 +1163,22 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
         }
         CrabState::Pose => {
             let t = smoothstep((p / 0.6).min(1.0));
-            ring(pb, c, 16.0 + 20.0 * t, WARN_AMBER, 0.55 * (1.0 - t * 0.5), 1.6);
-            ring(pb, c, 26.0 - 6.0 * t, WARN_RED, 0.35 + 0.25 * pulse, 1.2);
+            ring(pb, c, (16.0 + 20.0 * t) * BODY_SCALE, WARN_AMBER, 0.55 * (1.0 - t * 0.5), 1.6);
+            ring(pb, c, (26.0 - 6.0 * t) * BODY_SCALE, WARN_RED, 0.35 + 0.25 * pulse, 1.2);
             // Blue seeping out from under the plates.
             for k in 0..8 {
                 let a = k as f32 * TAU / 8.0 + 0.4;
-                let q = c + Vec2::from_angle(a) * (10.0 + 7.0 * t);
-                fill_disc(pb, q, 1.2 + t * 1.6, BLOOD_MID, 0.30);
+                let q = c + Vec2::from_angle(a) * ((10.0 + 7.0 * t) * BODY_SCALE);
+                fill_disc(pb, q, (1.2 + t * 1.6) * BODY_SCALE, BLOOD_MID, 0.30);
             }
         }
         CrabState::Death => {
             let t = clamp01(p);
-            let r = 14.0 + 18.0 * smoothstep(t * 1.2);
+            let r = (14.0 + 18.0 * smoothstep(t * 1.2)) * BODY_SCALE;
             // A wide blue pool under the collapsing shell.
-            fill_disc(pb, c + Vec2::new(0.0, 2.0), r, BLOOD_SH, 0.30 * (1.0 - t * 0.2));
-            ring(pb, c + Vec2::new(0.0, 2.0), r * 0.95, BLOOD_MID, 0.35 * (1.0 - t * 0.4), 1.3);
-            ring(pb, c, 12.0 + t * 26.0, BLOOD_HI, 0.35 * (1.0 - t), 1.2);
+            fill_disc(pb, c + Vec2::new(0.0, 2.0 * BODY_SCALE), r, BLOOD_SH, 0.30 * (1.0 - t * 0.2));
+            ring(pb, c + Vec2::new(0.0, 2.0 * BODY_SCALE), r * 0.95, BLOOD_MID, 0.35 * (1.0 - t * 0.4), 1.3);
+            ring(pb, c, (12.0 + t * 26.0) * BODY_SCALE, BLOOD_HI, 0.35 * (1.0 - t), 1.2);
         }
     }
 
@@ -1199,15 +1204,26 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             let a1 = PI * 0.15 + PI * 0.70 * ((k + 1) as f32 / segments as f32) - 0.02;
             let d0 = Vec2::from_angle(a0);
             let d1 = Vec2::from_angle(a1);
-            let r = 21.0;
+            let r = 21.0 * BODY_SCALE;
             line_solid(pb, c + d0 * r, c + d1 * r, col, 0.55);
         }
     }
 
     // A faint rim tying the crab to the floor's palette.
     if !matches!(view.state, CrabState::Death | CrabState::Burrow) {
-        ring(pb, c, DOME_HALF_PERP + 5.0, mix(accent, SHELL_MID, 0.6), 0.08, 1.0);
+        ring(pb, c, DOME_HALF_PERP + 5.0 * BODY_SCALE, mix(accent, SHELL_MID, 0.6), 0.08, 1.0);
     }
+}
+
+/// Ground tint for a live blue-blood hazard. The outline pass marks the same
+/// boundary before and after it becomes slippery.
+pub fn draw_blood_pool(pb: &mut PixelBuffer, cam: Vec2, center: Vec2, radius: f32, active: bool) {
+    let center = w2s(center, cam);
+    if active {
+        fill_disc(pb, center, radius, BLOOD_SH, 0.46);
+        fill_disc(pb, center, radius * 0.75, BLOOD_MID, 0.26);
+    }
+    ring(pb, center, radius * 0.95, BLOOD_HI, 0.30, 1.0);
 }
 
 // ============================================================================
@@ -1222,8 +1238,6 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
 /// unlit. It paints the telegraph and nothing else: no shadow, no body, no HP
 /// arc, so it can never become a second copy of the crab.
 pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2) {
-    let f = unit_facing(view);
-    let c = w2s(view.pos, cam);
     let p = clamp01(view.progress);
     let pulse = 0.5 + 0.5 * (view.anim * 9.0).sin();
     match view.state {
@@ -1231,14 +1245,14 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2) {
             let (center, inner, outer, af, half) = telson_arc(view);
             let sc = w2s(center, cam);
             let live = matches!(view.state, CrabState::TelsonSweep)
-                && (TELSON_ACTIVE_PROGRESS..=TELSON_ACTIVE_PROGRESS + 0.30).contains(&p);
+                && (TELSON_ACTIVE_PROGRESS..TELSON_ACTIVE_PROGRESS + TELSON_ACTIVE / TELSON_SWEEP).contains(&p);
             let col = if live { (255, 246, 196) } else { (255, 206, 96) };
-            arc_band(pb, sc, (inner, inner + 1.2), af, half, col, 0.85);
-            arc_band(pb, sc, (outer - 0.8, outer + 0.8), af, half, col, 0.92);
+            arc_band(pb, sc, (inner, inner + 1.2 * BODY_SCALE), af, half, col, 0.85);
+            arc_band(pb, sc, (outer - 0.8 * BODY_SCALE, outer + 0.8 * BODY_SCALE), af, half, col, 0.92);
             for k in 0..9 {
                 let a = -half + 2.0 * half * (k as f32 / 8.0);
                 let d = af.rotate(a);
-                line_solid(pb, sc + d * inner, sc + d * (inner + 4.2), col, 0.85);
+                line_solid(pb, sc + d * inner, sc + d * (inner + 4.2 * BODY_SCALE), col, 0.85);
             }
             if live {
                 arc_band(pb, sc, (inner, outer), af, half, col, 0.10 + 0.06 * pulse);
@@ -1261,14 +1275,14 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2) {
             while u <= len {
                 if ((u * 0.28) + view.anim * 3.0).sin() > 0.4 {
                     let q = start + lf * u;
-                    line_solid(pb, q - lp * 3.0, q + lp * 3.0, col, 0.35);
+                    line_solid(pb, q - lp * (3.0 * BODY_SCALE), q + lp * (3.0 * BODY_SCALE), col, 0.35);
                 }
                 u += 3.0;
             }
             for k in 0..3 {
-                let q = end - lf * (len * 0.08 + 12.0 * k as f32);
-                line_solid(pb, q - lf * 3.0 + lp * 3.5, q, col, 0.9);
-                line_solid(pb, q - lf * 3.0 - lp * 3.5, q, col, 0.9);
+                let q = end - lf * (len * 0.08 + 12.0 * k as f32 * BODY_SCALE);
+                line_solid(pb, q - lf * (3.0 * BODY_SCALE) + lp * (3.5 * BODY_SCALE), q, col, 0.9);
+                line_solid(pb, q - lf * (3.0 * BODY_SCALE) - lp * (3.5 * BODY_SCALE), q, col, 0.9);
             }
         }
         CrabState::BurrowTell => {
@@ -1278,7 +1292,7 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2) {
             ring(pb, sc, r, col, 0.95, 1.0);
             for k in 0..8 {
                 let d = Vec2::from_angle(k as f32 * TAU / 8.0);
-                line_solid(pb, sc + d * (r - 2.0), sc + d * (r + 2.0), col, 0.85);
+                line_solid(pb, sc + d * (r - 2.0 * BODY_SCALE), sc + d * (r + 2.0 * BODY_SCALE), col, 0.85);
             }
         }
         CrabState::Flipped => {
@@ -1289,11 +1303,10 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2) {
         }
         CrabState::Wedged => {
             let g = w2s(gill_pos(view), cam);
-            ring(pb, g, GILL_RADIUS + 3.0 + 2.0 * pulse, (255, 236, 150), 0.85, 1.2);
+            ring(pb, g, GILL_RADIUS + (3.0 + 2.0 * pulse) * BODY_SCALE, (255, 236, 150), 0.85, 1.2);
         }
         _ => {}
     }
-    let _ = (f, c);
 }
 
 // ============================================================================
@@ -1331,7 +1344,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, _accent: Rgb) {
         CrabState::Burrow => {
             // A ring of disturbed floor where it went down, then nothing.
             let t = smoothstep(p);
-            ring(pb, c, 6.0 + 10.0 * t, BLOOD_MID, 0.25 * (1.0 - t), 1.2);
+            ring(pb, c, (6.0 + 10.0 * t) * BODY_SCALE, BLOOD_MID, 0.25 * (1.0 - t), 1.2);
             return;
         }
         CrabState::Flipped | CrabState::Righting => {
@@ -1403,8 +1416,8 @@ fn draw_dome(
         CrabState::Pose => 0.5,
         _ => 0.0,
     };
-    let base = *c + f * (sag * -1.4) + Vec2::new(0.0, (view.anim * 1.6).sin() * 0.35);
-    let Some((x0, x1, y0, y1)) = bbox(pb, base, DOME_HALF_LEN + 4.0, DOME_HALF_PERP + 4.0) else {
+    let base = *c + (f * (sag * -1.4) + Vec2::new(0.0, (view.anim * 1.6).sin() * 0.35)) * BODY_SCALE;
+    let Some((x0, x1, y0, y1)) = shell_bbox(pb, base, f) else {
         return;
     };
     let fl = f.dot(LIGHT);
@@ -1417,8 +1430,8 @@ fn draw_dome(
     for y in y0..=y1 {
         for x in x0..=x1 {
             let d = Vec2::new(x as f32, y as f32) - base;
-            let u = d.dot(f);
-            let v = d.dot(perp);
+            let u = d.dot(f) / BODY_SCALE;
+            let v = d.dot(perp) / BODY_SCALE;
             // The horseshoe: a wide rounded front, tapering to a narrow hinge
             // at the back.
             let front = 1.0 - ((u - 1.5) / 16.5).powi(2);
@@ -1431,8 +1444,8 @@ fn draw_dome(
             } else {
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
-            let in_dome = (-DOME_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
-            let rim = (v.abs() - half_w).abs() < 1.0 || (u - 16.5).abs() < 1.0 || (u + DOME_HALF_LEN).abs() < 1.0;
+            let in_dome = (-DOME_LOCAL_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
+            let rim = (v.abs() - half_w).abs() < 1.0 || (u - 16.5).abs() < 1.0 || (u + DOME_LOCAL_HALF_LEN).abs() < 1.0;
             if !in_dome {
                 // The movable spines down each flank of the abdomen: the saw
                 // edge that makes the silhouette a horseshoe crab's.
@@ -1441,7 +1454,7 @@ fn draw_dome(
                     blend_px(pb, x, y, apply_hit(HINGE_MID, hit), 0.95);
                     continue;
                 }
-                if rim && (-DOME_HALF_LEN - 1.0..=17.5).contains(&u) && v.abs() <= half_w + 1.2 {
+                if rim && (-DOME_LOCAL_HALF_LEN - 1.0..=17.5).contains(&u) && v.abs() <= half_w + 1.2 {
                     blend_px(pb, x, y, SHELL_OUT, 0.85);
                 }
                 continue;
@@ -1487,7 +1500,7 @@ fn draw_dome(
             }
             // A strong light edge and dark edge just inside the outline, so the
             // domed horseshoe shell survives library card downscale and dark floors.
-            let edge = (half_w - v.abs()).min(16.5 - u).min(u + DOME_HALF_LEN);
+            let edge = (half_w - v.abs()).min(16.5 - u).min(u + DOME_LOCAL_HALF_LEN);
             if !rim && edge < 3.4 {
                 let k = 1.0 - ((edge - 1.0) / 2.4).clamp(0.0, 1.0);
                 if lit > 0.10 {
@@ -1497,7 +1510,7 @@ fn draw_dome(
                 }
             }
             // The hinge: two knuckle bumps at the back of the shell.
-            let hinge = Vec2::new(-DOME_HALF_LEN + 1.5, 0.0);
+            let hinge = Vec2::new(-DOME_LOCAL_HALF_LEN + 1.5, 0.0);
             let dh = Vec2::new(u, v).dist(hinge);
             if dh < 4.0 && u < -7.0 {
                 let k = (1.0 - dh / 4.0).clamp(0.0, 1.0);
@@ -1533,8 +1546,8 @@ fn draw_dome(
     for y in y0..=y1 {
         for x in x0..=x1 {
             let d = Vec2::new(x as f32, y as f32) - base;
-            let u = d.dot(f);
-            let v = d.dot(perp);
+            let u = d.dot(f) / BODY_SCALE;
+            let v = d.dot(perp) / BODY_SCALE;
             let front = 1.0 - ((u - 1.5) / 16.5).powi(2);
             let half_w = if u >= -2.0 {
                 if front <= 0.0 {
@@ -1545,13 +1558,22 @@ fn draw_dome(
             } else {
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
-            let inside = (-DOME_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
-            let near_edge = (v.abs() - half_w).abs() < 1.35 || (u - 16.5).abs() < 1.35 || (u + DOME_HALF_LEN).abs() < 1.35;
+            let inside = (-DOME_LOCAL_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
+            let near_edge = (v.abs() - half_w).abs() < 1.35 || (u - 16.5).abs() < 1.35 || (u + DOME_LOCAL_HALF_LEN).abs() < 1.35;
             if !inside && near_edge {
                 blend_px(pb, x, y, SHELL_OUT, 0.92);
             }
         }
     }
+}
+
+/// Rasterize the shell in its original local units inside its rotated world bounds.
+fn shell_bbox(pb: &PixelBuffer, center: Vec2, facing: Vec2) -> Option<(i32, i32, i32, i32)> {
+    let half_len = DOME_HALF_LEN + 4.0 * BODY_SCALE;
+    let half_width = DOME_HALF_PERP + 4.0 * BODY_SCALE;
+    let x = facing.x.abs();
+    let y = facing.y.abs();
+    bbox(pb, center, x * half_len + y * half_width, y * half_len + x * half_width)
 }
 
 fn draw_legs(
@@ -1572,8 +1594,8 @@ fn draw_legs(
             } else {
                 5.0 + 1.6 * step.max(0.0)
             };
-            let root = *c + f * along + perp * side * 12.0;
-            let tip = root + perp * side * reach + f * (step * 1.4);
+            let root = *c + (f * along + perp * side * 12.0) * BODY_SCALE;
+            let tip = root + (perp * side * reach + f * (step * 1.4)) * BODY_SCALE;
             let col = shade3(HINGE_SH, HINGE_MID, HINGE_HI, 0.55);
             line_solid(pb, root, tip, apply_hit(col, hit * 0.7), 0.95);
             blend_px(pb, tip.x.round() as i32, tip.y.round() as i32, SHELL_SH, 0.9);
@@ -1586,22 +1608,22 @@ fn draw_telson(pb: &mut PixelBuffer, view: &CrabView, c: &Vec2, f: Vec2, hit: f3
     let tip = w2s(telson_tip(view), Vec2::ZERO) + (*c - w2s(view.pos, Vec2::ZERO));
     let lift = telson_lift(view);
     let seg = tip - hinge;
-    let len = seg.len().max(1.0);
+    let len = (seg.len() / BODY_SCALE).max(1.0);
     let dir = smooth_dir(seg);
     let perp = dir.perp();
     let pl = perp.dot(LIGHT);
 
     // Solid tapered chitin tail spike with dark outline flanks and a bright
     // sunlit dorsal ridge so the telson survives dark floors & card downscale!
-    let min_x = (hinge.x.min(tip.x) - 5.0).floor().max(0.0) as i32;
-    let max_x = (hinge.x.max(tip.x) + 5.0).ceil().min((pb.w as i32 - 1) as f32) as i32;
-    let min_y = (hinge.y.min(tip.y) - 5.0).floor().max(0.0) as i32;
-    let max_y = (hinge.y.max(tip.y) + 5.0).ceil().min((pb.h as i32 - 1) as f32) as i32;
+    let min_x = (hinge.x.min(tip.x) - 5.0 * BODY_SCALE).floor().max(0.0) as i32;
+    let max_x = (hinge.x.max(tip.x) + 5.0 * BODY_SCALE).ceil().min((pb.w as i32 - 1) as f32) as i32;
+    let min_y = (hinge.y.min(tip.y) - 5.0 * BODY_SCALE).floor().max(0.0) as i32;
+    let max_y = (hinge.y.max(tip.y) + 5.0 * BODY_SCALE).ceil().min((pb.h as i32 - 1) as f32) as i32;
     if min_x <= max_x && min_y <= max_y {
         for y in min_y..=max_y {
             for x in min_x..=max_x {
-                let rx = x as f32 - hinge.x;
-                let ry = y as f32 - hinge.y;
+                let rx = (x as f32 - hinge.x) / BODY_SCALE;
+                let ry = (y as f32 - hinge.y) / BODY_SCALE;
                 let along = rx * dir.x + ry * dir.y;
                 if along < -1.0 || along > len + 1.5 {
                     continue;
@@ -1631,12 +1653,12 @@ fn draw_telson(pb: &mut PixelBuffer, view: &CrabView, c: &Vec2, f: Vec2, hit: f3
         }
     }
     // The spike's gleaming bone-bright tip and the lift's warning ticks.
-    fill_disc(pb, tip, 1.2, apply_hit(SHELL_SPEC, hit), 0.98);
+    fill_disc(pb, tip, 1.2 * BODY_SCALE, apply_hit(SHELL_SPEC, hit), 0.98);
     if lift > 0.05 {
         for k in 0..3 {
             let t = (k as f32 + 1.0) / 4.0;
             let q = hinge + seg * t;
-            line_solid(pb, q, q + Vec2::new(0.0, -3.2 * lift), WEAK_GOLD, 0.42 + 0.34 * pulse);
+            line_solid(pb, q, q + Vec2::new(0.0, -3.2 * lift * BODY_SCALE), WEAK_GOLD, 0.42 + 0.34 * pulse);
         }
     }
 }
@@ -1655,7 +1677,7 @@ fn draw_eyes(
         CrabState::Wedged | CrabState::Recover | CrabState::Righting
     );
     for side in [-1.0f32, 1.0] {
-        let q = *c + f * 11.5 + perp * side * 6.2;
+        let q = *c + (f * 11.5 + perp * side * 6.2) * BODY_SCALE;
         let blink = if asleep {
             0.20
         } else if matches!(view.state, CrabState::Bulldoze) {
@@ -1663,35 +1685,35 @@ fn draw_eyes(
         } else {
             0.60 + 0.40 * pulse
         };
-        fill_disc(pb, q, 1.6, apply_hit(EYE, hit * 0.5), 0.95);
+        fill_disc(pb, q, 1.6 * BODY_SCALE, apply_hit(EYE, hit * 0.5), 0.95);
         if blink > 0.4 && !asleep {
             blend_px(
                 pb,
-                (q.x - 0.6).round() as i32,
-                (q.y - 0.4).round() as i32,
+                (q.x - 0.6 * BODY_SCALE).round() as i32,
+                (q.y - 0.4 * BODY_SCALE).round() as i32,
                 EYE_HI,
                 blink * 0.85,
             );
         }
         if asleep {
-            line_solid(pb, q - perp * 1.6, q + perp * 1.6, HINGE_SH, 0.9);
+            line_solid(pb, q - perp * (1.6 * BODY_SCALE), q + perp * (1.6 * BODY_SCALE), HINGE_SH, 0.9);
         }
     }
     // The front sensory slit: a pale line across the brow.
-    let a = *c + f * 13.0 + perp * 5.0;
-    let b = *c + f * 13.0 - perp * 5.0;
+    let a = *c + (f * 13.0 + perp * 5.0) * BODY_SCALE;
+    let b = *c + (f * 13.0 - perp * 5.0) * BODY_SCALE;
     line_solid(pb, a, b, SHELL_SH, 0.55);
-    line_solid(pb, a + f * 0.8, b + f * 0.8, SHELL_HI, 0.18);
+    line_solid(pb, a + f * (0.8 * BODY_SCALE), b + f * (0.8 * BODY_SCALE), SHELL_HI, 0.18);
 }
 
 fn draw_gills(pb: &mut PixelBuffer, view: &CrabView, c: &Vec2, f: Vec2, cam: Vec2, pulse: f32) {
-    let hinge = *c - f * (DOME_HALF_LEN - 2.0);
+    let hinge = *c - f * (DOME_HALF_LEN - 2.0 * BODY_SCALE);
     // A fan of pale lamellae spilling out of the lifted rear rim.
     for k in 0..9 {
         let a = -1.15 + 2.3 * (k as f32 / 8.0);
         let d = (-f).rotate(a);
         let len = (GILL_RADIUS * 1.6) * (0.65 + 0.35 * ((k as f32 * 1.7 + view.anim * 4.0).sin() * 0.5 + 0.5));
-        let q0 = hinge + d * 2.0;
+        let q0 = hinge + d * (2.0 * BODY_SCALE);
         let q1 = hinge + d * len;
         let col = if k % 2 == 0 { GILL_MID } else { GILL_SH };
         line_solid(pb, q0, q1, col, 0.9);
@@ -1700,7 +1722,7 @@ fn draw_gills(pb: &mut PixelBuffer, view: &CrabView, c: &Vec2, f: Vec2, cam: Vec
     // The wet blue under the fans.
     let g = w2s(gill_pos(view), cam);
     fill_disc(pb, g, GILL_RADIUS * 0.8, BLOOD_SH, 0.45);
-    ring(pb, g, GILL_RADIUS * 0.8 + 1.0, BLOOD_MID, 0.35, 1.0);
+    ring(pb, g, GILL_RADIUS * 0.8 + BODY_SCALE, BLOOD_MID, 0.35, 1.0);
 }
 
 /// The underside: a pale segmented plate, ten legs thrashing, gill books open.
@@ -1726,9 +1748,9 @@ fn draw_underside(
             let phase = view.anim * speed + k as f32 * 1.3 + if side > 0.0 { PI } else { 0.0 };
             let swing = phase.sin();
             let reach = 11.0 + 7.0 * swing.abs() + (k as f32 * 0.5);
-            let root = base + f * along + perp * side * 8.0;
-            let knee = root + perp * side * (reach * 0.55) + f * (swing * 3.0);
-            let tip = knee + perp * side * (reach * 0.55) + f * (-swing * 4.5);
+            let root = base + (f * along + perp * side * 8.0) * BODY_SCALE;
+            let knee = root + (perp * side * (reach * 0.55) + f * (swing * 3.0)) * BODY_SCALE;
+            let tip = knee + (perp * side * (reach * 0.55) - f * (swing * 4.5)) * BODY_SCALE;
             let col = shade3(HINGE_SH, HINGE_MID, HINGE_HI, 0.45 + 0.25 * swing.abs());
             line_solid(pb, root, knee, apply_hit(col, hit * 0.6), 0.95);
             line_solid(pb, knee, tip, mix(col, GILL_SH, 0.3), 0.90);
@@ -1737,14 +1759,14 @@ fn draw_underside(
     }
 
     // The pale underside plate (the same silhouette, inverted shading).
-    let Some((x0, x1, y0, y1)) = bbox(pb, base, DOME_HALF_LEN + 3.0, DOME_HALF_PERP + 3.0) else {
+    let Some((x0, x1, y0, y1)) = shell_bbox(pb, base, f) else {
         return;
     };
     for y in y0..=y1 {
         for x in x0..=x1 {
             let d = Vec2::new(x as f32, y as f32) - base;
-            let u = d.dot(f);
-            let v = d.dot(perp);
+            let u = d.dot(f) / BODY_SCALE;
+            let v = d.dot(perp) / BODY_SCALE;
             let front = 1.0 - ((u - 1.5) / 16.5).powi(2);
             let half_w = if u >= -2.0 {
                 if front <= 0.0 {
@@ -1755,7 +1777,7 @@ fn draw_underside(
             } else {
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
-            if u < -DOME_HALF_LEN - 0.5 || u > 16.5 || v.abs() > half_w {
+            if u < -DOME_LOCAL_HALF_LEN - 0.5 || u > 16.5 || v.abs() > half_w {
                 continue;
             }
             let nu = (u / 16.5).clamp(-1.0, 1.0);
@@ -1783,16 +1805,16 @@ fn draw_underside(
         let a = -1.2 + 2.4 * (k as f32 / 4.0);
         let d = f.rotate(a);
         let len = 8.0 + 2.0 * ((k as f32 + view.anim * 6.0).sin().abs());
-        line_solid(pb, g - d * 2.0, g + d * len, GILL_HI, 0.75);
-        line_solid(pb, g - d * 1.0, g + d * (len - 2.0), BLOOD_HI, 0.35);
+        line_solid(pb, g - d * (2.0 * BODY_SCALE), g + d * (len * BODY_SCALE), GILL_HI, 0.75);
+        line_solid(pb, g - d * BODY_SCALE, g + d * ((len - 2.0) * BODY_SCALE), BLOOD_HI, 0.35);
     }
-    ring(pb, g, GILL_RADIUS + 2.5 + 1.5 * pulse, WEAK_GOLD, 0.35 + 0.25 * pulse, 1.1);
+    ring(pb, g, GILL_RADIUS + (2.5 + 1.5 * pulse) * BODY_SCALE, WEAK_GOLD, 0.35 + 0.25 * pulse, 1.1);
     // Outline.
     for y in y0..=y1 {
         for x in x0..=x1 {
             let d = Vec2::new(x as f32, y as f32) - base;
-            let u = d.dot(f);
-            let v = d.dot(perp);
+            let u = d.dot(f) / BODY_SCALE;
+            let v = d.dot(perp) / BODY_SCALE;
             let front = 1.0 - ((u - 1.5) / 16.5).powi(2);
             let half_w = if u >= -2.0 {
                 if front <= 0.0 {
@@ -1803,7 +1825,7 @@ fn draw_underside(
             } else {
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
-            let edge = (v.abs() - half_w).abs() < 1.1 || (u - 16.5).abs() < 1.1 || (u + DOME_HALF_LEN).abs() < 1.1;
+            let edge = (v.abs() - half_w).abs() < 1.1 || (u - 16.5).abs() < 1.1 || (u + DOME_LOCAL_HALF_LEN).abs() < 1.1;
             if edge {
                 blend_px(pb, x, y, SHELL_OUT, 0.8);
             }
@@ -1827,27 +1849,27 @@ fn draw_death(
         for k in 0..3 {
             let along = (k as f32 - 1.0) * 6.0 + 1.5;
             let curl = smoothstep((t - k as f32 * 0.12).clamp(0.0, 1.0));
-            let root = *c + f * along + perp * side * 11.0;
-            let tip = root + perp * side * (7.0 * (1.0 - curl) + 1.5) + f * (3.0 * curl);
+            let root = *c + (f * along + perp * side * 11.0) * BODY_SCALE;
+            let tip = root + (perp * side * (7.0 * (1.0 - curl) + 1.5) + f * (3.0 * curl)) * BODY_SCALE;
             line_solid(pb, root, tip, apply_hit(HINGE_SH, hit * 0.6), 0.9);
         }
     }
     // The dome sags and splits; the blue runs out of every seam.
-    let sag = *c + Vec2::new(0.0, 1.5 * smoothstep(t));
+    let sag = *c + Vec2::new(0.0, 1.5 * smoothstep(t) * BODY_SCALE);
     draw_dome(pb, view, &sag, f, perp, hit, pulse, 3, false, None);
     for k in 0..7 {
         let a = -1.4 + 2.8 * (k as f32 / 6.0);
         let d = f.rotate(a);
         let len = 6.0 + 12.0 * smoothstep((t * 1.3 - k as f32 * 0.06).clamp(0.0, 1.0));
-        let q = sag + d * (8.0 + len * 0.3);
-        line_solid(pb, sag + d * 6.0, q, BLOOD_MID, 0.55 * (1.0 - t * 0.3));
+        let q = sag + d * ((8.0 + len * 0.3) * BODY_SCALE);
+        line_solid(pb, sag + d * (6.0 * BODY_SCALE), q, BLOOD_MID, 0.55 * (1.0 - t * 0.3));
         blend_px(pb, q.x.round() as i32, q.y.round() as i32, BLOOD_HI, 0.65 * (1.0 - t * 0.4));
     }
     if t < 0.4 {
         // One last tail twitch before it goes still.
         let tw = (t * 40.0).sin().abs() * (1.0 - t / 0.4);
         let hinge = *c - f * TELSON_HINGE;
-        let tip = hinge - f * TELSON_LENGTH + perp * tw * 8.0;
+        let tip = hinge - f * TELSON_LENGTH + perp * (tw * 8.0 * BODY_SCALE);
         line_solid(pb, hinge, tip, HINGE_MID, 0.85);
     }
 }
@@ -1958,7 +1980,7 @@ mod tests {
         // (Sampled on the nose: the gill fan sits `GILL_BACK` = 7 px behind the
         // centre with a 6.5 + 2 px catch, so the exact centre is inside it.)
         let nose = v.pos + unit_facing(&v) * (BODY_RADIUS * 0.6);
-        assert!(nose.dist(gill_pos(&v)) > GILL_RADIUS + 2.0);
+        assert!(nose.dist(gill_pos(&v)) > GILL_RADIUS + 2.0 * BODY_SCALE);
         assert_eq!(incoming_multiplier(&v, front, nose), 1.0);
         assert_eq!(incoming_multiplier(&v, front, gill_pos(&v)), GILL_DAMAGE_MULT);
 

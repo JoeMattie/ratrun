@@ -8253,7 +8253,7 @@ mod tests {
                 hh.app.set_next_seed(seed.parse().expect("RATRUN_DUMP_SEED must be a u64"));
             }
         }
-        if target.starts_with("outfall-") || target.starts_with("lantern-") {
+        if target.starts_with("outfall-") || target.starts_with("lantern-") || target.starts_with("horseshoe-") {
             hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
         }
         hh.frame(&[]);
@@ -8712,6 +8712,77 @@ mod tests {
                         w.level.objects.lights[mount].pos
                     }
                     _ => (w.player.pos + body.pos) * 0.5,
+                });
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            t if t.starts_with("horseshoe-") => {
+                use crate::game::art_boss_horseshoe_crab::{self as art, CrabState};
+                use crate::game::art_walls::WallKind;
+                use crate::game::collision::{cell_of, TileKind, TILE_F};
+                use crate::game::ecs::systems::boss::{Boss, BossArtView, BossKind, BossState};
+
+                hh.app.start_practice(Theme::Sewer);
+                hh.frame(&[KeyCode::Enter]);
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.player.loadout.weapons.clear();
+                w.shake_scale = 0.0;
+                let scene = &t["horseshoe-".len()..];
+                let (x, y) = cell_of(w.player.pos);
+                w.level.tiles.fill_cells(x - 7, y - 4, 13, 9, TileKind::Open);
+                if scene.starts_with("shell-") {
+                    w.level.tiles.fill_cells(x + 4, y - 4, 1, 9, TileKind::Wall(WallKind::Solid));
+                }
+                w.level.tiles.rebuild_masks();
+                let rat = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * TILE_F;
+                w.player.pos = rat;
+                assert!(w.force_boss_here(BossKind::HorseshoeCrab));
+                let entity = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let tail = scene == "tail";
+                {
+                    let mut boss = w.ecs.get_mut::<Boss>(entity).unwrap();
+                    // Start the charge with enough runway to show its locked lane.
+                    if scene != "arrival" {
+                        boss.pos = rat - Vec2::new(48.0, 0.0);
+                        boss.facing = Vec2::new(1.0, 0.0);
+                        boss.set_state(BossState::HorseshoeCrab(CrabState::Dome), 0.01);
+                    }
+                    if tail {
+                        // Skip the charge by placing the rat inside close tail reach.
+                        w.player.pos = boss.pos + Vec2::new(28.0, 0.0);
+                    }
+                    if scene == "death" {
+                        boss.hp = 0.0;
+                    }
+                }
+                let mut captured = false;
+                for _ in 0..320 {
+                    w.update(1.0 / 60.0, Vec2::ZERO, false);
+                    let boss = w.ecs.get::<Boss>(entity).unwrap();
+                    captured = match scene {
+                        "arrival" => boss.anim >= 0.20,
+                        "shell-tell" => boss.state == BossState::HorseshoeCrab(CrabState::BulldozeTell)
+                            && boss.progress() >= 0.75,
+                        "shell-strike" => boss.state == BossState::HorseshoeCrab(CrabState::Bulldoze)
+                            && boss.progress() >= 0.26,
+                        "tail" => boss.state == BossState::HorseshoeCrab(CrabState::TelsonSweep)
+                            && boss.progress() >= art::TELSON_ACTIVE_PROGRESS + 0.12,
+                        "death" => boss.dead && boss.progress() >= 0.40,
+                        _ => panic!("unknown Horseshoe capture: {scene}"),
+                    };
+                    if captured {
+                        break;
+                    }
+                }
+                assert!(captured, "The Horseshoe did not reach {scene}");
+                let body = w.ecs.get::<Boss>(entity).unwrap();
+                let BossArtView::HorseshoeCrab(view) = body.view() else { unreachable!() };
+                let close = std::env::var("RATRUN_DUMP_ZOOM").ok().as_deref() == Some("0.5");
+                w.cam_focus = Some(match scene {
+                    "shell-tell" | "shell-strike" if !close => (view.pos + view.target) * 0.5 - view.facing * 12.0,
+                    "tail" => (view.pos + art::telson_tip(&view)) * 0.5,
+                    _ => view.pos - view.facing * (14.0 * if close { 0.5 } else { 1.0 }),
                 });
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
@@ -10466,11 +10537,24 @@ mod tests {
                         hh.frame(&[KeyCode::Enter]);
                     }
                 }
-                if kind == BossKind::Lantern {
+                if matches!(kind, BossKind::Lantern | BossKind::HorseshoeCrab) {
+                    if kind == BossKind::HorseshoeCrab {
+                        hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                    }
                     let w = hh.app.world.as_mut().unwrap();
+                    if kind == BossKind::HorseshoeCrab {
+                        w.set_zoom_instant(1.25);
+                    }
                     let focus = w.ecs.iter_entities().find_map(|e| {
-                        let view = e.get::<crate::game::ecs::systems::boss::Boss>()?.lantern_view()?;
-                        Some(view.pos - view.facing * 40.0)
+                        use crate::game::ecs::systems::boss::{Boss, BossArtView};
+                        match e.get::<Boss>()?.view() {
+                            BossArtView::Lantern(v) => Some(v.pos - v.facing * 40.0),
+                            BossArtView::HorseshoeCrab(v) => {
+                                let tip = crate::game::art_boss_horseshoe_crab::telson_tip(&v);
+                                Some(v.pos + (tip - v.pos) * 0.28)
+                            }
+                            _ => None,
+                        }
                     });
                     w.cam_focus = focus;
                     hh.app.picture_dirty = true;
@@ -11171,8 +11255,12 @@ mod tests {
         }
         // Reframe scripted Outfall poses without ticking their tells.
         let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
-        let frozen_pose = posed_outfall || target.starts_with("w6-") || target.starts_with("w8-")
-            || target.starts_with("dropping-") || target.starts_with("miniboss-milk-");
+        let frozen_pose = posed_outfall
+            || target.starts_with("horseshoe-")
+            || target.starts_with("w6-")
+            || target.starts_with("w8-")
+            || target.starts_with("dropping-")
+            || target.starts_with("miniboss-milk-");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())

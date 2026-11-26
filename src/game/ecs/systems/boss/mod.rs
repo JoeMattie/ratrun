@@ -559,7 +559,7 @@ impl BossKind {
             // the fight ran 127.5 s mean (the bot orbits into the dome and
             // loses half its damage); `0.70` lands it in the 45-80 s band at
             // ~64 s. A balance pass owns the final number.
-            BossKind::HorseshoeCrab => 1.65,
+            BossKind::HorseshoeCrab => 2.9,
             // SUBJECT R-01 is the Kitchen's *second* fight and the mirror
             // fight: every rotation spends a third of its time in a punish
             // window (a ×1.35 belly, a ×1.25 tail base) and it calls three
@@ -3671,55 +3671,15 @@ fn emit_cues(
                 vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
             }
 
-            // ---- the horseshoe crab -------------------------------------
-            // Its feedback is all shell and wet floor: the rattle and the
-            // charge are a dust kick off the concrete, the tail is the mower's
-            // steel clang family, and the death is the crab's own blue.
-            BossCue::CrabRattle => {
-                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.12);
-            }
-            BossCue::CrabTelsonCock => {
-                vfx::emit_boss_mower_overheat_steam(particles, rng, boss.pos, boss.facing, 0.10);
-            }
-            BossCue::CrabTelsonSweep => {
-                let view = boss.crab_view();
-                let tip = art_boss_horseshoe_crab::telson_tip(&view);
-                vfx::emit_boss_mower_wall_impact(particles, rng, tip, boss.facing, false);
-            }
-            BossCue::CrabCharge => {
-                vfx::emit_boss_mower_charge_trail(particles, rng, boss.pos, boss.facing, false, 0.10);
-            }
-            BossCue::CrabWedge => {
-                let view = boss.crab_view();
-                let gill = art_boss_horseshoe_crab::gill_pos(&view);
-                vfx::emit_boss_mower_wall_impact(particles, rng, gill, -boss.facing, true);
-            }
-            BossCue::CrabBurrow => {
-                let at = boss.target;
-                vfx::emit_boss_broom_stomp(
-                    particles,
-                    rng,
-                    at,
-                    art_boss_horseshoe_crab::BURROW_RADIUS * 0.6,
-                    boss.phase >= 3,
-                );
-            }
-            BossCue::CrabEmerge => {
-                vfx::emit_boss_broom_stomp(
-                    particles,
-                    rng,
-                    boss.pos,
-                    art_boss_horseshoe_crab::BURROW_RADIUS,
-                    true,
-                );
-            }
-            BossCue::CrabFlip => {
-                vfx::emit_boss_mower_flipped_smoke(particles, rng, boss.pos, 0.12);
-            }
-            BossCue::CrabDeath => {
-                let blood = (44, 92, 190);
-                vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
-            }
+            BossCue::CrabRattle
+            | BossCue::CrabTelsonCock
+            | BossCue::CrabTelsonSweep
+            | BossCue::CrabCharge
+            | BossCue::CrabWedge
+            | BossCue::CrabBurrow
+            | BossCue::CrabEmerge
+            | BossCue::CrabFlip
+            | BossCue::CrabDeath => horseshoe_crab::emit_cue(cue, boss, particles, rng),
             // ---- SUBJECT R-01 -------------------------------------------
             // The rat's own feedback, at boss scale: paw dust for the chitter
             // and the incisors coming up, the human's slam for the teeth going
@@ -4049,19 +4009,25 @@ pub fn boss_spawn_system(
     // once a floor, so its own is built here rather than borrowed.
     let mut scratch = SpawnScratch::default();
     let spawn_point_reachable = crate::game::ecs::systems::spawn::spawn_point_reachable;
-    let pos = if kind == BossKind::Lantern {
-        let Some(pos) = lantern_scheduled_landing(&mut boss_rng, &level, &player, viewport.0) else {
-            // Retry when the rat moves rather than materialising in view.
-            due.claimed = false;
-            override_kind.0 = Some(kind);
-            return;
-        };
-        pos
-    } else {
-        let landing = spawn_point_reachable(&mut boss_rng, &level, &player, viewport.0, &mut scratch);
-        // A rat holed up where the ring is solid still gets its fight beside
-        // itself, exactly like a console `boss here`.
-        landing.unwrap_or_else(|| arrival_beside(&level, player.pos, radius, &arena))
+    let pos = match kind {
+        BossKind::Lantern | BossKind::HorseshoeCrab => {
+            let landing = if kind == BossKind::Lantern {
+                lantern_scheduled_landing(&mut boss_rng, &level, &player, viewport.0)
+            } else {
+                horseshoe_crab::scheduled_landing(&mut boss_rng, &level, player.pos, viewport.0)
+            };
+            let Some(pos) = landing else {
+                // Retry when the rat moves instead of materializing in view.
+                due.claimed = false;
+                override_kind.0 = Some(kind);
+                return;
+            };
+            pos
+        }
+        _ => {
+            let landing = spawn_point_reachable(&mut boss_rng, &level, &player, viewport.0, &mut scratch);
+            landing.unwrap_or_else(|| arrival_beside(&level, player.pos, radius, &arena))
+        }
     };
     let arena = if kind == BossKind::Lantern {
         lantern_fight_rect(&level, player.pos, pos)
@@ -4085,10 +4051,20 @@ pub fn boss_spawn_system(
         &tuning,
     );
     let accent = level.palette.accent;
-    vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
+    emit_arrival_fx(kind, &mut particles, &mut fight.rng.0, pos, accent);
     shake.amount = shake.amount.max(14.0);
     sfx.0.push(Sfx::Boss);
     commands.spawn((boss, next_spawn_id.take()));
+}
+
+pub(crate) fn emit_arrival_fx(kind: BossKind, particles: &mut Particles, rng: &mut StdRng, pos: Vec2, accent: Rgb) {
+    if kind == BossKind::HorseshoeCrab {
+        particles.with_scaled_emission(pos, art_boss_horseshoe_crab::BODY_SCALE, |particles| {
+            vfx::emit_boss_spawn(particles, rng, pos, accent);
+        });
+    } else {
+        vfx::emit_boss_spawn(particles, rng, pos, accent);
+    }
 }
 
 pub(crate) fn boss_dock(level: &Level, kind: BossKind, arena: TileRect) -> Vec2 {
@@ -4135,7 +4111,7 @@ pub(crate) fn lantern_fight_rect(level: &Level, rat: Vec2, head: Vec2) -> TileRe
     TileRect::new(left, top, right - left, bottom - top)
 }
 
-fn lantern_arrival_hidden(level: &Level, rat: Vec2, viewport: Vec2, head: Vec2) -> bool {
+fn out_of_arrival_view(level: &Level, rat: Vec2, viewport: Vec2, pos: Vec2, margin: f32) -> bool {
     use crate::game::ecs::systems::spawn::widest_view;
     let half = widest_view(viewport) * 0.5;
     let camera_axis = |position: f32, extent: f32, half: f32| {
@@ -4145,9 +4121,12 @@ fn lantern_arrival_hidden(level: &Level, rat: Vec2, viewport: Vec2, head: Vec2) 
         camera_axis(rat.x, level.arena.x, half.x),
         camera_axis(rat.y, level.arena.y, half.y),
     );
-    let delta = head - center;
-    delta.x.abs() > half.x + LANTERN_ARRIVAL_MARGIN
-        || delta.y.abs() > half.y + LANTERN_ARRIVAL_MARGIN
+    let delta = pos - center;
+    delta.x.abs() > half.x + margin || delta.y.abs() > half.y + margin
+}
+
+fn lantern_arrival_hidden(level: &Level, rat: Vec2, viewport: Vec2, pos: Vec2) -> bool {
+    out_of_arrival_view(level, rat, viewport, pos, LANTERN_ARRIVAL_MARGIN)
 }
 
 fn lantern_scheduled_landing(
@@ -4902,7 +4881,7 @@ pub fn boss_update_system(
                         boss.facing = to.normalized();
                     }
                     let accent = level.palette.accent;
-                    vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, spot, accent);
+                    emit_arrival_fx(boss.kind, &mut particles, &mut fight.rng.0, spot, accent);
                     shake.amount = shake.amount.max(8.0);
                     sfx.0.push(Sfx::Boss);
                 }
@@ -4941,7 +4920,15 @@ pub fn boss_update_system(
         if near && walled_off {
             fight.siege += dt;
             if fight.siege >= SIEGE_AFTER_SECS {
-                if let Some(cell) = smash_target(&level, boss.pos, player.pos) {
+                let wall = if boss.kind == BossKind::HorseshoeCrab {
+                    // A two-cell corridor can be passable down its centreline
+                    // but still block the enlarged shell at the shoulders.
+                    level.tiles.segment_hit_face(boss.pos, player.pos, boss.kind.body_radius())
+                        .map(|(_, _, cell)| cell)
+                } else {
+                    None
+                };
+                if let Some(cell) = wall.or_else(|| smash_target(&level, boss.pos, player.pos)) {
                     smash_wall(&mut level, cell);
                     let hole = Vec2::new(
                         (cell.0 as f32 + 1.0) * collision::TILE_F,

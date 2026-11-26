@@ -779,8 +779,11 @@ fn boss_extent(kind: BossKind) -> (f32, f32) {
         ),
         BossKind::NightEdition => (48.0, 44.0),
         BossKind::Magpie => (52.0, 42.0),
-        // The tail trails 39 px astern of the body point.
-        BossKind::HorseshoeCrab => (82.0, 46.0),
+        // Scale the still plate with the shell and its long rear spike.
+        BossKind::HorseshoeCrab => {
+            let size = crate::game::art_boss_horseshoe_crab::BODY_SCALE;
+            (82.0 * size, 46.0 * size)
+        }
         BossKind::MegaRat => (68.0, 44.0),
         // Wings at full span over the hover's lift.
         BossKind::Hawk => (58.0, 60.0),
@@ -809,6 +812,7 @@ fn boss_anchor_x(kind: BossKind) -> f32 {
             (art_boss_mangle::BODY_RADIUS + 10.0) / need_w
         }
         BossKind::Lantern => 0.66,
+        BossKind::HorseshoeCrab => 0.64,
         _ => 0.5,
     }
 }

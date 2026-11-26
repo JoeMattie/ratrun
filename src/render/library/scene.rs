@@ -1229,8 +1229,16 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
             b.point(art_boss_magpie::beak_tip(&v), 4.0);
         }
         BossArtView::HorseshoeCrab(v) => {
-            // The telson is longer than the dome's hit box.
-            b.point(art_boss_horseshoe_crab::telson_tip(&v), 5.0);
+            // Include the legs beyond the shell hit box and the long telson.
+            let side = art_boss_horseshoe_crab::unit_facing(&v).perp();
+            let reach = if matches!(v.state, art_boss_horseshoe_crab::CrabState::Flipped | art_boss_horseshoe_crab::CrabState::Righting) {
+                art_boss_horseshoe_crab::LEGS_OUTER
+            } else {
+                19.0 * art_boss_horseshoe_crab::BODY_SCALE
+            };
+            b.point(v.pos + side * reach, 6.0 * art_boss_horseshoe_crab::BODY_SCALE);
+            b.point(v.pos - side * reach, 6.0 * art_boss_horseshoe_crab::BODY_SCALE);
+            b.point(art_boss_horseshoe_crab::telson_tip(&v), 5.0 * art_boss_horseshoe_crab::BODY_SCALE);
         }
         BossArtView::MegaRat(v) => {
             let f = facing_of(v.facing);
