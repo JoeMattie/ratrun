@@ -73,7 +73,8 @@ const BOSS_STAGE: u8 = 7;
 /// 60 s on the Sewer, 40 s on the Kitchen and 15 s on the Lab). Reading the
 /// wall clock here announced the Sewer's schedule on every level.
 pub fn elite_badge_due(world: &World) -> bool {
-    !world.director.boss_spawned
+    !(world.testbed && world.peace)
+        && !world.director.boss_spawned
         && director::curve_clock(world.level_index(), world.elapsed)
             >= director::ELITE_START - 5.0
         && world.director.elite_timer <= 4.0
@@ -1359,10 +1360,11 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // from a countdown to a boss-fight state instead of sitting at 00:00.
     let boss_phase = world.boss_time_reached();
     let time_left = world.time_left();
-    let urgent = !boss_phase && time_left <= BOSS_URGENT_SECS;
+    let urgent = !world.testbed && !boss_phase && time_left <= BOSS_URGENT_SECS;
     let boss_alive = state.telemetry.boss_alive;
     let clock_boss = boss_phase || boss_alive;
-    let boss_soon = !world.director.boss_spawned
+    let boss_soon = !world.testbed
+        && !world.director.boss_spawned
         && !boss_phase
         && world.elapsed >= director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS;
     let elite_due = elite_badge_due(world);
@@ -1370,7 +1372,9 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
 
     // Format numbers into retained buffers (zero per-frame heap allocation).
     refill(&mut state.time, |b| {
-        if boss_phase {
+        if world.testbed {
+            fmt_time_into(b, world.elapsed);
+        } else if boss_phase {
             // Time *into* the fight since the boss arrived.
             fmt_time_into(b, world.elapsed - director::BOSS_TIME);
         } else {

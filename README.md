@@ -287,7 +287,7 @@ clears the bank and every permanent upgrade).
 
 ## Modes
 
-Everyday play is `ratrun`. Three extra modes exist for watching and measuring:
+Everyday play is `ratrun`. You can also watch and measure self-playing runs.
 
 ```sh
 # A wall of self-playing games (default 16, max 32), each drawn for real.
@@ -315,6 +315,26 @@ Terminal diagnostics: `ratrun --caps` prints what the game resolved about your
 terminal and exits; `--probe` also prints the terminal's actual answer to the
 keyboard-protocol query. `--color truecolor|256|16` and
 `--glyphs unicode|safe` override detection.
+
+### Testbed
+
+Launch `ratrun --testbed [--floor sewer|kitchen|laundry|lab|printworks|flatbed]`
+or enter `testbed [floor]` in the console. The default is Sewer. You start in
+the sector's largest hall with god mode enabled. XP still counts, and the
+testbed skips upgrade cards, scheduled encounters, scores, and banking.
+
+| Keys | Action |
+| --- | --- |
+| `1` / `2`, `3` | Cycle rank-5 weapons and toggle evolution |
+| `4` / `5`, `6` | Cycle pickups and drop one ahead |
+| `7` / `8`, `9`, `0` | Cycle enemies, spawn five, or clear all enemies and bosses |
+| `F1` / `F2`, `F3` | Cycle bosses and start the selected fight |
+| `F5` / `F6`, `F7` | Cycle minibosses and spawn the selected one |
+| `H`, `J`, `K` | Toggle god mode, toggle the horde, or kill visible enemies for loot |
+| `T`, `F10` | Cycle sectors and toggle the testbed panel |
+
+Custom bindings take priority. With default bindings, `P` pauses and
+`Esc` or `Q` returns to the title from the playfield.
 
 ## Environment variables
 

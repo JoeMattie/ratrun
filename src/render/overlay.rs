@@ -504,7 +504,8 @@ fn draw_boss_warning(
 /// Draw Boss Countdown Warning, Arrival Banner, or Persistent Boss Health Bar.
 /// Returns how many rows at the top of `game` are occupied by boss chrome.
 fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudState) -> u16 {
-    let boss_soon = !world.director.boss_spawned
+    let boss_soon = !world.testbed
+        && !world.director.boss_spawned
         && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
         && world.elapsed < director::BOSS_TIME;
     let pulse = 0.5 + 0.5 * (state.clock * 8.0).sin();

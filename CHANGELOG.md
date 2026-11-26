@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added an interactive testbed for trying every weapon, evolution, pickup,
+  enemy, miniboss, and boss on any sector. Launch it with `--testbed` or the
+  console's `testbed` command.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

@@ -18,12 +18,16 @@ use ratatui::Frame;
 
 use crate::audio::{self, AudioEngine, Sfx};
 use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
+use crate::game::collision::SizeClass;
+use crate::game::ecs::systems::{boss::BossKind, miniboss::MinibossKind};
+use crate::game::enemy::EnemyKind;
 use crate::game::gem::PickupKind;
 use crate::game::library::{self as library_index, Key as LibraryKey};
 use crate::game::level::Theme;
 use crate::game::loadout::{ChestReward, Loadout, PassiveKind, SlotCaps, Upgrade};
 use crate::game::shop;
 use crate::game::ecs::resources::DashHold;
+use crate::game::weapon::WeaponKind;
 use crate::game::world::World;
 use crate::controls::{self, Action, Binding, Device, KeyBind, MouseBind, Scheme, ACTIONS};
 use crate::gamepad::PadPoller;
@@ -44,6 +48,83 @@ use crate::render::shop as shop_ui;
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
+
+#[derive(Clone, Copy)]
+struct Testbed {
+    weapon: WeaponKind,
+    pickup: PickupKind,
+    enemy: EnemyKind,
+    boss: BossKind,
+    miniboss: MinibossKind,
+    show_panel: bool,
+    granted_partner: Option<PassiveKind>,
+}
+
+impl Default for Testbed {
+    fn default() -> Self {
+        Self {
+            weapon: WeaponKind::all()[0],
+            pickup: PickupKind::all()[0],
+            enemy: EnemyKind::all()[0],
+            boss: BossKind::all()[0],
+            miniboss: MinibossKind::all()[0],
+            show_panel: true,
+            granted_partner: None,
+        }
+    }
+}
+
+impl Testbed {
+    fn remove_partner(&mut self, world: &mut World) {
+        let Some(partner) = self.granted_partner.take() else {
+            return;
+        };
+        let loadout = &mut world.player.loadout;
+        loadout.passives.retain_mut(|(kind, stacks)| {
+            if *kind == partner {
+                *stacks = stacks.saturating_sub(1);
+            }
+            *stacks > 0
+        });
+        loadout.rebuild_stats();
+        world.player.hp = world.player.hp.min(world.player.max_hp());
+    }
+
+    fn select_weapon(&mut self, world: &mut World) {
+        self.remove_partner(world);
+        world.player.loadout.weapons.clear();
+        world.give_weapon(self.weapon, self.weapon.max_level());
+    }
+
+    fn toggle_evolution(&mut self, world: &mut World) {
+        let Some(evolution) = self.weapon.evolution() else {
+            return;
+        };
+        let weapon = world.player.loadout.weapons.iter_mut().find(|w| w.kind == self.weapon);
+        match weapon {
+            Some(weapon) if weapon.evolved => {
+                weapon.evolved = false;
+                self.remove_partner(world);
+                return;
+            }
+            Some(weapon) => weapon.level = weapon.kind.max_level(),
+            None => self.select_weapon(world),
+        }
+        let loadout = &mut world.player.loadout;
+        if loadout.stacks(evolution.passive) == 0 {
+            loadout.passives.push((evolution.passive, 1));
+            loadout.rebuild_stats();
+            self.granted_partner = Some(evolution.passive);
+        }
+        world.evolve_weapon(self.weapon);
+    }
+}
+
+fn testbed_cycle<T: Copy + PartialEq>(table: &[T], current: T, forward: bool) -> T {
+    let index = table.iter().position(|&entry| entry == current).unwrap_or(0);
+    let step = if forward { 1 } else { table.len() - 1 };
+    table[(index + step) % table.len()]
+}
 
 /// Backdrop behind the campaign's full-screen plates (the same near-black the
 /// story dossier paints).
@@ -338,6 +419,7 @@ pub struct App {
     /// A single-sector practice run: the floor it plays alone. The campaign
     /// stage it belongs to is [`crate::game::campaign::theme_stage`].
     practice: Option<Theme>,
+    testbed: Option<Testbed>,
     /// The floor chosen for the level being packed on the keep screen (the
     /// route choice, `WAVE3_DESIGN.md` §1). Reset when the manifest opens.
     keep_route: Option<Theme>,
@@ -646,6 +728,7 @@ impl App {
             menu_idx: 0,
             campaign: None,
             practice: None,
+            testbed: None,
             keep_route: None,
             records: [LevelRecord::default(); campaign::LEVEL_COUNT],
             keep_items: Vec::new(),
@@ -1101,6 +1184,7 @@ impl App {
         // all).
         self.campaign = Some(CampaignState::with_modifiers(seed, self.run_modifiers()));
         self.practice = None;
+        self.testbed = None;
         // A brand-new run starts clean: console cheats live in the world (and
         // the carried loadout), so a fresh world carries no taint.
         self.console_cheat = false;
@@ -1124,6 +1208,14 @@ impl App {
     /// the campaign's fourth level (`campaign::theme_stage`), and a practice run
     /// on it plays that index's map and boss on the first level's scalars.
     fn start_practice(&mut self, theme: Theme) {
+        self.start_practice_with(theme, None);
+    }
+
+    pub(crate) fn start_testbed(&mut self, theme: Theme) {
+        self.start_practice_with(theme, Some(self.testbed.unwrap_or_default()));
+    }
+
+    fn start_practice_with(&mut self, theme: Theme, testbed: Option<Testbed>) {
         // The floor's own campaign level, the ride's fourth included.
         let level = campaign::theme_stage(theme).min(campaign::LEVEL_COUNT - 1);
         // A practice run is a side-route floor too, so it uses the same seeded
@@ -1132,7 +1224,8 @@ impl App {
         self.begin_run_bookkeeping();
         self.campaign = None;
         self.practice = Some(theme);
-        self.console_cheat = false;
+        self.testbed = testbed;
+        self.console_cheat = testbed.is_some();
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
         self.keep_entries.clear();
@@ -1142,19 +1235,30 @@ impl App {
         // The theme is the floor the player picked, not the stage's original
         // one: `new_level` derives the theme from the level index, so a side
         // route needs the explicit constructor.
+        // A testbed starts from neutral stats for repeatable weapon trials.
+        let loadout = match self.testbed {
+            Some(testbed) => Loadout::new(testbed.weapon),
+            None => Loadout::with_modifiers(Loadout::START_WEAPON, self.run_modifiers()),
+        };
         let mut world = World::new_level_with_theme(
             level,
             theme,
             seed,
-            // A practice run still gets the profile's permanent upgrades: the
-            // nest is the player's, not the campaign's.
-            Loadout::with_modifiers(Loadout::START_WEAPON, self.run_modifiers()),
+            loadout,
             campaign::CampaignTotals::default(),
         );
         // No carried build: play this sector's map and boss on the first
         // level's difficulty curve instead of the campaign's late-run one.
         world.difficulty_override = Some(0);
+        if let Some(testbed) = self.testbed.as_mut() {
+            testbed.granted_partner = None;
+            testbed.select_weapon(&mut world);
+            world.configure_testbed();
+        }
         self.enter_world(world, false);
+        if self.testbed.is_some() {
+            self.screen = Screen::Playing;
+        }
     }
 
     /// Start the sector the select screen points at: sector 1 is the campaign
@@ -1232,8 +1336,10 @@ impl App {
         self.hud.reset();
         // Entering a floor is discovering it, and it resets the per-floor
         // discovery marks (the library's "seen" counts floors, not frames).
-        self.scores.library.begin_floor();
-        self.scores.library.mark_seen(LibraryKey::Floor(theme));
+        if self.testbed.is_none() {
+            self.scores.library.begin_floor();
+            self.scores.library.mark_seen(LibraryKey::Floor(theme));
+        }
         // Announcing the nest once per floor keeps the permanent bonuses
         // distinct from the in-run passives the HUD rack grows: this is what the
         // rat carried *in*. Silent for a fresh profile.
@@ -1305,6 +1411,7 @@ impl App {
     /// Another run of the kind just played, skipping the story dossier.
     fn retry(&mut self) {
         match self.practice {
+            Some(theme) if self.testbed.is_some() => self.start_testbed(theme),
             Some(theme) => self.start_practice(theme),
             None => self.start_campaign(false),
         }
@@ -1321,6 +1428,7 @@ impl App {
         self.world = None;
         self.campaign = None;
         self.practice = None;
+        self.testbed = None;
         self.screen = Screen::Title;
         self.menu_music();
     }
@@ -1875,6 +1983,7 @@ impl App {
         }
         self.campaign = Some(campaign);
         self.practice = None;
+        self.testbed = None;
         self.console_floor = None;
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
@@ -1907,15 +2016,11 @@ impl App {
 
     /// Restart the current run from the top (`restart`).
     pub fn restart_run(&mut self) -> Result<(), String> {
-        if let Some(theme) = self.practice {
-            self.start_practice(theme);
-            Ok(())
-        } else if self.campaign.is_some() {
-            self.start_campaign(false);
-            Ok(())
-        } else {
-            Err("no run in progress".to_string())
+        if self.practice.is_none() && self.campaign.is_none() {
+            return Err("no run in progress".to_string());
         }
+        self.retry();
+        Ok(())
     }
 
     /// Close the console. A console `pause` ends with it: the pause is a
@@ -3145,7 +3250,110 @@ impl App {
         }
     }
 
+    /// Handle bare testbed keys while the field owns input. Bindings in the
+    /// active scheme keep precedence, including their secondary slots.
+    fn update_testbed_keys(&mut self) -> bool {
+        let (Some(testbed), Some(world)) = (&mut self.testbed, &mut self.world) else {
+            return false;
+        };
+        let bindings = self.input.controls.active();
+        let mut cleared = false;
+        for event in &self.input.pressed {
+            let Ok(binding) = KeyBind::from_event(event) else {
+                continue;
+            };
+            if bindings.action_for_kbm(Binding::Key(binding)).is_some() {
+                continue;
+            }
+            let key = match event.code {
+                KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+                code => code,
+            };
+            match key {
+                KeyCode::Char('1' | '2') => {
+                    testbed.weapon = testbed_cycle(
+                        &WeaponKind::all(), testbed.weapon, key == KeyCode::Char('2'),
+                    );
+                    testbed.select_weapon(world);
+                }
+                KeyCode::Char('3') => testbed.toggle_evolution(world),
+                KeyCode::Char('4' | '5') => {
+                    testbed.pickup = testbed_cycle(
+                        &PickupKind::all(), testbed.pickup, key == KeyCode::Char('5'),
+                    );
+                }
+                KeyCode::Char('6') => {
+                    let pos = world.testbed_spawn_point(
+                        world.player.face, 24.0, 1.0, SizeClass::Small,
+                    );
+                    world.spawn_pickup_near(testbed.pickup, pos, 0.0);
+                }
+                KeyCode::Char('7' | '8') => {
+                    let kinds = EnemyKind::all();
+                    let forward = key == KeyCode::Char('8');
+                    testbed.enemy = testbed_cycle(&kinds, testbed.enemy, forward);
+                    if testbed.enemy == EnemyKind::Boss {
+                        testbed.enemy = testbed_cycle(&kinds, testbed.enemy, forward);
+                    }
+                }
+                KeyCode::Char('9') => {
+                    let kind = testbed.enemy;
+                    for i in 0..5 {
+                        let direction = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 5.0);
+                        let pos = world.testbed_spawn_point(
+                            direction, 70.0, kind.radius(), SizeClass::of_enemy(kind),
+                        );
+                        world.spawn_enemy_near(kind, pos, 0.0, false);
+                    }
+                }
+                KeyCode::Char('0') => {
+                    world.clear_enemies();
+                    world.clear_testbed_boss();
+                    self.prev_boss_alive = false;
+                    self.prev_miniboss_alive = false;
+                    self.hud.telemetry.set_boss_alive(false);
+                    self.hud.telemetry.set_boss_hp(None);
+                    self.hud.telemetry.set_boss_offset(None);
+                    self.hud.telemetry.set_enemy_count(0);
+                    cleared = true;
+                }
+                KeyCode::F(1 | 2) => {
+                    testbed.boss = testbed_cycle(&BossKind::all(), testbed.boss, key == KeyCode::F(2));
+                }
+                KeyCode::F(3) => {
+                    world.clear_testbed_boss();
+                    world.force_boss_here(testbed.boss);
+                }
+                KeyCode::F(5 | 6) => {
+                    testbed.miniboss = testbed_cycle(
+                        &MinibossKind::all(), testbed.miniboss, key == KeyCode::F(6),
+                    );
+                }
+                KeyCode::F(7) => {
+                    let radius = testbed.miniboss.body_radius();
+                    let pos = world.testbed_spawn_point(
+                        world.player.face, 60.0, radius, SizeClass::Large,
+                    );
+                    world.spawn_miniboss_near(testbed.miniboss, pos);
+                }
+                KeyCode::Char('h') => world.player.god = !world.player.god,
+                KeyCode::Char('j') => world.peace = !world.peace,
+                KeyCode::Char('k') => world.kill_testbed_visible(),
+                KeyCode::Char('t') => {
+                    let theme = testbed_cycle(&Theme::playable(), world.level.theme, true);
+                    self.start_testbed(theme);
+                    return true;
+                }
+                KeyCode::F(10) => testbed.show_panel = !testbed.show_panel,
+                _ => {}
+            }
+        }
+        // Show the cleared field for this frame, even with the horde enabled.
+        cleared
+    }
+
     fn update_playing(&mut self, dt: f32, click: Option<Target>) {
+        let testbed_changed_field = !self.map_open && self.update_testbed_keys();
         // The minimap is the first claim on Tab, a click on the compact map and
         // Esc: while it is open those *close* it instead of pausing. The
         // simulation keeps running either way.
@@ -3208,6 +3416,13 @@ impl App {
         if self.input.action_pressed(Action::MinimapSize) {
             self.cycle_minimap_size();
         }
+        if self.testbed.is_some()
+            && (self.input.action_pressed(Action::Quit)
+                || (!self.map_open && !esc_used && self.input.just_pressed(KeyCode::Esc)))
+        {
+            self.back_to_title();
+            return;
+        }
         // Esc is both the pause key and the map's close key, so the map's own
         // close this frame wins: closing the map never pauses.
         if click == Some(Target::Pause)
@@ -3223,6 +3438,9 @@ impl App {
         // reading the route is never paid for in health. Tab, Esc or a click
         // on the map closes it and play resumes on the next frame.
         if self.map_open {
+            return;
+        }
+        if testbed_changed_field {
             return;
         }
         // Console `pause on`: the world holds still until `pause off`. The
@@ -5522,6 +5740,19 @@ impl App {
             if matches!(self.screen, Screen::Playing) {
                 let _p = crate::prof::scope(crate::prof::Stage::Overlays);
                 overlay::draw_overlays(frame, game, w, &mut self.hud);
+                if let Some(testbed) = self.testbed.filter(|testbed| testbed.show_panel && !self.map_open) {
+                    let weapon = w.player.loadout.weapons.iter()
+                        .find(|weapon| weapon.kind == testbed.weapon)
+                        .and_then(|weapon| weapon.evolution())
+                        .map_or_else(|| testbed.weapon.name(), |evolution| evolution.name);
+                    crate::render::testbed::draw(frame, game, w, [
+                        weapon,
+                        library_index::name_of(LibraryKey::Pickup(testbed.pickup)),
+                        library_index::name_of(LibraryKey::Enemy(testbed.enemy)),
+                        library_index::name_of(LibraryKey::Boss(testbed.boss)),
+                        testbed.miniboss.name(),
+                    ]);
+                }
             }
             let _p = crate::prof::scope(crate::prof::Stage::Hud);
             hud::draw_top(frame, top, w, &mut self.hud);
@@ -5978,6 +6209,241 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect()
         }
+    }
+
+    #[test]
+    fn testbed_starts_in_the_hall_and_only_manual_encounters_arrive() {
+        use crate::game::director::{BOSS_TIME, MINIBOSS_TIMES};
+
+        let mut h = Harness::new(57, 20);
+        let floor = LibraryKey::Floor(Theme::Sewer);
+        let floor_seen = h.app.scores.library.is_seen(floor);
+        h.app.start_testbed(Theme::Sewer);
+        let text = h.frame(&[]);
+        assert!(text.contains("TESTBED · F10 hide"));
+        assert!(text.contains("H god on · J horde off"));
+        assert!(h.app.console_cheat);
+        assert_eq!(h.app.scores.library.is_seen(floor), floor_seen);
+        let w = h.app.world.as_mut().unwrap();
+        assert!(w.player.god);
+        assert!(w.peace);
+        assert!(w.level.largest_hall().unwrap().rect.contains_world(w.player.pos));
+        assert_eq!(w.enemy_count(), 0);
+        assert!(w.next_miniboss_time().is_none());
+        w.elapsed = MINIBOSS_TIMES[0];
+        let gem = crate::game::gem::Gem::new(w.player.pos, w.player.xp_to_next);
+        w.spawn_gem(gem);
+        h.frame(&[]);
+        let w = h.app.world.as_mut().unwrap();
+        assert_eq!(w.enemy_count(), 0);
+        assert_eq!(w.pending_levelups, 0);
+        assert!(w.player.level > 1);
+        assert!(h.app.screen == Screen::Playing);
+
+        w.elapsed = BOSS_TIME - 0.02;
+        let text = h.frame(&[]);
+        assert!(!text.contains("BOSS INBOUND"));
+        h.frame(&[KeyCode::Char('j')]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(!w.peace);
+        assert!(w.enemy_count() > 0);
+        assert!(w.miniboss_hp().is_none());
+        assert!(w.boss_kind().is_none());
+        assert!(!w.director.boss_spawned);
+        h.frame(&[KeyCode::Char('h'), KeyCode::Char('j')]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(!w.player.god);
+        assert!(w.peace);
+    }
+
+    #[test]
+    fn testbed_cycles_all_arrays_and_wraps_both_ways() {
+        let mut h = Harness::new(57, 20);
+        h.app.start_testbed(Theme::Sewer);
+        let weapons = WeaponKind::all();
+        for expected in weapons.into_iter().rev() {
+            h.frame(&[KeyCode::Char('1')]);
+            let rack = &h.app.world.as_ref().unwrap().player.loadout.weapons;
+            assert_eq!(rack.len(), 1);
+            assert_eq!(rack[0].kind, expected);
+            assert_eq!(rack[0].level, 5);
+            assert!(!rack[0].evolved);
+        }
+        h.frame(&[KeyCode::Char('1')]);
+        assert_eq!(h.app.testbed.unwrap().weapon, *weapons.last().unwrap());
+        h.frame(&[KeyCode::Char('2')]);
+        assert_eq!(h.app.testbed.unwrap().weapon, weapons[0]);
+
+        let arrays = [KeyCode::Char('4'), KeyCode::Char('7'), KeyCode::F(1), KeyCode::F(5)];
+        h.frame(&arrays);
+        let picks = h.app.testbed.unwrap();
+        assert_eq!(picks.pickup, *PickupKind::all().last().unwrap());
+        assert_eq!(picks.enemy, *EnemyKind::all().last().unwrap());
+        assert_eq!(picks.boss, *BossKind::all().last().unwrap());
+        assert_eq!(picks.miniboss, *MinibossKind::all().last().unwrap());
+        h.frame(&[KeyCode::Char('5'), KeyCode::Char('8'), KeyCode::F(2), KeyCode::F(6)]);
+        let picks = h.app.testbed.unwrap();
+        assert_eq!(picks.pickup, PickupKind::all()[0]);
+        assert_eq!(picks.enemy, EnemyKind::all()[0]);
+        assert_eq!(picks.boss, BossKind::all()[0]);
+        assert_eq!(picks.miniboss, MinibossKind::all()[0]);
+
+        h.app.testbed.as_mut().unwrap().enemy = EnemyKind::Brute;
+        h.frame(&[KeyCode::Char('8')]);
+        assert_eq!(h.app.testbed.unwrap().enemy, EnemyKind::Pillbug);
+        h.frame(&[KeyCode::Char('7')]);
+        assert_eq!(h.app.testbed.unwrap().enemy, EnemyKind::Brute);
+    }
+
+    #[test]
+    fn testbed_evolves_drops_spawns_and_clears() {
+        let mut h = Harness::new(120, 40);
+        h.app.start_testbed(Theme::Sewer);
+        h.frame(&[KeyCode::Char('3')]);
+        let weapon = h.app.testbed.unwrap().weapon;
+        let evolution = weapon.evolution().unwrap();
+        let loadout = &h.app.world.as_ref().unwrap().player.loadout;
+        assert!(loadout.weapons[0].evolved);
+        assert_eq!(loadout.stacks(evolution.passive), 1);
+        h.frame(&[KeyCode::Char('3')]);
+        let loadout = &h.app.world.as_ref().unwrap().player.loadout;
+        assert!(!loadout.weapons[0].evolved);
+        assert_eq!(loadout.stacks(evolution.passive), 0);
+
+        h.frame(&[KeyCode::Char('4'), KeyCode::Char('6'), KeyCode::Char('8'), KeyCode::Char('9')]);
+        let picks = h.app.testbed.unwrap();
+        let w = h.app.world.as_mut().unwrap();
+        assert!(w.pickups().iter().any(|p| p.kind == picks.pickup));
+        let enemies = w.enemies();
+        assert_eq!(enemies.len(), 5);
+        assert!(enemies.iter().all(|e| e.kind == picks.enemy));
+
+        h.frame(&[KeyCode::F(2), KeyCode::F(3)]);
+        assert_eq!(h.app.world.as_ref().unwrap().boss_kind(), Some(BossKind::all()[1]));
+        h.frame(&[KeyCode::F(2), KeyCode::F(3)]);
+        assert_eq!(h.app.world.as_ref().unwrap().boss_kind(), Some(BossKind::all()[2]));
+        h.frame(&[KeyCode::F(6), KeyCode::F(7)]);
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.miniboss_hp().map(|(name, _, _)| name), Some(MinibossKind::all()[1].name()));
+        let kills = w.kills;
+        h.frame(&[KeyCode::Char('0')]);
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.enemy_count(), 0);
+        assert!(w.miniboss_hp().is_none());
+        assert!(w.boss_kind().is_none());
+        assert_eq!(w.kills, kills);
+    }
+
+    #[test]
+    fn testbed_kill_reaps_loot_and_boss_defeat_keeps_playing() {
+        use crate::game::ecs::systems::boss::Boss;
+
+        let mut h = Harness::new(80, 24);
+        h.app.start_testbed(Theme::Sewer);
+        h.frame(&[]);
+        let w = h.app.world.as_mut().unwrap();
+        let visible = w.player.pos + Vec2::new(20.0, 0.0);
+        w.spawn_enemy(EnemyKind::Skitterer, visible, 1.0);
+        let offscreen = w.player.pos + Vec2::new(240.0, 0.0);
+        let offscreen_body = w.spawn_enemy(EnemyKind::Skitterer, offscreen, 1.0);
+        h.frame(&[KeyCode::Char('k')]);
+        let w = h.app.world.as_mut().unwrap();
+        assert_eq!(w.kills, 1);
+        assert_eq!(w.gems().len(), 1);
+        assert!(w.ecs.get::<crate::game::enemy::Enemy>(offscreen_body).is_some());
+
+        h.frame(&[KeyCode::F(3)]);
+        let death_ticks = {
+            let w = h.app.world.as_mut().unwrap();
+            let mut bosses = w.ecs.query::<&mut Boss>();
+            let mut live = bosses.iter_mut(&mut w.ecs);
+            let mut boss = live.next().unwrap();
+            boss.hp = 0.0;
+            (boss.kind.death_duration() * 60.0).ceil() as usize + 2
+        };
+        h.app.step_ticks(death_ticks);
+        h.frame(&[]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(w.boss_kind().is_none());
+        assert!(!w.finished());
+        assert!(h.app.screen == Screen::Playing);
+    }
+
+    #[test]
+    fn testbed_controls_preserve_menus_bindings_and_selections() {
+        let mut h = Harness::new(80, 24);
+        h.app.start_testbed(Theme::Trailer);
+        h.frame(&[KeyCode::Char('2'), KeyCode::Char('5'), KeyCode::Char('8'), KeyCode::F(2), KeyCode::F(6)]);
+        let before = h.app.testbed.unwrap();
+        h.frame(&[KeyCode::Char('t')]);
+        assert_eq!(h.app.world.as_ref().unwrap().level.theme, Theme::Sewer);
+        let after = h.app.testbed.unwrap();
+        assert_eq!(after.weapon, before.weapon);
+        assert_eq!(after.pickup, before.pickup);
+        assert_eq!(after.enemy, before.enemy);
+        assert_eq!(after.boss, before.boss);
+        assert_eq!(after.miniboss, before.miniboss);
+
+        assert!(!h.frame(&[KeyCode::F(10)]).contains("F10 hide"));
+        assert!(h.frame(&[KeyCode::F(10)]).contains("F10 hide"));
+        h.frame(&[KeyCode::Tab]);
+        assert!(h.app.map_open);
+        h.frame(&[KeyCode::Esc]);
+        assert!(!h.app.map_open);
+        assert!(h.app.screen == Screen::Playing);
+        h.frame(&[KeyCode::Char('p')]);
+        assert!(h.app.screen == Screen::Paused);
+        h.frame(&[KeyCode::Char('o')]);
+        assert!(h.app.screen == Screen::Options);
+        h.app.options_row = options::GRAPHICS_ROW;
+        h.frame(&[KeyCode::Enter]);
+        assert!(h.app.screen == Screen::Graphics);
+        h.frame(&[KeyCode::Esc]);
+        h.frame(&[KeyCode::Esc]);
+        h.frame(&[KeyCode::Char('p')]);
+        assert!(h.app.screen == Screen::Playing);
+
+        h.app.input.controls.bind_active_kbm(Action::Map, Binding::Key(KeyBind::Char('9')));
+        h.frame(&[KeyCode::Char('9')]);
+        assert!(h.app.map_open);
+        assert_eq!(h.app.world.as_ref().unwrap().enemy_count(), 0);
+        h.frame(&[KeyCode::Char('9')]);
+        h.frame(&[KeyCode::Esc]);
+        assert!(h.app.screen == Screen::Title);
+        h.app.start_testbed(Theme::Sewer);
+        let bank = h.app.nest_bank();
+        h.app.world.as_mut().unwrap().gold = 999;
+        h.frame(&[KeyCode::Char('q')]);
+        assert!(h.app.screen == Screen::Title);
+        assert_eq!(h.app.nest_bank(), bank);
+    }
+
+    #[test]
+    fn testbed_keys_do_nothing_new_in_normal_play() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.world.as_mut().unwrap().peace = true;
+        h.frame(&[KeyCode::Char('9'), KeyCode::Char('2'), KeyCode::F(3), KeyCode::Char('h')]);
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.enemy_count(), 0);
+        assert!(w.boss_kind().is_none());
+        assert!(!w.player.god);
+        assert_eq!(w.player.loadout.weapons[0].level, 1);
+    }
+
+    #[test]
+    fn testbed_console_command_restarts_on_the_named_sector() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        crate::console::run_command(&mut h.app, "testbed flatbed").unwrap();
+        assert!(h.app.screen == Screen::Playing);
+        assert_eq!(h.app.world.as_ref().unwrap().level.theme, Theme::Trailer);
+        assert!(h.app.console_cheat);
+        assert!(h.app.testbed.is_some());
+        crate::console::run_command(&mut h.app, "restart").unwrap();
+        assert!(h.app.testbed.is_some());
+        crate::console::run_command(&mut h.app, "testbed").unwrap();
+        assert_eq!(h.app.world.as_ref().unwrap().level.theme, Theme::Sewer);
     }
 
     #[test]
@@ -7611,6 +8077,13 @@ mod tests {
         hh.frame(&[]);
 
         match target.as_str() {
+            "testbed" | "testbed-boss" => {
+                hh.app.start_testbed(Theme::Sewer);
+                hh.frame(&[KeyCode::Char('4'), KeyCode::Char('6'), KeyCode::Char('7')]);
+                if target == "testbed-boss" {
+                    hh.frame(&[KeyCode::F(3)]);
+                }
+            }
             // The dash module and the on-rat gauge in each of their three
             // states. `RATRUN_DUMP_CTRL=1` captures the Ctrl mapping (the
             // default is the Space fallback).

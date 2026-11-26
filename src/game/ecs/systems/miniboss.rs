@@ -1483,6 +1483,9 @@ pub fn miniboss_system(
         }
     }
     schedule.active = alive;
+    if counters.testbed {
+        return;
+    }
 
     // 2. Appointments. A surviving miniboss retreats without loot when the
     //    next one arrives, so only one is ever on the floor.

@@ -151,6 +151,10 @@ fn main() -> Result<()> {
     }
 
     let ai = parse_spectate_args(&args)?;
+    let testbed = parse_testbed_args(&args)?;
+    if ai.is_some() && testbed.is_some() {
+        bail!("choose either --ai or --testbed");
+    }
 
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -180,8 +184,24 @@ fn main() -> Result<()> {
         // `ratrun --ai [N]`: the self-playing wall. No `AudioEngine` is ever
         // constructed on this path (spectate.rs has no audio code at all).
         Some(opts) => spectate::run(&mut terminal, keys.kitty, opts),
-        None => run(&mut terminal, keys),
+        None => run(&mut terminal, keys, testbed),
     }
+}
+
+fn parse_testbed_args(args: &[String]) -> Result<Option<game::level::Theme>> {
+    if !args.iter().any(|arg| arg == "--testbed") {
+        return Ok(None);
+    }
+    let Some(index) = args.iter().position(|arg| arg == "--floor") else {
+        return Ok(Some(game::level::Theme::Sewer));
+    };
+    let name = args
+        .get(index + 1)
+        .filter(|arg| !arg.starts_with("--"))
+        .context("--floor needs a sector name")?;
+    Ok(Some(
+        console::find_floor(name).with_context(|| format!("unknown sector {name:?}"))?,
+    ))
 }
 
 /// Parse the self-playing wall's flags: `--ai [N]`, `--seed S`,
@@ -582,10 +602,14 @@ pub(crate) fn drain_input(
 fn run(
     terminal: &mut Terminal<CrosstermBackend<FrameOut>>,
     keys: KeyboardMode,
+    testbed: Option<game::level::Theme>,
 ) -> Result<()> {
     let audio = audio::AudioEngine::new();
     let mut app = App::new(keys.kitty, audio);
     app.set_lone_ctrl(keys.lone_ctrl);
+    if let Some(theme) = testbed {
+        app.start_testbed(theme);
+    }
     let target = Duration::from_micros(16_667); // ~60 FPS
     let mut last = Instant::now();
 
@@ -668,6 +692,24 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn testbed_cli_defaults_to_sewer_and_accepts_every_sector() {
+        use game::level::Theme;
+
+        assert_eq!(parse_testbed_args(&args(&["--testbed"])).unwrap(), Some(Theme::Sewer));
+        for theme in Theme::playable() {
+            let cli = args(&["--floor", theme.name(), "--testbed"]);
+            assert_eq!(parse_testbed_args(&cli).unwrap(), Some(theme));
+            assert_eq!(parse_spectate_args(&cli).unwrap(), None);
+        }
+        assert!(parse_testbed_args(&args(&["--testbed", "--floor"])).is_err());
+        assert!(parse_testbed_args(&args(&["--testbed", "--floor", "--caps"])).is_err());
+        assert!(parse_testbed_args(&args(&["--testbed", "--floor", "unknown"])).is_err());
+        assert_eq!(parse_testbed_args(&args(&["--bot-batch", "4", "--caps", "4:4"])).unwrap(), None);
+        assert_eq!(parse_testbed_args(&args(&["--caps"])).unwrap(), None);
+        assert_eq!(parse_testbed_args(&args(&["--floor", "sewer"])).unwrap(), None);
     }
 
     #[test]

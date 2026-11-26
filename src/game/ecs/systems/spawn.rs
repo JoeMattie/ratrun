@@ -346,6 +346,9 @@ pub fn director_system(
     // used to: give the ones still outside the 1.0 view their approach speed back (no
     // rng, no spawn, no position) before anything else this tick.
     boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
+    if counters.testbed && console.debug.peace {
+        return;
+    }
     // The campaign level shifts the whole curve (`director::curve_clock`), which
     // also freezes at the boss time, so the horde keeps its late-curve rate for
     // as long as the boss fight lasts.
@@ -408,7 +411,9 @@ pub fn director_system(
         if schedule.suppress(elapsed) || console.debug.peace {
             // Quiet after the death, or `peace on`: hold every fresh spawn,
             // but keep the boss hand-off alive.
-            director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+            if !counters.testbed {
+                director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+            }
             return;
         }
         // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
@@ -660,7 +665,9 @@ pub fn director_system(
 
     // Boss hand-off (no generic boss spawn any more): the boss framework reads
     // `BossDue` and spawns the level's boss in its arena.
-    director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+    if !counters.testbed {
+        director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+    }
 }
 
 /// The role of the `j`-th body of a Lilliputian squad **that made it onto the

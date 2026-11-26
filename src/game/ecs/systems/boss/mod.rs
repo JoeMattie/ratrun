@@ -4506,7 +4506,7 @@ pub fn boss_update_system(
                 // window — the removal itself is `loot::reap_enemies_system`'s
                 // job, after the last index reader. See
                 // [`BossFight::horde_break`].
-                fight.horde_break = true;
+                fight.horde_break = !counters.testbed;
             }
             // The death beat: the per-kind controller queues its last-gasp
             // hazards (the mower's detonation) and its death cues.
