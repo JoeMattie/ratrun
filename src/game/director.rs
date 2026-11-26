@@ -248,6 +248,7 @@ pub struct Director {
     /// scale it spawned with. Never an rng draw, never a spawn, never a position.
     pub approach: Vec<(u64, f32)>,
     pub(crate) pressure: PressureState,
+    pub(crate) power: HordePower,
 }
 
 impl Default for Director {
@@ -265,7 +266,48 @@ impl Default for Director {
             chamber_room: -1,
             approach: Vec::new(),
             pressure: PressureState::default(),
+            power: HordePower::default(),
         }
+    }
+}
+
+/// Floor-local weapon throughput. Both rates use the same exponential memory,
+/// so a change in the reference curve has the same lag as a change in damage.
+/// The director reads the ledger before this tick's weapons run.
+#[derive(Default)]
+pub(crate) struct HordePower {
+    previous_damage: f32,
+    actual_dps: f32,
+    expected_dps: f32,
+}
+
+impl HordePower {
+    pub(crate) fn tick(&mut self, tuning: &crate::tuning::Director, level: usize, elapsed: f32, dt: f32, total_damage: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        // Use the nominal horde's rate and HP curves. The current power boost,
+        // surges, and balance overlays never raise the reference behind the rat.
+        let expected = (tuning.power_reference_hp[level_slot(level)]
+            * spawn_rate_for(level, elapsed) * horde_hp_mult_for(level, elapsed)).max(f32::MIN_POSITIVE);
+        if self.expected_dps == 0.0 {
+            self.expected_dps = expected;
+            self.actual_dps = expected;
+        }
+        let damage = (total_damage - self.previous_damage).max(0.0);
+        self.previous_damage = total_damage;
+        let window = tuning.power_memory_secs + dt;
+        self.actual_dps += (damage - self.actual_dps * dt) / window;
+        self.expected_dps += (expected - self.expected_dps) * (dt / window);
+    }
+
+    pub(crate) fn hp(&self, tuning: &crate::tuning::Director) -> f32 {
+        if !tuning.power_scaling || self.expected_dps == 0.0 || tuning.power_hp_exponent == 0.0 {
+            return 1.0;
+        }
+        (self.actual_dps / self.expected_dps)
+            .dpowf(tuning.power_hp_exponent)
+            .clamp(tuning.power_hp_floor, tuning.power_hp_ceiling)
     }
 }
 

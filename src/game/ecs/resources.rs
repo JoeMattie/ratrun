@@ -371,12 +371,9 @@ pub struct Shake {
 /// Cumulative damage the player's weapons actually dealt, split by weapon
 /// (`WeaponKind::all()` index).
 ///
-/// This is *instrumentation*, not simulation: nothing reads it inside the
-/// schedule, so it cannot change behaviour or rng draws, and it is reset when a
-/// new [`crate::game::world::World`] is built (one per campaign level). The
-/// batch harness (`autoplay`) reads it to report each weapon's share of total
-/// damage — the number that used to be inferred from "Tail Whip is about half
-/// of boss damage" anecdotes.
+/// This resets when a new [`crate::game::world::World`] is built (one per
+/// campaign floor). The batch harness reads it to report per-weapon damage
+/// shares, and the opt-in director reads horde damage for power scaling.
 ///
 /// Damage is booked at the sites that hurt an enemy, as *effective* damage
 /// (`hp_before - hp_after`, floored at zero), so overkill on a nearly-dead
@@ -385,7 +382,8 @@ pub struct Shake {
 /// harness from the boss fight's per-tick tally instead (`autoplay`).
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct DamageLedger {
-    /// Effective damage dealt to every enemy, by weapon index.
+    /// Effective damage dealt to every enemy, by weapon index. The opt-in
+    /// director uses deltas from this column for recent horde throughput.
     pub dealt: [f32; crate::game::weapon::WEAPON_SLOTS],
     /// Effective damage dealt to **the boss**, by weapon index.
     ///

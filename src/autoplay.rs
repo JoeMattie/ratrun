@@ -693,8 +693,7 @@ pub struct LevelStats {
     /// One-line cause-of-death classification (diagnostic, not a spec).
     pub death_note: Option<String>,
     /// Effective damage dealt to enemies, by weapon (`WeaponKind::all()`
-    /// index). Read from the simulation's `DamageLedger`, which no system
-    /// reads back: pure balance instrumentation.
+    /// index). Read from the simulation's `DamageLedger`.
     pub dealt: [f32; crate::game::weapon::WEAPON_SLOTS],
     /// Damage dealt to this level's boss, by weapon (`WeaponKind::all()`
     /// index). The boss is not an `Enemy`, so this comes from the boss fight's
@@ -756,6 +755,8 @@ pub struct LevelStats {
     pub boss_hp_lost: f32,
     /// Floor-clock time each level-up was offered, including simultaneous cards.
     pub level_up_times: Vec<f32>,
+    /// Floor-clock time the bot upgraded a one-weapon rack to two weapons.
+    pub second_weapon_at: Option<f32>,
 }
 
 /// One named miniboss fight on a level (the wave 3 appointment system).
@@ -1208,8 +1209,13 @@ impl AutoRun {
         let pick = self.bot.pick_upgrade(&self.world, &choices);
         let pick = pick.min(choices.len() - 1);
         let title = self.world.player.loadout.describe(&choices[pick]).0;
+        let one_weapon = self.world.player.loadout.weapons.len() == 1;
         let heal = self.world.player.loadout.apply(&choices[pick]);
         self.world.player.heal(heal);
+        if one_weapon && self.world.player.loadout.weapons.len() == 2 {
+            let elapsed = self.world.elapsed;
+            self.level_stats().second_weapon_at.get_or_insert(elapsed);
+        }
         // The wallet belongs to the caller, not the loadout: without this a
         // Purse card was a wasted level-up for the bot.
         if matches!(choices[pick], crate::game::loadout::Upgrade::Purse) {

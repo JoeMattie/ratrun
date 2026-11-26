@@ -101,6 +101,12 @@ section!(Director {
     pressure_sector_scale: [f32; 4] = [0.65, 1.0, 1.15, 1.25]; "Beat strength by campaign sector. Zero skips beats and warnings",
     pressure_sewer_opening_secs: f32 = 150.0; "Length of Sewer opening contact grace in seconds",
     pressure_sewer_opening_cut: f32 = 0.35; "Fraction of ordinary contact damage removed during Sewer opening grace",
+    power_scaling: bool = false; "Adjust newly spawned ordinary and elite enemy HP to recent weapon damage",
+    power_hp_exponent: f32 = 0.45; "Raise the measured to expected damage ratio to this power",
+    power_hp_floor: f32 = 0.7; "Minimum power-based HP multiplier",
+    power_hp_ceiling: f32 = 1.4; "Maximum power-based HP multiplier",
+    power_memory_secs: f32 = 18.0; "Damage averaging time constant in simulation seconds",
+    power_reference_hp: [f32; 4] = [13.0, 16.0, 25.0, 15.0]; "Expected damage per scheduled body at unit horde HP, by sector",
 });
 
 pub(crate) const SECTOR_KEYS: [&str; 4] = ["1", "2", "3", "4"];
@@ -389,6 +395,14 @@ impl Tuning {
             bail!("xp.gem_tier_min must be in ascending order");
         }
         let director = &self.director;
+        if director.power_hp_floor <= 0.0 || director.power_hp_floor > 1.0
+            || director.power_hp_ceiling < 1.0
+        {
+            bail!("director power HP bounds must satisfy 0 < floor <= 1 <= ceiling");
+        }
+        if director.power_memory_secs <= 0.0 || director.power_reference_hp.contains(&0.0) {
+            bail!("director power_memory_secs and power_reference_hp must be positive");
+        }
         if director.pressure_recovery_budget_cut > 1.0
             || director.pressure_recovery_heal > 1.0
             || director.pressure_sewer_opening_cut >= 1.0

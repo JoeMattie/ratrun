@@ -80,6 +80,22 @@ by `pressure_warning_lead` seconds. Set it to zero for silent starts.
   `pressure_sewer_opening_cut` give the rat a timed reprieve from ordinary
   contact damage while it picks up its first cards.
 
+## Horde power scaling
+
+Set `power_scaling = true` in `[director]` to size the next wave against
+recent effective weapon damage. Each ordinary pulse and timed elite takes
+one HP multiplier at spawn. The scripted opening pair, guests, minibosses,
+and floor bosses keep their encounter HP. Spawn cadence and payouts stay
+on their existing curves. The shipped power switch is off.
+
+The director divides smoothed damage per second by a smoothed reference.
+The reference combines the nominal horde rate and HP curves with
+`power_reference_hp`, a four-sector calibration in HP per scheduled body at
+unit horde HP. `power_memory_secs` is the averaging time constant. The sample
+starts neutral on each floor and holds its last buildup value during boss
+cleanup. The director raises the ratio to `power_hp_exponent` and clamps it
+between `power_hp_floor` and `power_hp_ceiling`.
+
 ## Boss hazards
 
 Every boss kind accepts `attack_damage_mult` for timed hazard damage and `tell_time_mult` for the warning portion of a queued hazard. Both default to 1.0. Body contact has its own `contact_damage_mult`. A hazard keeps its footprint and the length of its active window.
