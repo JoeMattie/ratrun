@@ -1,5 +1,9 @@
 # Rat Run 🐀
 
+**[▶ Play in your browser](https://joemattie.github.io/ratrun/)** — desktop, or a phone
+held in landscape. It can be added to the home screen.
+Native builds: [latest release downloads](https://github.com/JoeMattie/ratrun/releases/latest).
+
 A **bullet-hell horde survivor** for your terminal — *Vampire Survivors* rendered
 in half-block "pixels" with 2D lighting, cast shadows, particles and a lot of
 screen shake, running entirely in a text terminal. Built in Rust with
@@ -137,6 +141,9 @@ dark.*
 
 ## Install
 
+Nothing to install for a quick look: **[play the web build in your
+browser](https://joemattie.github.io/ratrun/)**.
+
 Tagged releases attach prebuilt binaries: a universal macOS build (a
 double-clickable `Rat Run.app` that opens the game in Ghostty, iTerm2 or
 Terminal, and the bare `ratrun` binary), Linux x86_64 and Windows x86_64. The
@@ -180,6 +187,12 @@ cargo clippy --all-targets
 ```
 
 ## Web build
+
+The deployed edition is at **[joemattie.github.io/ratrun](https://joemattie.github.io/ratrun/)**.
+It runs on a desktop browser or a phone held in landscape, and the page can be
+added to a phone's home screen to open full screen without the address bar; a
+service worker caches the build, so a home-screen install plays with no
+network. Scores, settings and the Nest use the browser's local storage.
 
 Build the browser edition with the pinned Rust toolchain and Node.js/npm.
 The script installs the matching `wasm-bindgen` CLI in `.tools/` and uses
