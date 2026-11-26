@@ -3684,7 +3684,7 @@ impl World {
             if let Some((_, _, muzzle)) = newest {
                 let t = (muzzle.cycle - weapon.timer).max(0.0);
                 if t < LAVA_MUZZLE_SECS {
-                    let mouth = self.player.pos + muzzle.dir * (LAVA_MOUTH_OFFSET * giant.unwrap_or(1.0));
+                    let mouth = self.player.pos + muzzle.dir * (LAVA_MOUTH_OFFSET * scale.unwrap_or(1.0));
                     super::art_lava::draw_breath(pb, mouth, muzzle.dir, cam, t);
                     self.light_map.mark_emissive_highlights(pb, self.w2s(mouth, cam), 8);
                 }
