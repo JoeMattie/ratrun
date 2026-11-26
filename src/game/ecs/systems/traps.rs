@@ -1837,6 +1837,23 @@ mod tests {
     }
 
     #[test]
+    fn empty_crab_pot_releases_one_crab_at_its_mouth() {
+        let (mut w, c) = pot_world();
+        w.peace = false;
+        pot_ticks(&mut w, 1);
+        w.player.pos = c - FACING * 25.0;
+        pot_ticks(&mut w, 21);
+        assert_eq!(pot(&w).state, CrabPotState::Shut);
+        assert!(w.enemies().is_empty());
+        pot_ticks(&mut w, 2);
+        assert_eq!(pot(&w).state, CrabPotState::Open);
+        let bodies = w.enemies();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].kind, EnemyKind::ShoreCrab);
+        assert_eq!(bodies[0].pos, c + FACING * (POT_HALF + DOOR_DEPTH));
+    }
+
+    #[test]
     fn crab_pot_holds_the_rat_and_an_actual_dash_breaks_free_after_a_quarter_second() {
         let (mut w, c) = pot_world();
         let hp = w.player.hp;

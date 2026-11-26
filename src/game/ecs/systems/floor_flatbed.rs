@@ -65,7 +65,6 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::collision::{self, SizeClass};
 use crate::game::ecs::components::SpawnId;
-use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Level;
@@ -693,6 +692,7 @@ fn can_tick(
 
 #[cfg(test)]
 mod tests {
+    use crate::game::ecs::constants::PLAYER_RADIUS;
     use super::*;
     use crate::game::level::Theme;
     use crate::game::world::World;

@@ -3,20 +3,26 @@
 ## Unreleased
 
 - **The Outfall.** The storm gate opens a third Sector 2 route after the
-  Sewer. Cross wet sand bowls and pilings under the surge, skirt tidal drops,
-  and look for lure traps that release Congers.
-- **Outfall encounters.** Eight ordinary enemies join the roster and four
-  named encounters guard the return culvert. The Library tracks their moves,
-  the new floor and its fixtures.
-- **The Lantern.** An anglerfish lures you in, snuffs sconces and casts a
-  decoy before pulling you toward its jaws.
-- **Outfall lighting and foreground.** Cyan wall lamps, caustics and marine
-  snow light the culvert. Kelp, broken hull ribs and bubble chains cross the
-  view when Foreground is enabled.
-- **Return Current.** The Outfall's four-intensity score adds a displaced
-  bell echo over a D-minor bass line.
-- **The Lantern grows.** The anglerfish is three times larger, swings a longer lure and puts up a longer fight.
-
+  Sewer. Cross sandy ripples and seabed plants under blue-green light,
+  caustics and marine snow. Wear a diving suit and swim above your shadow.
+- **Outfall encounters.** Eight ordinary enemies, the Shore Crab and four
+  named encounters guard the culvert. Fish swim above the seabed while
+  crabs scuttle along it. Crab pots replace glue boards and mousetraps.
+- **Outfall surge.** Rippling crests warn of a stronger current that can
+  push you up to 64 px. Lure traps still release Congers.
+- **The Lantern.** The anglerfish is three times larger and seen from above
+  at every heading. It floats over the seabed, swings a longer lure, snuffs
+  sconces and submerges between phases for a longer fight.
+- **Return Current.** The Outfall score has a 40-bar loop at 100 BPM with
+  walking bass, electric piano and a flute melody.
+- **Smoother cast shadows.** Diagonal shadow edges follow the geometry at
+  every lighting quality when Light Effects is on.
+- **Longer dashes.** Every dash covers twice the distance. A fully charged
+  Super Dash crosses roughly 119 px on open ground.
+- **Growth Serum.** The giant’s larger body can squeeze through corridors
+  and is too wide for rat-holes. Incoming hits reach farther into its outline.
+- **The Laundry.** Washer and dryer pairs tumble behind lit portholes.
+  Clothes heaps and overflowing baskets gather beside the bays.
 - **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
   facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
 - **Shrink Draught.** A short-lived dose makes you smaller and quicker.
@@ -32,16 +38,15 @@
   Shaft marks its splash tile, and a Bottle Cap appears outside the start room
   at 1:30. Corkscrew's trench stays wet for 25 seconds.
 - **Graphics shortcuts and defaults.** Press `G` in play or pause to open
-  Graphics and `S` there to cycle smoothing. Smoothing and foreground default
-  to Off. Older saves retain their other graphics settings.
+  Graphics and `S` there to cycle smoothing. Smoothing defaults to Off. Older saves retain their other graphics settings.
 - **Still water.** Puddle glints and reflections stay still at rest. Passing
   splash ripples brighten the water and bend reflections as they spread.
 - **Laser Eyes sweeps across the widest view.** Thin beams stop at walls,
   light their path and reflect in puddles. The live beams follow your eyes
   throughout the sweep. Damage falls off with distance.
   Higher ranks deal full damage farther from the muzzle.
-- **Hantavirus droppings cast green light.** Higher ranks shine brighter,
-  and the glow fades as they dry.
+- **Hantavirus droppings.** Dark pellets cast a wider green glow. Higher
+  ranks shine brighter, and the glow fades as the pellets dry.
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
 - **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
@@ -53,13 +58,14 @@
 - **Pulsing rat marker.** A bright halo helps locate you on the minimap and Tab map.
 - **Clearer map boundaries.** Known walls are solid warm grey and unexplored
   edges are dotted. The Tab map footer explains both marks.
-- **Foreground bands.** Switch on Foreground to reveal oversized pipes,
-  catwalks and other overhead objects that cross the view.
+- **Foreground.** A few soft-focus bands cross each sector, with angled
+  kelp and bubble trails in the Outfall. Foreground is On by default and
+  can be switched off in Graphics.
 - **Five XP gem tiers.** Distant gems combine into larger drops that carry
   their combined XP. The Field Guide lists each tier's colour and value.
 - **Glass Bead.** Shots bounce off walls. Pair it with Lens Cap for Last Bounce.
-- **Plumb Bob.** A weight sweeps out on a chain. Pair it with Counterweight for
-  Shed Bob.
+- **Plumb Bob.** A weight accelerates through its swing and the chain
+  trails at each turn. Pair it with Counterweight for Shed Bob.
 - **Hold Point.** Stand still to charge a knockback pulse. Pair it with Thick
   Hide for Clamp.
 

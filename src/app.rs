@@ -8381,6 +8381,136 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
+            "outfall-seabed" | "outfall-diver-swim" | "outfall-diver-float"
+            | "outfall-swimmers" | "outfall-pot-set" | "outfall-pot-closing"
+            | "outfall-pot-shut" | "outfall-surge-active" | "w6-laundry"
+            | "w6-giant-hole" | "w6-long-dash" | "w6-superdash-full" => {
+                use crate::game::art_crabpot::CrabPotState;
+                use crate::game::collision::{SizeClass, TileMap};
+                use crate::game::ecs::resources::DashHold;
+                use crate::game::level::PlantKind;
+                let theme = match target.as_str() {
+                    "w6-laundry" => Theme::Laundry,
+                    t if t.starts_with("w6-") => Theme::Sewer,
+                    _ => Theme::Outfall,
+                };
+                hh.app.start_practice(theme);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.clear_enemies();
+                w.player.loadout.weapons.clear();
+                w.shake_scale = 0.0;
+                let east = Vec2::new(1.0, 0.0);
+                let north = Vec2::new(0.0, -1.0);
+                let dt = 1.0 / 60.0;
+                w.player.face = east;
+                match target.as_str() {
+                    "outfall-seabed" => {
+                        let anchor = w.level.plants.iter()
+                            .filter(|p| p.kind == PlantKind::Seagrass)
+                            .max_by_key(|p| w.level.plants.iter()
+                                .filter(|q| (q.pos.x - p.pos.x).abs() < 49.0
+                                    && (q.pos.y - p.pos.y).abs() < 29.0)
+                                .map(|q| if q.kind == PlantKind::Seagrass { 1 } else { 3 })
+                                .sum::<usize>())
+                            .expect("seagrass cluster").pos;
+                        w.player.pos = anchor;
+                    }
+                    "outfall-diver-swim" | "outfall-diver-float" | "outfall-swimmers" => {
+                        if target == "outfall-swimmers" {
+                            for (kind, direction) in [
+                                (EnemyKind::Conger, Vec2::new(-1.0, -0.4)),
+                                (EnemyKind::Lampfish, Vec2::new(1.0, -0.4)),
+                                (EnemyKind::ShoreCrab, Vec2::new(0.4, 1.0)),
+                            ] {
+                                let pos = w.testbed_spawn_point(
+                                    direction.normalized(), 24.0, kind.radius(),
+                                    SizeClass::of_radius(kind.radius()),
+                                );
+                                let e = w.spawn_enemy(kind, pos, 1.0);
+                                w.ecs.get_mut::<crate::game::enemy::Enemy>(e).unwrap().facing =
+                                    (w.player.pos - pos).normalized();
+                            }
+                        } else {
+                            let movement = if target == "outfall-diver-swim" { east } else { Vec2::ZERO };
+                            for _ in 0..12 {
+                                w.update(dt, movement, false);
+                            }
+                        }
+                    }
+                    "outfall-pot-set" | "outfall-pot-closing" | "outfall-pot-shut" => {
+                        let sample = w.level.objects.crab_pots.iter()
+                            .min_by(|a, b| a.pos.dist_sq(w.player.pos).total_cmp(&b.pos.dist_sq(w.player.pos)))
+                            .expect("crab pot");
+                        let mut pot = *sample;
+                        pot.state = match target.as_str() {
+                            "outfall-pot-closing" => CrabPotState::Closing,
+                            "outfall-pot-shut" => CrabPotState::Shut,
+                            _ => CrabPotState::Set,
+                        };
+                        pot.progress = 0.45;
+                        pot.caught_rat = pot.state == CrabPotState::Shut;
+                        w.player.pos = if pot.caught_rat { pot.pos } else { pot.pos + pot.facing * 17.0 };
+                        w.cam_focus = Some(pot.pos);
+                        w.level.objects.crab_pots = vec![pot];
+                    }
+                    "outfall-surge-active" => w.elapsed = 9.50,
+                    "w6-laundry" => {
+                        use crate::game::level::PropKind;
+                        let (bank, pile) = w.level.props.iter()
+                            .filter(|prop| prop.kind == PropKind::Washer)
+                            .flat_map(|prop| w.level.clothes_piles.iter().map(move |pile| (prop, pile)))
+                            .min_by(|(a, p), (b, q)| a.rect.center().dist_sq(p.pos).total_cmp(&b.rect.center().dist_sq(q.pos)))
+                            .expect("running bank and clothes pile");
+                        w.player.pos = pile.pos;
+                        w.cam_focus = Some((bank.rect.center() + pile.pos) * 0.5);
+                        w.elapsed = 6.0;
+                    }
+                    "w6-giant-hole" => {
+                        let (hole, rat) = w.level.objects.rat_holes.iter().find_map(|hole| {
+                            [hole.view.facing, -hole.view.facing].into_iter()
+                                .map(|dir| hole.view.pos + dir * 21.0)
+                                .find(|&p| w.level.tiles.circle_clear(p, 6.5, SizeClass::Large))
+                                .map(|p| (hole.view, p))
+                        }).expect("clear rat-hole approach");
+                        w.player.pos = rat;
+                        w.player.face = (hole.pos - rat).normalized();
+                        w.player.buffs.giant = 16.0;
+                        w.hitboxes = true;
+                        w.cam_focus = Some((hole.pos + rat) * 0.5);
+                    }
+                    "w6-long-dash" | "w6-superdash-full" => {
+                        let hall = w.level.largest_hall().unwrap().rect;
+                        let (at, dir) = hall.cells().find_map(|(x, y)| {
+                            let at = TileMap::tile_rect(x, y).center();
+                            [east, north].into_iter().find(|&dir| (0..=32).all(|i| {
+                                w.level.tiles.circle_clear(at + dir * (4.0 * i as f32), 4.0, SizeClass::Small)
+                            })).map(|dir| (at, dir))
+                        }).expect("128 px open lane");
+                        w.player.pos = at;
+                        w.player.face = dir;
+                        w.cam_focus = Some(at + dir * if target == "w6-long-dash" { 24.0 } else { 56.0 });
+                        if target == "w6-long-dash" {
+                            for i in 0..17 {
+                                w.update(dt, dir, i == 0);
+                            }
+                        } else {
+                            w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+                            for i in 0..56 {
+                                w.update_with_dash_hold(
+                                    dt, Vec2::ZERO, false, false, Some(at + dir * 140.0),
+                                    DashHold { down: i == 0, held: true, up: false },
+                                );
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             t if t.starts_with("outfall-enemy-") => {
                 use crate::game::collision::SizeClass;
                 use crate::game::ecs::systems::floor_outfall;
@@ -8819,7 +8949,14 @@ mod tests {
             "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet"
             | "laser-moving" => {
                 use crate::game::weapon::{LASER_ARC_DEG, LASER_EYE_OFFSET, LASER_SWEEP_SECS};
-                hh.enter_playing();
+                if target.starts_with("dropping-")
+                    && std::env::var("RATRUN_DUMP_FLOOR_THEME").as_deref() == Ok("outfall")
+                {
+                    hh.app.start_practice(Theme::Outfall);
+                    hh.frame(&[KeyCode::Enter]);
+                } else {
+                    hh.enter_playing();
+                }
                 hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
@@ -10927,6 +11064,7 @@ mod tests {
         }
         // Reframe scripted Outfall poses without ticking their tells.
         let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
+        let frozen_pose = posed_outfall || target.starts_with("w6-") || target.starts_with("dropping-");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
@@ -10934,7 +11072,7 @@ mod tests {
             if let Some(w) = hh.app.world.as_mut() {
                 w.set_zoom_instant(zoom);
                 w.damage_numbers.clear();
-                if posed_outfall {
+                if frozen_pose {
                     hh.app.picture_dirty = true;
                     hh.terminal.draw(|f| hh.app.render(f)).unwrap();
                 } else {
