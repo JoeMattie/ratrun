@@ -32,6 +32,9 @@ const INK: Rgb = (16, 13, 22);
 const FLASH_COL: Rgb = (255, 248, 226);
 /// Duration (seconds) of the initial arrival flourish on first spawn.
 const ENTRANCE_TIME: f32 = 1.15;
+/// Convert the speed-scaled enemy gait accumulator to the miniboss artists'
+/// pose clock. At 60 px/s, 34 gait units per second become about 1.5.
+const GAIT_TO_POSE: f32 = 0.045;
 
 /// Animation pose derived strictly from `Enemy` + `Miniboss` state (render-only).
 #[derive(Clone, Copy, Debug)]
@@ -748,12 +751,32 @@ fn body_facing(e: &Enemy, mb: &Miniboss, pose: Pose) -> Vec2 {
             // Let the walk heading settle before turning from the locked attack aim.
             let aim = safe_dir(mb.aim, e.facing);
             let walk = safe_dir(e.facing, aim);
-            let turn = aim.perp().dot(walk).atan2(aim.dot(walk));
             let t = ((mb.timer - 0.12) / 0.24).clamp(0.0, 1.0);
-            aim.rotate(turn * t * t * (3.0 - 2.0 * t))
+            turn_from(aim, walk, t)
         }
-        _ => safe_dir(e.facing, mb.aim),
+        _ => mb.art_heading.map_or_else(
+            || safe_dir(e.facing, mb.aim),
+            Vec2::from_angle,
+        ),
     }
+}
+
+fn turn_from(aim: Vec2, walk: Vec2, t: f32) -> Vec2 {
+    let turn = aim.perp().dot(walk).atan2(aim.dot(walk));
+    aim.rotate(turn * t * t * (3.0 - 2.0 * t))
+}
+
+fn pose_clock(e: &Enemy, mb: &Miniboss, pose: Pose) -> f32 {
+    if !e.anim.is_finite() {
+        return mb.timer * 2.2;
+    }
+    // The Mudlark's legs and shell already share a dedicated gait in its art.
+    let gait = if mb.kind == MinibossKind::Mudlark {
+        e.anim
+    } else {
+        e.anim * GAIT_TO_POSE
+    };
+    gait + if matches!(pose, Pose::Idle) { mb.timer * 2.2 } else { 0.0 }
 }
 
 /// Draw one miniboss body at `e.pos` with full pose animation, entrance flourish,
@@ -770,11 +793,7 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
     let pose = Pose::from_state(e, mb);
     let flash = (e.flash / 0.12).clamp(0.0, 1.0);
     let facing = body_facing(e, mb, pose);
-    let anim = if e.anim.is_finite() {
-        e.anim + if matches!(pose, Pose::Idle) { mb.timer * 2.2 } else { 0.0 }
-    } else {
-        mb.timer * 2.2
-    };
+    let anim = pose_clock(e, mb, pose);
 
     // Exact Bell Diver chip direction comes straight from `mb.telegraph()`'s
     // `RingGap { gap_dir }` (falling back to `facing.rotate(RING_GAP_TURN)`), so
@@ -1748,9 +1767,9 @@ fn draw_bell_diver(
     let hop_cycle = (anim * 1.15).fract();
     let hop_lift = if matches!(pose, Pose::Approach) {
         if hop_cycle < 0.65 {
-            -(hop_cycle / 0.65 * PI).sin() * 5.8
+            -(hop_cycle / 0.65 * PI).sin().powi(2) * 4.5
         } else {
-            0.8
+            0.0
         }
     } else {
         0.0
@@ -2381,14 +2400,19 @@ fn draw_milk_carton(
         (0.0, 0.0)
     };
 
+    let walk = (anim * 6.0).sin();
+    let waddle = match pose {
+        Pose::Approach => walk,
+        Pose::Retreat(t) => walk * (t * 9.0).min(1.0),
+        _ => 0.0,
+    };
+
     // Shear-tilt (`lean` shifts top horizontally relative to bottom), lift, squash, spout state.
     let (lean, lift, squash, spout_open, rear_kick) = match pose {
         Pose::Entrance(_) => (0.0, ent_drop, ent_sq, false, 0.0),
-        Pose::Idle => ((anim * 2.0).sin() * 1.4, (anim * 2.0).cos() * 0.4, 0.0, false, 0.0),
-        Pose::Approach => {
-            // Heavy boxy 4-footed waddle & slosh!
-            let s = (anim * 6.0).sin();
-            (s * 2.8, -s.abs() * 1.8, (anim * 12.0).sin() * 0.5, false, 0.0)
+        Pose::Idle => ((anim * 2.0).sin() * 0.8, (anim * 2.0).cos() * 0.25, 0.0, false, 0.0),
+        Pose::Approach | Pose::Retreat(_) => {
+            (waddle * 1.4, -waddle * waddle * 0.65, waddle * 0.18, false, 0.0)
         }
         Pose::Tell(t) => {
             let c = tell_coil(t);
@@ -2401,11 +2425,12 @@ fn draw_milk_carton(
             (face_x * 8.2 + glug, 0.6, 0.6, true, 1.0)
         }
         Pose::Recover(t) => {
-            // Rocks heavily backward onto its heels exposing the folded rear seam!
-            let slosh = (t * 8.0).sin() * 1.4;
-            (-face_x * 5.2 + slosh, 0.4, 0.4, false, 0.0)
+            // Carry the pouring tilt into a single rock back onto the heels.
+            let catch = (1.0 - (t / 0.32).min(1.0)).powi(3);
+            let rock = (t * PI).sin().powi(2);
+            let last_pour = face_x * 8.2 + 24.0_f32.sin() * 0.9;
+            (last_pour * catch - face_x * 3.0 * rock, 0.6 * catch, 0.6 * catch, false, catch)
         }
-        Pose::Retreat(t) => (-face_x * 3.2 + (t * 10.0).sin() * 1.8, -(t * 10.0).sin().abs() * 1.2, 0.0, false, 0.0),
         Pose::Death(_) => unreachable!(),
     };
 
@@ -2421,18 +2446,12 @@ fn draw_milk_carton(
     }
 
     // 1. FOUR distinct chunky square cardboard corner feet!
-    let waddle = if matches!(pose, Pose::Approach) {
-        (anim * 6.0).sin() * 2.2
-    } else if let Pose::Retreat(t) = pose {
-        (t * 10.0).sin() * 1.8
-    } else {
-        0.0
-    };
+    let step = waddle * 1.35;
     let feet = [
-        (-7.5_f32, 7.5_f32, waddle, true),   // back-left
-        (-3.0_f32, 8.8_f32, -waddle, true),  // inner-left
-        (3.0_f32, 8.8_f32, waddle, false),   // inner-right
-        (7.5_f32, 7.5_f32, -waddle, false),  // front-right
+        (-7.5_f32, 7.5_f32, step, true),   // back-left
+        (-3.0_f32, 8.8_f32, -step, true),  // inner-left
+        (3.0_f32, 8.8_f32, step, false),   // inner-right
+        (7.5_f32, 7.5_f32, -step, false),  // front-right
     ];
     for &(fx, fy, step, is_left) in &feet {
         let is_rear = (face_x > 0.0 && is_left) || (face_x < 0.0 && !is_left);
@@ -3937,8 +3956,12 @@ fn draw_dose_pump(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
 
     // Pogo-hop bounce on Approach; springy idle pulse on the plunger foot!
     let hop = if matches!(pose, Pose::Approach) {
-        let cyc = (anim * 2.2).fract();
-        if cyc < 0.68 { -(cyc / 0.68 * PI).sin() * 5.2 } else { 0.8 }
+        let cycle = anim.fract();
+        if cycle < 0.68 {
+            -(cycle / 0.68 * PI).sin().powi(2) * 3.4
+        } else {
+            0.0
+        }
     } else if matches!(pose, Pose::Idle) {
         (anim * 3.2).sin() * 1.4
     } else {
@@ -7047,7 +7070,7 @@ fn draw_road_atlas(
         }
         Pose::Approach => {
             let beat = (anim * 6.4).sin();
-            (beat * 1.8, -3.2 + beat * 1.8, 1.32 + beat * 0.24, -beat * 4.0, (anim * 3.2).cos() * 2.0, 0.25, 0.0)
+            (beat * 1.8, -2.6 + beat * 1.2, 1.32 + beat * 0.24, -beat * 2.0, (anim * 3.2).cos() * 2.0, 0.25, 0.0)
         }
         Pose::Tell(t) => {
             let c = tell_coil(t);
