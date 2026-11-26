@@ -104,7 +104,7 @@ section!(Enemies {
 });
 
 section!(Minibosses {
-    times: [f32; 4] = [180.0, 360.0, 540.0, 720.0]; "Scheduled arrivals by appointment (simulation seconds)",
+    times: [f32; 4] = std::array::from_fn(|i| d::MINIBOSS_TIMES[i]); "Scheduled arrivals by appointment (simulation seconds)",
     hp: [[f32; 4]; 4] = std::array::from_fn(|sector| std::array::from_fn(|slot| miniboss::appointment_hp_for(sector, slot))); "Actual starting HP [sector][appointment]",
     strike_damage: [f32; 4] = std::array::from_fn(miniboss::appointment_signature_damage); "Signature damage by appointment (HP before armor)",
     contact_damage: f32 = miniboss::MINIBOSS_CONTACT_DAMAGE; "Body contact damage (HP before armor)",
@@ -239,11 +239,11 @@ impl Selection {
     }
 
     pub fn report(&self) -> Report {
-        let defaults = Table::try_from(Tuning::default()).expect("serialize tuning defaults");
-        let current = Table::try_from(&*self.run.values).expect("serialize effective tuning");
+        let canonical = self.run.canonical();
+        let current = readable_table(&canonical);
+        let defaults = readable_table(&Tuning::default().canonical());
         let mut diff = BTreeMap::new();
         differences(&defaults, &current, "", &mut diff);
-        let canonical = serde_json::to_vec(&*self.run.values).expect("serialize effective tuning");
         let hash = canonical.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
         });
@@ -326,8 +326,12 @@ impl Tuning {
         Ok(())
     }
 
+    fn canonical(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("serialize effective tuning")
+    }
+
     pub fn commented_defaults() -> String {
-        let values = Table::try_from(Self::default()).expect("serialize tuning defaults");
+        let values = readable_table(&Self::default().canonical());
         let mut output = String::from("# Rat Run balance defaults. Omitted fields use the shipped game values.\n");
         for (section, comments) in [
             ("player", Player::COMMENTS), ("xp", Xp::COMMENTS), ("director", Director::COMMENTS),
@@ -350,6 +354,11 @@ impl Tuning {
         }
         output
     }
+}
+
+// Widen f32 numbers only after formatting them at their original precision.
+fn readable_table(canonical: &[u8]) -> Table {
+    serde_json::from_slice(canonical).expect("convert numeric tuning tables")
 }
 
 fn write_section(output: &mut String, path: &str, values: &Table, comments: &[(&str, &str)]) {

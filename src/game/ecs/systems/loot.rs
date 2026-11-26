@@ -539,7 +539,7 @@ pub fn gems_system(
         // Collect on the post-move distance, so a gem that just arrived this
         // tick is picked up rather than waiting an extra frame.
         if g.pos.dist_sq(ppos) < collect_r * collect_r {
-            gained += g.value;
+            gained = gained.saturating_add(g.value);
             commands.entity(entity).despawn();
         }
     }
@@ -562,7 +562,7 @@ pub fn gems_system(
             vfx::emit_level_up(&mut particles, &mut rng.0, p);
             sfx.0.push(Sfx::LevelUp);
         }
-        counters.pending_levelups += ups;
+        counters.pending_levelups = counters.pending_levelups.saturating_add(ups);
     }
 }
 

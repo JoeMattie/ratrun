@@ -76,7 +76,7 @@ pub fn elite_badge_due(world: &World) -> bool {
     !(world.testbed && world.peace)
         && !world.director.boss_spawned
         && world.curve_clock_at(world.elapsed)
-            >= director::ELITE_START - 5.0
+            >= world.tuning().director.elite_start - 5.0
         && world.director.elite_timer <= 4.0
 }
 

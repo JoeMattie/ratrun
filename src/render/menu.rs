@@ -997,9 +997,12 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
 /// The level-up plate's header: the level reached and the weapon damage that
 /// level is worth (`player::level_damage_mult`).
 pub fn levelup_header(level: u32) -> String {
+    levelup_header_with_bonus(level, crate::game::player::level_damage_percent(level))
+}
+
+fn levelup_header_with_bonus(level: u32, bonus: u32) -> String {
     format!(
-        " LEVEL UP   /   LV {level:02}   /   +{}% WEAPON DAMAGE ",
-        crate::game::player::level_damage_percent(level)
+        " LEVEL UP   /   LV {level:02}   /   +{bonus}% WEAPON DAMAGE "
     )
 }
 
@@ -1925,10 +1928,14 @@ pub fn draw_levelup_with_loadout_keyed(
     } else {
         n * 4 + (if show_loadout { 7 } else { 5 }) + 1
     };
+    let bonus = loadout.tuning.as_ref().map_or_else(
+        || crate::game::player::level_damage_percent(level),
+        |tuning| crate::game::player::level_damage_percent_with(level, tuning.xp.damage_per_level),
+    );
     let r = panel(
         f,
         centered_rect(panel_w, panel_h, area),
-        &levelup_header(level),
+        &levelup_header_with_bonus(level, bonus),
         TAIL,
     );
     let content = r.inner(Margin::new(1, 0));

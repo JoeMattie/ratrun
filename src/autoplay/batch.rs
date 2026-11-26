@@ -778,9 +778,11 @@ fn run_bank(practice: bool, run: &RunOutcome) -> (u32, u32, u32) {
 
 /// Fold the batch into its nest economy (see [`NestAgg`]). Run order in, so
 /// the figures are identical whatever the thread count.
-fn nest_agg(practice: bool, outcomes: &[RunOutcome]) -> NestAgg {
+fn nest_agg(practice: bool, outcomes: &[RunOutcome], tuned: bool) -> NestAgg {
     use crate::meta::Track;
-    let banks: Vec<(u32, u32, u32)> = outcomes.iter().map(|r| run_bank(practice, r)).collect();
+    let banks: Vec<(u32, u32, u32)> = outcomes.iter()
+        .map(|r| if tuned { (0, 0, 0) } else { run_bank(practice, r) })
+        .collect();
     let n = banks.len().max(1) as f32;
     let banked = Percentiles::of(banks.iter().map(|b| b.0 as f32).collect());
     let purse = banks.iter().map(|b| b.1 as f32).sum::<f32>() / n;
@@ -1173,7 +1175,7 @@ fn auto_opts(opts: &BatchOpts) -> AutoOpts {
 /// Fold per-run outcomes into the report. `outcomes` is in run order.
 fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> BatchReport {
     let runs = outcomes.len();
-    let nest = nest_agg(opts.practice, &outcomes);
+    let nest = nest_agg(opts.practice, &outcomes, opts.tuning.run.changed);
     let mut levels: Vec<LevelAgg> = Vec::new();
     let mut damage: BTreeMap<String, (f32, usize)> = BTreeMap::new();
     let mut deaths: Vec<DeathOutcome> = Vec::new();
@@ -3270,7 +3272,7 @@ mod tests {
         }
         // Purses 100, 200, 300 and nothing else: a death banks the purse.
         assert_eq!(run_bank(false, &runs[0]), (100, 100, 0));
-        let nest = nest_agg(false, &runs);
+        let nest = nest_agg(false, &runs, false);
         assert_eq!(nest.banked.n, 3);
         assert_eq!(nest.banked.median, 200.0);
         assert_eq!(nest.purse, 200.0);
@@ -3297,7 +3299,7 @@ mod tests {
         assert_eq!(run_bank(true, &clear), (50 + half, 50, half));
 
         // An empty batch prints no nest block and divides by nothing.
-        let empty = nest_agg(false, &[]);
+        let empty = nest_agg(false, &[], false);
         assert_eq!(empty.banked.n, 0);
         assert_eq!(empty.runs_to_table, 0.0);
     }

@@ -227,7 +227,12 @@ pub fn level_damage_mult(level: u32) -> f32 {
 /// The same bonus as a whole percentage, for the screens (`+44` at level 12,
 /// `+152` at level 39). Read from the constant, never from the level alone.
 pub fn level_damage_percent(level: u32) -> u32 {
-    (level_damage_mult(level) * 100.0).round() as u32 - 100
+    level_damage_percent_with(level, LEVEL_DAMAGE_PER_LEVEL)
+}
+
+pub(crate) fn level_damage_percent_with(level: u32, per_level: f32) -> u32 {
+    let mult = 1.0 + per_level * level.saturating_sub(1) as f32;
+    ((mult * 100.0).round() as u32).saturating_sub(100)
 }
 
 pub const XP_BASE: f64 = 6.0;
