@@ -62,20 +62,10 @@ pub const NOVA_EXPAND: f32 = 0.32;
 /// The ring's final radius in px before Lens Cap (`Stats::ranged_reach`).
 pub const NOVA_REACH: f32 = 123.5;
 
-// ---- Tail Whip: the frontal half-circle swipe (batch 12, corrected) ------
-//
-// The whip used to be a melee aura all the way round the rat, and my first
-// batch-12 pass made it a single-target line. The owner's design row is a
-// **quick low swipe in front of the rat**: a half-circle arc (180°) centred on
-// the aim/facing, short reach, fast cadence. The three tails now read apart by
-// shape alone — a crescent in front (whip), a full disc (thrash), one targeted
-// lash with a burst at the impact (spiked tail). Damage per body per cycle is
-// unchanged: the same `Weapon::damage()` on the same cooldown, delivered to
-// every body in the front half-circle instead of a full circle.
+// ---- Tail Whip: the rear swipe -------------------------------------------
 
-/// Half-angle of the swipe: `WHIP_ARC_HALF` either side of the aim/facing is
-/// 180° of arc, i.e. the whole front half of the rat's surroundings.
-pub const WHIP_ARC_HALF: f32 = std::f32::consts::FRAC_PI_2;
+/// Half of the 160° swipe centred opposite the aim or facing.
+pub const WHIP_ARC_HALF: f32 = 80.0 * std::f32::consts::PI / 180.0;
 
 /// Reach of the swipe in px, L1 → L5, before Lens Cap (`Stats::melee_reach`).
 /// Short on purpose: the swipe is the rat's near guard, and the Spiked Tail is
@@ -313,7 +303,7 @@ pub enum WeaponKind {
     CheeseSpray, // forward spread of darts
     SqueakNova,  // radial burst in all directions
     SporeOrbit,  // orbiting projectiles around the player
-    TailWhip,    // melee aura pulse around the player
+    TailWhip,    // rear melee swipe
     AcidSpit,    // lobbed shot that leaves a damaging pool
     TailThrash,  // ACTIVE: charged burst of sweeping tail sweeps
     SonicSqueak, // ACTIVE: charged expanding stunning ring
@@ -418,7 +408,7 @@ impl WeaponKind {
             WeaponKind::CheeseSpray => "Blasts a short, slowing fan of wedges.",
             WeaponKind::SqueakNova => "A ring of force bursts out, cutting all it passes.",
             WeaponKind::SporeOrbit => "Orbiting spores shred nearby foes.",
-            WeaponKind::TailWhip => "Swipes a half-circle of foes ahead of you.",
+            WeaponKind::TailWhip => "Swipes through foes behind you.",
             WeaponKind::AcidSpit => "Lobs acid that pools and burns.",
             // The "ACTIVE" prefix is what the level-up card shows, so the
             // player learns which weapons the Space bar fires (task: the first
@@ -645,12 +635,12 @@ impl WeaponKind {
                 "Something grew where you stood.",
                 "Every second cast leaves a fixed ring of spores that burns for 3s.",
             ),
-            // Ratchet Tail — the whip hooks a body and swings it around.
+            // Ratchet Tail — the whip hooks a body and throws it forward.
             WeaponKind::TailWhip => e(
                 super::loadout::PassiveKind::MoveSpeed,
                 "Ratchet Tail",
-                "Give the room a turn.",
-                "Hooks the nearest struck foe and swings it 90° through the crowd.",
+                "Redirected for further testing.",
+                "Hooks the nearest light foe it hits and throws it forward.",
             ),
             // Drain Cleaner — the splash becomes a directed corrosive channel.
             WeaponKind::AcidSpit => e(

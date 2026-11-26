@@ -2011,6 +2011,15 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         script.lean = Vec2::ZERO;
         script.cue = Some(arsenal_sweep_cue);
     }
+    if kind == WeaponKind::TailWhip {
+        script.cue = Some(arsenal_rear_cue);
+        script.lean = Vec2::new(-ARSENAL_RING * 0.5, 0.0);
+        if evolved {
+            // Keep the rear dummies and the front landing area in frame.
+            script.zoom = crate::render::zoom::MAX;
+            script.lean = Vec2::new(-6.0, 0.0);
+        }
+    }
     if kind == WeaponKind::Gnaw {
         // A bite reaches 24 px at most: its targets stand in the jaw.
         script.cue = Some(arsenal_bite_cue);
@@ -2083,6 +2092,13 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
 fn arsenal_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
     keep_actives_ready(world);
     arsenal_dummies(world, &dummy_homes(world.player.pos), ARSENAL_HP);
+}
+
+/// Tail Whip and Ratchet Tail start with all dummies behind the rat.
+fn arsenal_rear_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    let rat = world.player.pos;
+    let homes = dummy_homes(rat).map(|home| rat - (home - rat));
+    arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 
 /// Gnaw's and Milk Teeth's plate: the targets stand inside the bite's reach

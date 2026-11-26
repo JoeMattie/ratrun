@@ -1459,10 +1459,8 @@ pub fn draw_gnaw_bite(pb: &mut PixelBuffer, snap: &BiteSnap, cam: Vec2) {
     }
 }
 
-/// **Tail Whip** frontal swipe: a quick pink half-circle crescent in FRONT of
-/// the rat only (`dir ± WHIP_ARC_HALF`), hot rose-white along the leading edge,
-/// tapering to sharp horns with dust motes at both arc ends (never behind the
-/// rat and never a full-circle disc like Tail Thrash).
+/// **Tail Whip** rear swipe: a quick pink crescent on the cast's recorded
+/// centre line (`dir ± WHIP_ARC_HALF`), hot rose-white along the leading edge.
 pub fn draw_tail_whip_crack(pb: &mut PixelBuffer, crack: &WhipCrack, cam: Vec2) {
     let total = crack.total.max(1e-4);
     let progress = (1.0 - crack.t / total).clamp(0.0, 1.0);
@@ -1485,16 +1483,14 @@ pub fn draw_tail_whip_crack(pb: &mut PixelBuffer, crack: &WhipCrack, cam: Vec2) 
     let rim_dark: Rgb = (36, 14, 28);
     let dust: Rgb = (204, 192, 178);
 
-    // Quick frontal sweep from -half across to +half (always strictly inside
-    // the front half-circle `[-half, +half]`, never behind the rat).
+    // Quick sweep from -half across to +half within the recorded rear arc.
     let lead_frac = (0.58 + 0.42 * (progress / 0.36).min(1.0)).clamp(0.0, 1.0);
     let tail_frac = ((progress - 0.34) / 0.66).clamp(0.0, 0.72);
     let a_start = center_ang - half + tail_frac * (2.0 * half);
     let a_end = center_ang - half + lead_frac * (2.0 * half);
     let arc_span = (a_end - a_start).max(0.05);
 
-    // Crescent thickness: plumpest at the centre of the front arc, tapering to
-    // crisp 1 px points at the ±90° horns (hollow around the rat, unlike Thrash).
+    // Crescent thickness: plumpest at the centre, tapering to crisp 1 px ends.
     let max_thick = (reach * 0.16).clamp(3.0, 5.5);
     let steps = (reach * arc_span * 1.15).ceil().clamp(14.0, 128.0) as i32;
 
@@ -1545,7 +1541,7 @@ pub fn draw_tail_whip_crack(pb: &mut PixelBuffer, crack: &WhipCrack, cam: Vec2) 
         plot_add(pb, head_pt.0 + dx, head_pt.1 + dy, scale(pink_hot, 0.45 * fade));
     }
 
-    // A few pale dust motes kicked off both ±90° horn ends of the crescent.
+    // A few pale dust motes kicked off both ends of the crescent.
     for side in [-1.0f32, 1.0] {
         let horn_dir = Vec2::from_angle(center_ang + side * half);
         let drift = 1.5 + progress * 4.5;
@@ -3194,29 +3190,28 @@ mod tests {
         draw_gnaw_bite(&mut pb, &snap, Vec2::ZERO);
         assert!(count_lit(&pb) >= 16, "gnaw bite should draw closing tooth crescents");
 
-        // Tail Whip: frontal pink half-circle crescent ONLY in front of the rat
-        // (facing +X from x=48 -> zero pixels behind x=44).
+        // Tail Whip: the recorded crescent stays behind a rat facing +X.
         pb.clear(bg);
         let crack = WhipCrack {
             from: Vec2::new(48.0, 48.0),
-            to: Vec2::new(78.0, 48.0),
+            to: Vec2::new(18.0, 48.0),
             t: 0.075,
             total: 0.12,
         };
         draw_tail_whip_crack(&mut pb, &crack, Vec2::ZERO);
-        assert!(count_lit(&pb) >= 60, "tail whip should draw a visible frontal crescent");
-        let front_centre = pb.pixel_at(78, 48);
+        assert!(count_lit(&pb) >= 60, "tail whip should draw a visible rear crescent");
+        let rear_centre = pb.pixel_at(18, 48);
         assert!(
-            front_centre != bg && front_centre.0 >= 150,
-            "tail whip crescent should be bright pink/white at front centre, got {front_centre:?}"
+            rear_centre != bg && rear_centre.0 >= 150,
+            "tail whip crescent should be bright pink/white at rear centre, got {rear_centre:?}"
         );
-        let behind_lit = (0..pb.h)
-            .flat_map(|y| (0..44).map(move |x| (x, y)))
+        let ahead_lit = (0..pb.h)
+            .flat_map(|y| (48..pb.w).map(move |x| (x, y)))
             .filter(|&(x, y)| pb.pixel_at(x, y) != bg)
             .count();
         assert_eq!(
-            behind_lit, 0,
-            "tail whip crescent must stay strictly in front of the rat, found {behind_lit} pixels behind"
+            ahead_lit, 0,
+            "tail whip crescent must stay behind the rat, found {ahead_lit} pixels ahead"
         );
 
         // Tail Thrash: broad pink full-disc sweep trail.

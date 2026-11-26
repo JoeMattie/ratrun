@@ -50,6 +50,8 @@ first time.
   down the pack as before.
 - **The Drake.** A big duck wanders into the Sewers from 2:30. It winds up,
   shows you the lane, and pecks three times. It is slow to recover.
+- **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
+  facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
 - **The giant rat is drawn properly** at every size, instead of the small
   sprite with its pixels doubled.
 - **Whip and laser reach stop at the screen edge.** Neither hits what you

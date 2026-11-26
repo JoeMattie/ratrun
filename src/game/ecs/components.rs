@@ -894,12 +894,7 @@ pub struct BiteSnap {
     pub total: f32,
 }
 
-/// One **Tail Whip** swipe: the frontal half-circle arc the rat just cut.
-///
-/// Batch 12's correction made the whip a **crescent in front of the rat** (a
-/// 180° arc: `weapon::WHIP_ARC_HALF` either side of the aim/facing), not a line
-/// to one body. The component's fields are unchanged — the art worker was
-/// already reading them — so they now mean:
+/// One **Tail Whip** swipe: a 160° crescent opposite the aim or facing.
 ///
 /// * `from` — the rat on the swipe tick (the arc's centre),
 /// * `to` — the **centre of the arc**: `from + dir * reach`, so
@@ -910,7 +905,7 @@ pub struct BiteSnap {
 pub struct WhipCrack {
     /// The rat (the arc's centre).
     pub from: Vec2,
-    /// The arc's centre line: the aim point at the swipe's reach.
+    /// The arc's centre line at the swipe's reach, opposite the aim or facing.
     pub to: Vec2,
     /// Seconds left to draw.
     pub t: f32,
