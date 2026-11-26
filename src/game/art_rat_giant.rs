@@ -1,4 +1,4 @@
-//! High-resolution procedural art for the player's rat under the **Growth Serum**.
+//! Procedural art for the rat under Growth Serum and Shrink Draught.
 //!
 //! Unlike the old scratch-buffer nearest-neighbour upscale (which blew up the
 //! 1× sprite into chunky 5×5 blocks), this module authors the giant rat directly
@@ -9,7 +9,7 @@
 //! pink tail that sways with movement and lashes when `tail_flash > 0`.
 //!
 //! Everything is authored in the rat's own local `(u, v)` frame scaled by
-//! `scale` (`1.0..=5.0` across the Growth Serum's grow-in, hold, warning blink,
+//! `scale` (0.35× to 5× across the size buffs' ramps, holds, warning blinks,
 //! and shrink-out), while screen-space linework (the 1-px darker outline, 1-px
 //! eye glint, and 1-px whiskers) stays razor-sharp at every scale and at any
 //! 360-degree facing.
@@ -162,6 +162,7 @@ fn darken(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
 struct Tint {
     hurt: f32,
     ghost: bool,
+    white_coat: bool,
 }
 
 impl Tint {
@@ -172,13 +173,17 @@ impl Tint {
             } else {
                 0.0
             },
-            ghost: player.iframes > 0.0 && ((elapsed * 20.0) as i32 % 2 == 0),
+            ghost: player.buffs.white_coat <= 0.0
+                && player.iframes > 0.0 && ((elapsed * 20.0) as i32 % 2 == 0),
+            white_coat: player.buffs.white_coat > 0.0,
         }
     }
 
     #[inline]
     fn apply(self, c: Rgb) -> Rgb {
-        let c = if self.hurt > 0.0 {
+        let c = if self.white_coat {
+            mix(c, (255, 255, 248), 0.58)
+        } else if self.hurt > 0.0 {
             mix(c, HURT, self.hurt)
         } else {
             c
@@ -222,7 +227,7 @@ struct GiantPose {
 
 impl GiantPose {
     fn from_player(player: &Player, elapsed: f32, cam: Vec2, scale: f32) -> Self {
-        let scale = scale.max(1.0);
+        let scale = scale.max(crate::game::ecs::systems::powerups::SHRINK_SCALE);
         let face = if player.face.len_sq() > 1e-4 {
             player.face.normalized()
         } else {
@@ -378,11 +383,11 @@ impl GiantPose {
     }
 }
 
-/// Draw the player's rat at arbitrary `scale` (`1.0..=5.0`) for the **Growth Serum**.
+/// Draw the player's rat at the scale of either size buff.
 ///
 /// Matches the argument conventions of `art_rat::draw_rat_flash`, adding `scale`.
 /// Authored directly from procedural geometry so the giant rat reads as a crisp,
-/// detailed top-down white-and-pink rat at every scale from 1× to 5× and at any
+/// detailed top-down white-and-pink rat at every scale from 0.35× to 5× and at any
 /// 360-degree facing.
 pub fn draw_giant_rat(
     pb: &mut PixelBuffer,
@@ -1295,6 +1300,22 @@ mod tests {
             counts[4],
             counts[0]
         );
+    }
+
+    #[test]
+    fn the_tiny_rat_paints_fewer_pixels_than_the_life_size_rat() {
+        use crate::game::ecs::systems::powerups::SHRINK_SCALE;
+
+        let p = test_rat(Vec2::new(20.0, 20.0), Vec2::new(1.0, 0.0));
+        let mut pb = PixelBuffer::new(40, 40);
+        let mut painted = |scale| {
+            pb.clear(BG);
+            draw_giant_rat(&mut pb, &p, 0.4, Vec2::ZERO, scale, 0.0);
+            count_painted(&pb, BG)
+        };
+        let tiny = painted(SHRINK_SCALE);
+        let ordinary = painted(1.0);
+        assert!(tiny > 0 && tiny < ordinary, "tiny {tiny}, ordinary {ordinary}");
     }
 
     #[test]

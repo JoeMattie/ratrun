@@ -3,14 +3,15 @@
 use crate::detmath::DetF64;
 use crate::math::Vec2;
 
+use super::ecs::{constants::PLAYER_RADIUS, systems::powerups};
 use super::loadout::Loadout;
 use super::weapon::WeaponKind;
 
-/// Timed buffs from the wave-3 pocket finds (WAVE3_DESIGN §10).
+/// Timed pickup effects.
 ///
 /// Every countdown is in **simulation seconds** and `0.0` means "inactive", so
-/// a run that never finds one of these pickups carries four zeros and draws no
-/// extra rng. A repeat find refreshes the countdown to full (and, for the
+/// a run that never finds one of these pickups draws no extra rng. A repeat
+/// find refreshes the countdown to full (and, for the
 /// decoy, moves the key).
 ///
 /// They live on the player rather than in a separate resource because the
@@ -31,19 +32,28 @@ pub struct Buffs {
     /// Growth Serum (batch 13): the rat is drawn five times its size, stomps
     /// the ordinary horde and shrugs off ordinary contact. 20 s.
     pub giant: f32,
+    /// Shrink Draught: smaller hurt disc and faster feet. 12 s.
+    pub tiny: f32,
+    /// White Coat: damage immunity and suspended weapons. 5 s.
+    pub white_coat: f32,
+    /// The Collar: double gem XP and faster heavy pursuers. 16 s.
+    pub collar: f32,
 }
 
 impl Buffs {
     /// Every tick: age the countdowns. Returns the kinds that expired this
     /// tick, so the caller can play the release cue without a second pass.
-    pub fn tick(&mut self, dt: f32) -> [bool; 5] {
-        let mut expired = [false; 5];
+    pub fn tick(&mut self, dt: f32) -> [bool; 8] {
+        let mut expired = [false; 8];
         for (slot, was) in [
             (&mut self.shield, 0),
             (&mut self.slow_bullets, 1),
             (&mut self.socks, 2),
             (&mut self.decoy, 3),
             (&mut self.giant, 4),
+            (&mut self.tiny, 5),
+            (&mut self.white_coat, 6),
+            (&mut self.collar, 7),
         ] {
             if *slot > 0.0 {
                 *slot = (*slot - dt).max(0.0);
@@ -60,6 +70,9 @@ impl Buffs {
             || self.socks > 0.0
             || self.decoy > 0.0
             || self.giant > 0.0
+            || self.tiny > 0.0
+            || self.white_coat > 0.0
+            || self.collar > 0.0
     }
 
     /// Is the rat giant right now? (`Growth Serum`.) One reader-facing name for
@@ -68,6 +81,29 @@ impl Buffs {
     #[inline]
     pub fn is_giant(&self) -> bool {
         self.giant > 0.0
+    }
+
+    /// The radius for incoming hit tests. Movement still uses the body radius.
+    pub fn hurt_radius(&self) -> f32 {
+        if self.tiny > 0.0 {
+            powerups::SHRINK_HURT_RADIUS
+        } else {
+            PLAYER_RADIUS
+        }
+    }
+
+    pub fn weapons_suspended(&self) -> bool {
+        self.white_coat > 0.0
+    }
+
+    pub fn move_speed_scale(&self) -> f32 {
+        if self.is_giant() {
+            powerups::GIANT_MOVE_MULT
+        } else if self.tiny > 0.0 {
+            powerups::SHRINK_MOVE_MULT
+        } else {
+            1.0
+        }
     }
 
     /// How much of an incoming hit the rat takes while giant.
@@ -79,7 +115,7 @@ impl Buffs {
     #[inline]
     pub fn damage_taken_scale(&self) -> f32 {
         if self.is_giant() {
-            crate::game::ecs::systems::powerups::GIANT_DAMAGE_TAKEN
+            powerups::GIANT_DAMAGE_TAKEN
         } else {
             1.0
         }
@@ -344,7 +380,7 @@ impl Player {
     /// to it; Double Lid lengthens the immunity window either way, because
     /// the window opens on a blocked hit too.
     pub fn take_damage(&mut self, raw: f32) -> bool {
-        if self.god {
+        if self.god || self.buffs.white_coat > 0.0 {
             return false;
         }
         if self.iframes > 0.0 {

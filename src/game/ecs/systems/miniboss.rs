@@ -1450,7 +1450,7 @@ pub fn miniboss_system(
                     // strike live, so a dodge has to carry the rat clear of
                     // the shape, not merely through its first tick.
                     if !mb.hit_this_strike
-                        && shape.contains(ppos, crate::game::ecs::constants::PLAYER_RADIUS)
+                        && shape.contains(ppos, player.buffs.hurt_radius())
                         && player.take_damage(mb.signature_damage)
                     {
                         mb.hit_this_strike = true;

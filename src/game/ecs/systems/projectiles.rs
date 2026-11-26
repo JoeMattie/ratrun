@@ -204,6 +204,7 @@ pub fn bullets_system(
     let dt = input.dt;
     let ppos = player.pos;
     let arena = level.arena;
+    let weapons_suspended = player.buffs.weapons_suspended();
     // Pocket Watch (`systems::powerups`): hostile pellets crawl at 40 % of
     // their travel speed while the watch runs. Only the *step* is scaled, never
     // `b.vel`, so a pellet resumes its own speed the instant the watch ends; and
@@ -227,6 +228,11 @@ pub fn bullets_system(
         let Ok((_, _, mut b, mut echo, evolved_shot)) = bullets.get_mut(entity) else {
             continue;
         };
+        // White Coat dismisses the spores still attached to the rat.
+        if weapons_suspended && b.faction == Faction::Player && b.orbit.is_some() {
+            commands.entity(entity).despawn();
+            continue;
+        }
 
         b.prev_pos = b.pos;
         // Already spent (consumed by a hit or by a wall last tick): it still

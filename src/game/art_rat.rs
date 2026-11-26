@@ -256,6 +256,9 @@ impl TailCharge {
 /// `ready` is `timer <= 0` — the HUD's rule (`HudState::sync_active_ready`),
 /// so the tail's glow and the HUD's READY pip turn on together.
 pub fn tail_charge(player: &Player) -> Option<TailCharge> {
+    if player.buffs.weapons_suspended() {
+        return None;
+    }
     let weapon = player
         .loadout
         .weapons
@@ -302,12 +305,15 @@ pub fn tail_ready_flash(charge: Option<TailCharge>, elapsed: f32, ready_at: &mut
 struct Tint {
     hurt: f32,
     ghost: bool,
+    white_coat: bool,
 }
 
 impl Tint {
     #[inline]
     fn apply(&self, c: Rgb) -> Rgb {
-        let c = if self.hurt > 0.0 {
+        let c = if self.white_coat {
+            mix(c, (255, 255, 248), 0.58)
+        } else if self.hurt > 0.0 {
             mix(c, HURT, self.hurt)
         } else {
             c
@@ -1065,7 +1071,9 @@ fn tint_of(player: &Player, elapsed: f32) -> Tint {
         } else {
             0.0
         },
-        ghost: player.iframes > 0.0 && ((elapsed * 20.0) as i32 % 2 == 0),
+        ghost: player.buffs.white_coat <= 0.0
+            && player.iframes > 0.0 && ((elapsed * 20.0) as i32 % 2 == 0),
+        white_coat: player.buffs.white_coat > 0.0,
     }
 }
 

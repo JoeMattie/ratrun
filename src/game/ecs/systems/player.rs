@@ -149,7 +149,7 @@ pub fn player_system(
         .loadout
         .weapons
         .iter()
-        .find(|w| w.kind == WeaponKind::SuperDash)
+        .find(|w| w.kind == WeaponKind::SuperDash && !player.buffs.weapons_suspended())
         .map(|w| u32::from(w.level.max(1)));
     let mut release: Option<f32> = None;
     match super_dash_level {
@@ -310,18 +310,11 @@ pub fn player_system(
     } else {
         move_dir.clamp_len(1.0)
     };
-    // Console `speed x` scales the throttle; default 1.0 is a no-op. The
-    // Growth Serum's giant is 10 % slower on its feet (batch 13): the dash
-    // still fires, it just launches from a heavier body.
-    let giant_slow = if player.buffs.is_giant() {
-        crate::game::ecs::systems::powerups::GIANT_MOVE_MULT
-    } else {
-        1.0
-    };
+    // Console speed and the current size buff scale the throttle.
     let target_vel = throttle
         * stats.move_speed
         * player.speed_mult.max(0.0)
-        * giant_slow
+        * player.buffs.move_speed_scale()
         * dash_boost;
     // Copy out `vel` first (the legacy "disjoint borrow" convention) so the
     // arithmetic reads the pre-lerp velocity exactly once.

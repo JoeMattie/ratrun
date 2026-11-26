@@ -64,7 +64,6 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::collision::{self, SizeClass};
 use crate::game::ecs::components::{SpawnId, Wick};
-use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{NextSpawnId, RngRes, SfxQueue, Shake, TickInput};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Level;
@@ -285,7 +284,7 @@ pub fn wave3_system(
         let pos = wick.pos;
         // The burst: 9 to the rat, 20 to every enemy inside the radius (its own
         // side included — that is the whole point of the wick).
-        if pos.dist(ppos) <= WICK_BURST_RADIUS + PLAYER_RADIUS
+        if pos.dist(ppos) <= WICK_BURST_RADIUS + player.buffs.hurt_radius()
             && player.take_damage(WICK_RAT_DAMAGE)
         {
             sfx.0.push(Sfx::Hurt);
@@ -628,7 +627,8 @@ fn flea_impact(
 ) {
     vfx::emit_flea_impact(particles, rng, at, FLEA_CROSS_RADIUS, echo);
     sfx.0.push(Sfx::FleaHop);
-    if at.dist(player.pos) <= FLEA_CROSS_RADIUS + PLAYER_RADIUS && player.take_damage(FLEA_CROSS_DAMAGE)
+    if at.dist(player.pos) <= FLEA_CROSS_RADIUS + player.buffs.hurt_radius()
+        && player.take_damage(FLEA_CROSS_DAMAGE)
     {
         sfx.0.push(Sfx::Hurt);
     }
@@ -712,7 +712,7 @@ fn turnkey_tick(
         let rat = player.pos;
         if !e.w3.bar_telling()
             && !e.w3.bar_spent
-            && bar_hits(e.w3.bar_pos, e.w3.bar_dir, rat)
+            && bar_hits(e.w3.bar_pos, e.w3.bar_dir, rat, player.buffs.hurt_radius())
             && player.take_damage(CROSSBAR_DAMAGE)
         {
             e.w3.bar_spent = true;
@@ -761,14 +761,14 @@ fn turnkey_tick(
 
 /// Does the crossbar's line touch a body of radius `r` at `ppos`?
 #[inline]
-pub fn bar_hits(pos: Vec2, dir: Vec2, ppos: Vec2) -> bool {
+fn bar_hits(pos: Vec2, dir: Vec2, ppos: Vec2, radius: f32) -> bool {
     let half = dir * (CROSSBAR_LEN * 0.5);
     collision::segment_circle_hit(
         pos - half,
         pos + half,
         CROSSBAR_HALF_WIDTH,
         ppos,
-        PLAYER_RADIUS,
+        radius,
     )
 }
 

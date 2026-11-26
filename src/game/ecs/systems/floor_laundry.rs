@@ -50,6 +50,7 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::ecs::components::SpawnId;
+#[cfg(test)]
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -344,7 +345,7 @@ fn peg_tick(
             // One bite per strike, through the rat's i-frames like every
             // other hit (a blocked touch does not spend the strike).
             if !jaws.spent
-                && view.touches(player.pos, PLAYER_RADIUS)
+                && view.touches(player.pos, player.buffs.hurt_radius())
                 && player.take_damage(PEG_JAW_DAMAGE)
             {
                 jaws.spent = true;

@@ -306,8 +306,8 @@ pub fn can_path(e: &Enemy) -> Option<CanPath> {
 
 /// Does a roll from `prev` to `now` (one tick of the can's lane) touch the rat?
 #[inline]
-pub fn can_roll_hits(prev: Vec2, now: Vec2, rat: Vec2) -> bool {
-    collision::segment_circle_hit(prev, now, CAN_LANE_HALF_WIDTH, rat, PLAYER_RADIUS)
+pub fn can_roll_hits(prev: Vec2, now: Vec2, rat: Vec2, radius: f32) -> bool {
+    collision::segment_circle_hit(prev, now, CAN_LANE_HALF_WIDTH, rat, radius)
 }
 
 /// A Loose Can's own state (the authoritative copy; the phase, the tell clock
@@ -593,7 +593,10 @@ fn can_tick(
             e.anim += dt * 20.0;
             // One hit per roll, through the rat's i-frames like every other
             // hit: a roll that crosses an invulnerable rat stays unspent.
-            if !state.spent && can_roll_hits(prev, e.pos, player.pos) && player.take_damage(e.damage) {
+            if !state.spent
+                && can_roll_hits(prev, e.pos, player.pos, player.buffs.hurt_radius())
+                && player.take_damage(e.damage)
+            {
                 state.spent = true;
                 vfx::emit_player_hurt(particles, &mut rng.0, player.pos);
                 sfx.0.push(Sfx::Hurt);
@@ -968,8 +971,8 @@ mod tests {
     fn the_roll_hit_is_the_lane_the_outline_draws() {
         let (a, b) = (Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0));
         let reach = CAN_LANE_HALF_WIDTH + PLAYER_RADIUS;
-        assert!(can_roll_hits(a, b, Vec2::new(5.0, reach - 0.2)));
-        assert!(!can_roll_hits(a, b, Vec2::new(5.0, reach + 0.6)));
+        assert!(can_roll_hits(a, b, Vec2::new(5.0, reach - 0.2), PLAYER_RADIUS));
+        assert!(!can_roll_hits(a, b, Vec2::new(5.0, reach + 0.6), PLAYER_RADIUS));
         assert!(owns_state_machine(EnemyKind::LooseCan));
         assert!(!owns_state_machine(EnemyKind::MurderHornet));
     }

@@ -262,6 +262,9 @@ fn pickup_tag(kind: PickupKind) -> PickupTag {
         PickupKind::PocketWatch => PickupTag::PocketWatch,
         PickupKind::CleanSocks => PickupTag::CleanSocks,
         PickupKind::GrowthSerum => PickupTag::GrowthSerum,
+        PickupKind::ShrinkDraught => PickupTag::ShrinkDraught,
+        PickupKind::WhiteCoat => PickupTag::WhiteCoat,
+        PickupKind::TheCollar => PickupTag::Collar,
     }
 }
 

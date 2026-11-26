@@ -1021,7 +1021,7 @@ fn hornet_tick(
             // The jab: one heavier hit, through the player's i-frames like
             // every other hit in the game.
             if e.w4.spent == 0
-                && collision::circles_overlap(player.pos, PLAYER_RADIUS, e.pos, e.radius)
+                && collision::circles_overlap(player.pos, player.buffs.hurt_radius(), e.pos, e.radius)
                 && player.take_damage(HORNET_JAB_DAMAGE)
             {
                 e.w4.spent = 1;

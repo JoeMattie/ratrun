@@ -89,20 +89,16 @@ use crate::game::ecs::systems::powerups;
 /// appointment — and the rat still has to finish the body.
 pub const NUKE_NAMED_CHUNK: f32 = 0.35;
 
-/// Weights of the rare-pickup table, in `WAVE3_DESIGN.md` §10 order:
-/// Heal 32, Magnet 18, Nuke 4 + **Growth Serum 4** (the Nuke's own bucket split
-/// between them, so the table still totals 100 and every other find keeps the
-/// bucket it always had), Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9,
-/// Clean Socks 9. The **chance** of a drop is unchanged (ordinary 1.2 %, big
-/// 12 %, boss 100 %); this table only decides *which* find a successful roll
-/// yields, and it costs exactly the one `random_range` draw the legacy three-way
-/// table cost (see `powerups::tests::a_drop_draws_the_same_number_of_random_numbers`).
+/// Weights out of 100: Heal 30, Magnet 18, Nuke 3, Growth Serum 4,
+/// Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9, Clean Socks 9,
+/// and 1 each for Shrink Draught, White Coat and The Collar.
+///
+/// The three new outcomes deliberately change seeded traces when they replace
+/// Heal or Nuke. Drop chance and the single word spent choosing a find stay
+/// the same.
 pub const PICKUP_WEIGHT_TOTAL: u32 = 100;
 
 /// Roll the rare-pickup kind for one successful drop.
-///
-/// The bucket bounds are the design's cumulative weights, so the table reads
-/// top-to-bottom as the document does.
 ///
 /// **Exactly one 32-bit word, whatever the value.** A ranged integer sample is
 /// not a fixed cost: `rand`'s pinned `sample_single_inclusive` computes a
@@ -124,18 +120,19 @@ pub fn roll_pickup_kind_from_word(word: u32) -> PickupKind {
     let bucket =
         ((u64::from(word) * u64::from(PICKUP_WEIGHT_TOTAL)) >> 32) as u32;
     match bucket {
-        0..=31 => PickupKind::Heal,
+        0..=29 => PickupKind::Heal,
         32..=49 => PickupKind::Magnet,
-        // Batch 13 split the Nuke's eight points between the Nuke and the
-        // Growth Serum: the serum is as rare as the Nuke, and because the
-        // table still totals 100 every *other* find keeps the exact bucket it
-        // had, so no seed's Heal, Magnet, Cap, Mouse, Watch or Socks moved.
-        50..=53 => PickupKind::Nuke,
+        50..=52 => PickupKind::Nuke,
         54..=57 => PickupKind::GrowthSerum,
         58..=71 => PickupKind::BottleCap,
         72..=81 => PickupKind::WindupMouse,
         82..=90 => PickupKind::PocketWatch,
-        _ => PickupKind::CleanSocks,
+        91..=99 => PickupKind::CleanSocks,
+        // The new finds take two Heal buckets and one Nuke bucket.
+        30 => PickupKind::ShrinkDraught,
+        31 => PickupKind::WhiteCoat,
+        53 => PickupKind::TheCollar,
+        _ => unreachable!("multiply-high gives a bucket below PICKUP_WEIGHT_TOTAL"),
     }
 }
 
@@ -470,9 +467,15 @@ pub fn gems_system(
     // four stacks of Second Scent and the splice are x1.4 * x1.25 = x1.75.
     // The console's `xp_mult` multiplies on top (a positive floor keeps the
     // bank well-defined; the default 1.0 is a no-op).
+    let collar_xp = if player.buffs.collar > 0.0 {
+        powerups::COLLAR_XP_MULT
+    } else {
+        1.0
+    };
     let xp_mult = player.loadout.stats.xp_mult
         * crate::game::shop::gem_xp_mult(&player.loadout.splices)
-        * cvars.xp_mult.max(0.0);
+        * cvars.xp_mult.max(0.0)
+        * collar_xp;
     let mut gained = 0u32;
     let collect_r = PLAYER_RADIUS + 3.0;
 
@@ -799,6 +802,23 @@ pub fn pickups_system(
             // (`Player::take_damage`).
             PickupKind::GrowthSerum => {
                 player.buffs.giant = powerups::GROWTH_SECS;
+                player.buffs.tiny = 0.0;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::ShrinkDraught => {
+                player.buffs.tiny = powerups::SHRINK_SECS;
+                player.buffs.giant = 0.0;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::WhiteCoat => {
+                player.buffs.white_coat = powerups::WHITE_COAT_SECS;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::TheCollar => {
+                player.buffs.collar = powerups::COLLAR_SECS;
                 vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
                 sfx.0.push(Sfx::PocketFind);
             }

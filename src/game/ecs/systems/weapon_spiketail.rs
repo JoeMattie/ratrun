@@ -751,6 +751,12 @@ pub fn spiked_tail_system(
     if lashes.is_empty() {
         return;
     }
+    if player.buffs.weapons_suspended() {
+        for (entity, _, _) in lashes.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
     let dt = input.dt;
 
     // Both scratch buffers at once: one `DerefMut` through the `Local`, then

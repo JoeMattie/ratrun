@@ -193,7 +193,11 @@ pub fn fire_weapons_system(
     // of the stat block, so `fire_one` can read them while the loop still
     // mutates weapon timers.
     let stats = player.loadout.stats;
-    let n = player.loadout.weapons.len();
+    let n = if player.buffs.weapons_suspended() {
+        0
+    } else {
+        player.loadout.weapons.len()
+    };
 
     // One stable enemy order for the whole tick. `EnemyIndex` is rebuilt by
     // `enemy_move::grid_refresh_system` right before this system and nothing
@@ -832,6 +836,12 @@ pub fn active_weapons_system(
     mut fx: ResMut<ActiveFx>,
     mut scratch: ActiveScratch,
 ) {
+    if player.buffs.weapons_suspended() {
+        fx.thrash_left = 0.0;
+        fx.clear_caught();
+        fx.squeak_left = (fx.squeak_left - input.dt).max(0.0);
+        return;
+    }
     let dt = input.dt;
     let ppos = player.pos;
     let pface = player.face;

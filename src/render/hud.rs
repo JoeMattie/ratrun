@@ -386,6 +386,9 @@ pub enum CalloutKind {
     /// Growth Serum (batch 13): the rat is huge and crushes what it walks over.
     /// Appended last so the legacy kinds keep their order.
     GrowthSerum,
+    ShrinkDraught,
+    WhiteCoat,
+    Collar,
 }
 
 impl CalloutKind {
@@ -411,6 +414,9 @@ impl CalloutKind {
             CalloutKind::AutoPick => TRAIL_GOLD,
             CalloutKind::Nest => TRAIL_GOLD,
             CalloutKind::GrowthSerum => SERUM_PINK,
+            CalloutKind::ShrinkDraught => palette::to_color(PickupKind::ShrinkDraught.color()),
+            CalloutKind::WhiteCoat => palette::to_color(PickupKind::WhiteCoat.color()),
+            CalloutKind::Collar => palette::to_color(PickupKind::TheCollar.color()),
         }
     }
 }
@@ -804,6 +810,30 @@ impl HudState {
                     2.6,
                 );
             }
+            PickupKind::ShrinkDraught => {
+                self.push_callout(
+                    CalloutKind::ShrinkDraught,
+                    "+SHRINK DRAUGHT",
+                    "SMALLER · +15% SPEED · 12s",
+                    2.4,
+                );
+            }
+            PickupKind::WhiteCoat => {
+                self.push_callout(
+                    CalloutKind::WhiteCoat,
+                    "+WHITE COAT",
+                    "NO HITS · NO WEAPONS · 5s",
+                    2.4,
+                );
+            }
+            PickupKind::TheCollar => {
+                self.push_callout(
+                    CalloutKind::Collar,
+                    "+THE COLLAR",
+                    "DOUBLE GEM XP · 16s",
+                    2.4,
+                );
+            }
         }
     }
 
@@ -929,7 +959,8 @@ impl HudState {
         self.active_ready.truncate(weapons.len());
         self.active_flash.truncate(weapons.len());
         for (i, w) in weapons.iter().enumerate() {
-            let ready = !w.kind.is_active() || w.timer <= 0.0;
+            let ready = !w.kind.is_active()
+                || (!world.player.buffs.weapons_suspended() && w.timer <= 0.0);
             if ready && !self.active_ready[i] && world.elapsed > 0.2 {
                 self.active_flash[i] = 0.55;
             }
@@ -1112,6 +1143,9 @@ impl HudState {
                 (PickupKind::PocketWatch, buffs.slow_bullets),
                 (PickupKind::CleanSocks, buffs.socks),
                 (PickupKind::GrowthSerum, buffs.giant),
+                (PickupKind::ShrinkDraught, buffs.tiny),
+                (PickupKind::WhiteCoat, buffs.white_coat),
+                (PickupKind::TheCollar, buffs.collar),
             ] {
                 if left <= 0.0 {
                     continue;
@@ -2274,6 +2308,9 @@ fn buff_chip_name(kind: PickupKind) -> &'static str {
         PickupKind::Heal => "HEAL",
         PickupKind::Magnet => "MAGNET",
         PickupKind::Nuke => "PURGE",
+        PickupKind::ShrinkDraught => "TINY",
+        PickupKind::WhiteCoat => "WHITE COAT",
+        PickupKind::TheCollar => "COLLAR",
     }
 }
 
@@ -3905,6 +3942,7 @@ mod tests {
                 slow_bullets: 3.2,
                 socks: 5.9,
                 giant: 0.0,
+                ..crate::game::player::Buffs::default()
             };
             let mut state = HudState::default();
             state.tick(1.0 / 60.0, &w, &[], false);

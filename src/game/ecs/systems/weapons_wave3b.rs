@@ -357,6 +357,10 @@ pub fn laser_eyes_system(
     mut fx: ResMut<LaserFx>,
     mut fallback: Local<Vec<Entity>>,
 ) {
+    if player.buffs.weapons_suspended() {
+        *fx = LaserFx::default();
+        return;
+    }
     let dt = input.dt;
     let (dmg_mult, fire_rate, reach_mult) = {
         let s = player.loadout.stats;
@@ -637,6 +641,9 @@ pub fn super_dash_system(
     mut track: ResMut<DashTrack>,
     mut fallback: Local<Vec<Entity>>,
 ) {
+    if player.buffs.weapons_suspended() {
+        return;
+    }
     let Some((from, to)) = track.segment else {
         return;
     };

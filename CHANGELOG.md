@@ -5,6 +5,9 @@
 Not signed or notarised on macOS: right-click the app and choose Open the
 first time.
 
+- **Three new pickups.** Shrink Draught makes you smaller and quicker.
+  White Coat protects you from hits and suspends your weapons. The Collar
+  doubles gem XP while elites and the miniboss close in faster.
 
 - **A Graphics page in Options.** Lighting quality, light effects, smoothing,
   the foreground layer, glyph particles and screen shake, all saved between

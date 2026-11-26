@@ -54,6 +54,12 @@ pub enum PickupKind {
     /// Growth Serum: the rat is drawn five times its size and stomps the
     /// ordinary horde under it (20 s).
     GrowthSerum,
+    /// Shrink Draught: a smaller hurt disc and faster movement (12 s).
+    ShrinkDraught,
+    /// White Coat: no incoming hits or weapon use (5 s).
+    WhiteCoat,
+    /// The Collar: double gem XP and faster heavy pursuers (16 s).
+    TheCollar,
 }
 
 impl PickupKind {
@@ -72,6 +78,9 @@ impl PickupKind {
             PickupKind::CleanSocks => (240, 240, 232),
             // Hot lab pink-magenta: the one find that is a colour no floor has.
             PickupKind::GrowthSerum => (255, 88, 196),
+            PickupKind::ShrinkDraught => (192, 235, 255),
+            PickupKind::WhiteCoat => (255, 255, 248),
+            PickupKind::TheCollar => (255, 201, 100),
         }
     }
     pub fn glyph(self) -> &'static str {
@@ -84,6 +93,9 @@ impl PickupKind {
             PickupKind::PocketWatch => "w",
             PickupKind::CleanSocks => "s",
             PickupKind::GrowthSerum => "G",
+            PickupKind::ShrinkDraught => "T",
+            PickupKind::WhiteCoat => "W",
+            PickupKind::TheCollar => "K",
         }
     }
 
@@ -96,6 +108,9 @@ impl PickupKind {
             PickupKind::PocketWatch => "P",
             PickupKind::CleanSocks => "S",
             PickupKind::GrowthSerum => "G",
+            PickupKind::ShrinkDraught => "T",
+            PickupKind::WhiteCoat => "W",
+            PickupKind::TheCollar => "K",
             // The three legacy pickups are instant and have no timer.
             PickupKind::Heal | PickupKind::Magnet | PickupKind::Nuke => "",
         }
@@ -112,12 +127,15 @@ impl PickupKind {
             PickupKind::PocketWatch => "POCKET WATCH",
             PickupKind::CleanSocks => "CLEAN SOCKS",
             PickupKind::GrowthSerum => "GROWTH SERUM",
+            PickupKind::ShrinkDraught => "SHRINK DRAUGHT",
+            PickupKind::WhiteCoat => "WHITE COAT",
+            PickupKind::TheCollar => "THE COLLAR",
         }
     }
 
     /// Every pickup kind, in enum order. The console's `pickup` command and
     /// its Tab completion read this table rather than a retyped list.
-    pub fn all() -> [PickupKind; 8] {
+    pub const fn all() -> [PickupKind; 11] {
         [
             PickupKind::Heal,
             PickupKind::Magnet,
@@ -127,6 +145,9 @@ impl PickupKind {
             PickupKind::PocketWatch,
             PickupKind::CleanSocks,
             PickupKind::GrowthSerum,
+            PickupKind::ShrinkDraught,
+            PickupKind::WhiteCoat,
+            PickupKind::TheCollar,
         ]
     }
 
@@ -142,6 +163,9 @@ impl PickupKind {
             PickupKind::PocketWatch => "pocketwatch",
             PickupKind::CleanSocks => "cleansocks",
             PickupKind::GrowthSerum => "growthserum",
+            PickupKind::ShrinkDraught => "shrinkdraught",
+            PickupKind::WhiteCoat => "whitecoat",
+            PickupKind::TheCollar => "thecollar",
         }
     }
 }
@@ -177,18 +201,16 @@ mod tests {
     use super::PickupKind;
 
     /// The table the console's `pickup` command, its Tab completion and the
-    /// Library's registry all walk: every kind exactly once, in enum order, and
-    /// the batch-13 Growth Serum last.
+    /// Library's registry all walk: every kind exactly once, in enum order.
     #[test]
-    fn the_pickup_table_lists_every_kind_once_and_ends_with_the_serum() {
+    fn the_pickup_table_lists_every_kind_once_in_discriminant_order() {
         let all = PickupKind::all();
-        assert_eq!(all.len(), 8, "one row per find");
-        assert_eq!(*all.last().unwrap(), PickupKind::GrowthSerum);
+        assert_eq!(all.len(), 11, "one row per find");
         for (i, kind) in all.iter().enumerate() {
-            assert!(
-                !all[..i].contains(kind),
-                "{kind:?} is listed twice in PickupKind::all()"
-            );
+            assert_eq!(*kind as usize, i, "{kind:?} is out of order");
+            if !kind.buff_tag().is_empty() {
+                assert!(all[..i].iter().all(|prev| prev.buff_tag() != kind.buff_tag()));
+            }
             assert!(!kind.name().is_empty(), "{kind:?} has no console name");
             assert!(!kind.label().is_empty(), "{kind:?} has no label");
             // The label is the ALL CAPS callout name (STYLE: panel/HUD strings

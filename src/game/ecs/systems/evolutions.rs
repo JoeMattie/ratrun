@@ -1411,6 +1411,10 @@ pub fn ripcord_system(
     mut bosses: Query<&mut Boss>,
     mut fallback: Local<Vec<Entity>>,
 ) {
+    if player.buffs.weapons_suspended() {
+        track.clear_route();
+        return;
+    }
     if track.route_life <= 0.0 || track.route_len() == 0 {
         return;
     }

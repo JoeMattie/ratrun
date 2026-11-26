@@ -2451,6 +2451,9 @@ pub fn emit_pickup_ambient(
             PickupKind::CleanSocks => Ramp::Custom((250, 250, 246), (150, 156, 158)),
             // Growth Serum: a hot pink-magenta bubble of lab growth medium.
             PickupKind::GrowthSerum => Ramp::Custom((255, 176, 232), (140, 24, 104)),
+            PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => {
+                Ramp::Custom(kind.color(), (72, 76, 84))
+            }
         };
         let a = rng.random_range(0.0..std::f32::consts::TAU);
         let d = rng.random_range(2.5..5.5);
@@ -4980,6 +4983,13 @@ pub fn emit_pickup_find(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, kind:
             16,
             86.0,
         ),
+        PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => (
+            kind.color(),
+            (255, 255, 248),
+            Ramp::Custom(kind.color(), (72, 76, 84)),
+            10,
+            60.0,
+        ),
         // Not a pocket find: fall back to the heal burst's gentle read.
         _ => (
             (126, 224, 152),
@@ -5125,6 +5135,7 @@ pub fn emit_buff_expire(ps: &mut Particles, pos: Vec2, kind: PickupKind) {
         PickupKind::PocketWatch => ((150, 210, 226), 5),
         PickupKind::CleanSocks => ((240, 240, 232), 5),
         PickupKind::GrowthSerum => ((255, 88, 196), 6),
+        PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => (kind.color(), 5),
         _ => ((190, 190, 190), 4),
     };
     let n = ps.budget_count(count, false);

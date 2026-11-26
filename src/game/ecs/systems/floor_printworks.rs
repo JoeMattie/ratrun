@@ -47,6 +47,7 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::ecs::components::{SpawnId, Wick};
+#[cfg(test)]
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
 use crate::game::ecs::systems::enemy_wave3::{FLEA_JUMP_PERIOD, WICK_FUSE_SECS};
@@ -151,8 +152,8 @@ pub fn staple_feet(crawler: Vec2, rat: Vec2) -> [Vec2; 2] {
 /// Does a rat at `rat` stand in either live hole? The one test the strike, the
 /// tests and (once it is taught) the bot share.
 #[inline]
-pub fn staple_hits(feet: &[Vec2; 2], rat: Vec2) -> bool {
-    let reach = STAPLE_FOOT_RADIUS + PLAYER_RADIUS - STAPLE_GRAZE;
+pub fn staple_hits(feet: &[Vec2; 2], rat: Vec2, radius: f32) -> bool {
+    let reach = STAPLE_FOOT_RADIUS + radius - STAPLE_GRAZE;
     feet.iter().any(|f| f.dist(rat) < reach)
 }
 
@@ -449,7 +450,10 @@ fn staple_tick(
             staple_hold(e);
             let feet = [e.w4.trail[0], e.w4.trail[1]];
             // One latch for both feet: one hit per strike.
-            if e.w4.spent == 0 && staple_hits(&feet, rat) && player.take_damage(STAPLE_FOOT_DAMAGE) {
+            if e.w4.spent == 0
+                && staple_hits(&feet, rat, player.buffs.hurt_radius())
+                && player.take_damage(STAPLE_FOOT_DAMAGE)
+            {
                 e.w4.spent = 1;
                 hit = true;
             }
@@ -558,11 +562,11 @@ mod tests {
     fn the_lane_between_the_feet_is_safe_and_each_hole_is_not() {
         let rat = Vec2::new(100.0, 100.0);
         let feet = staple_feet(Vec2::new(80.0, 100.0), rat);
-        assert!(!staple_hits(&feet, rat), "standing between the feet is the answer");
-        assert!(!staple_hits(&feet, rat + Vec2::new(6.0, 0.0)), "walking the lane stays safe");
-        assert!(staple_hits(&feet, feet[0]));
-        assert!(staple_hits(&feet, feet[1]));
-        assert!(staple_hits(&feet, rat + Vec2::new(0.0, 2.0)), "drifting sideways is clipped");
+        assert!(!staple_hits(&feet, rat, PLAYER_RADIUS), "standing between the feet is the answer");
+        assert!(!staple_hits(&feet, rat + Vec2::new(6.0, 0.0), PLAYER_RADIUS), "walking the lane stays safe");
+        assert!(staple_hits(&feet, feet[0], PLAYER_RADIUS));
+        assert!(staple_hits(&feet, feet[1], PLAYER_RADIUS));
+        assert!(staple_hits(&feet, rat + Vec2::new(0.0, 2.0), PLAYER_RADIUS), "drifting sideways is clipped");
     }
 
     // ---- Staple Crawler ---------------------------------------------------

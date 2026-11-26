@@ -206,7 +206,8 @@ pub fn enemy_steering_system(
         // A miniboss mid-tell/mid-signature stands still: its state machine
         // owns the body's position, and it is held here (not by a `stun`) so a
         // Sonic Squeak ring still slows it exactly like it slows an elite.
-        if minibosses.get(entity).is_ok_and(|mb| mb.holds()) {
+        let miniboss = minibosses.get(entity).ok();
+        if miniboss.is_some_and(|mb| mb.holds()) {
             e.vel = e.vel * (1.0 - (12.0 * dt).min(1.0));
             e.contact_cd = (e.contact_cd - dt).max(0.0);
             if e.flash > 0.0 {
@@ -282,7 +283,12 @@ pub fn enemy_steering_system(
         // Sewer: the Pipe Eel eases its velocity at half the rate (`floor_sewer`).
         // `None` for every other kind, so nothing else changes.
         let eel_before = crate::game::ecs::systems::floor_sewer::pipe_eel_before(&e);
-        e.steer(target, flow_dir, dt, speed_mult * glue * ink);
+        let chase = if player.buffs.collar > 0.0 && (e.elite || miniboss.is_some()) {
+            crate::game::ecs::systems::powerups::COLLAR_CHASE_MULT
+        } else {
+            1.0
+        };
+        e.steer(target, flow_dir, dt, speed_mult * glue * ink * chase);
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.
