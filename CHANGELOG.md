@@ -5,6 +5,9 @@
 Not signed or notarised on macOS: right-click the app and choose Open the
 first time.
 
+- **Daily run.** A dated title row opens a seeded campaign through the Sewer,
+  Kitchen, Lab and Flatbed. It banks to the Nest and saves a local best for
+  each UTC day. The incident report and victory plate carry the start date.
 
 - **A Graphics page in Options.** Lighting quality, light effects, smoothing,
   the foreground layer, glyph particles and screen shake, all saved between
