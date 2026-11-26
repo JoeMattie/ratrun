@@ -45,6 +45,7 @@ mod flatbed;
 mod kitchen;
 mod lab;
 mod laundry;
+mod outfall;
 mod printworks;
 mod sewer;
 
@@ -378,22 +379,25 @@ impl Song {
     }
 }
 
-/// Every song, indexed by the converter's song number (1-based).
-pub static SONGS: [&Song; 6] = [
+/// Every song, indexed by the converter's song number (1-based), followed by
+/// original arrangements.
+pub static SONGS: [&Song; 7] = [
     &sewer::SONG,
     &kitchen::SONG,
     &laundry::SONG,
     &lab::SONG,
     &printworks::SONG,
     &flatbed::SONG,
+    &outfall::SONG,
 ];
 
 /// The one and only theme -> song table.
 ///
 /// The owner's pairing: Silent Return -> Sewer, The Great Dash -> Kitchen,
 /// A Minor Waltz -> Laundry, B-C-D# Warning -> Lab, Platen Pace -> Printworks,
-/// Rat on the Flatbed -> Flatbed. Each floor's file holds its own song, so
-/// swapping two songs is a two-line change here (and nothing else).
+/// Rat on the Flatbed -> Flatbed, Return Current -> Outfall. Each floor's file
+/// holds its own song, so swapping two songs is a two-line change here (and
+/// nothing else).
 pub fn song_for(theme: Theme) -> &'static Song {
     match theme {
         Theme::Sewer => &sewer::SONG,
@@ -402,11 +406,13 @@ pub fn song_for(theme: Theme) -> &'static Song {
         Theme::Lab => &lab::SONG,
         Theme::Printworks => &printworks::SONG,
         Theme::Trailer => &flatbed::SONG,
+        Theme::Outfall => &outfall::SONG,
     }
 }
 
 /// The theme for a floor name, as `--music-render` and the capture scripts
-/// spell it (`sewer`, `kitchen`, ..., `flatbed`, plus `trailer`).
+/// spell it (`sewer`, `kitchen`, `laundry`, `outfall`, `lab`, `printworks`,
+/// `flatbed`, plus `trailer`).
 pub fn theme_by_floor(floor: &str) -> Option<Theme> {
     Some(match floor {
         "sewer" => Theme::Sewer,
@@ -415,6 +421,7 @@ pub fn theme_by_floor(floor: &str) -> Option<Theme> {
         "laundry" => Theme::Laundry,
         "printworks" => Theme::Printworks,
         "flatbed" | "trailer" => Theme::Trailer,
+        "outfall" => Theme::Outfall,
         _ => return None,
     })
 }
@@ -457,7 +464,7 @@ mod tests {
             seen.push(song);
         }
         assert_eq!(seen.len(), Theme::playable().len());
-        assert_eq!(SONGS.len(), 6);
+        assert_eq!(SONGS.len(), 7);
         // No two songs share a name, a tempo or a loop length.
         for (i, a) in SONGS.iter().enumerate() {
             for b in &SONGS[i + 1..] {
@@ -578,6 +585,7 @@ mod tests {
         assert_eq!(song_by_floor("sewer").map(|s| s.floor), Some("Sewer"));
         assert_eq!(song_by_floor("flatbed").map(|s| s.floor), Some("Flatbed"));
         assert_eq!(song_by_floor("trailer").map(|s| s.floor), Some("Flatbed"));
+        assert_eq!(song_by_floor("outfall").map(|s| s.floor), Some("Outfall"));
         assert!(song_by_floor("kitchen").is_some());
         assert!(song_by_floor("submarine").is_none());
     }

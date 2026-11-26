@@ -11511,6 +11511,29 @@ const fn platen_clack(src: &[u8; SECTION_STEPS]) -> [u8; SECTION_STEPS] {
     out
 }
 
+/// An under-ocean half-time surge groove: heavy kick on beat one and step ten,
+/// deep snare on beat three, eighth-note hats with an open wash on step 14,
+/// and all boss overdrive hits preserved from the source section.
+const fn surge_groove(src: &[u8; SECTION_STEPS]) -> [u8; SECTION_STEPS] {
+    let mut out = [0u8; SECTION_STEPS];
+    let mut i = 0;
+    while i < SECTION_STEPS {
+        let step = i % 16;
+        let boss = src[i] & 0xF0;
+        out[i] = match step {
+            0 => KICK | (boss & BKICK),
+            2 | 4 | 6 => HAT | boss,
+            8 => SNARE | boss,
+            10 => KICK | HAT | boss,
+            12 => HAT | boss,
+            14 => OHAT | boss,
+            _ => boss,
+        };
+        i += 1;
+    }
+    out
+}
+
 /// One transposed section with a new groove and an optional bass rewrite.
 const fn retune(
     src: Section4,
@@ -11534,8 +11557,10 @@ const fn retune(
     };
     let drums = if groove == 0 {
         steam_6_8(&src.drums)
-    } else {
+    } else if groove == 1 {
         platen_clack(&src.drums)
+    } else {
+        surge_groove(&src.drums)
     };
     Section4 {
         name: src.name,
@@ -11582,6 +11607,11 @@ const LAUNDRY_SECTIONS: [Section4; NUM_SECTIONS] =
 /// bass pausing for the bell.
 const PRINTWORKS_SECTIONS: [Section4; NUM_SECTIONS] =
     retune_all(&KITCHEN_SECTIONS, 2, 1, false, true);
+
+/// Outfall: D minor (written one semitone up against a C#3 reference), 84 BPM,
+/// deep half-time surge groove over the subterranean progression.
+const OUTFALL_SECTIONS: [Section4; NUM_SECTIONS] =
+    retune_all(&SEWER_SECTIONS, 1, 2, false, false);
 
 fn track_for(theme: Theme) -> TrackCfg {
     match theme {
@@ -11670,6 +11700,22 @@ fn track_for(theme: Theme) -> TrackCfg {
             chord_pulse_mix: 0.36,
             chord_lp: 1750.0,
             sections: &TRAILER_SECTIONS,
+        },
+        Theme::Outfall => TrackCfg {
+            // The Sewer's C minor arrangement, written one semitone up against
+            // a C#3 reference: it sounds in D minor with its own reference
+            // (>7.7 Hz from every other floor) and 84 BPM half-time surge feel.
+            key_name: "D Minor",
+            root: 138.59, // C#3 (the tuning reference, not the tonic)
+            bpm: 84.0,
+            lead_duty: 0.20,
+            lead_lp: 2050.0,
+            counter_duty: 0.44,
+            counter_lp: 1550.0,
+            chord_pulse_duty: 0.28,
+            chord_pulse_mix: 0.34,
+            chord_lp: 1280.0,
+            sections: &OUTFALL_SECTIONS,
         },
     }
 }
