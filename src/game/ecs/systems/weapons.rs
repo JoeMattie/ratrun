@@ -167,8 +167,6 @@ pub fn fire_weapons_system(
     mut scratch: FireScratch,
 ) {
     let dt = input.dt;
-    // The reticle (wave 3 controls): `None` = auto-aim exactly as before.
-    let aim = input.aim;
     // Batch 12: age the melee weapons' snapshots (a bite and a whip crack each
     // live a tenth of a second). Despawn is deferred, so the component exists
     // for the whole frame it was spawned in.
@@ -299,7 +297,7 @@ pub fn fire_weapons_system(
             &mut melee_nudge,
             &mut scratch.evo,
             &mut scratch.moved,
-            aim,
+            &input,
             // Batch 12: the Squeak Nova's ring is the weapon's live effect; the
             // arm below seats it and `nova_ring` (after this loop) steps it.
             &mut scratch.active,
@@ -438,6 +436,7 @@ fn target_range(kind: WeaponKind) -> f32 {
         // needs the *entity*, not just a point, so the impact can follow the
         // body); this is the longest reach any level of it has.
         WeaponKind::SpikedTail => crate::game::weapon::LASH_REACH[4],
+        WeaponKind::LavaBreath => 0.0,
     }
 }
 
@@ -1544,9 +1543,8 @@ fn fire_one(
     // Set when this shot moved a body: the grid has to be re-filed before the
     // projectile/contact passes read it (see `FireScratch::grid`).
     moved: &mut bool,
-    // The reticle in world pixels (`None` = auto-aim). The per-weapon table is
-    // in the module docs on `TickInput::aim`; each arm below applies it.
-    aim: Option<Vec2>,
+    // Aim in world pixels and the rat's position before movement for Caldera.
+    input: &TickInput,
     // The concentrated weapons' live effects: this pass writes the **Squeak
     // Nova** ring (the ring is stepped after the loadout loop).
     fx: &mut crate::game::ecs::resources::ActiveFx,
@@ -1556,6 +1554,7 @@ fn fire_one(
     // Hantavirus's live droppings (the cap evicts the oldest).
     droppings: &Query<(Entity, &SpawnId, &crate::game::ecs::components::Dropping)>,
 ) -> bool {
+    let aim = input.aim;
     let color = kind.color();
     let mut fired = false;
     match kind {
@@ -2172,6 +2171,12 @@ fn fire_one(
                 next_id,
             );
         }
+        WeaponKind::LavaBreath => {
+            super::weapon_lava::fire_lava(
+                commands, next_id, level, input, stats, ppos, pface, wlevel, dmg, cd, evolved,
+            );
+            fired = true;
+        }
     }
     // Only announce a shot when the weapon actually produced something
     // (Gnaw with no target in range fires nothing). A weapon whose cue belongs
@@ -2202,6 +2207,7 @@ fn fire_one(
             // out of the simulation — whether the caller drains audio can
             // never change a body's HP.
             WeaponKind::SpikedTail => Sfx::Lash,
+            WeaponKind::LavaBreath => Sfx::ShootAcid,
         };
         sfx.0.push(sound);
     }

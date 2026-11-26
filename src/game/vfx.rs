@@ -370,6 +370,8 @@ pub fn emit_weapon_fire(
         // The Spiked Tail's whole wind-up tell is the physics-simulated whip
         // chain (`art_rat::WhipChain`): its crack has its own emitter.
         WeaponKind::SpikedTail => {}
+        // The live volley draws its own muzzle gout.
+        WeaponKind::LavaBreath => {}
     }
 }
 
@@ -383,6 +385,21 @@ pub fn emit_weapon_hit(
     _enemy_kind: EnemyKind,
     killed: bool,
 ) {
+    if weapon == Some(WeaponKind::LavaBreath) {
+        // A hot contact spark whose direction comes from the hit geometry.
+        ps.push(Particle {
+            pos,
+            vel: -bullet_vel.normalized() * 20.0 + Vec2::new(0.0, -15.0),
+            life: 0.16,
+            max_life: 0.16,
+            drag: 2.0,
+            gravity: 38.0,
+            ramp: Ramp::Custom((255, 234, 153), (238, 80, 30)),
+            additive: true,
+            shape: if killed { Shape::Cross } else { Shape::Ember },
+        });
+        return;
+    }
     let reflect = if bullet_vel.len_sq() > 1.0 {
         -bullet_vel.normalized()
     } else {
@@ -557,6 +574,7 @@ pub fn emit_weapon_hit(
         }
         // A spike shard striking a body: steel-grey thorn sparks.
         Some(WeaponKind::SpikedTail) => emit_lash_shard_hit(ps, rng, pos, reflect, killed),
+        Some(WeaponKind::LavaBreath) => unreachable!("lava hits take the deterministic path"),
     }
 }
 

@@ -73,6 +73,7 @@ use super::ecs::components::{
     AcidDrop, BiteSnap, CheeseString, ChestSpawn, CorrosiveChannel, Drake, Dropping, EchoSpoke,
     FairyRing,
     FondueTine, Infection, MilkTooth, SpawnId, WhipCrack,
+    LavaGlob, LavaPool,
 };
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP, PLAYER_RADIUS};
 use super::ecs::resources::{
@@ -100,7 +101,7 @@ use super::particle::Particles;
 use super::player::Player;
 use super::shop::{ShopBook, SpliceKind};
 use super::smoke::{SmokeLayer, SmokeScene};
-use super::weapon::{Weapon, WeaponKind};
+use super::weapon::{Weapon, WeaponKind, LAVA_MOUTH_OFFSET, LAVA_MUZZLE_SECS};
 use super::art_walls::{Cardinal, WallKind};
 use super::{
     art_boss_broom, art_boss_cat, art_boss_cobra, art_boss_hawk, art_boss_horseshoe_crab,
@@ -1427,6 +1428,7 @@ impl World {
             dash_held: hold.held,
             dash_released: hold.up,
             charge: charge.clamp(0.0, 1.0),
+            previous_pos: self.player.pos,
         });
         self.ecs.insert_resource(Viewport(self.viewport));
         self.ecs.insert_resource(NukeTick(false));
@@ -2451,6 +2453,21 @@ impl World {
             }
         }
 
+        // Molten pools sit under gems and bodies. Only their hot pixels are
+        // emissive, so the cooling crust still takes the room's lighting.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &LavaPool)>();
+            for (_, pool) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(pool.pos, cam);
+                if on_screen(s, pool.radius + 3.0, viewport) {
+                    let pen = pb.set_pen(crate::render::lighting::pool_pen());
+                    super::art_lava::draw_pool(pb, pool, cam, self.elapsed);
+                    pb.set_pen(pen);
+                    self.light_map.mark_emissive_highlights(pb, s, pool.radius.ceil() as i32);
+                }
+            }
+        }
+
         // Gems.
         {
             let mut query = self.ecs.query::<(&SpawnId, &Gem)>();
@@ -2665,6 +2682,20 @@ impl World {
                 } else {
                     pb.plot_add(s.0, s.1, b.color);
                     self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                }
+            }
+        }
+
+        // Lava globs fly over the friendly bullet layer. Their own shadows
+        // stay on the ground, outside the lifted body's emissive mark.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &LavaGlob)>();
+            for (_, glob) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let ground = self.w2s(glob.ground, cam);
+                let body = self.w2s(glob.ground - Vec2::new(0.0, glob.height()), cam);
+                if on_screen(body, 7.0, viewport) || on_screen(ground, 7.0, viewport) {
+                    super::art_lava::draw_glob(pb, glob, cam, self.elapsed);
+                    self.light_map.mark_emissive_highlights(pb, body, 6);
                 }
             }
         }
@@ -3450,6 +3481,21 @@ impl World {
         if let Some(beam) = self.laser_visual() {
             art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
             self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 9);
+        }
+        if let Some(weapon) = self.player.loadout.weapons.iter().find(|w| w.kind == WeaponKind::LavaBreath) {
+            use super::ecs::systems::weapon_lava::LavaMuzzle;
+            let mut query = self.ecs.query::<(&SpawnId, &LavaGlob, &LavaMuzzle)>();
+            let newest = query.iter(&self.ecs)
+                .filter(|(_, glob, _)| glob.t < LAVA_MUZZLE_SECS)
+                .max_by_key(|(id, _, _)| id.0);
+            if let Some((_, _, muzzle)) = newest {
+                let t = (muzzle.cycle - weapon.timer).max(0.0);
+                if t < LAVA_MUZZLE_SECS {
+                    let mouth = self.player.pos + muzzle.dir * (LAVA_MOUTH_OFFSET * giant.unwrap_or(1.0));
+                    super::art_lava::draw_breath(pb, mouth, muzzle.dir, cam, t);
+                    self.light_map.mark_emissive_highlights(pb, self.w2s(mouth, cam), 8);
+                }
+            }
         }
     }
 

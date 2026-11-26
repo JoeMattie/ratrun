@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
+  glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

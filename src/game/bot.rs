@@ -2897,6 +2897,7 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         // area on top: better than the spraying weapons into a Brute or a
         // miniboss, worse than a real crowd clearer.
         WeaponKind::SpikedTail => 8.6,
+        WeaponKind::LavaBreath => 8.0,
     }
 }
 

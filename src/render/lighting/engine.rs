@@ -241,6 +241,7 @@ pub struct Light {
     pub layers: LayerMask,
     /// Shapes that can block this light.
     pub occluders: LayerMask,
+    pub(super) ground_glow: bool,
 }
 
 impl Light {
@@ -263,6 +264,7 @@ impl Light {
             flicker: None,
             layers: LayerMask::ALL,
             occluders: LayerMask::ALL,
+            ground_glow: false,
         }
     }
 
@@ -960,6 +962,8 @@ impl LightMap {
             let directional = matches!(light.shape, LightShape::Directional { .. });
             let tag = if directional {
                 LightTag::Sun
+            } else if light.ground_glow {
+                LightTag::Ground
             } else {
                 LightTag::Moving { priority }
             };

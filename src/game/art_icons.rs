@@ -1591,6 +1591,7 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
         WeaponKind::AcidRain => &ACID_RAIN,
         WeaponKind::Hantavirus => &HANTAVIRUS,
         WeaponKind::SpikedTail => &SPIKED_TAIL,
+        WeaponKind::LavaBreath => &LAVA_BREATH,
     }
 }
 
@@ -1612,6 +1613,7 @@ pub fn evolution(kind: WeaponKind) -> Option<&'static Icon> {
         WeaponKind::LaserEyes => &CARBON_COPY,
         WeaponKind::SuperDash => &RIPCORD,
         WeaponKind::SpikedTail => &BARBED_WIRE,
+        WeaponKind::LavaBreath => &CALDERA,
     })
 }
 
@@ -1709,9 +1711,53 @@ pub fn by_name(name: &str) -> &'static Icon {
         "Long Fuse" => &LONG_FUSE,
         "Second Scent" => &SECOND_SCENT,
         "Lens Cap" => &LENS_CAP,
+        "Lava Breath" => &LAVA_BREATH,
+        "Caldera" => &CALDERA,
         _ => &PLACEHOLDER,
     }
 }
+
+const LAVA_PAL: &[(u8, Rgb)] = &[
+    (b'W', (255, 238, 154)),
+    (b'O', (255, 140, 40)),
+    (b'R', (186, 52, 24)),
+];
+
+const LAVA_BREATH: Icon = Icon {
+    large: grid8(
+        [
+            b"....WO..",
+            b"....OR..",
+            b"........",
+            b".WO...O.",
+            b".OR..WOR",
+            b".....OR.",
+            b"........",
+            b"........",
+        ],
+        LAVA_PAL,
+    ),
+    small: grid4([b"..W.", b".O..", b"W..O", b"R..R"], LAVA_PAL),
+    accent: (255, 140, 40),
+};
+
+const CALDERA: Icon = Icon {
+    large: grid8(
+        [
+            b"........",
+            b"...O....",
+            b"..W..O..",
+            b"........",
+            b"..R..R..",
+            b".ROWORR.",
+            b"..ROOR..",
+            b"...RR...",
+        ],
+        LAVA_PAL,
+    ),
+    small: grid4([b".W..", b"..O.", b"ROWR", b".RR."], LAVA_PAL),
+    accent: (255, 175, 82),
+};
 
 // ============================================================================
 // The nest (permanent upgrade tracks)
@@ -2127,6 +2173,8 @@ mod tests {
             ("BlackboardBelly", &BLACKBOARD_BELLY),
             ("BallastSac", &BALLAST_SAC),
             ("LongFingers", &LONG_FINGERS),
+            ("Lava Breath", &LAVA_BREATH),
+            ("Caldera", &CALDERA),
         ]
     }
 

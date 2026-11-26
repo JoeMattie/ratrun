@@ -220,7 +220,7 @@ pub const BOSS_EFFECT_KEY: u64 = 1 << 63;
 /// Cleaner) and [`Boss::take_damage`]; without this, a chest could turn a
 /// boss-capable build into a zero-damage one.
 #[allow(clippy::too_many_arguments)]
-fn damage_boss(
+pub(super) fn damage_boss(
     boss: &mut Boss,
     damage: f32,
     kind: WeaponKind,
@@ -251,7 +251,7 @@ fn damage_boss(
 /// like `weapons.rs` / `combat.rs`), with the narrow-harness fallback sort
 /// filling `scratch` when the grid never ran.
 #[cfg(debug_assertions)]
-fn enemy_order<'a>(
+pub(super) fn enemy_order<'a>(
     index: &'a EnemyIndex,
     enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
     scratch: &'a mut Vec<Entity>,
@@ -270,7 +270,7 @@ fn enemy_order<'a>(
 /// [`enemy_order`] without the debug guard (release build, where the guard's
 /// body is compiled out anyway).
 #[cfg(not(debug_assertions))]
-fn enemy_order<'a>(
+pub(super) fn enemy_order<'a>(
     index: &'a EnemyIndex,
     enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
     scratch: &'a mut Vec<Entity>,
@@ -305,7 +305,7 @@ fn sorted_order<'a>(
 /// the dart's previous position, the nearest point of the filament / ring /
 /// stripe, the tagged body that answered. The number drawn is what landed.
 #[allow(clippy::too_many_arguments)]
-fn hit_body(
+pub(super) fn hit_body(
     enemy: &mut Enemy,
     damage: f32,
     from: Vec2,
@@ -324,7 +324,7 @@ fn hit_body(
 
 /// The point of segment `a -> b` nearest to `p` (where a line-shaped hit
 /// "arrives from" for directional armour).
-fn nearest_on_segment(a: Vec2, b: Vec2, p: Vec2) -> Vec2 {
+pub(super) fn nearest_on_segment(a: Vec2, b: Vec2, p: Vec2) -> Vec2 {
     let ab = b - a;
     let len_sq = ab.len_sq();
     if len_sq <= 1e-6 {
