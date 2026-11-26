@@ -127,7 +127,7 @@ pub fn player_system(
     // A dash press the cooldown refused whose input is still held (Super Dash
     // only): the one hold that may start a charge without a fresh press edge.
     // Input bookkeeping, not simulation state: it is only ever set from live
-    // hold edges, which the bot and the goldens never pass.
+    // hold edges, which the bot and the scripted cases never pass.
     mut hold_buffered: Local<bool>,
     mut traps: ResMut<super::traps::TrapRuntime>,
 ) {
@@ -143,7 +143,7 @@ pub fn player_system(
     }
     // Wave 3 controls: while aiming, the rat faces the reticle (its dash and
     // every facing-based effect follow the pointer, not the walk). With no
-    // aim (`World::update`, the bot, the goldens) this changes nothing.
+    // aim (`World::update`, the bot, the scripted cases) this changes nothing.
     if let Some(d) = input.aim.map(|p| p - player.pos).filter(|v| v.len_sq() > 4.0) {
         player.face = d.normalized();
     }

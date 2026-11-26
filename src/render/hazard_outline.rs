@@ -22,7 +22,7 @@
 //!   screen thickness, so the mark survives the crisp resampler at 2x.
 //!
 //! Both halves are render-only: they read `Boss.hazards` and write pixels, draw
-//! no rng and mutate no simulation state, so the goldens cannot move.
+//! no rng and mutate no simulation state, so no scripted trace can change.
 
 use crate::game::ecs::systems::boss::{Boss, BossHazard, BossKind, HazardShape};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossShape, MinibossState, SignatureShape};

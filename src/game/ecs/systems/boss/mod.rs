@@ -958,7 +958,7 @@ impl BossKind {
 /// The boss's private rng stream.
 ///
 /// Seeded from the run seed and the kind's salt so the boss never draws from
-/// the main run rng (which would perturb the golden trace).
+/// the main run rng (which would perturb its draw order).
 pub struct BossRng(pub StdRng);
 
 impl BossRng {

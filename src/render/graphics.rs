@@ -9,7 +9,7 @@
 //! **Nothing here is simulated.** The lighting quality, the light effects, the
 //! 1× edge smoothing, the parallax foreground, the round-glyph particles and the
 //! camera's share of the hit shake are all read by the renderer only, so a
-//! setting can never move a run, a golden or the map pin. The values persist
+//! setting can never move a run, a scripted trace or the map pin. The values
 //! beside the other preferences ([`crate::scores::GraphicsFile`]).
 //!
 //! [`layout`] is the single source of truth for where the rows sit, so the

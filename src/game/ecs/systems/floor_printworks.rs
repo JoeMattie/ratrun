@@ -41,7 +41,7 @@
 //! `vfx::emit_player_hurt` on a landed hit, the same particle-only draw every
 //! other hit in the game makes. With none of this floor's four ruled kinds
 //! alive and no sliding wick the system returns before its first sort, so the
-//! six golden floors (which never field them) cannot see it.
+//! six scripted cases (which never field them) cannot see it.
 
 use bevy_ecs::prelude::*;
 

@@ -692,7 +692,7 @@ fn at_most_two_nearby_warned_attacks_start_together() {
 
 // ---- Determinism and the rng contract ------------------------------------
 
-/// A run with no wave-3 body on the map draws no rng at all, so the golden
+/// A run with no wave-3 body on the map draws no rng at all, so the scripted
 /// traces' openings cannot move because of this system.
 #[test]
 fn a_tick_without_wave3_bodies_draws_no_rng() {
@@ -722,7 +722,8 @@ fn a_tick_without_wave3_bodies_draws_no_rng() {
 
 /// Two worlds, the same seed, the same wave-3 bodies and the same scripted rat:
 /// the full schedule must agree tick for tick. This is the twin-run witness for
-/// the new state machines (the golden harness covers the pre-port reference).
+/// the new state machines (the scripted cases cover only same-seed replay,
+/// not the pre-port reference).
 #[test]
 fn twin_runs_with_wave3_kinds_stay_identical() {
     fn run_once() -> u64 {

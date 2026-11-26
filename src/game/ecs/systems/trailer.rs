@@ -5,7 +5,7 @@
 //! `levelgen::trailer`) and is drawn by `art_trailer`, so what the player sees
 //! is what this system reads. Nothing here runs on any other theme: the first
 //! line is a `Theme::Trailer` check, so the three campaign floors keep their
-//! exact tick (and their golden traces).
+//! exact tick (and their scripted traces).
 //!
 //! ## Ordering
 //!
@@ -797,8 +797,8 @@ mod tests {
 
     /// Twin runs on the flatbed: same seed, same bot, same inputs — the same
     /// hazards fire, the same falls land and the same bodies end up in the same
-    /// places. (The golden harness pins the three campaign themes; this pins
-    /// the trailer's own hazards without touching those hashes.)
+    /// places. (The scripted cases cover the three campaign themes; this covers
+    /// the trailer's own hazards too.)
     #[test]
     fn twin_runs_on_the_flatbed_match() {
         use crate::game::bot::{Bot, Skill};

@@ -8,9 +8,9 @@
 //! system libm on Linux, the Accelerate/system libraries on macOS, the UCRT on
 //! Windows), and those libraries disagree in the last bit or two. One such
 //! call in simulation code is enough to make a run diverge a tick later, which
-//! is exactly what the determinism goldens (`game/ecs/harness.rs`) caught when
-//! the traces recorded on macOS/arm64 were replayed on Linux and Windows CI:
-//! all six traces differed.
+//! is exactly what the scripted traces (`game/ecs/harness.rs`) caught when the
+//! traces recorded on macOS/arm64 were replayed on Linux and Windows CI: all
+//! six differed.
 //!
 //! [`libm`] is a pure-Rust implementation of the same functions with one
 //! implementation on every target, so a call routed through it is
@@ -464,7 +464,7 @@ mod tests {
     // These eight input → output bit patterns pin the *exact* rounding of the
     // libm implementations we depend on. They are the whole point of this
     // module: if a libm bump, a Cargo feature or an accidental `std` call
-    // changes any of them, the goldens would move. The coordinator fills them
+    // changes any of them, the traces move. The coordinator fills them
     // from the first run (see `print_the_pinned_table`) and from then on a
     // mismatch names the function and the input.
     //

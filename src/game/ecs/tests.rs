@@ -170,7 +170,7 @@ fn enemy_index_is_fresh_at_every_reader_for_a_full_run() {
 /// tick for tick (the wave-3 length; §1). The rat is kept alive and the input
 /// is a deterministic circle, so the run reaches the boss window instead of
 /// ending early. The twin-run comparison is a cheap determinism proof that
-/// does not depend on the golden list (which this wave deliberately moves).
+/// does not depend on any recorded hash (which this wave deliberately moves).
 #[test]
 fn full_fifteen_minute_level_per_theme_is_deterministic() {
     fn fingerprint(theme: Theme, seed: u64) -> (u64, u64) {
@@ -1630,7 +1630,7 @@ fn a_different_aim_changes_the_run() {
 }
 
 /// `World::update`/`update_with` keep passing `None`, so the auto-aim path is
-/// byte-identical to the pre-wave-3 sim (the goldens depend on it).
+/// byte-identical to the pre-wave-3 sim (the scripted traces depend on it).
 #[test]
 fn no_aim_is_the_auto_aim_path() {
     let mut a = World::new(Theme::Sewer, 3);

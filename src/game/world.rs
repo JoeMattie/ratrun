@@ -327,7 +327,7 @@ pub struct World {
     /// The share of the simulation's shake that reaches the camera
     /// ([`SHAKE_SCALE`] by default; the Graphics page's SCREEN SHAKE row, via
     /// the App). Render-only: read where `draw_scene` builds the camera and
-    /// nowhere else, so no system can see it and no golden can move.
+    /// nowhere else, so no system can see it and no scripted trace can move.
     pub shake_scale: f32,
     pub smoke_enabled: bool,
     light_map: LightMap,
@@ -1348,8 +1348,8 @@ impl World {
     /// (`0.0` = a plain tap-dash, which is what every pre-wave-3 caller gets).
     ///
     /// The bot uses this to fire a charged dash (`game::bot`): the signature of
-    /// `update`/`update_with` stays exactly as it was, so the goldens and every
-    /// older test are byte-identical.
+    /// `update`/`update_with` stays exactly as it was, so the scripted cases
+    /// and every older test are byte-identical.
     pub fn update_with_charge(
         &mut self,
         dt: f32,

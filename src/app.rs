@@ -4599,8 +4599,8 @@ impl App {
 
     /// Turn the parallax foreground layer on or off (the console `foreground`
     /// command and the Graphics page's FOREGROUND row). Render-only: no run
-    /// state, no golden can see it; the preference is persisted, and choosing
-    /// it drops the `RATRUN_FOREGROUND` session pin.
+    /// state, no scripted trace can see it; the preference is persisted, and
+    /// choosing it drops the `RATRUN_FOREGROUND` session pin.
     pub(crate) fn set_foreground(&mut self, on: bool) {
         self.foreground_env = None;
         if self.foreground != on {
@@ -4617,8 +4617,8 @@ impl App {
 
     /// Turn the batch-13 lighting effects on or off (the console `fx` command
     /// and the Graphics page's LIGHT EFFECTS row). Render-only: no run state, no
-    /// golden can see it; the preference is persisted, and choosing it drops the
-    /// `RATRUN_FX` session pin.
+    /// scripted trace can see it; the preference is persisted, and choosing it
+    /// drops the `RATRUN_FX` session pin.
     pub(crate) fn set_fx(&mut self, on: bool) {
         self.fx_env = None;
         if self.fx != on {
@@ -4635,10 +4635,10 @@ impl App {
 
     /// Turn the round-glyph particle layer on or off (the console `glyphfx`
     /// command and the Graphics page's GLYPH PARTICLES row). Render-only: no run
-    /// state, no golden, and no world redraw either — the layer is written into
-    /// the frame's cells after the cached picture is blitted, so the next frame
-    /// carries the change on its own. The preference is persisted, and choosing
-    /// it drops the `RATRUN_GLYPHFX` session pin.
+    /// state, no scripted trace, and no world redraw either — the layer is
+    /// written into the frame's cells after the cached picture is blitted, so
+    /// the next frame carries the change on its own. The preference is
+    /// persisted, and choosing it drops the `RATRUN_GLYPHFX` session pin.
     pub(crate) fn set_glyphfx(&mut self, on: bool) {
         self.glyphfx_env = None;
         self.glyphfx.set_enabled(on);
@@ -4653,7 +4653,7 @@ impl App {
     /// The camera's share of the simulation's shake (the Graphics page's SCREEN
     /// SHAKE row). Render-only: `World::shake_scale` is read where `draw_scene`
     /// builds the camera and nowhere in the simulation, so this can never move a
-    /// run, a golden or the map pin. Persisted with the other graphics
+    /// run, a scripted trace or the map pin. Persisted with the other graphics
     /// preferences.
     pub fn set_shake_scale(&mut self, scale: f32) {
         self.shake_scale = if scale.is_finite() {

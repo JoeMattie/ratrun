@@ -2719,9 +2719,9 @@ mod tests {
     /// **Twin runs.** Same seed, same map, same clock ⇒ the same enemies in the
     /// same order, down to the last rng-derived bit.
     ///
-    /// This is the determinism contract the golden reference trace cannot check
-    /// while the content wave is in flight (the integrator regenerates those
-    /// once); it also covers the *number* of rng draws per pulse, which the
+    /// This is a finer determinism contract than the scripted cases can check:
+    /// they fold a whole trace into one hash, while this compares every field of
+    /// every body. It also covers the *number* of rng draws per pulse, which
     /// room-wave, flank and skip rules all have to keep independent of their
     /// outcomes: every pulse member draws exactly one ring angle, then
     /// `Enemy::spawn` draws three fields.

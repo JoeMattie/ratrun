@@ -32,7 +32,7 @@
 //!
 //! Nothing here touches the rng or any simulated value, and the flood uses
 //! fixed neighbour order, a reused queue and stamp-based scratch arrays, so it
-//! neither allocates per tick nor perturbs the golden traces.
+//! neither allocates per tick nor perturbs a scripted trace.
 //! [`Fog::reveal_enabled`] exists only so the determinism regression can run the
 //! same seed with the reveal switched off and prove the traces are identical.
 

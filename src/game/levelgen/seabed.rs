@@ -7,7 +7,7 @@
 //! only, using its own salted RNG (`level_seed ^` [`SEABED_SALT`]) over the
 //! finished grid and writing nothing but [`Level::plants`].
 //!
-//! ## Why neither the map pin nor any golden can move
+//! ## Why neither the map pin nor any scripted trace can move
 //!
 //! 1. **Outfall only.** Every other theme returns immediately without drawing a
 //!    single number and keeps `Level::plants` empty.

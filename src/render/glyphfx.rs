@@ -61,7 +61,7 @@
 //! frame is bit-identical frame to frame and repaints nothing. There is no
 //! particle pool, no per-frame allocation and no rng — a particle is a pure
 //! function of `(level seed, step, its own index)`, so nothing here can touch
-//! the simulation, its rng, a golden or the map pin.
+//! the simulation, its rng, a scripted trace or the map pin.
 //!
 //! Motes are anchored to **world** cells (the camera offset is subtracted, so
 //! they do not swim when the rat runs) and drift one cell sideways every 1.5 s

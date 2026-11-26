@@ -43,7 +43,7 @@
 //!
 //! Everything else is a pure function of the rat's position, its intent, the
 //! live enemies and the previous state, so the only other way this file moves a
-//! golden trace is through the values it *writes* (`pending_levelups`,
+//! scripted trace is through the values it *writes* (`pending_levelups`,
 //! `player.iframes`, entity positions during centring). Every loop runs over a
 //! `Vec` in `LevelObjects` order (never a hash map), and no system allocates per
 //! tick: `GateRuntime`'s buffers are sized once per level (`resize_with` on a

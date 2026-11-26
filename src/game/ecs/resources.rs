@@ -135,7 +135,7 @@ pub struct TickInput {
     /// or `None` for auto-aim.
     ///
     /// Input, never a simulation decision: `World::update` and
-    /// `World::update_with` pass `None`, so the bot, the harness goldens and
+    /// `World::update_with` pass `None`, so the bot, the scripted cases and
     /// every pre-wave-3 test are byte-identical. The App passes the pointer's
     /// world position in the Mouse aim / Gamepad schemes (see
     /// `App::aim_point`). Each aiming weapon reads it in the way that suits it
@@ -181,7 +181,7 @@ pub struct DashHold {
 
 impl DashHold {
     /// No held dash input (every pre-charge caller: `World::update`, the bot,
-    /// the harness goldens).
+    /// the scripted cases).
     pub const NONE: DashHold = DashHold {
         down: false,
         held: false,
@@ -223,7 +223,7 @@ pub const RIPPLE_SLOTS: usize = 8;
 ///
 /// Cosmetic only: `systems::puddles::puddle_steps_system` starts it and ages it
 /// and `World::draw_scene` draws it. Nothing reads it back into the simulation,
-/// so it draws no rng and cannot move a golden trace.
+/// so it draws no rng and cannot move a scripted trace.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Ripple {
     /// Centre, world px (the rat's feet, or a body's position).

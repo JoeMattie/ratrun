@@ -41,7 +41,7 @@
 //!   tilt, which is the owner's brief, not a bevel.
 //! * **Still.** Every term is integer arithmetic over the picture and the
 //!   frame's grid; nothing reads `elapsed`/`step8`, so a still scene is
-//!   byte-identical frame to frame and the goldens cannot move.
+//!   byte-identical frame to frame and no scripted trace can change.
 //!
 //! Cost: one luminance byte per pixel into a three-row rolling buffer (the
 //! `thread_local!` scratch grows once and is reused), then ~20 integer ops per

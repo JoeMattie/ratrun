@@ -46,7 +46,7 @@
 //!
 //! The pass is its own system because a controller has no access to the player
 //! (`BossContext` hands it a `&Level` and a `&mut StdRng`, nothing more) and
-//! because the coil must not be a tile edit: the map pin is a golden, and a
+//! because the coil must not be a tile edit: the map pin folds tiles, and a
 //! boss that breaks tiles would move it. It is registered in
 //! `schedule::build_schedule` right after `boss::boss_update_system`, so the
 //! coil laid this tick separates this tick. A boss with no coil returns before

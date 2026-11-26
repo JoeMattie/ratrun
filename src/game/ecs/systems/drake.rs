@@ -54,8 +54,8 @@
 //! pass also takes (`vfx::emit_player_hurt`). The guest spawner draws exactly
 //! what a placement draws: one ring angle from `spawn_point_reachable`, then
 //! `Enemy::spawn`'s three fields. Nothing here can fire before 2:30 on the
-//! curve clock, and the determinism goldens run 60 s, so **the goldens cannot
-//! see this file** (see `.review-report-duck-code.md`).
+//! curve clock, and the scripted cases run 60 s, so **they cannot see this
+//! file** (see `.review-report-duck-code.md`).
 
 use bevy_ecs::prelude::*;
 
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(rotate_toward(from, Vec2::ZERO, REAIM_MAX_RAD), from);
     }
 
-    /// The four seeded 60 s golden scripts never contain a Drake: the guest is
+    /// The three seeded 60 s scripts here never contain a Drake: the guest is
     /// blind before 2:30 on the curve clock.
     #[test]
     fn no_golden_script_meets_a_drake() {

@@ -33,7 +33,8 @@
 //! ## Determinism
 //!
 //! This step draws no rng, changes no entities and never slows the rat. The
-//! temporary water first appears with Corkscrew, beyond the golden window.
+//! temporary water first appears with Corkscrew, beyond the 60 s scripted
+//! window.
 //!
 //! The slot table is keyed by `SpawnId` order rather than by a component, so a
 //! body that leaves the first six hands its slot back and the cooldowns can
