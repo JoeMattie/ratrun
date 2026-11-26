@@ -109,8 +109,8 @@ pub struct BatchOpts {
     /// The **nest** stage this batch plays (`--meta none|mid|max`): the
     /// permanent upgrades a saved profile would have bought, so balance can be
     /// measured at a fresh, a half-upgraded and a maxed nest. `None` is the
-    /// neutral profile every test and the determinism harness use; the batch
-    /// never reads a player's real profile.
+    /// neutral profile every test uses; the batch never reads a player's real
+    /// profile.
     pub meta: Option<crate::meta::MetaStage>,
 }
 
@@ -3593,8 +3593,8 @@ mod tests {
         assert_eq!(opts.meta, None);
 
         // A run built while no stage is set starts exactly like a fresh
-        // profile (the local game's default, and what the determinism harness
-        // plays): the batch never reads a saved nest.
+        // profile (the local game's default, and what the tests play): the
+        // batch never reads a saved nest.
         if crate::meta::batch_meta_stage().is_none() {
             let run = crate::autoplay::AutoRun::new(
                 11,

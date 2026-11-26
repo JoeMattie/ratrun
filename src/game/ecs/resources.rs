@@ -18,8 +18,8 @@
 //! Entity components are *not* imported/exported: the Bevy world owns them for
 //! the whole run, and nothing is copied out per tick. `World`'s HUD accessors
 //! read the Bevy world directly (`&self`, via `World::iter_entities`) and
-//! `World::enemies()`/`bullets()`/... clone a snapshot only when a test or the
-//! determinism harness asks for a whole list.
+//! `World::enemies()`/`bullets()`/... clone a snapshot only when a test asks
+//! for a whole list.
 
 use bevy_ecs::bundle::Bundle;
 use bevy_ecs::entity::Entity;
@@ -1565,8 +1565,8 @@ pub fn swap_out<T: Resource>(ecs: &mut World, facade: &mut T, spare: &mut Option
 
 /// Clone every component of type `T` into a `Vec`, in stable `SpawnId` order.
 ///
-/// Only [`super::super::world::World::enemies`] and its siblings (test and
-/// determinism-harness helpers) call this: the facade no longer rebuilds
+/// Only [`super::super::world::World::enemies`] and its siblings (test
+/// helpers) call this: the facade no longer rebuilds
 /// per-tick entity caches (nothing outside `src/game` read them), so this
 /// allocates once per call instead of once per tick.
 pub fn collect_sorted<T: Component + Clone>(ecs: &mut World) -> Vec<T> {

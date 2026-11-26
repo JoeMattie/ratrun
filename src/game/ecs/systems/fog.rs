@@ -101,8 +101,8 @@ mod tests {
     /// for tick, including the rng state (a `next_u64` draw compared on both
     /// sides).
     ///
-    /// This is the in-test equivalent of "no scripted trace moves": the
-    /// system reads `Player` + `Level` and writes only `Fog`.
+    /// This is the determinism check for the render-only systems: the system
+    /// reads `Player` + `Level` and writes only `Fog`.
     #[test]
     fn fog_never_moves_the_simulation() {
         use rand::Rng;

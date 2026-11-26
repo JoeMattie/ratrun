@@ -32,9 +32,9 @@
 //!
 //! Nothing here touches the rng or any simulated value, and the flood uses
 //! fixed neighbour order, a reused queue and stamp-based scratch arrays, so it
-//! neither allocates per tick nor perturbs a scripted trace.
-//! [`Fog::reveal_enabled`] exists only so the determinism regression can run the
-//! same seed with the reveal switched off and prove the traces are identical.
+//! neither allocates per tick nor perturbs a run.
+//! [`Fog::reveal_enabled`] exists only so the fog tests can play the same seed
+//! with the reveal switched off and prove nothing else moved.
 
 use bevy_ecs::resource::Resource;
 
@@ -119,8 +119,9 @@ pub struct Fog {
     /// open or shut while the rat stands still changes what it can see, so a
     /// change here reruns the flood without a cell change.
     door_sig: u64,
-    /// Determinism hook: `false` makes the reveal system a no-op, which the
-    /// harness uses to prove the fog cannot move the simulation.
+    /// Determinism hook: `false` makes the reveal system a no-op, which
+    /// `systems::fog::tests::fog_never_moves_the_simulation` uses to prove the
+    /// fog cannot move the simulation.
     pub reveal_enabled: bool,
 }
 

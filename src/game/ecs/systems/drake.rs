@@ -928,17 +928,19 @@ mod tests {
         assert_eq!(rotate_toward(from, Vec2::ZERO, REAIM_MAX_RAD), from);
     }
 
-    /// The three seeded 60 s scripts here never contain a Drake: the guest is
-    /// blind before 2:30 on the curve clock.
+    /// The guest is blind before 2:30 on the curve clock, so the first minute
+    /// of a run on any of the three opening floors is Drake-free. (This used
+    /// to guard the 60 s scripted traces; the absence of the guest in the
+    /// opening minute is still the rule worth pinning.)
     #[test]
-    fn no_golden_script_meets_a_drake() {
+    fn no_opening_run_meets_a_drake() {
         for theme in [Theme::Sewer, Theme::Kitchen, Theme::Lab] {
             let mut w = World::new(theme, 1000);
             for _ in 0..60 * 60 {
                 w.update(DT, Vec2::ZERO, false);
                 assert!(
                     !w.enemies().iter().any(|e| e.kind == EnemyKind::Drake),
-                    "{theme:?}: a Drake inside the 60 s golden window"
+                    "{theme:?}: a Drake inside the first 60 s"
                 );
             }
             assert!(w.elapsed < FROM_CLOCK, "{theme:?}: the run reached 2:30");

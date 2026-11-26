@@ -25,7 +25,7 @@
 //! tick), so `SpawnId` and `Entity` ids are stable across a run. Nothing is
 //! copied out of the ECS world per tick: the HUD accessors read it directly
 //! and [`World::enemies`]/[`World::bullets`]/... clone a snapshot only when a
-//! test or the determinism harness asks for one. Tests and systems spawn
+//! test asks for one. Tests and systems spawn
 //! through the helpers below, which assign `SpawnId`.
 //!
 //! Internal scratch (`SpatialGrid`, `NeighborScratch`, `PickupScratch`,
@@ -1148,7 +1148,7 @@ impl World {
             .is_some_and(|door| door.slammed)
     }
 
-    // ---- Entity snapshots (tests + determinism harness) ------------------
+    // ---- Entity snapshots (tests) ----------------------------------------
     //
     // The facade used to expose `enemies`/`bullets`/`gems`/`pickups`/`pools`
     // as `pub Vec` caches rebuilt every tick (a full clone of every entity, per

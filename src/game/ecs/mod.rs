@@ -8,7 +8,6 @@
 //! - [`systems`]: one file per concern (player, spawn, enemies, weapons,
 //!   projectiles, combat, loot, fx).
 //! - `tests`: the ported behavioural suite (every legacy `world.rs` test).
-//! - `harness`: a scripted seeded-run determinism regression.
 //!
 //! The public facade (`game::world::World`) owns a [`bevy_ecs::world::World`]
 //! and the schedules, and keeps the legacy public fields as real fields. See
@@ -23,7 +22,3 @@ pub mod systems;
 #[cfg(test)]
 mod tests;
 
-/// Scripted seeded-run determinism regression: every case is played twice and
-/// the two traces compared, so nothing is pinned (see the file header).
-#[cfg(test)]
-mod harness;

@@ -378,7 +378,7 @@ pub fn passage_system(
     // Tell the fog the rat crossed a hole (its `crossed` list is what lets a
     // known shortcut keep showing its far mouth). `reveal_cell` is the public
     // "the rat stood here" entry point and notes the crossing itself; it is
-    // skipped when the reveal is switched off (the determinism harness).
+    // skipped when the reveal is switched off (the fog tests do that).
     for &cell in crossed.iter() {
         if fog.reveal_enabled && !fog.hole_crossed(cell) {
             fog.reveal_cell(&level, cell);

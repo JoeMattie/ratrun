@@ -8,9 +8,10 @@
 //! system libm on Linux, the Accelerate/system libraries on macOS, the UCRT on
 //! Windows), and those libraries disagree in the last bit or two. One such
 //! call in simulation code is enough to make a run diverge a tick later, which
-//! is exactly what the scripted traces (`game/ecs/harness.rs`) caught when the
-//! traces recorded on macOS/arm64 were replayed on Linux and Windows CI: all
-//! six differed.
+//! is exactly what the six recorded scripted traces this repo used to pin
+//! caught when the macOS/arm64 recording was replayed on Linux and Windows CI:
+//! all six differed. The map pin still depends on it, and so does any
+//! cross-platform replay of a balance study.
 //!
 //! [`libm`] is a pure-Rust implementation of the same functions with one
 //! implementation on every target, so a call routed through it is
