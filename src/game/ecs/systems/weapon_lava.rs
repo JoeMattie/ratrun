@@ -67,7 +67,7 @@ impl LavaContacts {
 
 /// Only check the destination: the glob can fly across an intervening wall.
 /// If it would land in masonry, search backward along its throw line.
-fn landing_floor(level: &Level, origin: Vec2, target: Vec2) -> Vec2 {
+pub(super) fn landing_floor(level: &Level, origin: Vec2, target: Vec2) -> Vec2 {
     let (mut x, mut y) = cell_of(target);
     if level.tiles.get(x, y).is_open() {
         return target;

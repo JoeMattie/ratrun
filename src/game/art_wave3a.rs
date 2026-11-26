@@ -281,8 +281,31 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
     pb.plot(x, y, palette::mix(bg, c, a));
 }
 
-/// **Milk Teeth** (Gnaw + Sharp Teeth): curved ivory hook dart and dotted
-/// return thread tethered back to the rat.
+/// Travelling floor shadow and the little clack at first contact.
+pub fn draw_milk_tooth_shadow(pb: &mut PixelBuffer, dart: &MilkTooth, cam: Vec2) {
+    let (x, y) = w2s(dart.pos, cam);
+    let high = (dart.height() / dart.apex).clamp(0.0, 1.0);
+    let rx = 2.8 - high * 1.65;
+    let ry = 1.45 - high * 0.65;
+    let opacity = 0.42 + high * 0.38;
+    for dy in -1..=1 {
+        for dx in -2..=2 {
+            let r2 = (dx as f32 / rx).powi(2) + (dy as f32 / ry).powi(2);
+            if r2 <= 1.0 {
+                blend_px(pb, x + dx, y + dy, (10, 8, 12), opacity * (1.0 - 0.5 * r2));
+            }
+        }
+    }
+    if dart.phase == MilkPhase::Lodged && dart.age < MilkTooth::BOUNCE_SECS {
+        let u = dart.age / MilkTooth::BOUNCE_SECS;
+        let spread = (3.0 + 4.0 * u).round() as i32;
+        for (dx, dy) in [(-spread, 0), (spread, 1), (-spread + 2, 2)] {
+            blend_px(pb, x + dx, y + dy, (255, 227, 173), 0.85 * (1.0 - u));
+        }
+    }
+}
+
+/// Ivory hook tumbling on the throw, tethered once it lands.
 pub fn draw_milk_tooth(pb: &mut PixelBuffer, dart: &MilkTooth, player_pos: Vec2, cam: Vec2) {
     let ivory_hi: Rgb = (255, 254, 238);
     let ivory: Rgb = (242, 228, 186);
@@ -290,18 +313,18 @@ pub fn draw_milk_tooth(pb: &mut PixelBuffer, dart: &MilkTooth, player_pos: Vec2,
     let gum: Rgb = (242, 114, 140);
     let out: Rgb = (36, 28, 26);
 
-    // 1. Dotted return thread from the rat's muzzle to the lodged/returning hook.
-    let seg = dart.pos - player_pos;
+    let c = dart.body_pos();
+    let seg = c - player_pos;
     let dist = seg.len();
-    if dist > 2.5 {
+    if dart.phase != MilkPhase::Out && dist > 4.5 {
         let dir = seg * (1.0 / dist);
         let thread_bright = match dart.phase {
-            MilkPhase::Out => 0.65,
+            MilkPhase::Out => 0.0,
             MilkPhase::Lodged => 0.72 + 0.28 * (dart.age / MILK_LODGE_SECS).clamp(0.0, 1.0),
             MilkPhase::Back => 1.0,
         };
         let step_px = 2.4f32;
-        let mut d = 2.5f32;
+        let mut d = 4.5f32;
         let mut idx = 0i32;
         while d < dist - 1.5 {
             let p = w2s(player_pos + dir * d, cam);
@@ -317,18 +340,17 @@ pub fn draw_milk_tooth(pb: &mut PixelBuffer, dart: &MilkTooth, player_pos: Vec2,
         }
     }
 
-    // 2. Curved ivory hook / milk-tooth fang at `dart.pos`.
-    let dir = if dart.vel.len_sq() > 1.0 {
-        dart.vel.normalized()
-    } else if dist > 0.5 {
-        (player_pos - dart.pos) * (1.0 / dist)
-    } else {
-        Vec2::new(0.0, -1.0)
+    let throw_dir = (dart.landing - dart.origin).normalized();
+    let dir = match dart.phase {
+        MilkPhase::Out => {
+            let throw_dir = if throw_dir == Vec2::ZERO { Vec2::new(1.0, 0.0) } else { throw_dir };
+            throw_dir.rotate(dart.flight_progress() * std::f32::consts::TAU)
+        }
+        MilkPhase::Lodged | MilkPhase::Back if dist > 0.5 => seg * (-1.0 / dist),
+        _ => Vec2::new(0.0, -1.0),
     };
     let perp = dir.perp();
-    let c = dart.pos;
     let cs = w2s(c, cam);
-    shade_px(pb, cs.0 + 1, cs.1 + 2, 0.42);
     for &(u, v) in &[
         (-2.0f32, 0.0f32),
         (-1.0, 0.0),
@@ -1638,12 +1660,8 @@ mod tests {
 
         // 0: Milk Teeth (ivory hook + dotted return thread)
         render(0, &mut |pb| {
-            let mut dart = MilkTooth::new(
-                center + Vec2::new(22.0, -14.0),
-                Vec2::new(-120.0, 75.0),
-                20.0,
-                crate::game::ecs::systems::evolutions::MILK_REACH,
-            );
+            let at = center + Vec2::new(22.0, -14.0);
+            let mut dart = MilkTooth::new(at, at, 20.0);
             dart.phase = MilkPhase::Back;
             dart.age = 0.25;
             draw_milk_tooth(pb, &dart, center + Vec2::new(-18.0, 14.0), Vec2::ZERO);

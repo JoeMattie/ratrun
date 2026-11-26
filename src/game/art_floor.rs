@@ -1477,6 +1477,9 @@ pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: 
         PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => {
             super::art_pickups3::draw_pickup3(pb, s, kind, bob * 0.25);
         }
+        PickupKind::Headlamp => super::art_headlamp::draw_headlamp_pickup(
+            pb, Vec2::new(s.0 as f32, s.1 as f32), Vec2::ZERO, bob * 0.25,
+        ),
     }
 }
 

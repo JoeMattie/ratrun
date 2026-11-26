@@ -6,6 +6,8 @@
 //!
 //! Return and Drip latch each pass or drop separately. Wake can strike from
 //! the locked tell. A tell with no walkable escape is re-aimed or skipped.
+//! Milk Spray projects a wall-clipped 36° cone up to 92 px from the spout.
+//! It hits once and leaves cosmetic floor splashes independent of the body.
 //!
 //! The movement and signature changes intentionally affect seeded play once
 //! an appointment arrives. The 60 s harness ends before the first appointment.
@@ -58,7 +60,7 @@ use crate::game::director::MINIBOSS_TIMES;
 use crate::game::ecs::resources::{
     NextEnemyId, NextSpawnId, RatTrack, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
 };
-use super::miniboss_shapes::{self as shapes, SignatureTrack, WakeTrail};
+use super::miniboss_shapes::{self as shapes, MilkSplash, MilkSpray, SignatureTrack, WakeTrail};
 use crate::game::ecs::systems::spawn::{in_maze, spawn_point_reachable, widest_view, SpawnScratch};
 #[cfg(test)]
 use crate::game::director::BOSS_TIME;
@@ -137,10 +139,6 @@ pub const LATE_PLATE_CLOSED: f32 = 5.0;
 pub const STAMP_HALF: f32 = 6.0;
 /// Spacing between the three stamps.
 pub const STAMP_SPACING: f32 = 16.0;
-/// Length of the Milk Carton's spill.
-pub const SPILL_LEN: f32 = 32.0;
-/// Half-width of the spill.
-pub const SPILL_HALF: f32 = 10.0;
 /// The furthest any miniboss starts its tell from: the range of the rows whose
 /// signature is anchored on the rat (Cage Counter, Road Atlas, Late Plate) and
 /// the cap for everything else. See [`MinibossKind::engage_range`].
@@ -345,6 +343,7 @@ impl MinibossKind {
             S::Return { len, half, .. } => len + half,
             S::Shear { len, .. } | S::Umbra { len, .. } => len,
             S::False { forward, len, .. } => forward + len,
+            S::MilkSpray => shapes::MILK_REACH,
         };
         if self == Self::Shade && matches!(sig.shape, S::Umbra { .. }) {
             // The warned emergence is 40 px out. It must be able to cast
@@ -619,6 +618,8 @@ pub enum SignatureShape {
     Umbra { half_angle: f32, len: f32 },
     /// Two lateral bulbs with a rectangular jaw extending from either one.
     False { forward: f32, across: f32, len: f32, half: f32 },
+    /// A jet from the carton’s forward spout, clipped by the walls.
+    MilkSpray,
 }
 
 /// Where a row's three stamps sit, relative to what the tell locked.
@@ -744,6 +745,7 @@ pub enum MinibossShape {
         jaw_len: f32,
         jaw_half: f32,
     },
+    MilkSpray(MilkSpray),
 }
 
 impl MinibossShape {
@@ -931,6 +933,7 @@ pub struct Miniboss {
     /// The three stamp centres, locked at tell start, in landing order.
     pub stamp_centers: [Vec2; 3],
     pub(super) signature_track: SignatureTrack,
+    pub(super) spray: Option<MilkSpray>,
     /// Successful hits in the separately damaging passes or circles.
     multi_hit_mask: u8,
     /// Remaining i-frames granted by this strike's most recent hit.
@@ -957,6 +960,9 @@ pub struct Miniboss {
     signature_index: usize,
     second_unlocked: bool,
     next_secondary: bool,
+    /// Turn-rate-limited sprite heading in radians. Signature aim and movement
+    /// continue to read their own simulation state.
+    pub(crate) art_heading: Option<f32>,
 }
 
 impl Miniboss {
@@ -978,6 +984,7 @@ impl Miniboss {
             target: Vec2::ZERO,
             stamp_centers: [Vec2::ZERO; 3],
             signature_track: SignatureTrack::default(),
+            spray: None,
             multi_hit_mask: 0,
             multi_hit_iframes: 0.0,
             announced: false,
@@ -993,7 +1000,32 @@ impl Miniboss {
             signature_index: 0,
             second_unlocked: kind.temperament().second_from_hp == 1.0,
             next_secondary: false,
+            art_heading: None,
         }
+    }
+
+    fn update_art_heading(&mut self, body: &Enemy, dt: f32) {
+        use std::f32::consts::{PI, TAU};
+
+        if self.kind == MinibossKind::Mudlark {
+            return;
+        }
+        if matches!(self.state, MinibossState::Tell | MinibossState::Active | MinibossState::Recover) {
+            self.art_heading = Some(self.aim.angle());
+            return;
+        }
+
+        let previous = self.art_heading.unwrap_or_else(|| body.facing.angle());
+        let (heading, rate) = match self.manoeuvre.motion {
+            Motion::ChargeTell { from, end, .. } | Motion::Lunge { from, end, .. } => {
+                ((end - from).angle(), TAU * 2.0)
+            }
+            _ if body.vel.len_sq() > 1.0 => (body.vel.angle(), TAU),
+            _ => (previous, TAU),
+        };
+        let turn = (heading - previous + PI).rem_euclid(TAU) - PI;
+        let step = (rate * dt).max(0.0);
+        self.art_heading = Some((previous + turn.clamp(-step, step) + PI).rem_euclid(TAU) - PI);
     }
 
     /// Where a signature centred on the rat locks to.
@@ -1012,6 +1044,10 @@ impl Miniboss {
 
     pub fn signature(&self) -> Signature {
         self.kind.signatures()[self.signature_index]
+    }
+
+    pub fn milk_spray(&self) -> MilkSpray {
+        self.spray.unwrap_or_else(|| MilkSpray::open(self.origin, self.aim))
     }
 
     pub fn active_duration(&self) -> f32 {
@@ -1160,6 +1196,7 @@ pub struct MinibossSchedule {
     pub grace_suppress_until: f32,
     /// How many minibosses are alive right now.
     pub active: u32,
+    pub(crate) milk_splashes: Vec<MilkSplash>,
 }
 
 impl MinibossSchedule {
@@ -1278,6 +1315,7 @@ pub fn miniboss_system(
     let MinibossScratch { order, owners, summon_order } = &mut *behaviour_scratch;
     let dt = input.dt;
     let elapsed = counters.elapsed;
+    schedule.milk_splashes.retain(|splash| !splash.expired(elapsed));
     let ppos = player.pos;
     let pvel = player.vel;
     let retiring = !counters.testbed
@@ -1375,6 +1413,9 @@ pub fn miniboss_system(
             }
             MinibossState::Active => {
                 e.vel = Vec2::ZERO;
+                if mb.signature().shape == SignatureShape::MilkSpray {
+                    mb.milk_spray().deposit(previous_timer, mb.timer, elapsed, &mut schedule.milk_splashes);
+                }
                 if !mb.active_cued {
                     mb.active_cued = true;
                     sfx.0.push(Sfx::MinibossTell);
@@ -1418,6 +1459,7 @@ pub fn miniboss_system(
         e.position_locked = mb.holds() || mb.manoeuvre.locks_position();
         e.contact_cd = (contact_cd - dt).max(0.0);
         e.flash = (flash - dt).max(0.0);
+        mb.update_art_heading(&e, dt);
     }
     schedule.active = alive;
     movement.clean_summons(&mut commands, owners, summon_order);
@@ -1599,7 +1641,7 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
         SignatureShape::Umbra { .. } => shapes::umbra_aim(level, body, aim),
         _ => aim,
     };
-    let before = (mb.origin, mb.aim, mb.target, mb.stamp_centers);
+    let before = (mb.origin, mb.aim, mb.target, mb.stamp_centers, mb.spray);
     mb.origin = body;
     mb.aim = aim;
     mb.target = if matches!(shape, SignatureShape::False { .. }) { ppos } else { at };
@@ -1612,13 +1654,16 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
         8
     };
     for _ in 0..attempts {
+        if shape == SignatureShape::MilkSpray {
+            mb.spray = Some(MilkSpray::capture(&level.tiles, mb.origin, mb.aim));
+        }
         if escape_exists(mb, ppos, level) {
             return true;
         }
         mb.aim = mb.aim.rotate(std::f32::consts::FRAC_PI_4);
         lock_stamps(mb);
     }
-    (mb.origin, mb.aim, mb.target, mb.stamp_centers) = before;
+    (mb.origin, mb.aim, mb.target, mb.stamp_centers, mb.spray) = before;
     false
 }
 
@@ -1938,6 +1983,28 @@ pub fn chest_floor_near(level: &Level, pos: Vec2) -> Vec2 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sprite_restarts_from_attack_aim_and_turns_at_a_bounded_rate() {
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(21);
+        let mut enemy = Enemy::spawn(EnemyKind::Brute, Vec2::ZERO, 1.0, &mut rng);
+        let mut carton = Miniboss::new(MinibossKind::MilkCarton, 0);
+        carton.aim = Vec2::new(1.0, 0.0);
+        carton.state = MinibossState::Recover;
+        let dt = 1.0 / 60.0;
+        carton.update_art_heading(&enemy, dt);
+        carton.state = MinibossState::Cooldown;
+        enemy.facing = -carton.aim;
+        carton.update_art_heading(&enemy, dt);
+        assert!(carton.art_heading.unwrap().abs() < 1e-4);
+
+        enemy.vel = Vec2::new(0.0, 35.0);
+        carton.update_art_heading(&enemy, dt);
+        let turned = carton.art_heading.unwrap();
+        assert!(turned > 0.0 && turned <= std::f32::consts::TAU * dt + 1e-4);
+    }
+
     fn mb(kind: MinibossKind, origin: Vec2, aim: Vec2) -> Miniboss {
         let mut m = Miniboss::new(kind, 0);
         m.origin = origin;
@@ -2158,6 +2225,8 @@ mod tests {
 
     #[test]
     fn spill_hit_shape_is_exact() {
+        const SPILL_LEN: f32 = 32.0;
+        const SPILL_HALF: f32 = 10.0;
         let s = MinibossShape::Spill {
             center: Vec2::new(SPILL_LEN * 0.5, 0.0),
             aim: Vec2::new(1.0, 0.0),
@@ -2612,7 +2681,7 @@ mod tests {
         q.iter(&w.ecs).map(|g| g.value).collect()
     }
 
-    /// The first six bodies retain their radii and primary active windows.
+    /// Pin the first six bodies’ radii and primary active windows.
     #[test]
     fn the_existing_six_keep_their_numbers() {
         let want = [
@@ -2621,7 +2690,7 @@ mod tests {
             (MinibossKind::Bobbin, 0.7, 6.5),
             (MinibossKind::BellDiver, 1.2, 7.0),
             (MinibossKind::Foreman, 0.9, 7.5),
-            (MinibossKind::MilkCarton, 1.2, 7.0),
+            (MinibossKind::MilkCarton, 0.72, 7.0),
         ];
         for (kind, active, radius) in want {
             assert_eq!(kind.active_duration(), active, "{kind:?} active window");
@@ -3168,8 +3237,9 @@ mod tests {
             Mudlark => o + aim * 44.0,
             // Down the central seam between the rollers.
             WringerBoy => o + aim * 22.0,
+            MilkCarton => behind,
             // Off the sheet by its short edge.
-            MilkCarton | CarbonTwin | TarpaulinPup => o + aim * 16.0 + side * 16.0,
+            CarbonTwin | TarpaulinPup => o + aim * 16.0 + side * 16.0,
             // Off the marked line.
             Foreman | SaltHen => o + aim * 16.0 + side * 16.0,
             // Clear of the last reader pad.
@@ -3218,12 +3288,14 @@ mod tests {
         let kind = MinibossKind::MilkCarton;
         let walk = Vec2::new(0.0, 20.0);
         for turns in [false, true] {
-            let mut w = World::new(Theme::Sewer, 23);
+            let mut w = World::new(Theme::Kitchen, 23);
+            w.level = Level::empty(Theme::Kitchen);
+            w.player.pos = w.level.start;
             w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
             w.player.hp = 1.0e6;
             w.elapsed = 30.0;
             let start = w.player.pos;
-            let e = w.spawn_miniboss(kind, 0, start + Vec2::new(20.0, 0.0));
+            let e = w.spawn_miniboss(kind, 0, start + Vec2::new(30.0, 0.0));
             let hp = w.player.hp;
             let mut vel = walk;
             let mut locked_aim = None;

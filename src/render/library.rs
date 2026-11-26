@@ -659,6 +659,9 @@ fn draw_art(art: &mut PixelBuffer, scenes: &mut Scenes, key: Key, accent: Rgb, t
         }
         Key::Passive(kind) => draw_icon(art, art_icons::passive(kind), false, t),
         Key::Splice(kind) => draw_icon(art, art_icons::splice(kind), false, t),
+        Key::Pickup(PickupKind::Headlamp) => {
+            crate::game::art_headlamp::draw_headlamp_icon(art, centre.x as i32 - 4, centre.y as i32 - 4);
+        }
         Key::Pickup(kind) => {
             let s = (centre.x as i32, (centre.y + (t * 2.0).sin() * 2.0) as i32);
             art_floor::draw_pickup(art, kind, s, t);
@@ -776,8 +779,11 @@ fn boss_extent(kind: BossKind) -> (f32, f32) {
         ),
         BossKind::NightEdition => (48.0, 44.0),
         BossKind::Magpie => (52.0, 42.0),
-        // The tail trails 39 px astern of the body point.
-        BossKind::HorseshoeCrab => (82.0, 46.0),
+        // Scale the still plate with the shell and its long rear spike.
+        BossKind::HorseshoeCrab => {
+            let size = crate::game::art_boss_horseshoe_crab::BODY_SCALE;
+            (82.0 * size, 46.0 * size)
+        }
         BossKind::MegaRat => (68.0, 44.0),
         // Wings at full span over the hover's lift.
         BossKind::Hawk => (58.0, 60.0),
@@ -806,6 +812,7 @@ fn boss_anchor_x(kind: BossKind) -> f32 {
             (art_boss_mangle::BODY_RADIUS + 10.0) / need_w
         }
         BossKind::Lantern => 0.66,
+        BossKind::HorseshoeCrab => 0.64,
         _ => 0.5,
     }
 }

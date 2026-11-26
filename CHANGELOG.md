@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Headlamp.** Illuminates your path for 18s and reveals it on the map.
+  Ordinary enemies veer away from the middle of the beam.
+- **Growth Serum.** Longer strides and slower footfalls at giant size.
+- **Miniboss movement.** Bodies turn more smoothly between attacks.
+  The Mudlark walks with a steadier shell. The Milk Carton waddles.
+- **Milk Carton.** Its spout warns of a spray that splatters the floor.
+  Walls stop the jet.
+- **Milk Teeth.** Teeth arc over obstacles, bite on landing and slice
+  through enemies on the way back.
+- **Hantavirus.** Droppings cast a wider, brighter green glow.
+- **The Horseshoe.** The shell is 50% larger. Its charges cover a wider
+  lane and it takes more damage to bring down.
+- **The Sweeper.** Keep your distance and it may sprint at you. Watch
+  the marked lane and strike when it stops for breath.
+
 ## 0.4.2 (2026-11-26)
 
 - **Browser edition.** Play with a keyboard and mouse. The canvas renderer

@@ -9,7 +9,7 @@ use super::hazards::InkSlow;
 use super::miniboss::{
     Miniboss, MinibossKind, MinibossShape, Signature, SignatureShape, StampLayout, CONE_HALF_ANGLE,
     CONE_LEN, CORD_HALF, CORD_LEN, LATE_PLATE_CLOSED, RING_GAP_HALF, RING_HALF, RING_RADIUS,
-    SPILL_HALF, SPILL_LEN, STAMP_HALF, STAMP_SPACING, TRENCH_HALF, TRENCH_LEN,
+    STAMP_HALF, STAMP_SPACING, TRENCH_HALF, TRENCH_LEN,
 };
 use super::projectiles::los_clear;
 use super::traps::TrapSlow;
@@ -107,7 +107,7 @@ impl MinibossKind {
                 attack(0.7, S::Overlap { radius: 19.0, sep: 22.0 })),
             // Kitchen
             MilkCarton => (Stalk, 38.0, 2.9, 0.5,
-                attack(1.2, S::Spill { len: SPILL_LEN, half_w: SPILL_HALF }),
+                attack(0.72, S::MilkSpray),
                 attack(0.9, S::Drip { radius: 8.0 })),
             PastryWheel => (Charge, 66.0, 2.2, 1.0,
                 attack(0.6, S::Trench { len: 46.0, half: 4.0 }),
@@ -218,6 +218,7 @@ impl SignatureShape {
             Drip { .. } => "Falling drops",
             Umbra { .. } => "Shadow cone",
             False { .. } => "False jaws",
+            MilkSpray => "Milk spray",
         }
     }
 }
@@ -403,7 +404,10 @@ impl MovementParams<'_, '_> {
         };
         match t.style {
             MoveStyle::Stalk | MoveStyle::Summon => {
-                if ready && distance <= range {
+                if ready && distance <= range
+                    && (mb.signature().shape != SignatureShape::MilkSpray
+                        || level.tiles.segment_hit(body.pos, rat, 0.0).is_none())
+                {
                     return true;
                 }
                 steer(body, toward);

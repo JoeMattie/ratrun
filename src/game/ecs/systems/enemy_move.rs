@@ -174,6 +174,7 @@ pub fn enemy_steering_system(
         return;
     }
     let ppos = player.pos;
+    let beam = super::powerups::HeadlampBeam::from_player(&level, &player, player.face);
     // The horde's own speed ramp: ×1.0 → ×1.75 over the first five minutes,
     // then frozen at that ceiling to the boss (see
     // `tuning.director.horde_speed_mult`; the legacy `1.0 + elapsed / 400.0` reached
@@ -217,7 +218,7 @@ pub fn enemy_steering_system(
     order.extend(enemies.iter_mut().map(|(entity, id, _)| (id.0, entity)));
     order.sort_unstable_by_key(|(id, _)| *id);
 
-    for &(_, entity) in order.iter() {
+    for &(spawn, entity) in order.iter() {
         let (_, _, mut e) = enemies
             .get_mut(entity)
             .expect("ordered enemy must still be alive");
@@ -309,10 +310,11 @@ pub fn enemy_steering_system(
                 &mut e, &level, ppos, rat_wet, &outfall_bulbs, &mut target, &mut flow_dir, dt,
             );
         }
+        let shy = beam.map_or(Vec2::ZERO, |beam| beam.shy(&level, &e, spawn));
         if e.kind == EnemyKind::ShoreCrab {
-            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase * clamp);
+            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase * clamp, shy);
         } else {
-            e.steer(target, flow_dir, dt, gait);
+            e.steer_with_deflection(target, flow_dir, dt, gait, shy);
         }
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
@@ -661,6 +663,55 @@ mod tests {
         assert!(approx(e.pos.x, 2.0), "enemy not clamped to the arena: {:?}", e.pos);
         assert!(approx(e.pos.y, center.y), "enemy drifted off its row: {:?}", e.pos);
         assert!(e.vel.x > 0.0, "enemy did not steer toward the player: {:?}", e.vel);
+    }
+
+    #[test]
+    fn headlamp_steering_keeps_chase_and_fades_to_the_edge() {
+        let measure = |offset: Vec2, kind, elite, named, committed, wall, active| {
+            let mut w = World::new(Theme::Sewer, 5);
+            w.level = Level::empty(Theme::Sewer);
+            w.player.pos = Vec2::new(200.0, 200.0);
+            w.player.face = Vec2::new(1.0, 0.0);
+            w.player.buffs.headlamp = if active { super::super::powerups::HEADLAMP_SECS } else { 0.0 };
+            if wall {
+                w.level.tiles.set(15, 12, TileKind::Wall(WallKind::Solid));
+            }
+            w.flow = FlowField::new(&w.level.tiles);
+            let id = w.spawn_enemy(kind, w.player.pos + offset, 1.0);
+            {
+                let mut e = w.ecs.get_mut::<Enemy>(id).unwrap();
+                e.elite = elite;
+                e.named = named;
+                if committed {
+                    e.w3.curl_t = 1.0;
+                }
+            }
+            run_one(&mut w, enemy_steering_system);
+            w.ecs.get::<Enemy>(id).unwrap().vel
+        };
+        let centre = Vec2::new(64.0, 0.0);
+        let edge = Vec2::new(64.0, 24.0);
+        let kind = EnemyKind::Pillbug;
+        let plain = |at, active| measure(at, kind, false, false, false, false, active);
+        let centre_push = plain(centre, true) - plain(centre, false);
+        let edge_push = plain(edge, true) - plain(edge, false);
+        assert!(plain(centre, true).x < 0.0, "the body should keep chasing");
+        assert!(centre_push.y.abs() > 0.5);
+        assert!(edge_push.y.abs() > 0.0 && edge_push.y.abs() < centre_push.y.abs() * 0.15);
+        let elite_push = measure(centre, kind, true, false, false, false, true)
+            - measure(centre, kind, true, false, false, false, false);
+        assert!(approx(elite_push.y, centre_push.y * 0.5));
+        for (body, named, committed, wall) in [
+            (EnemyKind::Boss, false, false, false),
+            (kind, true, false, false),
+            (kind, false, true, false),
+            (kind, false, false, true),
+        ] {
+            assert_eq!(
+                measure(centre, body, false, named, committed, wall, true),
+                measure(centre, body, false, named, committed, wall, false),
+            );
+        }
     }
 
     #[test]

@@ -19,6 +19,9 @@ use crate::game::ecs::systems::miniboss::{
     Miniboss, MinibossKind, MinibossShape, MinibossState, SignatureShape, RECOVER_TIME,
     RING_GAP_TURN, TELL_TIME,
 };
+use crate::game::ecs::systems::miniboss_shapes::{
+    draw_outline, milk_warning_colour, MilkSplash, MILK_SPEED,
+};
 use crate::game::enemy::Enemy;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
@@ -32,6 +35,9 @@ const INK: Rgb = (16, 13, 22);
 const FLASH_COL: Rgb = (255, 248, 226);
 /// Duration (seconds) of the initial arrival flourish on first spawn.
 const ENTRANCE_TIME: f32 = 1.15;
+/// Convert the speed-scaled enemy gait accumulator to the miniboss artists'
+/// pose clock. At 60 px/s, 34 gait units per second become about 1.5.
+const GAIT_TO_POSE: f32 = 0.045;
 
 /// Animation pose derived strictly from `Enemy` + `Miniboss` state (render-only).
 #[derive(Clone, Copy, Debug)]
@@ -123,15 +129,11 @@ fn tell_quiver(t: f32) -> f32 {
     }
 }
 
-/// Physical hurt recoil offset (pushes backward & shakes laterally when hit).
+/// A short backward recoil as the hit flash fades. Fresh hits can refresh
+/// the displacement, but neither gait nor repeated hits can shake it sideways.
 #[inline]
-fn hurt_jolt(f: Vec2, flash: f32, anim: f32) -> Vec2 {
-    if flash <= 0.01 {
-        Vec2::ZERO
-    } else {
-        let shake = (anim * 44.0 + flash * 31.0).sin() * flash * 1.4;
-        -f * (flash * 2.6) + f.perp() * shake
-    }
+fn hurt_jolt(f: Vec2, flash: f32) -> Vec2 {
+    -f * (0.55 * flash * flash)
 }
 
 #[inline]
@@ -745,6 +747,41 @@ pub fn banner_style(kind: MinibossKind) -> BannerStyle {
     }
 }
 
+fn body_facing(e: &Enemy, mb: &Miniboss, pose: Pose) -> Vec2 {
+    match pose {
+        Pose::Tell(_) | Pose::Strike(_) | Pose::Recover(_) => safe_dir(mb.aim, e.facing),
+        Pose::Retreat(_) if mb.kind == MinibossKind::Mudlark && mb.timer < 0.36 => {
+            // Let the walk heading settle before turning from the locked attack aim.
+            let aim = safe_dir(mb.aim, e.facing);
+            let walk = safe_dir(e.facing, aim);
+            let t = ((mb.timer - 0.12) / 0.24).clamp(0.0, 1.0);
+            turn_from(aim, walk, t)
+        }
+        _ => mb.art_heading.map_or_else(
+            || safe_dir(e.facing, mb.aim),
+            Vec2::from_angle,
+        ),
+    }
+}
+
+fn turn_from(aim: Vec2, walk: Vec2, t: f32) -> Vec2 {
+    let turn = aim.perp().dot(walk).atan2(aim.dot(walk));
+    aim.rotate(turn * t * t * (3.0 - 2.0 * t))
+}
+
+fn pose_clock(e: &Enemy, mb: &Miniboss, pose: Pose) -> f32 {
+    if !e.anim.is_finite() {
+        return mb.timer * 2.2;
+    }
+    // The Mudlark's legs and shell already share a dedicated gait in its art.
+    let gait = if mb.kind == MinibossKind::Mudlark {
+        e.anim
+    } else {
+        e.anim * GAIT_TO_POSE
+    };
+    gait + if matches!(pose, Pose::Idle) { mb.timer * 2.2 } else { 0.0 }
+}
+
 /// Draw one miniboss body at `e.pos` with full pose animation, entrance flourish,
 /// hurt reaction, death collapse, and outer radial HP ring.
 pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: Rgb) {
@@ -758,15 +795,8 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
 
     let pose = Pose::from_state(e, mb);
     let flash = (e.flash / 0.12).clamp(0.0, 1.0);
-    let facing = match pose {
-        Pose::Tell(_) | Pose::Strike(_) | Pose::Recover(_) => safe_dir(mb.aim, e.facing),
-        _ => safe_dir(e.facing, mb.aim),
-    };
-    let anim = if e.anim.is_finite() {
-        e.anim + if matches!(pose, Pose::Idle) { mb.timer * 2.2 } else { 0.0 }
-    } else {
-        mb.timer * 2.2
-    };
+    let facing = body_facing(e, mb, pose);
+    let anim = pose_clock(e, mb, pose);
 
     // Exact Bell Diver chip direction comes straight from `mb.telegraph()`'s
     // `RingGap { gap_dir }` (falling back to `facing.rotate(RING_GAP_TURN)`), so
@@ -799,7 +829,13 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
         MinibossKind::Bobbin => draw_bobbin(pb, p, facing, pose, anim, flash),
         MinibossKind::BellDiver => draw_bell_diver(pb, p, facing, bell_gap_dir, pose, anim, flash),
         MinibossKind::Foreman => draw_foreman(pb, p, facing, pose, anim, flash),
-        MinibossKind::MilkCarton => draw_milk_carton(pb, p, facing, pose, anim, flash),
+        MinibossKind::MilkCarton => {
+            let nozzle = match tele {
+                Some(MinibossShape::MilkSpray(spray)) => Some(spray.origin - cam),
+                _ => None,
+            };
+            draw_milk_carton(pb, p, facing, pose, anim, flash, nozzle);
+        }
         MinibossKind::ValveWidow => draw_valve_widow(pb, p, facing, pose, anim, flash),
         MinibossKind::Mudlark => draw_mudlark(pb, p, facing, pose, anim, flash),
         MinibossKind::PastryWheel => draw_pastry_wheel(pb, p, facing, pose, anim, flash),
@@ -973,7 +1009,7 @@ fn draw_corkscrew(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
 
     // Floor shadow (tight & dark under the heavy brass body).
@@ -1268,7 +1304,7 @@ fn draw_sister_snip(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let pivot = center + f * stride + jolt + Vec2::new(0.0, lift);
 
     // Grounded shadow (shrinks slightly when hovering high in Entrance/Tell).
@@ -1512,7 +1548,7 @@ fn draw_bobbin(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + jolt + Vec2::new(lean_x, bob);
 
     // Grounded shadow beneath the top.
@@ -1740,9 +1776,9 @@ fn draw_bell_diver(
     let hop_cycle = (anim * 1.15).fract();
     let hop_lift = if matches!(pose, Pose::Approach) {
         if hop_cycle < 0.65 {
-            -(hop_cycle / 0.65 * PI).sin() * 5.8
+            -(hop_cycle / 0.65 * PI).sin().powi(2) * 4.5
         } else {
-            0.8
+            0.0
         }
     } else {
         0.0
@@ -1771,7 +1807,7 @@ fn draw_bell_diver(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + jolt + Vec2::new(rattle + tilt * 0.65, lift);
 
     // Shadow shrinks & softens when bell hoists high in Tell / mid-hop.
@@ -2134,7 +2170,7 @@ fn draw_foreman(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let bx = (center.x + lean_x + jolt.x).round() as i32;
     let by = (center.y + lift + jolt.y).round() as i32;
     let hw = 10 + squash_w;
@@ -2313,6 +2349,7 @@ fn draw_milk_carton(
     pose: Pose,
     anim: f32,
     flash: f32,
+    spray_nozzle: Option<Vec2>,
 ) {
     let wax_spec: Rgb = (255, 255, 246);
     let wax_hi: Rgb = (246, 244, 232);
@@ -2373,14 +2410,27 @@ fn draw_milk_carton(
         (0.0, 0.0)
     };
 
+    let walk = (anim * 6.0).sin();
+    let waddle = match pose {
+        Pose::Approach => walk,
+        Pose::Retreat(t) => walk * (t * 9.0).min(1.0),
+        _ => 0.0,
+    };
+
     // Shear-tilt (`lean` shifts top horizontally relative to bottom), lift, squash, spout state.
     let (lean, lift, squash, spout_open, rear_kick) = match pose {
         Pose::Entrance(_) => (0.0, ent_drop, ent_sq, false, 0.0),
-        Pose::Idle => ((anim * 2.0).sin() * 1.4, (anim * 2.0).cos() * 0.4, 0.0, false, 0.0),
-        Pose::Approach => {
-            // Heavy boxy 4-footed waddle & slosh!
-            let s = (anim * 6.0).sin();
-            (s * 2.8, -s.abs() * 1.8, (anim * 12.0).sin() * 0.5, false, 0.0)
+        Pose::Idle => ((anim * 2.0).sin() * 0.8, (anim * 2.0).cos() * 0.25, 0.0, false, 0.0),
+        Pose::Approach | Pose::Retreat(_) => {
+            (waddle * 1.4, -waddle * waddle * 0.65, waddle * 0.18, false, 0.0)
+        }
+        Pose::Tell(t) if spray_nozzle.is_some() => {
+            let pressure = t * t * (3.0 - 2.0 * t);
+            (f.x * 5.8 * pressure, -pressure, 1.5 * pressure, true, pressure)
+        }
+        Pose::Strike(t) if spray_nozzle.is_some() => {
+            let squeeze = (PI * t).sin();
+            (f.x * (5.8 + 0.8 * squeeze), -1.0 + 0.8 * squeeze, 1.5 + 2.0 * squeeze, true, 1.0)
         }
         Pose::Tell(t) => {
             let c = tell_coil(t);
@@ -2393,15 +2443,16 @@ fn draw_milk_carton(
             (face_x * 8.2 + glug, 0.6, 0.6, true, 1.0)
         }
         Pose::Recover(t) => {
-            // Rocks heavily backward onto its heels exposing the folded rear seam!
-            let slosh = (t * 8.0).sin() * 1.4;
-            (-face_x * 5.2 + slosh, 0.4, 0.4, false, 0.0)
+            // Carry the pouring tilt into a single rock back onto the heels.
+            let catch = (1.0 - (t / 0.32).min(1.0)).powi(3);
+            let rock = (t * PI).sin().powi(2);
+            let last_pour = face_x * 8.2 + 24.0_f32.sin() * 0.9;
+            (last_pour * catch - face_x * 3.0 * rock, 0.6 * catch, 0.6 * catch, false, catch)
         }
-        Pose::Retreat(t) => (-face_x * 3.2 + (t * 10.0).sin() * 1.8, -(t * 10.0).sin().abs() * 1.2, 0.0, false, 0.0),
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.45, 1.1);
     draw_shadow(pb, center.x + 1.5 + lean * 0.3, center.y + 9.0, 12.5 * sh_s, 5.5 * sh_s, 0.52);
@@ -2413,18 +2464,12 @@ fn draw_milk_carton(
     }
 
     // 1. FOUR distinct chunky square cardboard corner feet!
-    let waddle = if matches!(pose, Pose::Approach) {
-        (anim * 6.0).sin() * 2.2
-    } else if let Pose::Retreat(t) = pose {
-        (t * 10.0).sin() * 1.8
-    } else {
-        0.0
-    };
+    let step = waddle * 1.35;
     let feet = [
-        (-7.5_f32, 7.5_f32, waddle, true),   // back-left
-        (-3.0_f32, 8.8_f32, -waddle, true),  // inner-left
-        (3.0_f32, 8.8_f32, waddle, false),   // inner-right
-        (7.5_f32, 7.5_f32, -waddle, false),  // front-right
+        (-7.5_f32, 7.5_f32, step, true),   // back-left
+        (-3.0_f32, 8.8_f32, -step, true),  // inner-left
+        (3.0_f32, 8.8_f32, step, false),   // inner-right
+        (7.5_f32, 7.5_f32, -step, false),  // front-right
     ];
     for &(fx, fy, step, is_left) in &feet {
         let is_rear = (face_x > 0.0 && is_left) || (face_x < 0.0 && !is_left);
@@ -2538,8 +2583,15 @@ fn draw_milk_carton(
 
     // 4. Articulated open triangular pouring spout beak facing `+face_x`!
     let spout_base = Vec2::new((row_cx(top_y - 2) + (face_x as i32) * (hw - 2)) as f32, (top_y - 2) as f32);
-    let spout_tip = spout_base
-        + Vec2::new(face_x * if spout_open { 6.2 } else { 3.2 }, if spout_open { 1.4 } else { -0.5 });
+    let (spout_base, spout_tip) = if let Some(nozzle) = spray_nozzle {
+        (Vec2::new(row_cx(top_y - 2) as f32, (top_y - 2) as f32) + f * 4.0, nozzle)
+    } else {
+        let tip = spout_base + Vec2::new(
+            face_x * if spout_open { 6.2 } else { 3.2 },
+            if spout_open { 1.4 } else { -0.5 },
+        );
+        (spout_base, tip)
+    };
     draw_tapered_capsule(pb, spout_base, spout_tip, 2.4, 1.1, wax_spec, blue_hi, blue_lo, flash);
     // Dark inner open spout mouth when pouring!
     if spout_open {
@@ -2547,7 +2599,7 @@ fn draw_milk_carton(
     }
 
     // Idle & Recover: curling greenish expired sour-milk stink wisps / bubbles!
-    if matches!(pose, Pose::Idle | Pose::Tell(_) | Pose::Recover(_)) {
+    if spray_nozzle.is_none() && matches!(pose, Pose::Idle | Pose::Tell(_) | Pose::Recover(_)) {
         for k in 0..2 {
             let ph = (anim * 1.4 + k as f32 * 0.5).fract();
             let sx = spout_tip.x + (ph * TAU).sin() * 1.8;
@@ -2563,15 +2615,18 @@ fn draw_milk_carton(
         plot_px(pb, drop.x.round() as i32, drop.y.round() as i32, sour_hi);
     }
 
-    // Tell: swelling wobbling pale-yellow curdled milk glob bulging at the spout lip!
     if let Pose::Tell(t) = pose {
-        let c = tell_coil(t);
-        let glob = spout_tip + Vec2::new(face_x * (1.8 + c * 2.2), 1.2 + c * 2.0);
-        draw_shaded_disc(pb, glob.x, glob.y, 1.2 + c * 1.5, (255, 255, 246), sour_mid, sour_curd, 0.0);
+        if let Some(nozzle) = spray_nozzle {
+            draw_shaded_disc(pb, nozzle.x, nozzle.y, 0.7 + t, (255, 255, 250), wax_hi, blue_hi, 0.0);
+        } else {
+            let c = tell_coil(t);
+            let glob = spout_tip + Vec2::new(face_x * (1.8 + c * 2.2), 1.2 + c * 2.0);
+            draw_shaded_disc(pb, glob.x, glob.y, 1.2 + c * 1.5, (255, 255, 246), sour_mid, sour_curd, 0.0);
+        }
     }
 
-    // Strike: thick arcing frothy sour-milk waterfall stream + bouncing foam & curds!
-    if let Pose::Strike(t) = pose {
+    // Secondary: the spout dribbles as the three drops land.
+    if let (Pose::Strike(t), None) = (pose, spray_nozzle) {
         let mid_arc = spout_tip + f * 5.0 + Vec2::new(0.0, 3.8);
         let splash = spout_tip + f * 9.5 + Vec2::new(0.0, 9.5);
         draw_tapered_capsule(pb, spout_tip, mid_arc, 2.0, 2.5, (255, 255, 250), sour_hi, sour_mid, 0.0);
@@ -2664,7 +2719,7 @@ impl Frame {
         // body facing left lunged backwards on its strike); `lift` is screen-up.
         let fdir = safe_dir(f, Vec2::new(1.0, 0.0));
         Frame {
-            c: center + hurt_jolt(f, flash, anim) + fdir * lean + Vec2::new(0.0, lift),
+            c: center + hurt_jolt(f, flash) + fdir * lean + Vec2::new(0.0, lift),
             f: fdir,
             s: fdir.perp(),
             pose,
@@ -2976,7 +3031,7 @@ fn draw_valve_widow(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, ani
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(tilt_x, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.48, 1.15);
     draw_shadow(pb, center.x + 1.5, center.y + 7.2, 13.0 * sh_s + ent_sq * 2.0, 5.8 * sh_s, 0.54);
@@ -3157,6 +3212,44 @@ fn draw_valve_widow(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, ani
 // on its carapace, eight wide splayed crab legs, elevated glowing eyestalks,
 // and twin massive serrated steel trap-claws that throw wide in Tell (28+ px)
 // and clap violently shut down the centre line on Strike.
+/// Long, low steps. `Enemy::anim` advances at 4 + speed / 2 units per
+/// second while walking, so one gait cycle takes about 1.5 s at full speed.
+const MUDLARK_GAIT: f32 = 0.14;
+
+fn mudlark_motion(pose: Pose, anim: f32) -> (f32, f32, f32, f32) {
+    let gait = anim * MUDLARK_GAIT;
+    let walking = |weight: f32| {
+        let (step, sway) = gait.sin_cos();
+        (
+            step * 0.22 * weight,
+            -step.max(0.0) * 0.38 * weight,
+            sway * 0.45 * weight,
+            0.0,
+        )
+    };
+    match pose {
+        Pose::Entrance(t) => (0.0, (1.0 - t).powi(3) * 14.0, 0.0, 0.0),
+        Pose::Idle => (0.0, anim.sin() * 0.28, 0.0, 0.0),
+        Pose::Approach => walking(1.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            // The jaws and springs quiver under tension while the shell stays planted.
+            (-3.8 * c, -1.6 * c, 0.0, 1.2 + q * 1.4)
+        }
+        Pose::Strike(t) => {
+            let lunge = (t * PI).sin();
+            (4.8 * lunge, 0.8 * lunge, 0.0, 1.8)
+        }
+        Pose::Recover(t) => {
+            let settle = 4.0 * t * (1.0 - t);
+            (0.65 * settle, 1.3 * settle, 0.0, 0.0)
+        }
+        Pose::Retreat(t) => walking((t * 9.0).min(1.0)),
+        Pose::Death(_) => unreachable!(),
+    }
+}
+
 fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
     let f = safe_dir(f, Vec2::new(1.0, 0.0));
     let s = f.perp();
@@ -3188,37 +3281,14 @@ fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f
         return;
     }
 
-    let (ent_rise, ent_mud) = if let Pose::Entrance(t) = pose {
-        let ease = 1.0 - (1.0 - t).powi(3);
-        ((1.0 - ease) * 14.0, (1.0 - t).clamp(0.0, 1.0))
-    } else {
-        (0.0, 0.0)
-    };
-
-    let (recoil, lift, sway, trap_rattle) = match pose {
-        Pose::Entrance(t) => (0.0, ent_rise, (t * 18.0).sin() * 1.2, 1.4),
-        Pose::Idle => (0.0, (anim * 2.4).sin() * 0.65, (anim * 1.8).sin() * 0.7, 0.0),
-        Pose::Approach => ((anim * 7.5).sin() * 1.0, -(anim * 7.5).sin().abs() * 1.4, (anim * 7.5).cos() * 1.8, 0.5),
-        Pose::Tell(t) => {
-            let c = tell_coil(t);
-            let q = tell_quiver(t);
-            (-3.8 * c, -1.6 * c, q * 1.2, 1.2 + q * 1.4)
-        }
-        Pose::Strike(t) => {
-            let lunge = (t * PI).sin();
-            (4.8 * lunge, 0.8 * lunge, 0.0, 1.8)
-        }
-        Pose::Recover(t) => (2.0, 2.0, (t * 10.0).sin() * 1.1, 0.4),
-        Pose::Retreat(t) => (-2.5, -(t * 11.0).sin().abs() * 1.1, (t * 11.0).sin() * 1.6, 0.2),
-        Pose::Death(_) => unreachable!(),
-    };
-
-    let jolt = hurt_jolt(f, flash, anim);
+    let (recoil, lift, sway, trap_rattle) = mudlark_motion(pose, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + s * sway + jolt + Vec2::new(0.0, lift);
     draw_shadow(pb, base.x + 1.5, center.y + 6.5, 16.5, 6.8, 0.56);
 
     // Entrance mud eruption!
     if let Pose::Entrance(t) = pose {
+        let ent_mud = 1.0 - t;
         draw_shaded_ellipse(pb, center.x, center.y + 4.0, 13.0 * ent_mud + 4.0, 6.0 * ent_mud + 2.0, shell_lo.mid, shell_lo.lo, INK, 0.0);
         draw_entrance_ring(pb, center, t, mud.hi);
         for k in 0..6 {
@@ -3232,11 +3302,10 @@ fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f
     for i in 0..4 {
         let u = i as f32 - 1.5;
         for side in [-1.0_f32, 1.0] {
-            let ph = anim * 7.5 + i as f32 * 1.45 + if side > 0.0 { PI } else { 0.0 };
+            let ph = anim * MUDLARK_GAIT + i as f32 * 1.45 + if side > 0.0 { PI } else { 0.0 };
             let stride = match pose {
-                Pose::Approach | Pose::Retreat(_) => ph.sin() * 2.6,
-                Pose::Idle => (anim * 3.0 + i as f32 * 1.7 + side).sin() * 0.75,
-                Pose::Recover(_) => (anim * 14.0 + i as f32 * 2.0).sin() * 1.6,
+                Pose::Approach => ph.sin() * 1.5,
+                Pose::Retreat(t) => ph.sin() * 1.5 * (t * 9.0).min(1.0),
                 _ => 0.0,
             };
             let hip = base + f * (u * 2.2 - 0.8) + s * (side * 6.0) + Vec2::new(0.0, 1.5);
@@ -3272,8 +3341,8 @@ fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f
     // 4. TWIN MASSIVE SERRATED STEEL PINCER CLAWS!
     //    Throw WIDE apart in Tell (matching 28 px opening) and SLAM SHUT to ~4 px on Strike!
     let (sep, reach, gape, idle_snap) = match pose {
-        Pose::Idle => (9.0, 9.5, 0.30, (anim * 3.2).sin()),
-        Pose::Approach => (9.6, 10.2, 0.34, (anim * 6.5).sin()),
+        Pose::Idle => (9.0, 9.5, 0.30, anim.sin() * 0.30),
+        Pose::Approach => (9.6, 10.2, 0.34, (anim * MUDLARK_GAIT).sin() * 0.30),
         Pose::Tell(t) => {
             let c = tell_coil(t);
             let q = tell_quiver(t);
@@ -3342,7 +3411,7 @@ fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f
         Pose::Tell(_) | Pose::Strike(_) => (255, 224, 92),
         _ => (255, 250, 210),
     };
-    let stalk_bob = if matches!(pose, Pose::Idle) { (anim * 2.8).sin() * 0.7 } else { 0.0 };
+    let stalk_bob = if matches!(pose, Pose::Idle) { anim.sin() * 0.35 } else { 0.0 };
     for side in [-1.0_f32, 1.0] {
         let st_root = base + f * 4.5 + s * (side * 2.4);
         let st_tip = base + f * 6.4 + s * (side * 2.8) + Vec2::new(0.0, -2.6 + stalk_bob * side);
@@ -3420,7 +3489,7 @@ fn draw_pastry_wheel(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.15);
     draw_shadow(pb, base.x + 1.2, center.y + 6.5, 13.0 * sh_s + ent_sq * 2.0, 5.4 * sh_s, 0.54);
@@ -3599,7 +3668,7 @@ fn draw_salt_hen(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: 
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(waddle, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.48, 1.15);
     draw_shadow(pb, center.x + 1.2, center.y + 7.4, 12.0 * sh_s + ent_sq * 2.0, 5.2 * sh_s, 0.54);
@@ -3773,7 +3842,7 @@ fn draw_pot_brush(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + jolt + Vec2::new(0.0, body_lift);
     let sh_s = (1.0 - (-body_lift).max(0.0) * 0.024).clamp(0.46, 1.15);
     draw_shadow(pb, base.x + 1.4, center.y + 6.8, 13.5 * sh_s + ent_sq * 2.0, 5.4 * sh_s, 0.54);
@@ -3915,8 +3984,12 @@ fn draw_dose_pump(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
 
     // Pogo-hop bounce on Approach; springy idle pulse on the plunger foot!
     let hop = if matches!(pose, Pose::Approach) {
-        let cyc = (anim * 2.2).fract();
-        if cyc < 0.68 { -(cyc / 0.68 * PI).sin() * 5.2 } else { 0.8 }
+        let cycle = anim.fract();
+        if cycle < 0.68 {
+            -(cycle / 0.68 * PI).sin().powi(2) * 3.4
+        } else {
+            0.0
+        }
     } else if matches!(pose, Pose::Idle) {
         (anim * 3.2).sin() * 1.4
     } else {
@@ -3941,7 +4014,7 @@ fn draw_dose_pump(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.15);
     draw_shadow(pb, base.x + 1.0, center.y + 8.5, 9.5 * sh_s + ent_sq * 2.0, 4.4 * sh_s, 0.54);
@@ -4093,7 +4166,7 @@ fn draw_petri_mother(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + jolt + Vec2::new(sway, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.48, 1.15);
     draw_shadow(pb, base.x + 1.2, center.y + 7.2, 14.0 * sh_s + ent_sq * 2.0, 6.2 * sh_s, 0.52);
@@ -4297,7 +4370,7 @@ fn draw_cage_counter(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + jolt + Vec2::new(sway, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.15);
     draw_shadow(pb, center.x + 1.2, center.y + 8.6, 12.2 * sh_s + ent_sq * 2.0, 5.2 * sh_s, 0.54);
@@ -4477,7 +4550,7 @@ fn draw_rotor_technician(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.15);
     draw_shadow(pb, base.x + 1.4, center.y + 7.2, 14.2 * sh_s + ent_sq * 2.0, 6.0 * sh_s, 0.54);
@@ -5073,7 +5146,7 @@ fn draw_suds_bailiff(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + jolt + Vec2::new(rattle, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.15);
     draw_shadow(pb, center.x + 1.2, center.y + 8.0, 14.5 * sh_s, 6.4 * sh_s, 0.54);
@@ -5397,7 +5470,7 @@ fn draw_wringer_boy(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.45, 1.12);
     draw_shadow(pb, center.x + 1.0, center.y + 6.5, 18.5 * sh_s, 6.8 * sh_s, 0.54);
@@ -5674,7 +5747,7 @@ fn draw_quoin_key(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.12);
     draw_shadow(pb, center.x + 1.0, center.y + 6.5, 13.5 * sh_s, 6.2 * sh_s, 0.52);
@@ -5879,7 +5952,7 @@ fn draw_carbon_twin(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.45, 1.12);
     draw_shadow(pb, center.x + 1.2, center.y + 7.0, 14.5 * sh_s, 6.4 * sh_s, 0.52);
@@ -6114,7 +6187,7 @@ fn draw_late_plate(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.45, 1.14);
     draw_shadow(pb, center.x + 1.2, center.y + 7.2, 16.0 * sh_s, 6.8 * sh_s, 0.54);
@@ -6322,7 +6395,7 @@ fn draw_tarpaulin_pup(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.032).clamp(0.45, 1.14);
     draw_shadow(pb, center.x + 1.0 + unfurl * f.x * 0.25, center.y + 6.5, (12.5 + unfurl * 0.45) * sh_s, 5.6 * sh_s, 0.52);
@@ -6564,7 +6637,7 @@ fn draw_axle_nut(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.15);
     draw_shadow(pb, center.x + 1.2, center.y + 8.5, 13.5 * sh_s, 6.2 * sh_s, 0.56);
@@ -6792,7 +6865,7 @@ fn draw_chain_dog(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.14);
     draw_shadow(pb, center.x + 1.0, center.y + 6.8, 15.5 * sh_s, 6.4 * sh_s, 0.54);
@@ -7025,7 +7098,7 @@ fn draw_road_atlas(
         }
         Pose::Approach => {
             let beat = (anim * 6.4).sin();
-            (beat * 1.8, -3.2 + beat * 1.8, 1.32 + beat * 0.24, -beat * 4.0, (anim * 3.2).cos() * 2.0, 0.25, 0.0)
+            (beat * 1.8, -2.6 + beat * 1.2, 1.32 + beat * 0.24, -beat * 2.0, (anim * 3.2).cos() * 2.0, 0.25, 0.0)
         }
         Pose::Tell(t) => {
             let c = tell_coil(t);
@@ -7066,7 +7139,7 @@ fn draw_road_atlas(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + s * bank + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.42, 1.12);
     draw_shadow(pb, center.x + 1.5, center.y + 8.5, 17.5 * sh_s, 6.8 * sh_s, 0.50);
@@ -7408,7 +7481,7 @@ fn draw_gasket(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.50, 1.15);
     draw_shadow(
@@ -7702,7 +7775,7 @@ fn draw_swell(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let base = center + f * surge + jolt + Vec2::new(0.0, lift);
     let bf = f.rotate(tilt);
     let bs = bf.perp();
@@ -7943,7 +8016,7 @@ fn draw_shade(
         Pose::Death(_) => unreachable!(),
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.12);
     draw_shadow(pb, center.x + 1.5, center.y + 8.5, 14.5 * sh_s, 6.4 * sh_s, 0.56);
@@ -8221,7 +8294,7 @@ fn draw_false_bulb(
         0.0
     };
 
-    let jolt = hurt_jolt(f, flash, anim);
+    let jolt = hurt_jolt(f, flash);
     let body = center + f * lunge + s * (sel_bias * 1.8) + jolt + Vec2::new(0.0, lift);
     let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.50, 1.15);
     draw_shadow(pb, center.x + 1.5, center.y + 8.0, 13.5 * sh_s, 6.5 * sh_s, 0.54);
@@ -8599,6 +8672,7 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
                 pb, origin, aim, bulbs, sel, jaw_len, jaw_half, cam, is_active, progress,
             );
         }
+        MinibossShape::MilkSpray(_) => draw_milk_spray(pb, mb, cam),
         shape => crate::game::ecs::systems::miniboss_shapes::draw_telegraph(
             pb, mb, &shape, cam, Vec2::splat(1.0),
         ),
@@ -9418,7 +9492,97 @@ fn draw_stamps_telegraph(
     }
 }
 
-/// Milk Carton: exact oriented 20×32 spill rectangle with animated pour chevrons
+/// The hostile layer shares the live front and wall stops with the hit test.
+/// The fine white centre stream breaks into an angled fan of airborne drops.
+pub fn draw_milk_spray(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2) {
+    let shape = if mb.state == MinibossState::Active { mb.active_shape() } else { mb.telegraph() };
+    let Some(MinibossShape::MilkSpray(spray)) = shape else { return };
+    let telling = mb.state == MinibossState::Tell;
+    let age = mb.timer;
+    let warning = milk_warning_colour(age);
+    let pressure = 0.55 + 0.45 * ((mb.active_duration() - age) / 0.12).clamp(0.0, 1.0);
+    let (lo, hi) = spray.bounds();
+    let lo = lo - cam;
+    let hi = hi - cam;
+    let x0 = (lo.x.floor() as i32).max(0);
+    let y0 = (lo.y.floor() as i32).max(0);
+    let x1 = (hi.x.ceil() as i32).min(pb.w as i32 - 1);
+    let y1 = (hi.y.ceil() as i32).min(pb.h as i32 - 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let at = cam + Vec2::new(x as f32, y as f32);
+            let d = at - spray.origin;
+            let along = d.dot(spray.aim);
+            let across = d.dot(spray.aim.perp()).abs();
+            if telling {
+                if spray.contains(at, 0.0) {
+                    let arrow = (along - across * 1.8 - age * 32.0).rem_euclid(16.0);
+                    let alpha = if arrow < 2.0 { 0.27 } else { 0.08 };
+                    blend_px(pb, x, y, warning, alpha);
+                }
+            } else if spray.contains(at, 0.0) {
+                let ripple = ((along - age * 200.0) * 0.23).sin();
+                let width = (1.2 + along * 0.070) * (0.85 + 0.15 * ripple);
+                let front = ((spray.reach - d.len()) / 6.0).clamp(0.0, 1.0);
+                if across <= width {
+                    let core = (1.0 - across / width).clamp(0.0, 1.0);
+                    let foam = mix((144, 187, 207), (255, 255, 245), core.sqrt());
+                    let breakup = (1.0 - along / 124.0).clamp(0.28, 1.0);
+                    blend_px(pb, x, y, foam, (0.48 + core * 0.52) * breakup.sqrt() * front * pressure);
+                } else {
+                    let filament = ((across / along.max(1.0)) * 100.0 + ripple).sin().powi(4);
+                    blend_px(pb, x, y, (205, 225, 226), (0.09 + 0.18 * filament) * front * pressure);
+                }
+            }
+        }
+    }
+    if telling {
+        draw_outline(pb, &MinibossShape::MilkSpray(spray), cam, Vec2::splat(1.0), warning);
+        return;
+    }
+    // Fixed launch intervals and stable per-drop directions. Every drop moves
+    // continuously, with a short fading tail, until it lands or hits a wall.
+    for slot in 0..52 {
+        let flight = age - slot as f32 * 0.013;
+        if !(0.0..=0.29).contains(&flight) {
+            continue;
+        }
+        let angle = (((slot * 23) % 53) as f32 / 52.0 - 0.5) * 0.59;
+        let speed = MILK_SPEED * (0.58 + ((slot * 11) % 17) as f32 * 0.024);
+        let dir = spray.aim.rotate(angle);
+        let at = spray.origin + dir * (flight * speed);
+        if spray.contains(at, 0.0) {
+            let head = at - cam;
+            let tail = head - dir * (1.0 + flight * 8.0);
+            let opacity = (flight * 30.0).min(1.0) * ((0.29 - flight) * 20.0).min(1.0);
+            blend_px(pb, tail.x.round() as i32, tail.y.round() as i32, (165, 210, 224), opacity * 0.62);
+            blend_px(pb, head.x.round() as i32, head.y.round() as i32, (255, 254, 242), opacity);
+        }
+    }
+}
+
+pub fn draw_milk_splash(pb: &mut PixelBuffer, splash: &MilkSplash, cam: Vec2, elapsed: f32) {
+    let opacity = splash.opacity(elapsed);
+    if opacity <= 0.0 {
+        return;
+    }
+    let p = splash.pos - cam;
+    let rx = splash.size;
+    let ry = rx * 0.53;
+    for y in (p.y - ry).floor() as i32..=(p.y + ry).ceil() as i32 {
+        for x in (p.x - rx).floor() as i32..=(p.x + rx).ceil() as i32 {
+            let d = ((x as f32 - p.x) / rx).powi(2) + ((y as f32 - p.y) / ry).powi(2);
+            let wet = (1.0 - d).clamp(0.0, 1.0);
+            blend_px(pb, x, y, (224, 230, 218), wet.sqrt() * opacity * 0.81);
+        }
+    }
+    for offset in [Vec2::new(-1.20 * rx, -0.8 * ry), Vec2::new(1.35 * rx, 0.55 * ry)] {
+        let bead = p + offset;
+        blend_px(pb, bead.x.round() as i32, bead.y.round() as i32, (243, 242, 226), opacity * 0.60);
+    }
+}
+
+/// Oriented spill rectangle with animated pour chevrons
 /// in Tell and surging frothy sour-milk wave + curds in Active!
 #[allow(clippy::too_many_arguments)]
 fn draw_spill_telegraph(
@@ -10015,6 +10179,22 @@ mod tests {
     use crate::render::lighting::LightingMode;
     use std::path::Path;
     use std::time::Instant;
+
+    #[test]
+    fn mudlark_walk_keeps_its_shell_steady() {
+        let mut previous = Vec2::ZERO;
+        for tick in 0..180 {
+            // A half unit of gait phase per tick at full walking speed.
+            let (recoil, lift, sway, rattle) = mudlark_motion(Pose::Approach, tick as f32 * 0.5);
+            let offset = Vec2::new(recoil, lift + sway);
+            assert!(sway.abs() <= 0.5);
+            assert_eq!(rattle, 0.0);
+            if tick != 0 {
+                assert!(offset.dist(previous) < 0.08);
+            }
+            previous = offset;
+        }
+    }
 
     #[test]
     fn all_six_minibosses_and_poses_render_cleanly() {

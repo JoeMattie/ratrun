@@ -18,6 +18,9 @@
 //! | `DustpanDrop` | 1.45 / 1.15 s | 0.00..0.46 → 0.46..0.58 | 22 (26) + 6 × 10 shards |
 //! | `Hurt` | 1.20 s | — | bump only |
 //! | `PhaseChange` | 1.80 s | 0.00..0.38 → 0.38..0.54 | 18 (+50 % damage cut on the boss) |
+//! | `RunWindup` | 0.60 / 0.45 s | tracks until 30%, then holds the lane | none |
+//! | `Run` | up to 160 / 175 px incl. skid | six alternating footfalls | 18 (22) per footfall |
+//! | `RunRecover` | 1.00 s | skid, then both feet planted | none (+25% damage on the boss) |
 //! | `Defeat` | 2.40 s | — | none (the framework owns it) |
 //!
 //! ## The designer's direction (takes precedence where it narrows the art)
@@ -59,7 +62,8 @@
 //! The only randomness is one `f32` per open-ended attack decision from
 //! `ctx.rng` (the boss's own stream), so the draw *count* is reproducible for
 //! a seed. Every attack starts on a decision index, never on a timer, and all
-//! geometry comes from the art helpers. Nothing here allocates: the hazard ring
+//! geometry comes from the art helpers. The run checks the distance clock and
+//! cooldown when a walk is due, with no additional draw. Nothing here allocates: the hazard ring
 //! is a pre-sized `Vec` and projectiles go into the reused `BossOutput`.
 //!
 //! ## Per-controller memory
@@ -77,8 +81,9 @@
 //! * `scratch[2]` — the hp anchor of the current beat (the poise budget the
 //!   art's heavy-stagger burst is measured against).
 //!
-//! All three start at zero, which is exactly what the old borrowed fields were
-//! cleared to on the first tick, so the behaviour is unchanged.
+//! * `scratch[3]` — run cooldown seconds, measured from the start of the tell.
+//! * `scratch[4]` — continuous seconds at running distance.
+//! * `scratch[5]` — committed lane length during the sprint, skid length during recovery.
 //!
 //! ## Feedback
 //!
@@ -122,6 +127,28 @@ const STOMP_STRIDE_MAX: f32 = 24.0;
 const STOMP_LAND_MIN: f32 = 6.0;
 /// The body marches after the planted foot once it has landed.
 const STOMP_SETTLE_SPEED_MAX: f32 = 72.0;
+
+// The sprint replaces a walk only after the opening and sustained distance.
+const RUN_MIN_RANGE: f32 = 70.0;
+const RUN_MAX_RANGE: f32 = 160.0;
+const RUN_DISTANCE_TIME: f32 = 1.1;
+const RUN_LOCK: f32 = 0.30;
+// The shipped Kitchen's tell multiplier brings these to 0.60 / 0.45 s.
+const RUN_WINDUP_P1: f32 = 0.45;
+const RUN_WINDUP_P2: f32 = 0.3375;
+const RUN_SPEED_P1: f32 = 240.0;
+const RUN_SPEED_P2: f32 = 275.0;
+const RUN_LENGTH_P1: f32 = 160.0;
+const RUN_LENGTH_P2: f32 = 175.0;
+const RUN_DAMAGE_P1: f32 = 18.0;
+const RUN_DAMAGE_P2: f32 = 22.0;
+const RUN_ACTIVE: f32 = 0.065;
+const RUN_COOLDOWN_P1: f32 = 10.0;
+const RUN_COOLDOWN_P2: f32 = 8.0;
+const RUN_SKID: f32 = 10.0;
+const RUN_SKID_TIME: f32 = 0.18;
+const RUN_RECOVER: f32 = 1.0;
+const RUN_RECOVER_DAMAGE_MULT: f32 = 1.25;
 
 /// `BroomSweep` (art: `1.65 s` / `1.25 s`, active `0.46..0.72`).
 const SWEEP_P1: f32 = 1.65;
@@ -242,6 +269,9 @@ const DECISION_MASK: u32 = 0x3F;
 const S_STAGGER_CD: usize = 0;
 const S_RAKES: usize = 1;
 const S_POISE: usize = 2;
+const S_RUN_CD: usize = 3;
+const S_RUN_DISTANCE_TIME: usize = 4;
+const S_RUN_LENGTH: usize = 5;
 
 /// The hurt hop's two touchdown progresses (the art's `|sin(p·τ·2.5)|`
 /// bounce bottoms out at `0.4` and `0.8`).
@@ -264,6 +294,12 @@ impl BossController for BroomController {
         boss.scratch[S_STAGGER_CD] = (boss.scratch[S_STAGGER_CD] - ctx.dt).max(0.0);
 
         let aim = Aim::new(ctx.player_pos, boss);
+        boss.scratch[S_RUN_CD] = (boss.scratch[S_RUN_CD] - ctx.dt).max(0.0);
+        if (RUN_MIN_RANGE..=RUN_MAX_RANGE).contains(&aim.dist) {
+            boss.scratch[S_RUN_DISTANCE_TIME] += ctx.dt;
+        } else {
+            boss.scratch[S_RUN_DISTANCE_TIME] = 0.0;
+        }
         // The arena is the boss room; outside it the human hunts through the
         // large-class flow field (see `BossContext::seek`).
         boss.hunting = !ctx.arena.contains_world(ctx.player_pos);
@@ -465,6 +501,22 @@ impl BossController for BroomController {
                 }
             }
 
+            BossState::Broom(BroomBossState::RunWindup) => {
+                tick_run_windup(ctx, boss, &aim);
+            }
+            BossState::Broom(BroomBossState::Run) => {
+                tick_run(ctx, boss, out);
+            }
+            BossState::Broom(BroomBossState::RunRecover) => {
+                let skid_left = 1.0 - (boss.elapsed / RUN_SKID_TIME).clamp(0.0, 1.0);
+                let remaining = boss.scratch[S_RUN_LENGTH] * skid_left * skid_left;
+                boss.pos = boss.target - boss.facing * remaining;
+                boss.no_contact();
+                if boss.progress() >= 1.0 {
+                    go_idle(boss, aim.enraged);
+                }
+            }
+
             // The shared system owns the defeat walk-off; its one cue lives in
             // `death_tick`.
             BossState::Broom(BroomBossState::Defeat) => {}
@@ -578,6 +630,7 @@ fn busy(boss: &Boss) -> bool {
         BossState::Broom(BroomBossState::Defeat)
             | BossState::Broom(BroomBossState::Hurt { .. })
             | BossState::Broom(BroomBossState::PhaseChange)
+            | BossState::Broom(BroomBossState::RunWindup | BroomBossState::Run | BroomBossState::RunRecover)
     )
 }
 
@@ -626,7 +679,13 @@ fn choose_and_begin(ctx: &mut BossContext<'_>, boss: &mut Boss, aim: &Aim) {
             begin_dustpan(ctx, boss, aim)
         }
         Choice::Jab if JAB_ENABLED && jab_fits(ctx, boss, aim) => begin_jab(boss, aim),
-        _ => begin_stomp(ctx, boss, aim),
+        _ => {
+            if let Some(target) = run_opportunity(ctx, boss, aim) {
+                begin_run(boss, aim, target, ctx.dt);
+            } else {
+                begin_stomp(ctx, boss, aim);
+            }
+        }
     }
     set_decision(boss, index.wrapping_add(1));
 }
@@ -721,6 +780,153 @@ fn begin_stomp(ctx: &BossContext<'_>, boss: &mut Boss, aim: &Aim) {
     boss.facing = unit_or(land - boss.pos, aim.toward);
     let duration = if aim.enraged { STOMP_P2 } else { STOMP_P1 };
     enter(boss, BroomBossState::StompWalk { left_foot }, duration);
+}
+
+/// Leave the next walk slot to the authored sprint when the straight lane fits.
+pub(super) fn can_run(ctx: &BossContext<'_>, boss: &Boss) -> bool {
+    run_opportunity(ctx, boss, &Aim::new(ctx.player_pos, boss)).is_some()
+}
+
+fn run_opportunity(ctx: &BossContext<'_>, boss: &Boss, aim: &Aim) -> Option<Vec2> {
+    if decision(boss) < OPENING_DECISIONS
+        || boss.scratch[S_RUN_CD] > 0.0
+        || boss.scratch[S_RUN_DISTANCE_TIME] < RUN_DISTANCE_TIME
+    {
+        return None;
+    }
+    run_target(ctx, boss, aim)
+}
+
+/// Stop the route at the last clear large-body point before an obstruction.
+fn run_target(ctx: &BossContext<'_>, boss: &Boss, aim: &Aim) -> Option<Vec2> {
+    if !(RUN_MIN_RANGE..=RUN_MAX_RANGE).contains(&aim.dist) {
+        return None;
+    }
+    let max = if aim.enraged { RUN_LENGTH_P2 } else { RUN_LENGTH_P1 };
+    let desired = (aim.dist + 22.0).min(max);
+    let radius = art_boss_broom::RUN_HALF_WIDTH;
+    let steps = (desired / 4.0).ceil() as usize;
+    let mut end = boss.pos;
+    for i in 1..=steps {
+        let next = boss.pos + aim.toward * (desired * i as f32 / steps as f32);
+        if !ctx.footprint_fits(next, radius) || !ctx.los_clear(end, next, radius) {
+            break;
+        }
+        end = next;
+    }
+    (end.dist(boss.pos) >= aim.dist - 12.0).then_some(end)
+}
+
+fn run_lane(boss: &Boss) -> HazardShape {
+    HazardShape::Rect {
+        center: (boss.pos + boss.target) * 0.5,
+        facing: boss.facing,
+        half: boss.pos.dist(boss.target) * 0.5,
+        half_perp: art_boss_broom::RUN_HALF_WIDTH,
+    }
+}
+
+fn run_speed(enraged: bool) -> f32 {
+    if enraged { RUN_SPEED_P2 } else { RUN_SPEED_P1 }
+}
+
+fn begin_run(boss: &mut Boss, aim: &Aim, target: Vec2, dt: f32) {
+    boss.target = target;
+    boss.facing = aim.toward;
+    boss.scratch[S_RUN_CD] = if aim.enraged { RUN_COOLDOWN_P2 } else { RUN_COOLDOWN_P1 };
+    let warn = if aim.enraged { RUN_WINDUP_P2 } else { RUN_WINDUP_P1 };
+    enter(boss, BroomBossState::RunWindup, warn * boss.attack_tuning.tell_time_mult);
+    boss.no_contact();
+
+    // The lane warns of the whole route. Only the individual footfalls hit.
+    let damage = if aim.enraged { RUN_DAMAGE_P2 } else { RUN_DAMAGE_P1 };
+    let sprint_time = (boss.pos.dist(target) - RUN_SKID) / run_speed(aim.enraged);
+    let mut lane = BossHazard::new(run_lane(boss), warn, sprint_time, damage);
+    lane.elapsed = -dt;
+    lane.hit_player = false;
+    boss.push_hazard(lane);
+}
+
+fn tick_run_windup(ctx: &BossContext<'_>, boss: &mut Boss, aim: &Aim) {
+    boss.no_contact();
+    let tracked_target = if boss.progress() < RUN_LOCK {
+        run_target(ctx, boss, aim)
+    } else {
+        None
+    };
+    if let Some(target) = tracked_target {
+        boss.target = target;
+        boss.facing = aim.toward;
+        let shape = run_lane(boss);
+        let sprint_time = (boss.pos.dist(target) - RUN_SKID) / run_speed(aim.enraged);
+        if let Some(lane) = boss.hazards.last_mut() {
+            lane.shape = shape;
+            lane.active = sprint_time;
+        }
+    }
+    if boss.progress() < 1.0 {
+        return;
+    }
+
+    let speed = run_speed(aim.enraged);
+    let length = boss.pos.dist(boss.target);
+    let duration = (length - RUN_SKID) / speed;
+    boss.scratch[S_RUN_LENGTH] = length;
+    enter(boss, BroomBossState::Run, duration);
+    boss.hazards.clear();
+    let damage = if aim.enraged { RUN_DAMAGE_P2 } else { RUN_DAMAGE_P1 };
+    for i in 0..art_boss_broom::RUN_FOOTFALLS {
+        let progress = art_boss_broom::run_footfall_progress(i);
+        let mut view = boss.broom_view();
+        view.progress = progress;
+        view.pos += boss.facing * ((length - RUN_SKID) * progress);
+        let foot = art_boss_broom::foot_hitboxes(&view)[i % 2];
+        let shape = HazardShape::Circle {
+            center: foot.pos,
+            radius: art_boss_broom::RUN_FOOT_RADIUS,
+        };
+        // The lane tell uses tuning. Impacts follow the stride clock.
+        let at = progress * duration;
+        let mut hazard = BossHazard::new(shape, 0.0, RUN_ACTIVE.min(duration - at), damage)
+            .with_knockback(STOMP_KNOCKBACK);
+        hazard.elapsed = -ctx.dt;
+        if boss.push_hazard(hazard) {
+            boss.hazards.last_mut().expect("queued footfall").warn = at;
+        }
+    }
+}
+
+fn tick_run(ctx: &BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
+    boss.no_contact();
+    let p = boss.progress();
+    let remaining = RUN_SKID + (boss.scratch[S_RUN_LENGTH] - RUN_SKID) * (1.0 - p);
+    let next = boss.target - boss.facing * remaining;
+    if !ctx.footprint_fits(next, boss.kind.body_radius()) {
+        // A blocked stride brakes in place and cannot fire later footprints.
+        boss.target = boss.pos;
+        finish_run(boss, 0.0);
+        return;
+    }
+    boss.pos = next;
+    let prev = previous_progress(boss, ctx.dt);
+    for i in 0..art_boss_broom::RUN_FOOTFALLS {
+        let at = art_boss_broom::run_footfall_progress(i);
+        if prev < at && p >= at {
+            out.cue(BossCue::BroomRunFootfall {
+                left: i.is_multiple_of(2),
+            });
+        }
+    }
+    if p >= 1.0 {
+        finish_run(boss, RUN_SKID);
+    }
+}
+
+fn finish_run(boss: &mut Boss, skid: f32) {
+    boss.hazards.clear();
+    enter(boss, BroomBossState::RunRecover, RUN_RECOVER);
+    boss.scratch[S_RUN_LENGTH] = skid;
+    boss.damage_mult = RUN_RECOVER_DAMAGE_MULT;
 }
 
 /// `BroomSweep`: plant both feet and rake the annulus, starting on the flank
@@ -1762,6 +1968,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_run_tracks_then_locks_and_lands_on_its_printed_route() {
+        let mut rig = Rig::new(71);
+        rig.set_player(CENTER + Vec2::new(105.0, 0.0));
+        rig.edit(|b| {
+            set_decision(b, OPENING_DECISIONS);
+            b.scratch[S_RUN_DISTANCE_TIME] = RUN_DISTANCE_TIME;
+        });
+        rig.run_until(80, |r| r.state() == BroomBossState::RunWindup);
+        assert_eq!(rig.state(), BroomBossState::RunWindup);
+        let first_target = rig.boss().target;
+        rig.set_player(CENTER + Vec2::new(105.0, 12.0));
+        rig.tick();
+        assert_ne!(rig.boss().target, first_target);
+        rig.run_until(30, |r| r.boss().progress() >= RUN_LOCK);
+        let tell = rig.boss();
+        rig.set_player(CENTER + Vec2::new(105.0, -35.0));
+        rig.run_until(60, |r| r.state() == BroomBossState::Run);
+        let run = rig.boss();
+        assert_eq!(run.state, BossState::Broom(BroomBossState::Run));
+        assert_eq!(run.target, tell.target);
+        assert_eq!(run.facing, tell.facing);
+        assert_eq!(run.hazards.len(), art_boss_broom::RUN_FOOTFALLS);
+
+        let footfall = run.hazards[2];
+        let hit = footfall.shape.center() + run.facing * 4.0;
+        rig.set_player(hit);
+        let hp = rig.hp();
+        rig.run_until(90, |r| r.hp() < hp);
+        assert_eq!(hp - rig.hp(), RUN_DAMAGE_P1);
+        assert!(rig.player_pos().dist(hit) > 0.5, "footfall knocks the rat away");
+        rig.run_until(90, |r| r.state() == BroomBossState::RunRecover);
+        assert_eq!(rig.boss().damage_mult, RUN_RECOVER_DAMAGE_MULT);
+        assert!(rig.boss().hazards.is_empty());
+        rig.run_until(90, |r| r.state() == BroomBossState::Idle);
+        let recovered = rig.boss();
+        assert_eq!(recovered.pos, tell.target);
+        assert_eq!(recovered.damage_mult, 1.0);
+        assert!(recovered.scratch[S_RUN_CD] > 0.0);
+    }
+
+    #[test]
+    fn the_run_ends_in_front_of_a_wall_and_refuses_a_rat_behind_it() {
+        let mut rig = Rig::new(72);
+        // A solid wall begins 128 px east of the starting slippers.
+        rig.paint(108, 77, 2, 6);
+        rig.set_player(CENTER + Vec2::new(105.0, 0.0));
+        rig.edit(|b| {
+            set_decision(b, OPENING_DECISIONS);
+            b.scratch[S_RUN_DISTANCE_TIME] = RUN_DISTANCE_TIME;
+        });
+        rig.run_until(80, |r| r.state() != BroomBossState::Idle);
+        assert_eq!(rig.state(), BroomBossState::RunWindup);
+        let stop = rig.boss().target;
+        assert!(stop.x < CENTER.x + 128.0);
+        assert!(rig.w.level.tiles.circle_clear(
+            stop,
+            art_boss_broom::RUN_HALF_WIDTH,
+            SizeClass::Large,
+        ));
+        rig.set_player(CENTER + Vec2::new(150.0, 0.0));
+        rig.run_until(130, |r| r.state() == BroomBossState::RunRecover);
+        assert_eq!(rig.state(), BroomBossState::RunRecover);
+        assert!(rig.boss().pos.x < stop.x);
+        assert_eq!(rig.boss().target, stop);
+
+        let mut blocked = Rig::new(72);
+        blocked.paint(108, 77, 2, 6);
+        blocked.set_player(CENTER + Vec2::new(150.0, 0.0));
+        blocked.edit(|b| {
+            set_decision(b, OPENING_DECISIONS);
+            b.scratch[S_RUN_DISTANCE_TIME] = RUN_DISTANCE_TIME;
+        });
+        blocked.run_until(80, |r| r.state() != BroomBossState::Idle);
+        assert!(matches!(blocked.state(), BroomBossState::StompWalk { .. }));
+    }
+
     // ---- fit tests ----------------------------------------------------------
 
     #[test]
@@ -1937,6 +2220,9 @@ mod tests {
             BroomBossState::Hurt { left_foot_hit: false } => 8,
             BroomBossState::PhaseChange => 9,
             BroomBossState::Defeat => 10,
+            BroomBossState::RunWindup => 11,
+            BroomBossState::Run => 12,
+            BroomBossState::RunRecover => 13,
         }
     }
 

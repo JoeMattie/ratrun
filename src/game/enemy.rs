@@ -1380,6 +1380,12 @@ impl Enemy {
     /// inside the goal cell / off-grid, in which case we head straight at the
     /// player).
     pub fn steer(&mut self, target: Vec2, flow_dir: Vec2, dt: f32, speed_mult: f32) {
+        self.steer_with_deflection(target, flow_dir, dt, speed_mult, Vec2::ZERO);
+    }
+
+    pub(crate) fn steer_with_deflection(
+        &mut self, target: Vec2, flow_dir: Vec2, dt: f32, speed_mult: f32, deflection: Vec2,
+    ) {
         // A wave-3 body in the middle of its own tell or hop is held in place:
         // its behaviour owns the position this tick (a curled Pillbug, a Bell
         // Flea between its two crosses, a Porter raising the cube). Wave 4's
@@ -1453,6 +1459,7 @@ impl Enemy {
             }
             _ => chase * speed,
         };
+        let desired = if deflection == Vec2::ZERO { desired } else { desired + deflection * speed };
         // Smooth toward desired velocity.
         self.vel += (desired - self.vel) * (6.0 * dt).min(1.0);
         self.pos += self.vel * dt;
@@ -1482,7 +1489,7 @@ impl Enemy {
     /// Crab steering shares the ordinary control, flash, and contact clocks.
     pub(crate) fn steer_crab(
         &mut self, level: &crate::game::level::Level, target: Vec2, flow_dir: Vec2,
-        dt: f32, gait: f32,
+        dt: f32, gait: f32, deflection: Vec2,
     ) {
         if self.position_locked {
             self.vel = Vec2::ZERO;
@@ -1492,7 +1499,7 @@ impl Enemy {
         }
         if !self.position_locked && self.targetable() {
             let speed = self.speed() * self.speed_scale * gait * self.slow_mult;
-            crate::game::ecs::systems::crab::scuttle(self, level, target, flow_dir, dt, speed);
+            crate::game::ecs::systems::crab::scuttle(self, level, target, flow_dir, dt, speed, deflection);
         }
         self.flash = (self.flash - dt).max(0.0);
         self.contact_cd = (self.contact_cd - dt).max(0.0);

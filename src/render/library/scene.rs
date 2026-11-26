@@ -860,7 +860,7 @@ impl LibraryScene {
             let r = ((DUMMY_R / scale).round() as i32).max(2);
             // The floor reference is only needed where the cork can land.
             let bare = self.floor_plate(w, h);
-            draw_practice_dummy(art, bare, (sx, sy), r);
+            draw_practice_dummy(art, Some(bare), (sx, sy), r);
         }
         if self.script.trail {
             self.pellet_trails(art);
@@ -953,6 +953,10 @@ impl LibraryScene {
             bounds.grow(pos - Vec2::new(side, up), pos + Vec2::new(side, down));
             if let Some(shape) = mb.telegraph() {
                 let (lo, hi) = shape_bounds(shape);
+                bounds.grow(lo, hi);
+            } else if mb.kind == MinibossKind::MilkCarton && mb.holds() {
+                // The deposited drops still occupy the spray's footprint.
+                let (lo, hi) = mb.milk_spray().bounds();
                 bounds.grow(lo, hi);
             }
         } else {
@@ -1200,6 +1204,11 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
                 art_boss_broom::broom_head_pos(&v),
                 art_boss_broom::JAB_HEAD_RADIUS,
             );
+            if v.state == art_boss_broom::BroomBossState::RunWindup {
+                for hazard in &boss.hazards {
+                    b.hazard(hazard.shape);
+                }
+            }
         }
         BossArtView::Mower(v) => {
             // Deck, bumper and the hazard-striped wrap.
@@ -1225,8 +1234,16 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
             b.point(art_boss_magpie::beak_tip(&v), 4.0);
         }
         BossArtView::HorseshoeCrab(v) => {
-            // The telson is longer than the dome's hit box.
-            b.point(art_boss_horseshoe_crab::telson_tip(&v), 5.0);
+            // Include the legs beyond the shell hit box and the long telson.
+            let side = art_boss_horseshoe_crab::unit_facing(&v).perp();
+            let reach = if matches!(v.state, art_boss_horseshoe_crab::CrabState::Flipped | art_boss_horseshoe_crab::CrabState::Righting) {
+                art_boss_horseshoe_crab::LEGS_OUTER
+            } else {
+                19.0 * art_boss_horseshoe_crab::BODY_SCALE
+            };
+            b.point(v.pos + side * reach, 6.0 * art_boss_horseshoe_crab::BODY_SCALE);
+            b.point(v.pos - side * reach, 6.0 * art_boss_horseshoe_crab::BODY_SCALE);
+            b.point(art_boss_horseshoe_crab::telson_tip(&v), 5.0 * art_boss_horseshoe_crab::BODY_SCALE);
         }
         BossArtView::MegaRat(v) => {
             let f = facing_of(v.facing);
@@ -2019,7 +2036,9 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
     let cycle = TELL_TIME + primary.active + RECOVER_TIME;
     let mut script = Script::new(cycle, 2.0);
     script.framing = Framing::Pair;
-    script.dummy = true;
+    // The transparent Milk Spray needs its dummy in the world pass, under
+    // the translucent stream and mist.
+    script.dummy = kind != MinibossKind::MilkCarton;
     // The stage fits the body + the tell's own footprint (a cone, a sweep, the
     // Salt Hen's three pads), centre on their midpoint, and takes its zoom from
     // those bounds: what clipped the right edge of the wide rows.
@@ -2050,7 +2069,11 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
     // attacks are aimed at, so the plate frames the animal, the space it is
     // about to take, and the thing its telegraphs land on.
     world.player.pos += Vec2::new(30.0, 6.0);
-    world.force_boss(kind);
+    // Open on the Sweeper's feet so its long run can fit without zooming
+    // back for both the arrival and the sprint.
+    if kind != BossKind::Broom || !world.force_boss_here(kind) {
+        world.force_boss(kind);
+    }
     let mut script = Script::new(10.0, 1.0);
     // Drawn 2× oversized and box-filtered down: the art modules draw at 1:1
     // only, and every boss sprite is 26–84 px long against a 44 px plate.
@@ -2060,6 +2083,10 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
     // (`LibraryScene::probe_boss_union`), not a camera that follows the fight:
     // a stomp, a pounce, a coil and a hoisted stamp all left a moving frame.
     script.boss_fit = true;
+    if kind == BossKind::Broom {
+        script.loop_secs = 15.0;
+        script.cue = Some(broom_run_cue);
+    }
     if kind == BossKind::Hawk {
         // The Redtail circles overhead, and while it is up there the art gives
         // it no hit shape at all — the card was a shadow on empty planks. Its
@@ -2069,6 +2096,27 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
         script.cue = Some(hawk_hover_cue);
     }
     (world, script, None)
+}
+
+/// After the close-range demonstration, hold the dummy at running distance.
+fn broom_run_cue(world: &mut World, _subject: Option<Entity>, tick: u32) {
+    use crate::game::art_boss_broom::BroomBossState::{Run, RunRecover, RunWindup};
+    if !(330..780).contains(&tick) {
+        return;
+    }
+    let pose = world.ecs.iter_entities().find_map(|entity| {
+        let boss = entity.get::<Boss>()?;
+        Some((boss.pos, boss.state))
+    });
+    if let Some((pos, _)) = pose.filter(|(_, state)| {
+        !matches!(state, BossState::Broom(RunWindup | Run | RunRecover))
+    }) {
+        let offset = Vec2::new(87.0, 10.0);
+        // Keep the demonstration within the staged floor if the boss has
+        // already walked east to meet the dummy.
+        let direction = if pos.x > world.level.start.x + 80.0 { -1.0 } else { 1.0 };
+        world.player.pos = pos + offset * direction;
+    }
 }
 
 fn stage_lantern() -> Staged {
@@ -2237,6 +2285,10 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         // A bite reaches 24 px at most: its targets stand in the jaw.
         script.cue = Some(arsenal_bite_cue);
         script.lean = Vec2::new(BITE_RING * 0.5, 0.0);
+        if evolved {
+            script.cue = Some(arsenal_milk_teeth_cue);
+            script.lean = Vec2::new(BITE_RING * 0.5, -5.0);
+        }
     }
     if kind == WeaponKind::Hantavirus {
         // The weapon is deployed by **droppings**: the rat leaves one where it
@@ -2356,7 +2408,7 @@ fn arsenal_hold_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
     arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 
-/// Gnaw's and Milk Teeth's plate: the targets stand inside the bite's reach
+/// Gnaw's plate: the targets stand inside the bite's reach
 /// (closer than the radius that hides hit digits: a jaw cannot be shown at
 /// arm's length).
 fn arsenal_bite_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
@@ -2367,6 +2419,14 @@ fn arsenal_bite_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
         let a = (i as f32 - 1.0) * 0.66;
         *home = rat + Vec2::from_angle(a) * BITE_RING;
     }
+    arsenal_dummies(world, &homes, ARSENAL_HP);
+}
+
+/// Keep a clear horizontal throw with enough room to see its apex.
+fn arsenal_milk_teeth_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    let rat = world.player.pos;
+    let homes = [Vec2::new(26.0, 0.0), Vec2::new(30.0, -8.0), Vec2::new(31.0, 10.0)]
+        .map(|offset| rat + offset);
     arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 
@@ -2580,6 +2640,9 @@ fn stage_pickup(theme: Theme, kind: PickupKind) -> Staged {
         if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
             body.speed_scale = 0.45;
         }
+    }
+    if kind == PickupKind::Headlamp {
+        world.flat_lit = false;
     }
     let mut script = Script::new(2.8, 1.5);
     script.framing = Framing::Point(rat + Vec2::new(16.0, 0.0));
@@ -3348,7 +3411,7 @@ impl BareFloor {
 /// One horizontal chord of a circle of radius `r`, `dy` rows from its centre,
 /// painted only where the world's pass left bare floor — the card's dummy
 /// never covers anything the world drew.
-fn chord(pb: &mut PixelBuffer, floor: &BareFloor, s: (i32, i32), r: i32, dy: i32, c: Rgb) {
+fn chord(pb: &mut PixelBuffer, floor: Option<&BareFloor>, s: (i32, i32), r: i32, dy: i32, c: Rgb) {
     let h2 = r * r - dy * dy;
     if h2 <= 0 {
         return;
@@ -3362,8 +3425,8 @@ fn chord(pb: &mut PixelBuffer, floor: &BareFloor, s: (i32, i32), r: i32, dy: i32
 /// Paint one pixel of the card's dummy, and only if the world's pass left that
 /// pixel as bare floor: the check is what puts the cork *under* the bodies (see
 /// [`draw_practice_dummy`]).
-fn plot_on_floor(pb: &mut PixelBuffer, floor: &BareFloor, x: i32, y: i32, c: Rgb) {
-    if floor.at(x, y) {
+fn plot_on_floor(pb: &mut PixelBuffer, floor: Option<&BareFloor>, x: i32, y: i32, c: Rgb) {
+    if floor.is_none_or(|floor| floor.at(x, y)) {
         pb.plot(x, y, c);
     }
 }
@@ -3381,9 +3444,10 @@ fn plot_on_floor(pb: &mut PixelBuffer, floor: &BareFloor, x: i32, y: i32, c: Rgb
 /// needs to stay honest (a body the cork had covered would leave the plate
 /// with no subject at all — the Bell Flea, the Wick Moth and the Loose Bungee
 /// all end their loop standing on the dummy).
-fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32), r: i32) {
+fn draw_practice_dummy(pb: &mut PixelBuffer, floor: Option<&PixelBuffer>, s: (i32, i32), r: i32) {
     let r = r.max(2);
-    let floor = &BareFloor::of(pb, floor);
+    let floor_mask = floor.map(|floor| BareFloor::of(pb, floor));
+    let floor = floor_mask.as_ref();
     // Its own shadow, so it stands on the floor rather than in it.
     chord(pb, floor, (s.0, s.1 + r), r, 0, CORK_SHADOW);
     for dy in -r..=r {
@@ -3417,6 +3481,12 @@ fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32),
     plot_on_floor(pb, floor, s.0, s.1 - 1, CHALK);
     plot_on_floor(pb, floor, s.0 - 1, s.1 - 1, CHALK);
     plot_on_floor(pb, floor, s.0 + 1, s.1 - 1, CHALK);
+}
+
+/// The Milk Carton plate paints the same target in world space before the
+/// hostile layer, allowing the milky wash to blend over the cork.
+pub(crate) fn draw_world_practice_dummy(pb: &mut PixelBuffer, s: (i32, i32)) {
+    draw_practice_dummy(pb, None, s, DUMMY_R as i32);
 }
 
 /// Every colour the card's dummy paints (its shadow included).

@@ -1,0 +1,12 @@
+# Best overlay from 12 v0.4.0 release trials. All unspecified values are shipped.
+# It passed the three win bands on seed 1000 and missed them on seed 2000.
+[player]
+# A 3 HP buffer on each hit protects the bare Sewer build from repeat chip
+# damage and still leaves large hits costly.
+armor = 3.0
+
+[director]
+# Keep Sewer's contact ramp. Bring more risk into Kitchen and Lab, and trim
+# the Flatbed's late pressure so the final minutes can test the build without
+# accounting for most Expert deaths.
+level_damage_top = [1.0, 2.60, 3.00, 1.85]

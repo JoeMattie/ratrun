@@ -446,6 +446,7 @@ pub fn wave4_system(
     }
 
     // ---- Pass 2: the state machines, in `SpawnId` order ------------------
+    let beam = super::powerups::HeadlampBeam::from_player(&level, &player, player.face);
     scratch.splits.clear();
     for &(_, entity) in scratch.order.iter() {
         let Ok((_, id, mut e)) = enemies.get_mut(entity) else {
@@ -466,6 +467,7 @@ pub fn wave4_system(
         // Glue and ink, the same product `enemy_steering_system` feeds to
         // `Enemy::steer`.
         let speed_mult = glue.get(entity).map_or(1.0, |s| s.0) * ink.get(entity).map_or(1.0, |s| s.0);
+        let shy = beam.map_or(Vec2::ZERO, |beam| beam.shy(&level, &e, self_id));
         // The state machines are the archetype's (a registered kind runs its
         // base body's warned attack until its floor's own batch).
         match e.kind.archetype() {
@@ -477,6 +479,7 @@ pub fn wave4_system(
                 &flow,
                 &scratch.warns,
                 speed_mult,
+                shy,
                 &mut player,
                 &mut particles,
                 &mut rng,
@@ -490,6 +493,7 @@ pub fn wave4_system(
                 &flow,
                 &scratch.warns,
                 speed_mult,
+                shy,
                 &mut particles,
                 &mut rng,
                 &mut sfx,
@@ -501,6 +505,7 @@ pub fn wave4_system(
                 &level,
                 &scratch.warns,
                 speed_mult,
+                shy,
                 &mut player,
                 &mut particles,
                 &mut rng,
@@ -516,6 +521,7 @@ pub fn wave4_system(
                 &scratch.warns,
                 &scratch.squads,
                 speed_mult,
+                shy,
                 &mut player,
                 &mut particles,
                 &mut rng,
@@ -715,6 +721,7 @@ fn snake_tick(
     flow: &FlowField,
     warns: &[(Vec2, u64)],
     speed_mult: f32,
+    shy: Vec2,
     player: &mut Player,
     particles: &mut Particles,
     rng: &mut RngRes,
@@ -774,7 +781,7 @@ fn snake_tick(
             };
             e.anim += dt * 3.0;
             let sway = base.perp() * e.anim.dsin() * SNAKE_SLITHER_SWAY;
-            let dir = (base + sway).normalized();
+            let dir = deflected((base + sway).normalized(), shy);
             e.facing += (dir - e.facing) * (5.0 * dt).min(1.0);
             let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
             e.pos += dir * speed * dt;
@@ -849,6 +856,7 @@ fn centipede_tick(
     flow: &FlowField,
     warns: &[(Vec2, u64)],
     speed_mult: f32,
+    shy: Vec2,
     particles: &mut Particles,
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
@@ -905,7 +913,7 @@ fn centipede_tick(
             } else {
                 // The wall hug only applies close to a wall, so open floor is a
                 // straight crossing.
-                dir = wall_blend(level, e.pos, dir, class);
+                dir = deflected(wall_blend(level, e.pos, dir, class), shy);
                 e.anim += dt * (6.0 + speed * 0.5);
                 e.pos += dir * speed * dt;
                 e.vel = dir * speed;
@@ -993,6 +1001,7 @@ fn hornet_tick(
     level: &Level,
     warns: &[(Vec2, u64)],
     speed_mult: f32,
+    shy: Vec2,
     player: &mut Player,
     particles: &mut Particles,
     rng: &mut RngRes,
@@ -1062,7 +1071,7 @@ fn hornet_tick(
             } else {
                 Vec2::ZERO
             };
-            let dir = (radial + orbit).normalized();
+            let dir = deflected((radial + orbit).normalized(), shy);
             let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
             e.pos += dir * speed * dt;
             e.vel = dir * speed;
@@ -1122,6 +1131,7 @@ fn lilliputian_tick(
     warns: &[(Vec2, u64)],
     squads: &[(u32, u16, Vec2)],
     speed_mult: f32,
+    shy: Vec2,
     player: &mut Player,
     particles: &mut Particles,
     rng: &mut RngRes,
@@ -1159,7 +1169,7 @@ fn lilliputian_tick(
         } else {
             -e.facing.normalized()
         };
-        step_body(e, away, speed * PANIC_MULT, dt, level);
+        step_body(e, away, speed * PANIC_MULT, dt, level, Vec2::ZERO);
         return;
     }
     // Below a third of its *own* peak: the squad has broken.
@@ -1201,7 +1211,7 @@ fn lilliputian_tick(
                 // The line steps in behind the points.
                 e.w4.t -= dt;
                 let dir = chase_dir(e, target, flow);
-                step_body(e, dir, speed * SPEAR_CHARGE_MULT, dt, level);
+                step_body(e, dir, speed * SPEAR_CHARGE_MULT, dt, level, Vec2::ZERO);
                 if e.w4.t <= 0.0 {
                     e.w4.phase = LILLI_PHASE_WALK;
                 }
@@ -1212,7 +1222,7 @@ fn lilliputian_tick(
                 let dir = chase_dir(e, target, flow);
                 let side = (e.w4.slot as f32 - (LILLI_SQUAD_SIZE as f32 * 0.5)) * 0.10;
                 let formed = (dir + dir.perp() * side).normalized();
-                step_body(e, formed, speed, dt, level);
+                step_body(e, formed, speed, dt, level, shy);
                 if dist <= SPEAR_REACH
                     && e.w4.cd <= 0.0
                     && warn_pressure(warns, e.pos) < WARN_MAX_NEARBY
@@ -1281,7 +1291,7 @@ fn lilliputian_tick(
                 } else {
                     direct.perp() * 0.5
                 };
-                step_body(e, dir, speed, dt, level);
+                step_body(e, dir, speed, dt, level, shy);
                 if e.w4.cd <= 0.0
                     && (ARCHER_MIN..=ARCHER_MAX).contains(&dist)
                     && crate::game::ecs::systems::projectiles::los_clear(
@@ -1333,7 +1343,7 @@ fn lilliputian_tick(
             }
             _ => {
                 let dir = chase_dir(e, target, flow);
-                step_body(e, dir, speed, dt, level);
+                step_body(e, dir, speed, dt, level, shy);
                 if dist <= ROPE_REACH && warn_pressure(warns, e.pos) < WARN_MAX_NEARBY {
                     e.w4.phase = LILLI_PHASE_TELL;
                     e.w4.t = ROPE_TIE_SECS;
@@ -1367,13 +1377,17 @@ fn chase_dir(e: &Enemy, target: Vec2, flow: &FlowField) -> Vec2 {
     }
 }
 
+fn deflected(dir: Vec2, shy: Vec2) -> Vec2 {
+    if shy == Vec2::ZERO { dir } else { dir + shy }
+}
+
 /// Move one body along `dir` for `speed * dt`, resolving walls and the arena.
 #[inline]
-fn step_body(e: &mut Enemy, dir: Vec2, speed: f32, dt: f32, level: &Level) {
+fn step_body(e: &mut Enemy, dir: Vec2, speed: f32, dt: f32, level: &Level, shy: Vec2) {
     if dir.len_sq() <= 1e-6 {
         return;
     }
-    let d = dir.normalized();
+    let d = deflected(dir.normalized(), shy);
     e.pos += d * speed * dt;
     e.vel = d * speed;
     e.anim += dt * (8.0 + speed * 0.35);

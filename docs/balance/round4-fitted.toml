@@ -1,0 +1,153 @@
+# Rat Run round 4 power-scaling candidate.
+# Fresh seeds 8000–8299, measured campaign wins expert 90.0%, skilled 73.7%, casual 15.7%.
+# See report.md for target conformance, uncertainty and predictions.
+
+[director]
+# Feel anchor false. Enable pressure beats.
+pressure_beats = true
+# Feel anchor [205.0, 675.0]. Pair of buildup windows in simulation seconds.
+pressure_starts = [210.913, 682.059]
+# Feel anchor [125.0, 125.0]. Pair of buildup windows in simulation seconds.
+pressure_lengths = [104.441, 115.084]
+# Feel anchor [220.0, 90.0]. Pair of buildup windows in simulation seconds.
+pressure_recovery_lengths = [262.264, 57.687]
+# Feel anchor 0.4. Fractional cadence uplift, automatically balanced by recovery.
+pressure_rate_bonus = 0.27173588
+# Feel anchor 0.35. Fractional live-budget uplift in a surge.
+pressure_budget_bonus = 0.18062489
+# Feel anchor 0.4. Fractional contact damage uplift in a surge.
+pressure_contact_bonus = 0.51706851
+# Feel anchor 0.25. Fractional live-budget cut in recovery.
+pressure_recovery_budget_cut = 0.1847496
+# Feel anchor 0.25. Fraction of other rare finds converted to Medkits in recovery.
+pressure_recovery_heal = 0.19906581
+# Feel anchor 150.0. Time for Sewer opening contact grace.
+pressure_sewer_opening_secs = 123.91214065
+# Feel anchor 0.35. Fractional contact damage cut in the Sewer opening.
+pressure_sewer_opening_cut = 0.76796936
+# Feel anchor 0.45. Strength of the response to relative weapon throughput.
+power_hp_exponent = 0.79421783
+# Feel anchor 0.7. Minimum horde HP multiplier.
+power_hp_floor = 0.89240879
+# Feel anchor 1.4. Maximum horde HP multiplier.
+power_hp_ceiling = 1.47950322
+# Feel anchor 18.0. Damage averaging time constant.
+power_memory_secs = 14.08793376
+# Feel anchor [0.65, 1.0, 1.15, 1.25]. Beat strength for Kitchen, Lab and Flatbed, with later-floor weighting.
+pressure_sector_scale = [0.58031691, 0.70678675, 0.83151382, 0.95624089]
+# Feel anchor false. Match incoming horde HP to measured damage.
+power_scaling = true
+# Feel anchor [13.0, 16.0, 25.0, 15.0]. Shift the neutral DPS reference in all sectors.
+power_reference_hp = [10.47669452, 12.89439325, 20.14748945, 12.08849367]
+# Feel anchor [0.8, 2.2, 2.4, 2.6]. Independent ordinary enemy HP scales by sector.
+build_hp_level = [0.81775221, 1.52398901, 3.59161955, 1.99297545]
+# Feel anchor [1.0, 1.6, 1.9, 2.1]. Independent end-of-buildup contact damage scales by sector.
+level_damage_top = [0.74592829, 2.25947814, 1.35672318, 1.34106798]
+
+[director.sectors.1]
+# Feel anchor [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Sewer live budget by buildup time.
+live_budget = [[0.0, 13], [60.0, 30], [180.0, 52], [360.0, 83], [540.0, 109], [720.0, 134], [900.0, 134]]
+# Feel anchor [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Sewer pulse interval.
+spawn_interval = [[0.0, 1.27836858], [60.0, 1.22510322], [180.0, 1.11857251], [360.0, 0.95877643], [540.0, 0.79898036], [720.0, 0.63918429], [900.0, 0.47938822]]
+# Feel anchor 1.0. Sewer elite arrival interval.
+elite_interval_mult = 0.88218586
+
+[director.sectors.2]
+# Feel anchor [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Kitchen live budget by buildup time.
+live_budget = [[0.0, 23], [60.0, 54], [180.0, 93], [360.0, 148], [540.0, 193], [720.0, 238], [900.0, 238]]
+# Feel anchor [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Kitchen pulse interval.
+spawn_interval = [[0.0, 1.26131083], [60.0, 1.20875621], [180.0, 1.10364698], [360.0, 0.94598313], [540.0, 0.78831927], [720.0, 0.63065542], [900.0, 0.47299156]]
+# Feel anchor 1.0. Kitchen elite arrival interval.
+elite_interval_mult = 1.31636534
+
+[director.sectors.3]
+# Feel anchor [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Lab live budget by buildup time.
+live_budget = [[0.0, 14], [60.0, 34], [180.0, 58], [360.0, 92], [540.0, 120], [720.0, 148], [900.0, 148]]
+# Feel anchor [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Lab pulse interval.
+spawn_interval = [[0.0, 1.63476014], [60.0, 1.56664513], [180.0, 1.43041512], [360.0, 1.22607011], [540.0, 1.02172509], [720.0, 0.81738007], [900.0, 0.61303505]]
+# Feel anchor 1.0. Lab elite arrival interval.
+elite_interval_mult = 0.77401281
+
+[director.sectors.4]
+# Feel anchor [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Flatbed live budget by buildup time.
+live_budget = [[0.0, 16], [60.0, 37], [180.0, 63], [360.0, 101], [540.0, 132], [720.0, 162], [900.0, 162]]
+# Feel anchor [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Flatbed pulse interval.
+spawn_interval = [[0.0, 1.54844289], [60.0, 1.48392443], [180.0, 1.35488753], [360.0, 1.16133217], [540.0, 0.96777681], [720.0, 0.77422144], [900.0, 0.58066608]]
+# Feel anchor 1.0. Flatbed elite arrival interval.
+elite_interval_mult = 1.09848269
+
+[enemies]
+# Feel anchor 1.0. Ordinary movement speed relative to shipped.
+speed_mult = 1.07868439
+
+[player]
+# Feel anchor 130.0. Starting health before upgrades.
+max_hp = 159.07354861
+# Feel anchor 0.9. Protection after a projectile, boss or hazard hit.
+hit_iframes = 1.18618544
+# Feel anchor 0.65. Protection after ordinary enemy contact.
+contact_iframes = 1.07793501
+# Feel anchor 0.4. Starting regeneration relative to shipped.
+regen = 0.32050932
+
+[xp]
+# Feel anchor 6.0. XP cost of each geometric progression step relative to shipped.
+base = 5.70318416
+
+[bosses]
+# Feel anchor 1.0. Effective health of each boss relative to shipped.
+hp_mult = 0.72818252
+# Feel anchor [0.75, 0.78, 0.57, 0.68]. Cancels sector enemy HP scaling in the boss HP formula.
+build_level = [0.7337186, 1.12599237, 0.38088667, 0.88711579]
+
+[bosses.kinds.Cat]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+# Feel anchor 22.0. Jaguar swipe damage before the attack multiplier and armor.
+swipe_damage = 17.73477965
+# Feel anchor 1.0. Jaguar swipe windup multiplier, compounded with tell_time_mult.
+swipe_windup_mult = 1.12655884
+
+[bosses.kinds.HorseshoeCrab]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+
+[bosses.kinds.Broom]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+
+[bosses.kinds.MegaRat]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+
+[bosses.kinds.Mower]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+
+[bosses.kinds.Cobra]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+
+[bosses.kinds.Magpie]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089
+
+[bosses.kinds.Hawk]
+# Feel anchor 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 0.84036112
+# Feel anchor 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.01110089

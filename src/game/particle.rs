@@ -252,6 +252,7 @@ pub struct Particles {
     shockwave_cap: usize,
     pub stains: VecDeque<Stain>,
     stain_cap: usize,
+    emission_scale: Option<(Vec2, f32)>,
 }
 
 impl Particles {
@@ -267,10 +268,18 @@ impl Particles {
             shockwave_cap,
             stains: VecDeque::with_capacity(stain_cap),
             stain_cap,
+            emission_scale: None,
         }
     }
 
-    pub fn push(&mut self, p: Particle) {
+    /// Scale an effect around its world anchor while retaining its lifetime and RNG.
+    pub(crate) fn with_scaled_emission(&mut self, origin: Vec2, scale: f32, emit: impl FnOnce(&mut Self)) {
+        let previous = self.emission_scale.replace((origin, scale));
+        emit(self);
+        self.emission_scale = previous;
+    }
+
+    pub fn push(&mut self, mut p: Particle) {
         // `Particles::default()` has no capacity to store anything in (and
         // `pop_front` on the empty deque below would be wrong either way).
         if self.cap == 0 {
@@ -282,25 +291,40 @@ impl Particles {
             // tops the buffer up.
             self.items.pop_front();
         }
+        if let Some((origin, scale)) = self.emission_scale {
+            p.pos = origin + (p.pos - origin) * scale;
+            p.vel = p.vel * scale;
+            p.gravity *= scale;
+        }
         self.items.push_back(p);
     }
 
-    pub fn push_shockwave(&mut self, sw: Shockwave) {
+    pub fn push_shockwave(&mut self, mut sw: Shockwave) {
         if self.shockwave_cap == 0 {
             return;
         }
         if self.shockwaves.len() >= self.shockwave_cap {
             self.shockwaves.pop_front();
         }
+        if let Some((origin, scale)) = self.emission_scale {
+            sw.pos = origin + (sw.pos - origin) * scale;
+            sw.start_r *= scale;
+            sw.end_r *= scale;
+            sw.thick *= scale;
+        }
         self.shockwaves.push_back(sw);
     }
 
-    pub fn push_stain(&mut self, stain: Stain) {
+    pub fn push_stain(&mut self, mut stain: Stain) {
         if self.stain_cap == 0 {
             return;
         }
         if self.stains.len() >= self.stain_cap {
             self.stains.pop_front();
+        }
+        if let Some((origin, scale)) = self.emission_scale {
+            stain.pos = origin + (stain.pos - origin) * scale;
+            stain.radius *= scale;
         }
         self.stains.push_back(stain);
     }

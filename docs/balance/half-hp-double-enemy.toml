@@ -1,0 +1,9 @@
+# Owner experiment (2026-11-26): "start the player with half as much HP and enemies with 2x".
+# Overlay on the v0.4.2 defaults (round-3 surge tuning): starting HP 158.95 -> 79.48,
+# ordinary enemy HP x2. Everything else stays at the v0.4.2 defaults.
+
+[player]
+max_hp = 79.47699596
+
+[enemies]
+hp_mult = 2.0

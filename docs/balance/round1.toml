@@ -1,0 +1,60 @@
+# Rat Run v0.4.1 difficulty model candidate.
+# Fresh seeds 5000–5299, measured campaign wins expert 82.7%, skilled 68.3%, casual 24.7%.
+# See report.md for target conformance, uncertainty and predictions.
+
+[director]
+# Shipped [0.8, 2.2, 2.4, 2.6]. Sewer at 0.2550×. Set ordinary enemy HP pressure after the first keep. Sampled at 1.6956×.
+build_hp_level = [0.203982, 3.73026, 4.069375, 4.408489]
+
+# Shipped [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Set the size of the largest buildup crowds. Sampled at 1.4342×.
+live_budget = [[0.0, 26], [60.0, 60], [180.0, 103], [360.0, 165], [540.0, 215], [720.0, 265], [900.0, 265]]
+
+# Shipped 1.0. Set the delay between buildup pulses. Sampled at 0.3527×.
+spawn_interval_mult = 0.3527
+
+# Shipped 1.0. Set the time between timed elites. Sampled at 1.1183×.
+elite_interval_mult = 1.118288
+
+[enemies]
+# Shipped 1.0. Set the cost of contact and attacks that read body damage. Sampled at 1.5997×.
+contact_damage_mult = 1.599674
+
+# Shipped 1.0. Set the speed at which ordinary bodies close an escape lane. Sampled at 1.4998×.
+speed_mult = 1.499764
+
+[player]
+# Shipped 130.0. Set the player's buffer against successive hits. Sampled at 1.4355×.
+max_hp = 186.612329
+
+# Shipped 0.4. Set recovery between waves of damage. Sampled at 1.3749×.
+regen = 0.549961
+
+# Shipped 0.9. Set repeat-hit protection after both contact and other hits. Sampled at 1.8369×.
+hit_iframes = 1.653191
+
+# Shipped 0.65. Set repeat-hit protection after both contact and other hits. Sampled at 1.8369×.
+contact_iframes = 1.193971
+
+[xp]
+# Shipped 6.0. Move the first card by changing the base step cost. Sampled at 1.6476×.
+base = 9.885494
+
+# Shipped 4. Set late card pacing with two to seven steps per level. Sampled at 1.0000×.
+steps_per_level = 4
+
+# Shipped 0.04. Set the attack power earned with each level. Sampled at 1.8454×.
+damage_per_level = 0.073818
+
+[bosses]
+# Shipped 1.0. Set boss fight length through the shared boss HP multiplier. Sampled at 1.1392×.
+hp_mult = 1.139203
+
+# Shipped [0.75, 0.78, 0.57, 0.68]. Raise Sewer boss HP and reduce Flatbed boss HP by reciprocal factors. Sampled at 1.5308×. Cancels the ordinary enemy HP scales in the boss formula.
+build_level = [4.502851, 0.460022, 0.33617, 0.261978]
+
+[loot]
+# Shipped 0.35. Set recovery from medkits and their availability in ordinary drops. Sampled at 1.9248×.
+heal_pickup_fraction = 0.673697
+
+# Shipped [0.012, 0.12, 1.0]. Set recovery from medkits and their availability in ordinary drops. Sampled at 1.9248×.
+pickup_chances = [0.023098, 0.230982, 1.0]
