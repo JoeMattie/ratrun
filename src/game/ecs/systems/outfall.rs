@@ -287,7 +287,9 @@ mod tests {
     use rand::RngExt;
 
     use super::*;
-    use crate::game::hazards::{LureTrap, SurgePhase, SURGE_ACTIVE_SECS, SURGE_DISTANCE};
+    use crate::game::hazards::{
+        LureTrap, SurgePhase, SURGE_ACTIVE_SECS, SURGE_DISTANCE, SURGE_PERIOD,
+    };
     use crate::game::level::{LightFixture, LightFixtureKind, Pit, PitKind, TileRect};
     use crate::game::world::World;
 
@@ -311,13 +313,26 @@ mod tests {
     }
 
     #[test]
-    fn surge_uses_one_compass_and_an_integrated_sine_bell() {
-        let first = outfall_surge(23, 8.0);
-        assert_eq!(first.phase, SurgePhase::Warning);
-        assert_eq!(outfall_surge(23, 9.0).phase, SurgePhase::Active);
+    fn surge_turns_per_burst_and_wanders_within_one() {
+        let warning = outfall_surge(23, 8.0);
+        assert_eq!(warning.phase, SurgePhase::Warning);
+        let start = outfall_surge(23, 9.0);
+        assert_eq!(start.phase, SurgePhase::Active);
+        assert_eq!(
+            warning.dir, start.dir,
+            "the warning crests show the coming surge's starting push"
+        );
         assert_eq!(outfall_surge(23, 10.09).phase, SurgePhase::Active);
         assert_eq!(outfall_surge(23, 10.1).phase, SurgePhase::Quiet);
-        assert_eq!(outfall_surge(23, 17.0), first);
+        // A later warning is for a later burst, so it shows a different push
+        // (and matches that burst's own opening frame).
+        let later = outfall_surge(23, 17.0);
+        assert_eq!(later.phase, SurgePhase::Warning);
+        assert_eq!(later.dir, outfall_surge(23, 18.0).dir);
+        assert!(
+            later.dir.dot(start.dir) < 0.5,
+            "consecutive bursts must not push nearly the same way"
+        );
         assert_eq!(outfall_surge_distance(0.0, 8.99), 0.0);
         assert_eq!(outfall_surge_distance(8.98, 10.1), 64.0);
         assert_eq!(outfall_surge_distance(8.98, 19.2), 2.0 * SURGE_DISTANCE);
@@ -336,6 +351,63 @@ mod tests {
                 t = next;
             }
             assert!((total - f64::from(SURGE_DISTANCE)).abs() < 1e-5, "{dt}: {total}");
+        }
+    }
+
+    #[test]
+    fn consecutive_surges_turn_at_least_sixty_degrees() {
+        for seed in [0u64, 1, 23, 0xdead_beef, u64::MAX] {
+            let mut previous = outfall_surge(seed, SURGE_PERIOD).dir;
+            for index in 2..24u64 {
+                let dir = outfall_surge(seed, index as f32 * SURGE_PERIOD).dir;
+                let cos = previous.dot(dir).clamp(-1.0, 1.0);
+                let turn = cos.acos().to_degrees();
+                assert!(
+                    turn >= 60.0,
+                    "seed {seed}: surge {index} turned only {turn:.1}° from the last"
+                );
+                previous = dir;
+            }
+        }
+    }
+
+    #[test]
+    fn a_surge_turns_smoothly_within_its_own_wander() {
+        const STEP: f32 = 0.001;
+        for seed in [0u64, 23, 0xdead_beef] {
+            let mut previous = outfall_surge(seed, SURGE_PERIOD).dir;
+            let mut elapsed = SURGE_PERIOD + STEP;
+            while elapsed < SURGE_PERIOD + SURGE_ACTIVE_SECS {
+                let dir = outfall_surge(seed, elapsed).dir;
+                let cos = previous.dot(dir).clamp(-1.0, 1.0);
+                let turn = cos.acos().to_degrees();
+                assert!(
+                    turn < 1.0,
+                    "seed {seed}: the push jumped {turn:.2}° in {STEP} s at {elapsed}"
+                );
+                previous = dir;
+                elapsed += STEP;
+            }
+        }
+    }
+
+    #[test]
+    fn surge_angles_are_continuous_and_not_compass_points() {
+        // Any angle, not one of the eight compass points: a hashed phase plus
+        // jitter spreads the offset from the nearest 45° line over the whole
+        // quadrant, where a compass implementation pins every one to 0.
+        let mut buckets = [false; 45];
+        for index in 1..=64u64 {
+            let dir = outfall_surge(11, index as f32 * SURGE_PERIOD).dir;
+            let offset = dir.y.atan2(dir.x).to_degrees().rem_euclid(45.0);
+            buckets[(offset as usize).min(buckets.len() - 1)] = true;
+        }
+        let spread = buckets.iter().filter(|&&hit| hit).count();
+        assert!(spread >= 4, "the push is still quantised to the compass ({spread}/45)");
+        // Same input, same answer (the crests, the bot and the lighting read
+        // the same pure function).
+        for elapsed in [0.0, 8.0, 9.0, 9.55, 10.1, 17.0, 18.03] {
+            assert_eq!(outfall_surge(23, elapsed), outfall_surge(23, elapsed));
         }
     }
 

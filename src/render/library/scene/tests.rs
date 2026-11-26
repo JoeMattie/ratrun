@@ -1518,9 +1518,13 @@ fn outfall_trick_cards_run_their_real_rules() {
         one_loop(&mut scene, |scene| {
             let world = &scene.world;
             let body = world.ecs.get::<Enemy>(subject).unwrap();
+            let on_soft_seabed = matches!(
+                world.level.seabed_at(body.pos),
+                Some(crate::game::level::SeabedKind::Silt | crate::game::level::SeabedKind::Shingle)
+            );
             if kind == EnemyKind::Skater {
-                wet |= world.level.wet_at(body.pos);
-                dry |= !world.level.wet_at(body.pos);
+                wet |= on_soft_seabed || world.level.wet_at(body.pos);
+                dry |= !on_soft_seabed && !world.level.wet_at(body.pos);
             }
             if kind == EnemyKind::FrySchool {
                 dark |= body.radius == kind.radius();
@@ -1649,13 +1653,19 @@ fn outfall_lantern_card_runs_arrival_feint_snuff_and_gape() {
 }
 
 #[test]
-fn outfall_floor_card_runs_a_lure_on_the_wet_bank() {
+fn outfall_floor_card_runs_a_lure_on_the_seabed() {
     use crate::game::hazards::{lure_landing_clear, LurePhase};
 
     let mut scene = LibraryScene::build(Key::Floor(Theme::Outfall)).unwrap();
     let level = &scene.world.level;
     let window = scene.script.window.unwrap();
-    assert!(level.puddles.iter().any(|p| window.contains_world(p.pos)));
+    assert!(
+        level
+            .seabed_patches
+            .iter()
+            .any(|patch| window.contains_world(patch.center)),
+        "the card must show the seabed patches"
+    );
     assert!(level.props.iter().any(|p| p.kind == PropKind::OutfallRib
         && window.contains_world(p.rect.center())));
     let trap = &level.objects.lure_traps[0];

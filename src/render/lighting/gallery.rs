@@ -329,7 +329,7 @@ fn capture_lighting_gallery() {
         write_ppm(&dir.join("boss_cat_full.ppm"), &pb);
     }
     {
-        // Outfall boss: The Lantern approaching with its cyan lure over wet sand.
+        // Outfall boss: The Lantern approaching with its cyan lure over seabed gravel.
         let mut w = World::new(Theme::Outfall, 77);
         let c = w.player.pos;
         let mut boss = Boss::new(

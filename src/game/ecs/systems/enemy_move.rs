@@ -224,7 +224,7 @@ pub fn enemy_steering_system(
     let outfall = level.theme == Theme::Outfall;
     let rat_wet = outfall
         && enemies.iter().any(|(_, _, e)| e.kind == EnemyKind::Skater && e.targetable())
-        && level.wet_at(ppos);
+        && floor_outfall::skater_ground(&level, ppos);
     if outfall {
         outfall_bulbs.clear();
         if enemies.iter().any(|(_, _, e)| e.kind == EnemyKind::FrySchool && e.targetable()) {

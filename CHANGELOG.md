@@ -38,6 +38,12 @@
   lands past the stomp ring; the Spiked Tail's burst and its impact star
   grow with them. The weapon effects draw over the giant body instead of
   under it. Damage is unchanged.
+- **Outfall.** Each surge pushes its own way. The direction changes every
+  nine seconds, at least 60° from the last, and the push wanders a little
+  while it runs; the warning shows where it will go.
+- **Outfall floor.** The little lakes are gone. The seabed is mixed gravel,
+  pebbles, shell grit and broad silt and shingle fields, and it no longer
+  splashes, ripples or reflects like water.
 
 ## 0.4.4 (2026-11-26, playtest build)
 

@@ -2545,6 +2545,7 @@ impl World {
         // every pixel is tagged with the wet-floor material so the lighting pass
         // reflects a lamp in it.
         self.draw_puddles(pb, cam, viewport);
+        self.draw_seabed_patches(pb, cam, viewport);
         self.draw_clothes_piles(pb, cam, viewport);
         if self.level.theme == Theme::Outfall {
             art_floor::draw_outfall_hazards(pb, &self.level, cam, self.elapsed);
@@ -2612,9 +2613,9 @@ impl World {
             }
         }
 
-        // Decorative Outfall seabed plants: after floor/puddles/walls/props and
-        // before pools, loot and bodies so creatures pass over them, lit with
-        // the scene under the default matte floor pen.
+        // Decorative Outfall seabed plants: after floor/puddles/patches/walls/
+        // props and before pools, loot and bodies so creatures pass over them,
+        // lit with the scene under the default matte floor pen.
         self.draw_seabed_plants(pb, cam, viewport);
 
         _s = crate::prof::scope(crate::prof::Stage::SceneFixturesAmbience);
@@ -4298,6 +4299,30 @@ impl World {
             }
         }
         pb.set_pen(pen);
+    }
+
+    /// The Outfall's seabed patches: mixed gravel, pebbles, shell grit and the
+    /// big silt and shingle fields, drawn where the puddles were drawn (right
+    /// after the floor stains, before the boss ground layer and the walls, so a
+    /// patch rim may spill over a wall face and the wall is painted over it).
+    ///
+    /// Each patch is drawn under its material's own matte pen
+    /// (`art_seabed::seabed_pen`), never the water pen: the lights must not
+    /// reflect a lamp in the seabed. Render-only — nothing here writes an
+    /// entity, an rng or a simulated value.
+    fn draw_seabed_patches(&self, pb: &mut PixelBuffer, cam: Vec2, viewport: Vec2) {
+        if self.level.seabed_patches.is_empty() {
+            return;
+        }
+        for patch in &self.level.seabed_patches {
+            let margin = patch.rx.max(patch.ry) + 2.0;
+            if !on_screen(self.w2s(patch.center, cam), margin, viewport) {
+                continue;
+            }
+            pb.set_pen(super::art_seabed::seabed_pen(patch.kind));
+            super::art_seabed::draw_seabed_patch(pb, patch, &self.level.tiles, cam);
+        }
+        pb.set_pen(0);
     }
 
     /// Decorative Outfall seabed plants (kelp fronds, seagrass tufts and corner

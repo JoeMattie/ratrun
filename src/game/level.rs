@@ -1211,6 +1211,91 @@ impl Puddle {
     }
 }
 
+/// What one seabed patch is made of. The Outfall's floor is not water: it is
+/// dark gravel, silt and shell rubble, and each material is drawn and lit as
+/// matte seabed. Placed by [`super::levelgen::puddles::place_seabed_patches`]
+/// where the puddles used to be; never a tile, never a gameplay volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeabedKind {
+    /// Coarse dark gravel scattered at wall edges and around plants.
+    Gravel,
+    /// Pale broken shell grit, the brightest patch material.
+    ShellGrit,
+    /// Rounded pebbles in a thin, flat scatter.
+    Pebbles,
+    /// A broad, soft silt field: the largest and flattest of the patches.
+    Silt,
+    /// A broad field of small flat stones, the other big field material.
+    Shingle,
+}
+
+/// One patch of mixed seabed material on the Outfall floor, in world pixels.
+///
+/// Floor decoration with no gameplay hook: it never paints, blocks or slows a
+/// tile and is invisible to the bot, the fog and the minimap. The Outfall uses
+/// these where the other floors use [`Puddle`]s (the owner: *"why are there
+/// little lakes when we are underwater? ... shaded like different kinds of
+/// gravel"*). Empty on every floor but [`Theme::Outfall`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeabedPatch {
+    /// Centre, world px. Always on an open floor cell (the generator's rule).
+    pub center: Vec2,
+    /// Half-width, world px.
+    pub rx: f32,
+    /// Half-height, world px.
+    pub ry: f32,
+    /// What it is made of.
+    pub kind: SeabedKind,
+    /// Shape variation (the rim's lobes), the art's tone variation.
+    pub seed: u32,
+}
+
+impl SeabedPatch {
+    /// The rim factor at `angle`: `0.78` (pinched) to `1.0` (full). The same
+    /// eight-lobe hash blob [`Puddle`]s use, so the two materials share one
+    /// shoreline rule and one soft edge.
+    pub fn edge_factor(&self, angle: f32) -> f32 {
+        0.78 + 0.22 * puddle_wobble(self.seed, angle)
+    }
+
+    /// Is `p` inside the patch? (Same irregular test as [`Puddle::contains`].)
+    pub fn contains(&self, p: Vec2) -> bool {
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return false;
+        }
+        let d = p - self.center;
+        let nx = d.x / self.rx;
+        let ny = d.y / self.ry;
+        let radial_sq = nx * nx + ny * ny;
+        if radial_sq > 1.0 {
+            return false;
+        }
+        let edge = self.edge_factor(d.y.datan2(d.x));
+        radial_sq <= edge * edge
+    }
+
+    /// `0.0` outside, `1.0` deep inside, linear over the outer
+    /// [`PUDDLE_EDGE_PX`] pixels — the soft edge the art feathers.
+    pub fn depth(&self, p: Vec2) -> f32 {
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return 0.0;
+        }
+        let d = p - self.center;
+        let edge = self.edge_factor(d.y.datan2(d.x));
+        let nx = d.x / (self.rx * edge);
+        let ny = d.y / (self.ry * edge);
+        let nr = (nx * nx + ny * ny).sqrt();
+        if nr >= 1.0 {
+            return 0.0;
+        }
+        if nr <= 1e-6 {
+            return 1.0;
+        }
+        let to_edge = d.len() * (1.0 - nr) / nr;
+        (to_edge / PUDDLE_EDGE_PX).clamp(0.0, 1.0)
+    }
+}
+
 /// Kind of decorative aquatic plant rooted on the Outfall seabed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlantKind {
@@ -1314,9 +1399,15 @@ pub struct Level {
     /// Standing water on the floor (Sewer, Laundry, Kitchen). Render-only
     /// decoration plus the rat's footstep splashes; placed by
     /// [`super::levelgen::puddles`] on its own salted rng after every other
-    /// stage, so it cannot move the map pin. Empty on the Lab, the Printworks
-    /// and the Flatbed.
+    /// stage, so it cannot move the map pin. Empty on the Lab, the Printworks,
+    /// the Flatbed **and the Outfall** (whose floor is seabed, not lakes).
     pub puddles: Vec<Puddle>,
+    /// Mixed gravel, silt and shell patches on the Outfall seabed. Render-only
+    /// floor decoration placed by
+    /// [`super::levelgen::puddles::place_seabed_patches`] on the same salted
+    /// rng as the puddles, so it cannot move the map pin. Empty on every theme
+    /// except [`Theme::Outfall`].
+    pub seabed_patches: Vec<SeabedPatch>,
     /// Decorative aquatic plants on the Outfall seabed. Render-only; placed
     /// by [`super::levelgen::seabed`] on its own salted rng so no earlier
     /// stage or other theme can move. Empty on every theme except
@@ -1404,6 +1495,7 @@ impl Level {
             boss: BossArena::default(),
             trailer: TrailerDeck::default(),
             puddles: Vec::new(),
+            seabed_patches: Vec::new(),
             plants: Vec::new(),
             clothes_piles: Vec::new(),
         }
@@ -1560,10 +1652,18 @@ impl Level {
         if self.puddles.is_empty() && self.objects.trench_puddles.is_empty() {
             return false;
         }
-        if self.theme == Theme::Outfall && self.pit_at(p).is_some() {
-            return false;
-        }
         self.tiles.get_at(p).is_open() && self.standing_water().any(|puddle| puddle.contains(p))
+    }
+
+    /// The seabed material covering `p`, if any. The last patch in placement
+    /// order wins, which is the one drawn on top. Floor decoration only: it is
+    /// never water, never a tile and never read by the fog or the minimap.
+    pub fn seabed_at(&self, p: Vec2) -> Option<SeabedKind> {
+        self.seabed_patches
+            .iter()
+            .rev()
+            .find(|patch| patch.contains(p))
+            .map(|patch| patch.kind)
     }
 
     pub fn standing_water(&self) -> impl Iterator<Item = &Puddle> {
@@ -1921,5 +2021,43 @@ mod tests {
         // A dry level answers false everywhere without walking the list.
         let dry = Level::empty(Theme::Sewer);
         assert!(!dry.wet_at(dry.start));
+    }
+
+    #[test]
+    fn a_seabed_patch_shares_the_puddle_blob_and_is_never_water() {
+        let patch = SeabedPatch {
+            center: Vec2::new(400.0, 300.0),
+            rx: 64.0,
+            ry: 40.0,
+            kind: SeabedKind::Shingle,
+            seed: 11,
+        };
+        assert!(patch.contains(patch.center));
+        assert_eq!(patch.depth(patch.center), 1.0);
+        assert_eq!(patch.depth(patch.center + Vec2::new(patch.rx, 0.0)), 0.0);
+        // `contains` and `depth > 0` are the same set, on the same 8-lobe rim.
+        for i in 0..200 {
+            let angle = i as f32 * 0.37;
+            let r = (i as f32 / 200.0) * 1.3;
+            let (s, c) = angle.dsin_cos();
+            let q = patch.center + Vec2::new(c * patch.rx * r, s * patch.ry * r);
+            assert_eq!(patch.contains(q), patch.depth(q) > 0.0, "contains and depth disagree");
+        }
+        assert_eq!(
+            patch.edge_factor(0.0),
+            Puddle { pos: patch.center, rx: patch.rx, ry: patch.ry, seed: patch.seed }
+                .edge_factor(0.0),
+            "a patch must use the puddle rim"
+        );
+        // A degenerate patch covers nothing.
+        let flat = SeabedPatch { rx: 0.0, ..patch };
+        assert!(!flat.contains(flat.center));
+        assert_eq!(flat.depth(flat.center), 0.0);
+        // And a level reports its material without calling it water.
+        let mut level = Level::empty(Theme::Outfall);
+        level.seabed_patches.push(patch);
+        assert_eq!(level.seabed_at(patch.center), Some(SeabedKind::Shingle));
+        assert!(!level.wet_at(patch.center), "a seabed patch is not water");
+        assert_eq!(level.seabed_at(Vec2::new(4.0, 4.0)), None);
     }
 }

@@ -12,7 +12,7 @@ use crate::game::ecs::systems::boss::{Boss, BossKind, HazardShape};
 use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::enemy::{Enemy, EnemyKind, OutfallAttack};
 use crate::game::hazards::{clamp_outfall_displacement, outfall_sand_clear};
-use crate::game::level::{Level, Theme};
+use crate::game::level::{Level, SeabedKind, Theme};
 use crate::game::player::Player;
 use crate::math::Vec2;
 
@@ -174,38 +174,105 @@ fn update_school(e: &mut Enemy, level: &Level, rat: Vec2, bulbs: &[Vec2]) {
     }
 }
 
-/// Pick the nearest reachable wet sample. Clip the local two-pixel lattice to
-/// each puddle's bounds, test that puddle's actual rim, and keep the first
-/// equidistant sample in placement and row order.
-fn nearest_water(level: &Level, from: Vec2, radius: f32) -> Option<Vec2> {
-    let mut best = None;
-    let mut best_distance = SKATER_WATER_REACH * SKATER_WATER_REACH;
+/// The ground a Skater can skim. Any standing water (puddles, which the
+/// Outfall no longer has) plus, on the Outfall, the loose **Silt and Shingle**
+/// seabed patches that replaced its lakes. The trick is unchanged: while it
+/// stands on that ground it can release its splash, and stepping off it
+/// cancels the attack.
+pub(super) fn skater_ground(level: &Level, p: Vec2) -> bool {
+    if level.wet_at(p) {
+        return true;
+    }
+    level.theme == Theme::Outfall
+        && level.seabed_patches.iter().any(|patch| {
+            matches!(patch.kind, SeabedKind::Silt | SeabedKind::Shingle) && patch.contains(p)
+        })
+}
+
+/// The nearest reachable sample of one blob (a puddle or a seabed patch), with
+/// its squared distance. The local two-pixel lattice is clipped to the blob's
+/// bounds, each sample is tested against the blob's actual rim, and the first
+/// equidistant sample in row and column order wins.
+fn nearest_on_ground<F>(
+    level: &Level,
+    from: Vec2,
+    radius: f32,
+    center: Vec2,
+    rx: f32,
+    ry: f32,
+    covered: F,
+) -> Option<(f32, Vec2)>
+where
+    F: Fn(Vec2) -> bool,
+{
     let class = SizeClass::of_radius(radius);
-    for puddle in &level.puddles {
-        let rel = puddle.pos - from;
-        let x0 = ((rel.x - puddle.rx).max(-SKATER_WATER_REACH) * 0.5).ceil() as i32;
-        let x1 = ((rel.x + puddle.rx).min(SKATER_WATER_REACH) * 0.5).floor() as i32;
-        let y0 = ((rel.y - puddle.ry).max(-SKATER_WATER_REACH) * 0.5).ceil() as i32;
-        let y1 = ((rel.y + puddle.ry).min(SKATER_WATER_REACH) * 0.5).floor() as i32;
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let step = Vec2::new(x as f32 * 2.0, y as f32 * 2.0);
-                let distance = step.len_sq();
-                if distance > best_distance || (best.is_some() && distance == best_distance) {
-                    continue;
-                }
-                let at = from + step;
-                if level.tiles.get_at(at).is_open()
-                    && puddle.contains(at)
-                    && clamp_outfall_displacement(level, from, step, radius, class) == at
-                {
-                    best = Some(at);
-                    best_distance = distance;
-                }
+    let rel = center - from;
+    let x0 = ((rel.x - rx).max(-SKATER_WATER_REACH) * 0.5).ceil() as i32;
+    let x1 = ((rel.x + rx).min(SKATER_WATER_REACH) * 0.5).floor() as i32;
+    let y0 = ((rel.y - ry).max(-SKATER_WATER_REACH) * 0.5).ceil() as i32;
+    let y1 = ((rel.y + ry).min(SKATER_WATER_REACH) * 0.5).floor() as i32;
+    let mut best: Option<(f32, Vec2)> = None;
+    let mut best_distance = SKATER_WATER_REACH * SKATER_WATER_REACH;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let step = Vec2::new(x as f32 * 2.0, y as f32 * 2.0);
+            let distance = step.len_sq();
+            if distance > best_distance || (best.is_some() && distance == best_distance) {
+                continue;
+            }
+            let at = from + step;
+            if level.tiles.get_at(at).is_open()
+                && covered(at)
+                && clamp_outfall_displacement(level, from, step, radius, class) == at
+            {
+                best = Some((distance, at));
+                best_distance = distance;
             }
         }
     }
     best
+}
+
+/// Pick the nearest reachable soft ground within [`SKATER_WATER_REACH`]: a
+/// puddle anywhere, or a Silt/Shingle seabed patch on the Outfall.
+fn nearest_water(level: &Level, from: Vec2, radius: f32) -> Option<Vec2> {
+    let mut best: Option<(f32, Vec2)> = None;
+    let mut consider = |sample: Option<(f32, Vec2)>| {
+        if let Some((distance, at)) = sample {
+            if best.map_or(true, |(best_distance, _)| distance < best_distance) {
+                best = Some((distance, at));
+            }
+        }
+    };
+    for puddle in &level.puddles {
+        consider(nearest_on_ground(
+            level,
+            from,
+            radius,
+            puddle.pos,
+            puddle.rx,
+            puddle.ry,
+            |at| puddle.contains(at),
+        ));
+    }
+    if level.theme == Theme::Outfall {
+        for patch in level
+            .seabed_patches
+            .iter()
+            .filter(|patch| matches!(patch.kind, SeabedKind::Silt | SeabedKind::Shingle))
+        {
+            consider(nearest_on_ground(
+                level,
+                from,
+                radius,
+                patch.center,
+                patch.rx,
+                patch.ry,
+                |at| patch.contains(at),
+            ));
+        }
+    }
+    best.map(|(_, at)| at)
 }
 
 fn lane_clear(e: &Enemy, level: &Level, start: Vec2, dir: Vec2) -> bool {
@@ -300,7 +367,7 @@ pub(super) fn steering_intent(
 ) -> f32 {
     match e.kind {
         EnemyKind::Skater => {
-            let wet = level.wet_at(e.pos);
+            let wet = skater_ground(level, e.pos);
             advance_attack(e, level, wet, dt);
             if !e.position_locked && !rat_wet && *target == rat {
                 if wet {
@@ -336,7 +403,7 @@ fn arm_attack(e: &mut Enemy, level: &Level, rat: Vec2) -> bool {
     let remaining = if e.kind == EnemyKind::Skater {
         let reach = SKATER_SPLASH_LEN + PLAYER_RADIUS;
         if rat.dist_sq(start) > reach * reach
-            || !level.wet_at(start)
+            || !skater_ground(level, start)
         {
             return false;
         }
@@ -390,7 +457,7 @@ fn resolve_attack(
         }
         OutfallAttack::Tell { .. } => {}
         OutfallAttack::Splash { start, dir, spent: false } => {
-            if e.stun > 0.0 || !level.wet_at(e.pos) || !lane_clear(e, level, start, dir) {
+            if e.stun > 0.0 || !skater_ground(level, e.pos) || !lane_clear(e, level, start, dir) {
                 cancel_attack(e);
             } else {
                 if attack_shape(e, start, dir).contains(player.pos, PLAYER_RADIUS + player.buffs.giant_hit_padding()) {
@@ -456,7 +523,7 @@ mod tests {
     use super::*;
     use crate::game::art_walls::WallKind;
     use crate::game::collision::TileKind;
-    use crate::game::level::{LightFixture, LightFixtureKind, Puddle};
+    use crate::game::level::{LightFixture, LightFixtureKind, Puddle, SeabedKind, SeabedPatch};
     use crate::game::weapon::WeaponKind;
 
     const START: Vec2 = Vec2 { x: 104.0, y: 104.0 };
@@ -484,6 +551,32 @@ mod tests {
         assert!(around.x < START.x && level.wet_at(around));
         level.puddles.pop();
         assert!(nearest_water(&level, START, 3.0).is_none());
+    }
+
+    #[test]
+    fn skater_skims_the_soft_seabed_patches_too() {
+        // The Outfall has no puddles any more: the Silt and Shingle patches are
+        // its soft ground, and the Skater's whole trick follows them.
+        let mut level = Level::empty(Theme::Outfall);
+        level.seabed_patches.push(SeabedPatch {
+            center: START + RIGHT * 20.0,
+            rx: 30.0,
+            ry: 22.0,
+            kind: SeabedKind::Silt,
+            seed: 3,
+        });
+        assert!(skater_ground(&level, START + RIGHT * 20.0));
+        let at = nearest_water(&level, START, 3.0).expect("the Silt is reachable");
+        assert!(skater_ground(&level, at));
+        let mut e = enemy(EnemyKind::Skater, START + RIGHT * 20.0);
+        assert!(arm_attack(&mut e, &level, START + RIGHT * 36.0));
+        // Hard ground is not soft ground, and stepping off cancels the tell.
+        level.tiles.set(7, 6, TileKind::Wall(WallKind::Solid));
+        level.seabed_patches.clear();
+        assert!(!skater_ground(&level, START));
+        assert!(nearest_water(&level, START, 3.0).is_none());
+        advance_attack(&mut e, &level, false, SKATER_TELL_SECS);
+        assert!(outfall_enemy_tell(&e).is_none());
     }
 
     #[test]

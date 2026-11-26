@@ -697,11 +697,11 @@ fn draw_outfall_floor_plate(art: &mut PixelBuffer, level: &Level, t: f32) {
     let cam = level.start + Vec2::new(0.0, 5.0) - Vec2::new(art.w as f32, art.h as f32);
     bank.clear(level.palette.bg);
     art_floor::draw_floor(&mut bank, level, cam, t);
-    for puddle in &level.puddles {
-        crate::game::art_puddle::draw_puddle_among_with(
-            &mut bank, puddle, &level.puddles, cam, t, level.theme, false,
-        );
+    for patch in &level.seabed_patches {
+        bank.set_pen(crate::game::art_seabed::seabed_pen(patch.kind));
+        crate::game::art_seabed::draw_seabed_patch(&mut bank, patch, &level.tiles, cam);
     }
+    bank.set_pen(0);
     art_floor::draw_outfall_hazards(&mut bank, level, cam, t);
     for prop in &level.props {
         art_props::draw_prop(&mut bank, prop, cam, &level.palette);
@@ -1271,6 +1271,7 @@ fn build_scene(theme: Theme) -> Level {
         boss: crate::game::level::BossArena::default(),
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
+        seabed_patches: Vec::new(),
         plants: Vec::new(),
         clothes_piles: Vec::new(),
     };

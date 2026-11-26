@@ -68,8 +68,8 @@
 //!   lamp-lit wall tints
 //!   nearby floor, a lava pool warms nearby walls, green droppings tint the
 //!   floor around them, sunlit Flatbed oak planks bounce warm amber into cool
-//!   cargo shadows, and Outfall's water bounces marine cyan onto sand and
-//!   pilings, while a wall blocks bounce from reaching the room behind it.
+//!   cargo shadows, while a wall blocks bounce from reaching the room behind
+//!   it.
 //! * **Flicker-free & blackout-aware**: static fixtures are evaluated at unit
 //!   steady power (`elapsed = 0`, `blackout = 0`, `flicker = None`), propagated
 //!   once per world-snapped view key (`StaticGiCache`), and scaled linearly by
@@ -80,9 +80,7 @@
 
 use std::cell::RefCell;
 
-use super::engine::{
-    ambient_level_scaled, zone_gain, Curve, Grid, LayerMask, LightingMode, MUL_CLAMP,
-};
+use super::engine::{zone_gain, Curve, Grid, LayerMask, LightingMode, MUL_CLAMP};
 use super::fixtures;
 use super::fx::{Canvas, FxFrame};
 use super::material::{self, MaterialKind};
@@ -353,8 +351,6 @@ struct LevelCache {
     alb_h: usize,
     /// Diffuse bounce reflectance per 4 px subcell.
     albedo: Vec<Rgb>,
-    /// Bit/byte flag: 1 where an Outfall 4 px subcell is standing water.
-    water_sub: Vec<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -376,7 +372,7 @@ struct StaticGiCache {
     /// Propagated indoor fixture GI (`[u16; 3]` Q8.8 per padded cell), before
     /// `1.0 - blackout`.
     indoor: Vec<[u16; 3]>,
-    /// Propagated sun / ambient-water GI (`[u16; 3]` Q8.8 per padded cell).
+    /// Propagated sun / ambient GI (`[u16; 3]` Q8.8 per padded cell).
     sky: Vec<[u16; 3]>,
     any_indoor: bool,
     any_sky: bool,
@@ -417,7 +413,6 @@ struct GiScratch {
     is_wall: Vec<bool>,
     facing: Vec<Vec2>,
     albedo: Vec<Rgb>,
-    water: Vec<u8>,
     emit_indoor: Vec<[i32; 3]>,
     emit_sky: Vec<[i32; 3]>,
     emit_dyn: Vec<[i32; 3]>,
@@ -943,7 +938,6 @@ impl LevelCache {
         self.alb_h = (rows as usize) * 4;
         let n_alb = self.alb_w * self.alb_h;
         self.albedo.clear();
-        self.water_sub.clear();
 
         let floor_raw = palette::mix(level.palette.bg, level.palette.bg_alt, 0.55);
         let floor_alb = match level.theme {
@@ -957,7 +951,6 @@ impl LevelCache {
         let wall_alb = bounce_reflectance(wall_raw, 1.45, 222, 24);
 
         self.albedo.resize(n_alb, floor_alb);
-        self.water_sub.resize(n_alb, 0);
 
         for cy in 0..rows {
             for cx in 0..cols {
@@ -982,16 +975,13 @@ impl LevelCache {
             }
         }
 
-        // Standing water puddles: Outfall water bounces vivid marine cyan;
-        // indoor wet floors shift toward the floor's wet accent.
-        let water_alb = match level.theme {
-            Theme::Outfall => (42, 240, 255),
-            _ => palette::mix(
-                floor_alb,
-                bounce_reflectance(level.palette.accent, 1.3, 222, 24),
-                0.45,
-            ),
-        };
+        // Standing water puddles (the wet indoor floors only: the Outfall is
+        // seabed and has none) shift toward the floor's wet accent.
+        let water_alb = palette::mix(
+            floor_alb,
+            bounce_reflectance(level.palette.accent, 1.3, 222, 24),
+            0.45,
+        );
         for puddle in &level.puddles {
             let gx0 = (((puddle.pos.x - puddle.rx) * 0.25).floor() as i32)
                 .clamp(0, self.alb_w as i32 - 1) as usize;
@@ -1016,9 +1006,6 @@ impl LevelCache {
                     {
                         let idx = gy * self.alb_w + gx;
                         self.albedo[idx] = water_alb;
-                        if level.theme == Theme::Outfall {
-                            self.water_sub[idx] = 1;
-                        }
                     }
                 }
             }
@@ -1084,14 +1071,13 @@ impl LevelCache {
     }
 
     #[inline]
-    fn sample_albedo(&self, p: Vec2) -> (Rgb, bool) {
+    fn sample_albedo(&self, p: Vec2) -> Rgb {
         if self.alb_w == 0 || self.alb_h == 0 {
-            return ((180, 180, 180), false);
+            return (180, 180, 180);
         }
         let gx = ((p.x * 0.25).floor() as i32).clamp(0, self.alb_w as i32 - 1) as usize;
         let gy = ((p.y * 0.25).floor() as i32).clamp(0, self.alb_h as i32 - 1) as usize;
-        let idx = gy * self.alb_w + gx;
-        (self.albedo[idx], self.water_sub[idx] != 0)
+        self.albedo[gy * self.alb_w + gx]
     }
 }
 
@@ -1700,7 +1686,6 @@ fn propagate_gi(
     is_wall: &[bool],
     facing: &[Vec2],
     albedo: &[Rgb],
-    water: Option<&[u8]>,
     (pw, ph): (usize, usize),
     bounds: (usize, usize, usize, usize),
     ping: &mut Vec<[i32; 3]>,
@@ -1842,9 +1827,6 @@ fn propagate_gi(
                     (field[i][1] - (self_seed[1] >> 2)).max(0),
                     (field[i][2] - (self_seed[2] >> 2)).max(0),
                 ];
-                if water.is_some_and(|w| w.get(i).copied().unwrap_or(0) != 0) {
-                    ind = [ind[0] >> 2, ind[1] >> 2, ind[2] >> 2];
-                }
                 let m = [
                     ((ind[0] * GI_MUL_GAIN_Q8) >> 8).clamp(0, GI_MUL_FIELD_MAX) as u16,
                     ((ind[1] * GI_MUL_GAIN_Q8) >> 8).clamp(0, GI_MUL_FIELD_MAX) as u16,
@@ -1965,8 +1947,6 @@ pub(super) fn apply_indirect(
         s.facing.resize(p_len, Vec2::ZERO);
         s.albedo.clear();
         s.albedo.resize(p_len, (0, 0, 0));
-        s.water.clear();
-        s.water.resize(p_len, 0);
 
         {
             let lvl = &s.levels[slot];
@@ -1979,14 +1959,12 @@ pub(super) fn apply_indirect(
                     let idx = row + x;
                     s.is_wall[idx] = surf.layer & LayerMask::WALLS.0 != 0;
                     s.facing[idx] = surf.facing;
-                    let (alb, wet) = lvl.sample_albedo(p);
-                    s.albedo[idx] = alb;
-                    s.water[idx] = u8::from(wet);
+                    s.albedo[idx] = lvl.sample_albedo(p);
                 }
             }
         }
 
-        // ---- 1. Static fixture + sun + marine water GI (cached) ------------
+        // ---- 1. Static fixture + sun GI (cached) ----------------------------
         let (snuffed_len, snuffed_hash) = snuffed_signature(scene.level);
         let gi_key = StaticGiKey {
             level: LevelKey::of(scene.level),
@@ -2147,35 +2125,12 @@ pub(super) fn apply_indirect(
                 }
             }
 
-            // Outfall marine water column: standing water puddles scatter cool
-            // cyan sky-water light onto surrounding sand and timber pilings.
-            if theme == Theme::Outfall {
-                let scale = super::upsample::ambient_scale(theme, frame.mode);
-                for y in 0..ph {
-                    let wy = pstart.y + (y * 4) as f32;
-                    for x in 0..pw {
-                        let idx = y * pw + x;
-                        if s.water[idx] == 0 || s.is_wall[idx] {
-                            continue;
-                        }
-                        let p = Vec2::new(pstart.x + (x * 4) as f32, wy);
-                        let z_gain = zone_gain(geometry.surface(p).zone).min(cap);
-                        let amb_b = i32::from(ambient_level_scaled(frame.ambient[2], z_gain, scale));
-                        // Cyan water emission proportional to marine ambient.
-                        s.emit_sky[idx][0] += (amb_b * 88) >> 8;
-                        s.emit_sky[idx][1] += (amb_b * 1840) >> 8;
-                        s.emit_sky[idx][2] += (amb_b * 2280) >> 8;
-                    }
-                }
-            }
-
             s.static_gi.any_indoor = if let Some(b) = non_zero_bounds(&s.emit_indoor, pw, ph) {
                 propagate_gi(
                     &s.emit_indoor,
                     &s.is_wall,
                     &s.facing,
                     &s.albedo,
-                    None,
                     (pw, ph),
                     b,
                     &mut s.ping,
@@ -2194,7 +2149,6 @@ pub(super) fn apply_indirect(
                     &s.is_wall,
                     &s.facing,
                     &s.albedo,
-                    Some(&s.water),
                     (pw, ph),
                     b,
                     &mut s.ping,
@@ -2431,7 +2385,6 @@ pub(super) fn apply_indirect(
                 &s.is_wall,
                 &s.facing,
                 &s.albedo,
-                None,
                 (pw, ph),
                 b,
                 &mut s.ping,
@@ -2444,13 +2397,7 @@ pub(super) fn apply_indirect(
 
         // ---- 3. Composite cached static (× power) + dynamic onto `grid` ----
         let indoor_power_q8 = ((1.0 - scene.blackout).clamp(0.0, 1.0) * 256.0).round() as i32;
-        // Outfall ambient water bounce dims substantially during a blackout,
-        // while the Flatbed sun is unaffected.
-        let sky_power_q8 = if scene.level.theme == Theme::Outfall {
-            ((1.0 - scene.blackout * 0.80).clamp(0.0, 1.0) * 256.0).round() as i32
-        } else {
-            256
-        };
+        let sky_power_q8 = 256;
         let ceiling = if scene.fx {
             super::upsample::MUL_CEILING
         } else {
@@ -2512,7 +2459,7 @@ mod tests {
     use crate::game::collision::{TileKind, TileMap};
     use crate::game::ecs::components::{Dropping, LavaPool, SpawnId};
     use crate::game::enemy::{Enemy, EnemyKind};
-    use crate::game::level::{LightFixture, LightFixtureKind, Prop, Puddle};
+    use crate::game::level::{LightFixture, LightFixtureKind, Prop};
     use crate::game::world::World;
     use crate::render::framebuffer::PixelBuffer;
     use crate::render::lighting::{luminance, LightMap};
@@ -2905,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn gi_lava_warms_nearby_wall_and_droppings_tint_floor_and_water_bounces_cyan() {
+    fn gi_lava_warms_nearby_wall_and_droppings_tint_the_floor() {
         // 1. Lava pool near a wall warms the facing wall face and not the room behind.
         {
             let mut w = World::new(Theme::Lab, 91);
@@ -2987,40 +2934,6 @@ mod tests {
             );
         }
 
-        // 3. Outfall blue water puddle bounces marine cyan onto adjacent dry sand.
-        {
-            let mut w = World::new(Theme::Outfall, 93);
-            w.level = Level::empty(Theme::Outfall);
-            w.level.puddles.push(Puddle {
-                pos: Vec2::new(240.0, 240.0),
-                rx: 24.0,
-                ry: 16.0,
-                seed: 5,
-            });
-            w.player.pos = Vec2::new(1200.0, 1200.0);
-            w.cam_focus = Some(Vec2::new(240.0, 240.0));
-            w.lighting = LightingMode::Full;
-            w.lighting_fx = true;
-            w.smoke_enabled = false;
-
-            let ao = render_with(&mut w, GlobalLight::AoOnly, (120, 96));
-            let gi = render_with(&mut w, GlobalLight::AoGi, (120, 96));
-            let cam = (w.cam.x.round() as i32, w.cam.y.round() as i32);
-            // Dry sand just outside the puddle's right edge. The blob's wobble
-            // puts that edge near `wx = 262` on this row, and the bounce
-            // reaches about 8 px past it.
-            let (sx, sy) = ((268 - cam.0) as usize, (240 - cam.1) as usize);
-            assert!(!w.level.wet_at(Vec2::new(268.0, 240.0)));
-            let b_px = ao.pixel_at(sx, sy);
-            let g_px = gi.pixel_at(sx, sy);
-            let dg = i32::from(g_px.1) - i32::from(b_px.1);
-            let db = i32::from(g_px.2) - i32::from(b_px.2);
-            let dr = i32::from(g_px.0) - i32::from(b_px.0);
-            assert!(
-                (dg > 0 || db > 0) && dg + db > dr * 2,
-                "Outfall water must bounce cyan onto nearby sand: {b_px:?} -> {g_px:?}"
-            );
-        }
     }
 
     #[test]

@@ -11,11 +11,12 @@
 //! the number of swaying plants per frame is capped by [`MAX_SWAY_PER_FRAME`]
 //! so terminal diff churn stays minimal.
 
+use crate::game::collision::TileMap;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale, Rgb};
 
-use super::level::{PlantKind, SeabedPlant};
+use super::level::{PlantKind, SeabedKind, SeabedPatch, SeabedPlant};
 
 /// Maximum number of on-screen plants allowed to animate sway in a single
 /// frame (caps moving pixel area at wide 2× zoom-out for terminal byte budget).
@@ -245,6 +246,66 @@ fn draw_anemone(
         let ey = ry + (ty * scale_b).round() as i32;
         pb.plot(mx, my, body);
         pb.plot(ex, ey, tip);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STUB: replaced by outfall2-art
+//
+// The Outfall's seabed patches (`Level::seabed_patches`) are drawn by
+// outfall2-art in this file. Until that lands, this flat tint keeps the
+// wiring visible and the floor from reading as water. Integration takes the
+// art file's own `draw_seabed_patch` and `seabed_pen`.
+// ---------------------------------------------------------------------------
+
+/// The material pen for one seabed material: matte and rough (Stone), so the
+/// lighting treats a patch as seabed rather than water.
+// STUB: replaced by outfall2-art.
+pub fn seabed_pen(_kind: SeabedKind) -> u8 {
+    1
+}
+
+/// Draw one seabed patch into the world buffer, in screen space via `cam`.
+/// `tiles` keeps the tint off wall cells (a patch rim may spill over a face,
+/// and the wall layer is drawn over it).
+// STUB: replaced by outfall2-art.
+pub fn draw_seabed_patch(
+    pb: &mut PixelBuffer,
+    patch: &SeabedPatch,
+    tiles: &TileMap,
+    cam: Vec2,
+) {
+    if pb.w == 0 || pb.h == 0 || patch.rx <= 0.0 || patch.ry <= 0.0 {
+        return;
+    }
+    // One flat, slightly lighter tint per material: gravel stays dark, shell
+    // grit is the pale one, silt sits between.
+    let tint: Rgb = match patch.kind {
+        SeabedKind::Gravel => (96, 100, 96),
+        SeabedKind::ShellGrit => (172, 168, 150),
+        SeabedKind::Pebbles => (126, 124, 118),
+        SeabedKind::Silt => (88, 98, 84),
+        SeabedKind::Shingle => (108, 112, 106),
+    };
+    let (cam_x, cam_y) = (cam.x.round() as i32, cam.y.round() as i32);
+    let x0 = ((patch.center.x - patch.rx).floor() as i32 - cam_x).max(0);
+    let y0 = ((patch.center.y - patch.ry).floor() as i32 - cam_y).max(0);
+    let x1 = ((patch.center.x + patch.rx).ceil() as i32 - cam_x).min(pb.w as i32 - 1);
+    let y1 = ((patch.center.y + patch.ry).ceil() as i32 - cam_y).min(pb.h as i32 - 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let world = Vec2::new(
+                cam_x as f32 + x as f32 + 0.5,
+                cam_y as f32 + y as f32 + 0.5,
+            );
+            if !tiles.get_at(world).is_open() {
+                continue;
+            }
+            let depth = patch.depth(world);
+            if depth > 0.0 {
+                blend_px(pb, x, y, tint, 0.55 * depth);
+            }
+        }
     }
 }
 

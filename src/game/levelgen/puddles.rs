@@ -1,4 +1,5 @@
-//! Standing water: where a floor is wet enough for the rat to splash.
+//! Standing water: where a floor is wet enough for the rat to splash — and, on
+//! the Outfall, the seabed patches that took its place.
 //!
 //! The owner's brief: *"sewer especially should have areas of the floor be very
 //! wet, and the rat should make little splashing sounds when walking over."*
@@ -7,6 +8,12 @@
 //! included — on its **own salted rng** (`level_seed ^` [`PUDDLE_SALT`]),
 //! reading the finished tile grid and object list and writing nothing but
 //! [`Level::puddles`].
+//!
+//! The Outfall is **not** wet: the same stage, on the same salted stream, places
+//! [`SeabedPatch`]es instead ([`place_seabed_patches`]) — the owner: *"why are
+//! there little lakes when we are underwater? instead I want those to be shaded
+//! like different kinds of gravel and stuff"* — so `Level::puddles` is empty
+//! there and nothing on that floor splashes, reflects or counts as water.
 //!
 //! ## Why the map pin cannot move
 //!
@@ -18,9 +25,10 @@
 //!    holes, the traps, the hazards or the lights draw can be perturbed, and it
 //!    is called last so nothing downstream of it exists.
 //! 2. **The pin does not fold it.** `map_trace_pin` hashes every tile and every
-//!    placed object of `LevelObjects`; `Level::puddles` is neither. So the pin
-//!    is unchanged even when the puddle placement changes, and
-//!    `puddles_leave_the_tiles_and_objects_alone` asserts that directly.
+//!    placed object of `LevelObjects`; `Level::puddles` and
+//!    `Level::seabed_patches` are neither. So the pin is unchanged even when the
+//!    decoration placement changes, and `puddles_leave_the_tiles_and_objects_alone`
+//!    asserts that directly.
 //!
 //! ## Placement
 //!
@@ -36,13 +44,15 @@
 //! biased 4:1 toward corridors and cells that touch a wall. The Kitchen gets a
 //! few small spills, biased the same way toward the props they would run off.
 //! The Laundry is in between. The Lab, the Printworks and the Flatbed stay dry:
-//! nothing in this stage runs for a theme [`count_for`] does not list.
+//! nothing in this stage runs for a theme [`count_for`] does not list. The
+//! Outfall draws no puddle at all: [`place_seabed_patches`] runs after the
+//! plants and covers 25–30 % of its open floor with matte material.
 
 use rand::RngExt;
 
 use crate::game::art_walls::WallKind;
 use crate::game::collision::{cell_of, TileKind, TileMap, TILE};
-use crate::game::level::{level_rng, Level, Puddle, RoomKind, Theme};
+use crate::game::level::{level_rng, Level, Puddle, RoomKind, SeabedKind, SeabedPatch, Theme};
 use crate::math::Vec2;
 
 /// Salt mixed into the level seed for this stage's own rng.
@@ -73,15 +83,15 @@ const BIAS_CHANCE: f32 = 0.8;
 /// floor is dry.
 ///
 /// The Sewer is the wet one; the Laundry and the Kitchen have standing water
-/// where their hazards and spills are; the Lab, the Printworks and the Flatbed
-/// get none.
+/// where their hazards and spills are; the Lab, the Printworks, the Flatbed
+/// **and the Outfall** get none (the Outfall's floor is seabed patches, see
+/// [`place_seabed_patches`]).
 pub fn count_for(theme: Theme) -> Option<(usize, usize)> {
     match theme {
         Theme::Sewer => Some((225, 255)),
         Theme::Laundry => Some((22, 30)),
         Theme::Kitchen => Some((8, 12)),
-        Theme::Lab | Theme::Printworks | Theme::Trailer => None,
-        Theme::Outfall => Some((240, 265)),
+        Theme::Lab | Theme::Printworks | Theme::Trailer | Theme::Outfall => None,
     }
 }
 
@@ -96,15 +106,18 @@ enum Bias {
     Props,
 }
 
-/// Place this level's puddles. Called last by `levelgen::generate_stages`.
+/// Place this level's puddles. Runs in `levelgen::generate_stages` after every
+/// gameplay stage. The Outfall is skipped here: [`place_seabed_patches`] fills
+/// its floor after the plants.
 pub(super) fn place(level: &mut Level, attempt: u32) {
+    level.puddles.clear();
     let Some((min, max)) = count_for(level.theme) else {
         return;
     };
     let mut rng = level_rng(level.theme, level.seed ^ PUDDLE_SALT, attempt);
     let blocked = blocked_cells(level);
     let bias = match level.theme {
-        Theme::Sewer | Theme::Laundry | Theme::Outfall => Bias::Edges,
+        Theme::Sewer | Theme::Laundry => Bias::Edges,
         Theme::Kitchen => Bias::Props,
         // `count_for` has already returned for these, so the arm is the "any
         // cell" default rather than a third policy.
@@ -112,31 +125,7 @@ pub(super) fn place(level: &mut Level, attempt: u32) {
     };
     let wanted = rng.random_range(min..=max);
     let mut puddles = Vec::with_capacity(wanted);
-    if level.theme == Theme::Outfall {
-        let cols = level.tiles.cols();
-        for room in level.rooms.iter().filter(|r| matches!(
-            r.kind, crate::game::level::RoomKind::Hall | crate::game::level::RoomKind::Room
-        )) {
-            // Start each bowl with a bank near its edge. The remaining
-            // centres use the map-wide edge-biased draws.
-            let Some((cx, cy)) = room.rect.cells()
-                .filter(|&(x, y)| {
-                    level.tiles.get(x, y) == TileKind::Open && !blocked[(y * cols + x) as usize]
-                })
-                .filter(|&(x, y)| room_edge_or_corridor(level, x, y))
-                .min_by(|&(x, y), &(a, b)| {
-                    let center = room.center();
-                    TileMap::tile_rect(x, y).center().dist_sq(center)
-                        .total_cmp(&TileMap::tile_rect(a, b).center().dist_sq(center))
-                })
-            else {
-                continue;
-            };
-            let (rx, ry) = size_for(level, cx, cy, &mut rng);
-            puddles.push(Puddle { pos: TileMap::tile_rect(cx, cy).center(), rx, ry, seed: rng.random() });
-        }
-    }
-    for _ in puddles.len()..wanted {
+    for _ in 0..wanted {
         let Some(centre) = one_centre(level, &blocked, &mut rng, bias) else {
             break;
         };
@@ -149,48 +138,225 @@ pub(super) fn place(level: &mut Level, attempt: u32) {
             seed: rng.random::<u32>(),
         });
     }
-    if level.theme == Theme::Outfall {
-        tune_outfall_coverage(level, &mut puddles);
-    }
     level.puddles = puddles;
 }
 
-/// Measure the union on the walkable grid and resize together. The placement
-/// draws and bank centres are already settled, so this reads no RNG.
-fn tune_outfall_coverage(level: &Level, puddles: &mut [Puddle]) {
+// ---- The Outfall's seabed patches -----------------------------------------
+
+/// How many seabed patches an Outfall map gets (`min..=max`).
+pub const SEABED_PATCH_COUNT: (usize, usize) = (140, 200);
+
+/// The share of the Outfall's open floor the patches cover, and the band the
+/// tuner aims for (inside the 25–30 % contract band, so sampling noise at the
+/// edge cannot fail a test).
+const PATCH_TARGET: f32 = 0.275;
+const PATCH_BAND: (f32, f32) = (0.26, 0.29);
+
+/// The few big, flat Silt and Shingle fields, as `min..=max` fields and their
+/// half-extents (`rx0, rx1, ry0, ry1`). Larger and flatter than the puddles
+/// were: a field covers a whole room's floor rather than pooling in it.
+const PATCH_FIELDS: (usize, usize) = (6, 9);
+const FIELD_SIZE: (f32, f32, f32, f32) = (110.0, 140.0, 62.0, 86.0);
+
+/// The scatter band for Gravel, Pebbles and ShellGrit (`rx0, rx1, ry0, ry1`).
+const SCATTER_SIZE: (f32, f32, f32, f32) = (60.0, 105.0, 34.0, 58.0);
+
+/// Rejection tries for one patch centre, and the unbiased fallback's.
+const PATCH_TRIES: u32 = 48;
+const PATCH_FALLBACK_TRIES: u32 = 128;
+
+/// Place the Outfall's seabed patches on the **same salted rng** as the
+/// puddles (`level_seed ^ PUDDLE_SALT`).
+///
+/// Runs after `levelgen::seabed` (the plants live on some of these patches)
+/// and after every other stage. The material split: a few big flat Silt and
+/// Shingle fields, and Gravel, Pebbles and ShellGrit scattered at wall edges
+/// and around plants. Every rule the puddles had is kept — open floor only,
+/// [`START_CLEAR_PX`] clear of the start, and off rat-holes, doors, shop
+/// thresholds, trap pads and the Outfall's lure banks. The union is measured
+/// on the walkable grid and the patches are resized together until they cover
+/// [`PATCH_TARGET`] of it. Writes only [`Level::seabed_patches`].
+pub(super) fn place_seabed_patches(level: &mut Level, attempt: u32) {
+    level.seabed_patches.clear();
+    if level.theme != Theme::Outfall {
+        return;
+    }
+    // The Outfall is seabed, never standing water (also covers a caller that
+    // runs this stage on a map built before `place`).
+    level.puddles.clear();
+    let mut rng = level_rng(level.theme, level.seed ^ PUDDLE_SALT, attempt);
+    let blocked = blocked_cells(level);
+    let near_plants = plant_reach_cells(level);
+    let wanted = rng.random_range(SEABED_PATCH_COUNT.0..=SEABED_PATCH_COUNT.1);
+    let mut patches = Vec::with_capacity(wanted);
+
+    // 1. The big fields: Silt and Shingle, anywhere on open sand.
+    let fields = rng
+        .random_range(PATCH_FIELDS.0..=PATCH_FIELDS.1)
+        .min(wanted);
+    for i in 0..fields {
+        let Some(center) = patch_centre(level, &blocked, &near_plants, &mut rng, false) else {
+            break;
+        };
+        let kind = if i % 2 == 0 {
+            SeabedKind::Silt
+        } else {
+            SeabedKind::Shingle
+        };
+        let rx = rng.random_range(FIELD_SIZE.0..=FIELD_SIZE.1);
+        let ry = rng.random_range(FIELD_SIZE.2..=FIELD_SIZE.3);
+        patches.push(SeabedPatch {
+            center,
+            rx,
+            ry,
+            kind,
+            seed: rng.random(),
+        });
+    }
+
+    // 2. The scatter: gravel, pebbles and shell grit, along walls and plants.
+    const SCATTER: [SeabedKind; 3] = [
+        SeabedKind::Gravel,
+        SeabedKind::Pebbles,
+        SeabedKind::ShellGrit,
+    ];
+    for _ in patches.len()..wanted {
+        let Some(center) = patch_centre(level, &blocked, &near_plants, &mut rng, true) else {
+            break;
+        };
+        let kind = SCATTER[rng.random_range(0..SCATTER.len())];
+        let rx = rng.random_range(SCATTER_SIZE.0..=SCATTER_SIZE.1);
+        let ry = rng.random_range(SCATTER_SIZE.2..=SCATTER_SIZE.3);
+        patches.push(SeabedPatch {
+            center,
+            rx,
+            ry,
+            kind,
+            seed: rng.random(),
+        });
+    }
+
+    tune_patch_coverage(level, &mut patches);
+    level.seabed_patches = patches;
+}
+
+/// Measure the union on the walkable grid and resize the patches together. The
+/// placement draws are settled, so this reads no RNG.
+fn tune_patch_coverage(level: &Level, patches: &mut [SeabedPatch]) {
     let cols = level.tiles.cols();
     let rows = level.tiles.rows();
-    let eligible: Vec<_> = (0..rows).flat_map(|y| (0..cols).map(move |x| (x, y)))
-        .map(|(x, y)| level.tiles.get(x, y) == TileKind::Open
-            && level.pit_at(TileMap::tile_rect(x, y).center()).is_none())
+    let eligible: Vec<_> = (0..rows)
+        .flat_map(|y| (0..cols).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            level.tiles.get(x, y) == TileKind::Open
+                && level.pit_at(TileMap::tile_rect(x, y).center()).is_none()
+        })
         .collect();
     let dry_cells = eligible.iter().filter(|&&open| open).count().max(1) as f32;
-    let mut wet = vec![false; eligible.len()];
-    for _ in 0..3 {
-        wet.fill(false);
-        for puddle in &*puddles {
-            let span = Vec2::new(puddle.rx, puddle.ry);
-            let (x0, y0) = cell_of(puddle.pos - span);
-            let (x1, y1) = cell_of(puddle.pos + span);
+    let mut covered = vec![false; eligible.len()];
+    // Coverage grows roughly with the patches' area, so a square-root scale
+    // converges in two or three passes; the extra rounds cover wall clipping
+    // and the clamps. The last round only measures, so the value the caller
+    // sees has always been checked against the band.
+    for round in 0..=8 {
+        covered.fill(false);
+        for patch in &*patches {
+            let span = Vec2::new(patch.rx, patch.ry);
+            let (x0, y0) = cell_of(patch.center - span);
+            let (x1, y1) = cell_of(patch.center + span);
             for y in y0.max(0)..=y1.min(rows - 1) {
                 for x in x0.max(0)..=x1.min(cols - 1) {
                     let i = (y * cols + x) as usize;
-                    if eligible[i] && !wet[i] && puddle.contains(TileMap::tile_rect(x, y).center()) {
-                        wet[i] = true;
+                    if eligible[i]
+                        && !covered[i]
+                        && patch.contains(TileMap::tile_rect(x, y).center())
+                    {
+                        covered[i] = true;
                     }
                 }
             }
         }
-        let share = wet.iter().filter(|&&w| w).count() as f32 / dry_cells;
-        if (0.325..=0.395).contains(&share) {
+        let share = covered.iter().filter(|&&c| c).count() as f32 / dry_cells;
+        if (PATCH_BAND.0..=PATCH_BAND.1).contains(&share) || round == 8 {
             break;
         }
-        let scale = (0.36 / share.max(0.01)).sqrt().clamp(0.75, 1.35);
-        for puddle in &mut *puddles {
-            puddle.rx = (puddle.rx * scale).clamp(50.0, 150.0);
-            puddle.ry = (puddle.ry * scale).clamp(35.0, 115.0);
+        let scale = (PATCH_TARGET / share.max(0.01)).sqrt().clamp(0.65, 1.6);
+        for patch in &mut *patches {
+            patch.rx = (patch.rx * scale).clamp(36.0, 150.0);
+            patch.ry = (patch.ry * scale).clamp(22.0, 100.0);
         }
     }
+}
+
+/// The cells within three cells of a plant, so a scattered patch can land
+/// "near plants" without walking the plant list once per rejection draw.
+fn plant_reach_cells(level: &Level) -> Vec<bool> {
+    let cols = level.tiles.cols();
+    let rows = level.tiles.rows();
+    let mut near = vec![false; (cols * rows).max(0) as usize];
+    for plant in &level.plants {
+        let (cx, cy) = cell_of(plant.pos);
+        for dy in -3..=3 {
+            for dx in -3..=3 {
+                let (x, y) = (cx + dx, cy + dy);
+                if x >= 0 && y >= 0 && x < cols && y < rows {
+                    near[(y * cols + x) as usize] = true;
+                }
+            }
+        }
+    }
+    near
+}
+
+/// One patch centre: open, unblocked floor, biased toward the material places
+/// (wall edges and plants) for the scatter, with an unbiased fallback.
+fn patch_centre(
+    level: &Level,
+    blocked: &[bool],
+    near_plants: &[bool],
+    rng: &mut rand::rngs::StdRng,
+    biased: bool,
+) -> Option<Vec2> {
+    if biased {
+        draw_patch_centre(level, blocked, near_plants, rng, true, PATCH_TRIES)
+            .or_else(|| {
+                draw_patch_centre(level, blocked, near_plants, rng, false, PATCH_FALLBACK_TRIES)
+            })
+    } else {
+        draw_patch_centre(level, blocked, near_plants, rng, false, PATCH_FALLBACK_TRIES)
+    }
+}
+
+/// Rejection sampling for one patch centre (the puddle rule, plus the plants).
+fn draw_patch_centre(
+    level: &Level,
+    blocked: &[bool],
+    near_plants: &[bool],
+    rng: &mut rand::rngs::StdRng,
+    biased: bool,
+    tries: u32,
+) -> Option<Vec2> {
+    let (cols, rows) = (level.tiles.cols(), level.tiles.rows());
+    if cols <= 0 || rows <= 0 {
+        return None;
+    }
+    for _ in 0..tries {
+        let cx = rng.random_range(0..cols);
+        let cy = rng.random_range(0..rows);
+        if !matches!(level.tiles.get(cx, cy), TileKind::Open) {
+            continue;
+        }
+        let i = (cy * cols + cx) as usize;
+        if blocked[i] {
+            continue;
+        }
+        let material_place = room_edge_or_corridor(level, cx, cy) || near_plants[i];
+        if biased && !material_place && rng.random::<f32>() < BIAS_CHANCE {
+            continue;
+        }
+        return Some(TileMap::tile_rect(cx, cy).center());
+    }
+    None
 }
 
 /// The half-width and half-height of a new puddle centred on cell `(cx, cy)`.
@@ -226,7 +392,6 @@ fn size_for(level: &Level, cx: i32, cy: i32, rng: &mut rand::rngs::StdRng) -> (f
             }
         }
         Theme::Laundry => (rng.random_range(30.0..=64.0), rng.random_range(20.0..=44.0)),
-        Theme::Outfall => (rng.random_range(80.0..=106.0), rng.random_range(52.0..=82.0)),
         // Kitchen spills: small, and slightly wider than deep, like a splash on
         // a tiled floor.
         _ => (rng.random_range(24.0..=40.0), rng.random_range(14.0..=26.0)),
@@ -281,8 +446,7 @@ fn draw(
             Bias::Edges => room_edge_or_corridor(level, cx, cy),
             Bias::Props => near_a_prop(level, cx, cy),
         };
-        let bias_chance = if level.theme == Theme::Outfall { 0.58 } else { BIAS_CHANCE };
-        if !wet_place && rng.random::<f32>() < bias_chance {
+        if !wet_place && rng.random::<f32>() < BIAS_CHANCE {
             continue;
         }
         return Some(TileMap::tile_rect(cx, cy).center());
@@ -314,7 +478,8 @@ fn near_a_prop(level: &Level, cx: i32, cy: i32) -> bool {
     })
 }
 
-/// The cells a puddle may not be centred on, indexed `cy * cols + cx`.
+/// The cells a puddle or seabed patch may not be centred on, indexed
+/// `cy * cols + cx`.
 ///
 /// A rat-hole's tunnel is a run of `WallKind::RatHole` cells (the hole's own
 /// cell is a wall and could never be a centre anyway), so the face — the floor
@@ -373,12 +538,15 @@ fn blocked_cells(level: &Level) -> Vec<bool> {
                 .chain(level.objects.mousetraps.iter().map(|trap| trap.pos))
                 .chain(level.objects.crab_pots.iter().map(|trap| trap.pos))
                 .any(|pos| pos.dist(centre) < TRAP_CLEAR_PX);
-            let outfall_bank = level.theme == Theme::Outfall && (
-                level.touches_tidal_pit(centre, 16.0)
-                    || level.objects.lure_traps.iter().any(|trap| {
-                        trap.pos.dist_sq(centre) < TRAP_CLEAR_PX * TRAP_CLEAR_PX
-                    })
-            );
+            // The Outfall's tidal drops and lure banks are hazard pads on the
+            // seabed: a patch keeps clear of them, as a puddle did.
+            let outfall_bank = level.theme == Theme::Outfall
+                && (level.touches_tidal_pit(centre, 16.0)
+                    || level
+                        .objects
+                        .lure_traps
+                        .iter()
+                        .any(|trap| trap.pos.dist_sq(centre) < TRAP_CLEAR_PX * TRAP_CLEAR_PX));
             if on_a_trap || outfall_bank {
                 blocked[(cy * cols + cx) as usize] = true;
             }
@@ -411,6 +579,14 @@ mod tests {
         cells
     }
 
+    /// The cells the seabed coverage is measured on: open floor, off the pits.
+    fn eligible_cells(level: &Level) -> Vec<Vec2> {
+        open_cells(level)
+            .into_iter()
+            .filter(|&centre| level.pit_at(centre).is_none())
+            .collect()
+    }
+
     #[test]
     fn counts_per_theme_and_dry_floors_stay_dry() {
         for theme in Theme::all() {
@@ -438,6 +614,7 @@ mod tests {
         assert!(count_for(Theme::Laundry).is_some());
         assert!(count_for(Theme::Kitchen).is_some());
         assert!(count_for(Theme::Trailer).is_none());
+        assert!(count_for(Theme::Outfall).is_none(), "the Outfall is seabed, not lakes");
     }
 
     #[test]
@@ -456,13 +633,16 @@ mod tests {
                         "{theme:?} seed {}: a puddle is on the start",
                         level.seed
                     );
-                    let (rx, ry) = if theme == Theme::Outfall {
-                        (50.0..=150.0, 35.0..=115.0)
-                    } else {
-                        (24.0..=90.0, 14.0..=60.0)
-                    };
-                    assert!(rx.contains(&puddle.rx), "{theme:?}: half-width {}", puddle.rx);
-                    assert!(ry.contains(&puddle.ry), "{theme:?}: half-height {}", puddle.ry);
+                    assert!(
+                        (24.0..=90.0).contains(&puddle.rx),
+                        "{theme:?}: half-width {}",
+                        puddle.rx
+                    );
+                    assert!(
+                        (14.0..=60.0).contains(&puddle.ry),
+                        "{theme:?}: half-height {}",
+                        puddle.ry
+                    );
                 }
             }
         }
@@ -519,6 +699,7 @@ mod tests {
                 let with = Level::generate(theme, seed);
                 let mut without = Level::generate(theme, seed);
                 without.puddles.clear();
+                without.seabed_patches.clear();
                 assert_eq!(
                     with.tiles.cols(),
                     without.tiles.cols(),
@@ -631,6 +812,157 @@ mod tests {
                 "seed {}: only {biased} of {} puddles are along a wall or in a corridor",
                 level.seed,
                 level.puddles.len()
+            );
+        }
+    }
+
+    // ---- The Outfall's seabed patches ------------------------------------
+
+    #[test]
+    fn outfall_has_no_puddles_and_seabed_patches_in_band() {
+        for seed in 0..4 {
+            let level = Level::generate(Theme::Outfall, seed);
+            assert!(
+                level.puddles.is_empty(),
+                "seed {seed}: the Outfall still has {} puddles",
+                level.puddles.len()
+            );
+            let n = level.seabed_patches.len();
+            assert!(
+                (SEABED_PATCH_COUNT.0..=SEABED_PATCH_COUNT.1).contains(&n),
+                "seed {seed}: {n} patches, wanted {}..={}",
+                SEABED_PATCH_COUNT.0,
+                SEABED_PATCH_COUNT.1
+            );
+            let cells = eligible_cells(&level);
+            let covered = cells
+                .iter()
+                .filter(|&&centre| {
+                    level
+                        .seabed_patches
+                        .iter()
+                        .any(|patch| patch.contains(centre))
+                })
+                .count();
+            let share = covered as f32 / cells.len().max(1) as f32;
+            assert!(
+                (0.25..=0.30).contains(&share),
+                "seed {seed}: seabed covers {:.3} of the open floor",
+                share
+            );
+            for kind in [
+                SeabedKind::Gravel,
+                SeabedKind::ShellGrit,
+                SeabedKind::Pebbles,
+                SeabedKind::Silt,
+                SeabedKind::Shingle,
+            ] {
+                assert!(
+                    level.seabed_patches.iter().any(|patch| patch.kind == kind),
+                    "seed {seed}: no {kind:?} patch"
+                );
+            }
+            // The seabed is not water: no cell on the floor is wet, on a patch
+            // or off it, and the pits are not water either.
+            for cy in 0..level.tiles.rows() {
+                for cx in 0..level.tiles.cols() {
+                    assert!(
+                        !level.wet_at(TileMap::tile_rect(cx, cy).center()),
+                        "seed {seed}: cell ({cx}, {cy}) is wet"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn outfall_patches_keep_the_puddle_placement_rules() {
+        for seed in 0..4 {
+            let level = Level::generate(Theme::Outfall, seed);
+            let blocked = blocked_cells(&level);
+            let cols = level.tiles.cols();
+            for patch in &level.seabed_patches {
+                let (cx, cy) = cell_of(patch.center);
+                assert!(
+                    matches!(level.tiles.get(cx, cy), TileKind::Open),
+                    "seed {seed}: a patch is centred on a wall cell ({cx}, {cy})"
+                );
+                assert!(
+                    !blocked[(cy * cols + cx) as usize],
+                    "seed {seed}: a patch sits on a blocked cell"
+                );
+                assert!(
+                    patch.center.dist(level.start) >= START_CLEAR_PX,
+                    "seed {seed}: a patch is on the start"
+                );
+                assert!(
+                    (36.0..=150.0).contains(&patch.rx),
+                    "seed {seed}: half-width {}",
+                    patch.rx
+                );
+                assert!(
+                    (22.0..=100.0).contains(&patch.ry),
+                    "seed {seed}: half-height {}",
+                    patch.ry
+                );
+                // Off the trap pads and the lure banks, by distance.
+                for trap in level
+                    .objects
+                    .sticky_traps
+                    .iter()
+                    .map(|t| t.pos)
+                    .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+                    .chain(level.objects.crab_pots.iter().map(|t| t.pos))
+                    .chain(level.objects.lure_traps.iter().map(|t| t.pos))
+                {
+                    assert!(
+                        trap.dist(patch.center) >= TRAP_CLEAR_PX,
+                        "seed {seed}: a patch covers a trap pad"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn outfall_scatter_follows_walls_and_plants() {
+        for seed in 0..4 {
+            let level = Level::generate(Theme::Outfall, seed);
+            let near = plant_reach_cells(&level);
+            let cols = level.tiles.cols();
+            let scatter: Vec<_> = level
+                .seabed_patches
+                .iter()
+                .filter(|patch| {
+                    matches!(
+                        patch.kind,
+                        SeabedKind::Gravel | SeabedKind::Pebbles | SeabedKind::ShellGrit
+                    )
+                })
+                .collect();
+            let placed = scatter
+                .iter()
+                .filter(|patch| {
+                    let (cx, cy) = cell_of(patch.center);
+                    room_edge_or_corridor(&level, cx, cy) || near[(cy * cols + cx) as usize]
+                })
+                .count();
+            assert!(
+                placed * 5 >= scatter.len() * 3,
+                "seed {seed}: only {placed} of {} scatter patches follow walls or plants",
+                scatter.len()
+            );
+        }
+    }
+
+    #[test]
+    fn seabed_patch_generation_is_deterministic() {
+        for seed in 0..3 {
+            let a = Level::generate(Theme::Outfall, seed);
+            let b = Level::generate(Theme::Outfall, seed);
+            assert_eq!(
+                a.seabed_patches, b.seabed_patches,
+                "seed {seed} is not repeatable"
             );
         }
     }

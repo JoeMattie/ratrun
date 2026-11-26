@@ -8483,7 +8483,7 @@ mod tests {
                     }
                 }
             }
-            "outfall-wet" | "outfall-pit" | "outfall-lure-ready" | "outfall-lure-warning"
+            "outfall-pit" | "outfall-lure-ready" | "outfall-lure-warning"
             | "outfall-lure-spent" | "outfall-surge" => {
                 use crate::game::hazards::{LurePhase, LURE_WARN_SECS};
                 hh.app.start_practice(Theme::Outfall);
@@ -8491,12 +8491,6 @@ mod tests {
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
                 match target.as_str() {
-                    "outfall-wet" => {
-                        let p = w.level.puddles.iter().map(|puddle| puddle.pos)
-                            .find(|&p| w.level.wet_at(p) && w.level.pit_at(p).is_none())
-                            .expect("wet sand");
-                        w.player.pos = p;
-                    }
                     "outfall-pit" => {
                         let pit = w.level.objects.tidal_pits.first().expect("tidal drop");
                         let edge = pit.rect.to_world();
