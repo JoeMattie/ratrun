@@ -1438,7 +1438,7 @@ pub fn ripcord_system(
         * player.damage_mult()
         * (1.0 + crate::game::ecs::systems::weapons_wave3b::SUPER_DASH_DAMAGE_PER_CHARGE * charge);
     let kind = WeaponKind::SuperDash;
-    let taut = track.segment.is_none();
+    let taut = !track.live_this_tick;
     let start = track.route_start();
     let legs = track.route_len();
 
@@ -3187,6 +3187,15 @@ mod tests {
         use crate::game::ecs::systems::weapons_wave3b;
         let mut w = evolved_world(WeaponKind::SuperDash); // L5: 38 dmg, 6 px radius
         let origin = w.player.pos;
+        let (cx, cy) = crate::game::collision::cell_of(origin);
+        w.level.tiles.fill_cells(
+            cx + 1,
+            cy - 1,
+            1,
+            3,
+            TileKind::Wall(crate::game::art_walls::WallKind::Solid),
+        );
+        w.level.tiles.rebuild_masks();
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.vel = Vec2::new(58.0, 0.0);
         w.player.dash_cd = 0.0;
@@ -3214,8 +3223,9 @@ mod tests {
         }
         assert_eq!(hp_of(&w, body), after_dash, "one dash hit per body");
         assert_eq!(w.player.dash_active, 0.0, "the dash is over");
-        // The tick that ended the dash still recorded its last leg, so the cord
-        // is taut from the next tick on.
+        let track = w.ecs.resource::<DashTrack>();
+        assert!(track.segment.is_none(), "the wall should stop movement early");
+        assert_eq!(track.route_life, RIPCORD_SECS, "the wall must not start the fuse early");
 
         // The cord: one more dash hit, and the body is dragged back toward the
         // departure point.

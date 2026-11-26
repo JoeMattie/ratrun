@@ -2504,7 +2504,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     };
     let bar_block: u16 = if bar_w > 0 { bar_w + 2 } else { 0 };
     // Pad the state word to a steady width so READY ⇄ 3.4s does not shove the
-    // HP/XP divider around (only DASHING, which is 0.16 s, is wider).
+    // HP/XP divider around (only DASHING is wider).
     let status_w = (state.dash_status.chars().count() as u16).max(5);
     let dash_width = (sep_w + dash_text_w + bar_block + status_w + 2).min(area.width);
     let meters = area.width.saturating_sub(dash_width);

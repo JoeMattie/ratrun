@@ -3080,8 +3080,9 @@ impl World {
                     .segment
                     .map_or(5.0, |(a, b)| a.dist(b))
                     .clamp(3.0, 8.0);
-                let comb_len = (track.legs.max(1) as f32 * step_len).clamp(10.0, 26.0);
-                let dash_frac = (self.player.dash_active / 0.16).clamp(0.0, 1.0);
+                let comb_len = (track.legs.max(1) as f32 * step_len).clamp(10.0, 52.0);
+                let dash_frac = (self.player.dash_active / super::ecs::systems::player::DASH_SECS)
+                    .clamp(0.0, 1.0);
                 art_wave3a::draw_super_dash_comb(
                     pb,
                     self.player.pos,

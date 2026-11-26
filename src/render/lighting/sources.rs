@@ -275,7 +275,8 @@ impl LightMap {
 
         // Dash cyan-white burst light.
         if scene.player.dash_active > 0.0 {
-            let k = (scene.player.dash_active / 0.16).clamp(0.2, 1.0);
+            let k = (scene.player.dash_active / crate::game::ecs::systems::player::DASH_SECS)
+                .clamp(0.2, 1.0);
             self.lights.push(PointLight {
                 x: px,
                 y: py,

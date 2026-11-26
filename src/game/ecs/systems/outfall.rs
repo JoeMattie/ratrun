@@ -85,7 +85,7 @@ pub fn outfall_motion_system(
                     sfx.0.push(Sfx::Hurt);
                 }
             }
-        } else if player.dash_active <= 0.0 && dash.segment.is_none() {
+        } else if player.dash_active <= 0.0 && !dash.live_this_tick {
             let step = if player.buffs.is_giant() { shove * 0.5 } else { shove };
             player.pos = clamp_outfall_displacement(&level, player.pos, step, radius, class);
         }
@@ -415,6 +415,13 @@ mod tests {
         world.player.dash_active = 0.1;
         let before = world.player.pos;
         motion(&mut world, 19.12, 1.15);
+        assert_eq!(world.player.pos, before);
+
+        // The movement system has spent the final dash time at a wall. Its
+        // timer is empty and it has no swept leg, but surge still skips it.
+        world.player.dash_active = 0.0;
+        world.ecs.resource_mut::<DashTrack>().record(before, before, true);
+        motion(&mut world, 18.61, 0.65);
         assert_eq!(world.player.pos, before);
     }
 

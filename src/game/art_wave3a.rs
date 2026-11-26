@@ -909,7 +909,7 @@ pub fn draw_super_dash_comb(
     let navy: Rgb = (16, 42, 92);
 
     // 1. Blazing white-cyan central spine along the travelled segment behind `head`.
-    let steps = length.ceil().clamp(6.0, 34.0) as i32;
+    let steps = length.ceil().max(6.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let p = head - dir * (t * length);

@@ -665,8 +665,8 @@ pub fn super_dash_system(
     let radius = w.dash_radius();
     let dmg = w.damage() * player.damage_mult();
     // A charged dash (the player held the dash input and released it) is wider
-    // and hits harder; the arms above are the whole curve, so a tap dash — the
-    // pre-charge behaviour, and every scripted `charge = 0` — is unchanged.
+    // and hits harder. A tap dash (`charge = 0`) uses the base radius and
+    // damage along its travelled path.
     let charge = track.charge.clamp(0.0, 1.0);
     let radius = radius * (1.0 + SUPER_DASH_RADIUS_PER_CHARGE * charge);
     let dmg = dmg * (1.0 + SUPER_DASH_DAMAGE_PER_CHARGE * charge);
@@ -1354,8 +1354,10 @@ mod tests {
         w.player.dash_cd = 0.0;
         let p = w.player.pos;
         let crossed = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
+        let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(46.0, 0.0), 1.0);
         let aside = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 40.0), 1.0);
         let hp_crossed = enemy_hp(&w, crossed);
+        let hp_far = enemy_hp(&w, far);
         let hp_aside = enemy_hp(&w, aside);
 
         // First dash tick: the press and the movement happen together.
@@ -1372,15 +1374,14 @@ mod tests {
             "the crossed body took no dash damage"
         );
         assert_eq!(enemy_hp(&w, aside), hp_aside, "an un-crossed body was hit");
+        assert_eq!(enemy_hp(&w, far), hp_far, "the first tick reached too far");
 
         // The rest of the dash: the crossed body never takes a second hit.
-        for _ in 0..12 {
-            w.begin_tick(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
-            w.ecs
-                .run_system_cached(crate::game::ecs::systems::player::player_system)
-                .unwrap();
-            w.ecs.run_system_cached(super_dash_system).unwrap();
-            w.end_tick();
+        for _ in 0..40 {
+            if w.player.dash_active == 0.0 {
+                break;
+            }
+            tick_dash(&mut w);
         }
         assert_eq!(
             enemy_hp(&w, crossed),
@@ -1388,6 +1389,8 @@ mod tests {
             "the same body was hit twice by one dash"
         );
         assert!(w.player.dash_active == 0.0, "the dash should be over");
+        assert!(enemy_hp(&w, far) < hp_far, "the dash missed a body beyond its old reach");
+        assert_eq!(enemy_hp(&w, aside), hp_aside, "an un-crossed body was hit");
     }
 
     /// A dash on cooldown (a blocked press) buys no hit, and neither does the
@@ -1846,24 +1849,35 @@ mod tests {
             arm(&mut w, WeaponKind::SuperDash, 1);
             w.player.loadout.weapons[0].evolved = true;
             w.player.face = Vec2::new(1.0, 0.0);
-            w.player.vel = Vec2::new(58.0, 0.0);
+            // A fast loadout produces more than the old route cap of 96 legs.
+            w.player.loadout.stats.move_speed = 92.0;
+            w.player.vel = Vec2::new(92.0 * 3.2, 0.0);
             w.player.dash_cd = 0.0;
-            let p = w.player.pos;
-            let body = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
+            let p = w.level.arena * 0.5;
+            w.player.pos = p;
+            let body = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 4.0);
+            let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(170.0, 0.0), 4.0);
             let hp0 = enemy_hp(&w, body);
+            let hp_far = enemy_hp(&w, far);
             run_charged_dash(&mut w, charge);
             for _ in 0..40 {
+                if w.player.dash_active == 0.0 {
+                    break;
+                }
                 tick_dash(&mut w);
             }
+            assert_eq!(w.player.dash_active, 0.0);
+            assert_eq!(enemy_hp(&w, far) < hp_far, charge == 1.0);
             let taken = hp0 - enemy_hp(&w, body);
-            let route: f32 = w
-                .ecs
-                .resource::<DashTrack>()
-                .route()
-                .iter()
-                .map(|&(a, b)| a.dist(b))
-                .sum();
-            (taken, route)
+            let track = w.ecs.resource::<DashTrack>();
+            let route = track.route();
+            assert_eq!(route.first().unwrap().0, p);
+            assert_eq!(route.last().unwrap().1, w.player.pos);
+            if charge == 1.0 {
+                assert!(route.len() > 96, "the old cap would collapse part of the route");
+            }
+            let length = route.iter().map(|&(a, b)| a.dist(b)).sum();
+            (taken, length)
         };
         let (tap_dmg, tap_route) = run(0.0);
         let (full_dmg, full_route) = run(1.0);
@@ -1873,7 +1887,7 @@ mod tests {
             "a full charge hit for {full_dmg}, a tap for {tap_dmg}"
         );
         assert!(
-            full_route > tap_route * 1.3,
+            (full_route - tap_route * 2.0).abs() < 0.03,
             "the cord must keep the longer route: {full_route} vs {tap_route}"
         );
     }

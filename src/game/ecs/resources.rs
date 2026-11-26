@@ -1175,13 +1175,13 @@ fn laser_fade(progress: f32) -> f32 {
 /// How many bodies one dash can remember as already hit. A dash crosses a
 /// handful of bodies; the fixed history only exists so "once per target per
 /// dash" cannot allocate and cannot loop.
-pub const DASH_HIT_CAP: usize = 48;
+pub const DASH_HIT_CAP: usize = 96;
 
 /// **Ripcord**: seconds the dash's actual route stays taut after the dash, and
-/// the fixed number of travelled legs it can remember (a 0.16 s dash at 60 fps
-/// is ~10 legs; the cap bounds a large-`dt` or click-dash route).
+/// the fixed number of travelled legs it can remember (a 0.64 s full charge
+/// at 60 fps takes 39 ticks, with multiple collision sub-steps per tick).
 pub const RIPCORD_SECS: f32 = 0.6;
-pub const RIPCORD_SEG_CAP: usize = 96;
+pub const RIPCORD_SEG_CAP: usize = 192;
 
 /// Dash legs one tick can record. The dash moves in sub-steps shorter than the
 /// player radius (`player::PLAYER_SUBSTEP`), so a normal tick is one or two
@@ -1201,6 +1201,10 @@ pub const DASH_TICK_SEG_CAP: usize = 8;
 /// segment, so neither buys a hit.
 #[derive(Resource)]
 pub struct DashTrack {
+    /// The player spent a dash this tick, including a refill during a dash.
+    pub started_this_tick: bool,
+    /// This tick used dash movement, including its final or wall-blocked tick.
+    pub live_this_tick: bool,
     /// `Some((from, to))` while this tick's movement happened during a dash
     /// **and actually moved the rat**. A dash pressed straight into a wall
     /// resolves to its starting point and records nothing, so a degenerate
@@ -1244,6 +1248,8 @@ pub struct DashTrack {
 impl Default for DashTrack {
     fn default() -> Self {
         Self {
+            started_this_tick: false,
+            live_this_tick: false,
             segment: None,
             segs: [(Vec2::ZERO, Vec2::ZERO); DASH_TICK_SEG_CAP],
             seg_len: 0,
@@ -1268,6 +1274,7 @@ impl DashTrack {
     /// snap any cord still hanging from the previous dash.
     #[inline]
     pub fn begin(&mut self) {
+        self.started_this_tick = true;
         self.hit_len = 0;
         self.legs = 0;
         self.boss_hit = false;
@@ -1289,6 +1296,7 @@ impl DashTrack {
     /// rat's own position.
     #[inline]
     pub fn record(&mut self, frame_start: Vec2, to: Vec2, live: bool) {
+        self.live_this_tick = live;
         if live && frame_start.dist_sq(to) > 0.000_1 {
             self.segment = Some((frame_start, to));
             self.legs = self.legs.saturating_add(1);
