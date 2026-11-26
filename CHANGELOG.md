@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Touch controls and app icon.** On-screen translucent floating stick and
+  Dash, Active, Pause, Back and Map plates drawn directly in the terminal
+  grid, plus pixel-art PWA home-screen icons based on the title rat plate.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP

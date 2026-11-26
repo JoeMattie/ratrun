@@ -55,6 +55,7 @@ pub mod graphics;
 pub mod testbed;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod outfall_current;
+pub mod touch_art;
 
 /// Package version stamped in the top-left corner of every screen.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
