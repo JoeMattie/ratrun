@@ -1259,9 +1259,7 @@ fn outfall_front(wx: i32, fy: i32, bay_h: u32, has_w: bool, has_e: bool) -> Rgb 
             } else {
                 OUTFALL_LUT.wood_lo[wi]
             }
-        } else if fy == 0 {
-            OUTFALL_LUT.wood_hi[wi]
-        } else if px == 1 || px == 2 {
+        } else if fy == 0 || px == 1 || px == 2 {
             OUTFALL_LUT.wood_hi[wi]
         } else if px >= 6 {
             OUTFALL_LUT.wood_lo[wi]
@@ -6280,7 +6278,7 @@ mod tests {
                     2,
                     77,
                     theme,
-                    WallKind::OneWayGate {
+                    WallKind::OneWayDoor {
                         dir: Cardinal::South,
                     },
                     NeighborMask::from_cardinals(false, true, false, true),

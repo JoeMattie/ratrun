@@ -258,13 +258,15 @@ fn leaves_escape(ctx: &BossContext<'_>, boss: &Boss, shape: HazardShape, pad: f3
     if !shape.contains(rat, pad) {
         return true;
     }
+    let separation = HEAD_RADIUS + ctx.player_radius;
+    let separation_sq = separation * separation;
     [16.0, 28.0, 44.0, 60.0].into_iter().any(|distance| {
         (0..16).any(|i| {
             let delta = Vec2::from_angle(i as f32 * TAU / 16.0) * distance;
             let end = path_end(ctx.level, rat, delta, ctx.player_radius, SizeClass::Small);
             !shape.contains(end, pad)
-                && (end.dist_sq(boss.pos) > (HEAD_RADIUS + ctx.player_radius).powi(2)
-                    || rat.dist_sq(boss.pos) <= (HEAD_RADIUS + ctx.player_radius).powi(2))
+                && (end.dist_sq(boss.pos) > separation_sq
+                    || rat.dist_sq(boss.pos) <= separation_sq)
         })
     })
 }
@@ -319,7 +321,7 @@ fn snuff(ctx: &BossContext<'_>, boss: &mut Boss) {
         if p.dist_sq(pos) > end.dist_sq(pos) {
             end = p;
         }
-        if end.dist_sq(pos) >= (reach - 0.01).powi(2) {
+        if end.dist_sq(pos) >= (reach - 0.01) * (reach - 0.01) {
             break;
         }
     }
@@ -461,14 +463,13 @@ impl BossController for LanternController {
             return;
         };
         boss.lantern.pull = None;
-        if state.is_neutral()
-            || (matches!(state, FeintApproach | FeintTell | DarkTell | GapeTell)
-                && !boss.lantern.locked)
+        if boss.phase > boss.lantern.phase
+            && (state.is_neutral()
+                || (matches!(state, FeintApproach | FeintTell | DarkTell | GapeTell)
+                    && !boss.lantern.locked))
         {
-            if boss.phase > boss.lantern.phase {
-                commit_phase(ctx, boss);
-                return;
-            }
+            commit_phase(ctx, boss);
+            return;
         }
 
         advance_decoy(ctx.level, boss, ctx.dt);

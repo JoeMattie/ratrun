@@ -264,6 +264,7 @@ pub fn draw_ink(
 }
 
 /// Re-stamp a published combat footprint at the ink pass's pixel scale.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_shape_ink(
     pb: &mut PixelBuffer,
     shape: &HazardShape,

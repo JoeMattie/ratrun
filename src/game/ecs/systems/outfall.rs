@@ -48,6 +48,7 @@ fn active_slice(previous_elapsed: f32, elapsed: f32) -> f32 {
     (active_until(end) - active_until(start)).max(0.0) as f32
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn outfall_motion_system(
     mut commands: Commands,
     mut level: ResMut<Level>,
@@ -444,7 +445,7 @@ mod tests {
         let pos = world.player.pos;
         let at = pos + Vec2::new(24.0, 0.0);
         world.level.objects.lure_traps.push(LureTrap::new(pos, vec![at]));
-        let mut expected_rng = world.rng.clone();
+        let mut expected_rng = patch().rng;
         motion(&mut world, 1.0, 0.01);
         assert_eq!(world.level.objects.lure_traps[0].phase, LurePhase::Warning);
         // An already armed trap still resolves after the arrival gate.

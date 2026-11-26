@@ -349,11 +349,8 @@ fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
             assert_eq!(coins.iter(&w.ecs).count(), 0, "{kind:?}: no boss coin");
         }
     }
-    // The five `Theme::all()` floors field eight bosses between them (the
-    // Magpie's flatbed is not a menu floor): the Cat and the Horseshoe, the
-    // Sweeper and SUBJECT R-01, the Mower and the King Cobra, the Mangle, the
-    // Night Edition.
-    assert_eq!(cleared, 8, "every pool mate of every floor was cleared");
+    // The six generated floors field nine bosses, including The Lantern.
+    assert_eq!(cleared, 9, "every generated-floor pool mate was cleared");
 }
 
 /// The boss's death breaks the horde, and that despawn has to happen **after**

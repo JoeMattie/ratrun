@@ -810,7 +810,15 @@ fn draw_miniboss_ui(
         return 0;
     }
     // A live miniboss: two rows (name + bar).
-    if let Some((name, hp, max_hp)) = world.miniboss_hp() {
+    if let Some((body, miniboss)) = world.living_miniboss() {
+        let name = miniboss.kind.name();
+        let (hp, max_hp) = (body.hp.max(0.0), body.max_hp);
+        let (title_ink, bar_ink, glyph) = if world.level.theme == crate::game::level::Theme::Outfall {
+            let style = crate::game::art_miniboss::banner_style(miniboss.kind);
+            (palette::to_color(style.accent), palette::to_color(style.bar), style.glyph)
+        } else {
+            (COAT, WARN_AMBER, '◆')
+        };
         let ratio = (hp.max(0.0) / max_hp.max(1.0)).clamp(0.0, 1.0);
         let bar_w = (game.width * 46 / 100).clamp(18, 54).min(game.width.saturating_sub(2));
         if bar_w < 12 {
@@ -820,7 +828,7 @@ fn draw_miniboss_ui(
         state.miniboss_text.clear();
         let _ = write!(
             state.miniboss_text,
-            " ◆ {}  {:.0}/{:.0} ",
+            " {glyph} {}  {:.0}/{:.0} ",
             name.to_uppercase(),
             hp.max(0.0),
             max_hp
@@ -834,15 +842,15 @@ fn draw_miniboss_ui(
             &state.miniboss_text,
             tw as usize,
             Style::default()
-                .fg(COAT)
+                .fg(title_ink)
                 .bg(PLATE)
                 .add_modifier(Modifier::BOLD),
         );
-        // Bar: filled part in amber, the rest in the track colour.
+        // Bar: filled part in the encounter's accent, the rest in the track colour.
         // A living miniboss always shows at least one lit cell.
         let filled = ((bar_w as f32 * ratio).round() as u16).max(u16::from(hp > 0.0));
         for i in 0..bar_w {
-            let c = if i < filled { WARN_AMBER } else { TRACK };
+            let c = if i < filled { bar_ink } else { TRACK };
             buf[(bx + i, y + 1)].set_char('█').set_style(Style::default().fg(c).bg(PLATE));
         }
         return 2 + lead;

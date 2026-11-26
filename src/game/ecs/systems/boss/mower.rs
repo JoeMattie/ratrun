@@ -276,7 +276,8 @@ impl BossController for MowerController {
             | BossState::HorseshoeCrab(_)
             | BossState::MegaRat(_)
             | BossState::Hawk(_)
-            | BossState::Cobra(_) => {}
+            | BossState::Cobra(_)
+            | BossState::Lantern(_) => {}
         }
 
         // The art owns the multiplier; set it after the transitions so the

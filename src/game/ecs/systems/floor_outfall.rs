@@ -334,7 +334,8 @@ fn arm_attack(e: &mut Enemy, level: &Level, rat: Vec2) -> bool {
     let aim = (rat - start).normalized();
     let dir = if aim == Vec2::ZERO { facing(e) } else { aim };
     let remaining = if e.kind == EnemyKind::Skater {
-        if rat.dist_sq(start) > (SKATER_SPLASH_LEN + PLAYER_RADIUS).powi(2)
+        let reach = SKATER_SPLASH_LEN + PLAYER_RADIUS;
+        if rat.dist_sq(start) > reach * reach
             || !level.wet_at(start)
         {
             return false;

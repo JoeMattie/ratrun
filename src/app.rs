@@ -7157,6 +7157,15 @@ mod tests {
         use ratatui::style::Color::*;
         match c {
             Rgb(r, g, b) => (r, g, b),
+            Indexed(i @ 16..=231) => {
+                let n = usize::from(i - 16);
+                let cube = [0, 95, 135, 175, 215, 255];
+                (cube[n / 36], cube[(n / 6) % 6], cube[n % 6])
+            }
+            Indexed(i @ 232..=255) => {
+                let grey = 8 + 10 * (i - 232);
+                (grey, grey, grey)
+            }
             White => (235, 235, 235),
             Red => (220, 70, 70),
             LightRed => (255, 120, 120),
@@ -8282,6 +8291,9 @@ mod tests {
             })
             .unwrap_or((env_size("RATRUN_DUMP_W", 120), env_size("RATRUN_DUMP_H", 46)));
         let mut hh = Harness::new(w, h);
+        if target.starts_with("outfall-") || target.starts_with("lantern-") {
+            hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+        }
         hh.frame(&[]);
 
         match target.as_str() {
@@ -8357,6 +8369,41 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
+            t if t.starts_with("outfall-enemy-") => {
+                use crate::game::collision::SizeClass;
+                use crate::game::ecs::systems::floor_outfall;
+                use crate::game::enemy::{Enemy, OutfallAttack};
+                let name = t.trim_start_matches("outfall-enemy-").replace('-', "");
+                let kind = EnemyKind::all()
+                    .into_iter()
+                    .find(|kind| kind.name() == name)
+                    .expect("Outfall enemy name");
+                hh.app.start_practice(Theme::Outfall);
+                hh.frame(&[KeyCode::Enter]);
+                let world = hh.app.world.as_mut().unwrap();
+                world.configure_testbed();
+                let pos = world.testbed_spawn_point(
+                    Vec2::new(1.0, 0.0), 17.0, kind.radius(), SizeClass::of_radius(kind.radius()),
+                );
+                let dir = (world.player.pos - pos).normalized();
+                let entity = world.spawn_enemy(kind, pos, 1.0);
+                let mut enemy = world.ecs.get_mut::<Enemy>(entity).unwrap();
+                enemy.facing = dir;
+                let tell = match kind {
+                    EnemyKind::Skater => Some(floor_outfall::SKATER_TELL_SECS),
+                    EnemyKind::Lampfish => Some(floor_outfall::LAMPFISH_TELL_SECS),
+                    _ => None,
+                };
+                if let Some(duration) = tell {
+                    enemy.outfall.attack = OutfallAttack::Tell {
+                        start: pos,
+                        dir,
+                        remaining: duration * 0.35,
+                    };
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             t if t.starts_with("outfall-miniboss-") => {
                 use crate::game::collision::SizeClass;
                 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossState};
@@ -8400,9 +8447,13 @@ mod tests {
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
                 w.player.loadout.weapons.clear();
+                let scene = &t["lantern-".len()..];
+                if !matches!(scene, "decoy" | "dark") {
+                    // Isolate the lure's light for the arrival and reveal plates.
+                    w.level.objects.lights.clear();
+                }
                 assert!(w.force_boss_here(BossKind::Lantern));
                 let boss = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
-                let scene = &t["lantern-".len()..];
                 let start_frames = if scene == "arrival" { 45 } else { 150 };
                 for _ in 0..start_frames {
                     w.update(1.0 / 60.0, Vec2::ZERO, false);
@@ -8438,10 +8489,8 @@ mod tests {
                     }
                     assert!(captured, "Lantern did not reach {scene}");
                 }
-                if scene != "arrival" {
-                    let body = w.ecs.get::<Boss>(boss).unwrap();
-                    w.cam_focus = Some((w.player.pos + body.pos) * 0.5);
-                }
+                let body = w.ecs.get::<Boss>(boss).unwrap();
+                w.cam_focus = Some((w.player.pos + body.pos) * 0.5);
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
@@ -10864,7 +10913,11 @@ mod tests {
             .unwrap();
             return;
         }
-        let buf = hh.terminal.backend().buffer().clone();
+        let mut buf = hh.terminal.backend().buffer().clone();
+        if std::env::var("RATRUN_DUMP_COLOR").is_ok_and(|mode| mode == "256") {
+            use crate::term::{sanitize_with, ColorDepth, GlyphSet};
+            sanitize_with(&mut buf, GlyphSet::Unicode, ColorDepth::Ansi256);
+        }
         if let Some(dir) = std::env::var_os("RATRUN_DUMP_DIR") {
             use std::fmt::Write;
             let dir = std::path::PathBuf::from(dir);

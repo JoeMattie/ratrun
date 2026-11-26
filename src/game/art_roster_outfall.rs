@@ -50,11 +50,8 @@ const FLASH_MAX: f32 = 0.12;
 /// used as a fallback if `floor_outfall::lampfish_bulb` returns `None`.
 const LAMPFISH_STALK_REACH: f32 = 16.0;
 /// Skater splash tell duration (seconds, `OUTFALL_PLAN.md` §3).
-const SKATER_TELL_SECS: f32 = 0.45;
 /// Lampfish warning ring duration (seconds, `OUTFALL_PLAN.md` §3).
-const LAMPFISH_WARN_SECS: f32 = 0.40;
 /// Lampfish lunge duration (seconds, `OUTFALL_PLAN.md` §3).
-const LAMPFISH_LUNGE_SECS: f32 = 0.18;
 /// Pistol Shrimp charge window before firing (seconds; 2.2 s cadence).
 const PISTOL_CHARGE_SECS: f32 = 0.55;
 /// Fry School radius threshold separating bunched (r=6) from dark (r=12).
@@ -528,53 +525,39 @@ enum TellView {
     },
 }
 
-/// CONTRACT SEAM with `outfall-roster` (`systems/floor_outfall.rs`):
-/// reads `floor_outfall::outfall_enemy_tell(e)` and `floor_outfall::lampfish_bulb(e)`
-/// and normalizes them into [`TellView`]. All field accesses on `OutfallTell`
-/// live in this one function so any integration naming reconciliation is local.
+/// Read the locked endpoints and width from the simulation footprint.
 fn tell_view(e: &Enemy) -> Option<TellView> {
+    use crate::game::ecs::systems::boss::HazardShape;
     let tell = floor_outfall::outfall_enemy_tell(e)?;
-    let dir = if tell.dir.len_sq() > 1e-4 {
-        tell.dir.normalized()
-    } else if e.facing.len_sq() > 1e-4 {
-        e.facing.normalized()
-    } else {
-        Vec2::new(1.0, 0.0)
-    };
-    let active = matches!(tell.phase, floor_outfall::OutfallTellPhase::Active);
-    match tell.kind {
-        floor_outfall::OutfallTellKind::SkaterSplash => {
-            let progress = if active {
-                1.0
-            } else {
-                (1.0 - tell.remaining / SKATER_TELL_SECS).clamp(0.0, 1.0)
-            };
+    let active = tell.phase == floor_outfall::OutfallTellPhase::Strike;
+    match tell.shape {
+        HazardShape::Rect { center, facing, half, half_perp } => {
+            let progress = (1.0 - tell.remaining / floor_outfall::SKATER_TELL_SECS).clamp(0.0, 1.0);
             Some(TellView::SkaterSplash {
-                start: tell.origin,
-                end: tell.origin + dir * tell.len,
-                half_width: tell.half_width.max(1.5),
+                start: center - facing * half,
+                end: center + facing * half,
+                half_width: half_perp,
                 progress,
                 active,
             })
         }
-        floor_outfall::OutfallTellKind::LampfishLunge => {
+        HazardShape::Corridor { from, to, .. } => {
             let duration = if active {
-                LAMPFISH_LUNGE_SECS
+                floor_outfall::LAMPFISH_LUNGE_SECS
             } else {
-                LAMPFISH_WARN_SECS
+                floor_outfall::LAMPFISH_TELL_SECS
             };
             let progress = (1.0 - tell.remaining / duration).clamp(0.0, 1.0);
-            let bulb = floor_outfall::lampfish_bulb(e)
-                .unwrap_or_else(|| e.pos + dir * LAMPFISH_STALK_REACH);
             Some(TellView::LampfishLunge {
-                start: tell.origin,
-                end: tell.origin + dir * tell.len,
-                bulb,
-                remaining: tell.remaining.max(0.0),
+                start: from,
+                end: to,
+                bulb: floor_outfall::lampfish_bulb(e)?,
+                remaining: tell.remaining,
                 progress,
                 active,
             })
         }
+        _ => None,
     }
 }
 
@@ -584,7 +567,7 @@ fn lampfish_flicker_hi(remaining: f32, active: bool) -> bool {
     if active {
         return true;
     }
-    let elapsed = (LAMPFISH_WARN_SECS - remaining).max(0.0);
+    let elapsed = (floor_outfall::LAMPFISH_TELL_SECS - remaining).max(0.0);
     (((elapsed * 6.0).floor() as i32) & 1) == 0
 }
 
@@ -620,13 +603,13 @@ pub(crate) fn draw_sand_hopper(
     for side in [-1.0f32, 1.0] {
         let hip = lf.px(-1.3 * s, side * 1.3 * s);
         let knee = lf.px((-2.3 - 0.9 * hop) * s, side * (2.6 - 0.4 * hop) * s);
-        let foot = lf.px((-3.6 - 1.3 * hop) * s, side * (2.0 + 0.5 * stride * side) * s);
+        let foot = lf.px((-3.6 - 1.3 * hop) * s, side * (2.0 + 0.95 * stride * side) * s);
         line(pb, hip, knee, leg_c, 0.95);
         line(pb, knee, foot, sh_c, 0.92);
         pb.plot(foot.0, foot.1, hi_c);
 
         let f0 = lf.px(0.8 * s, side * 1.4 * s);
-        let f1 = lf.px((1.7 + 0.5 * stride * side) * s, side * 2.5 * s);
+        let f1 = lf.px((1.7 + 0.95 * stride * side) * s, side * 2.5 * s);
         line(pb, f0, f1, leg_c, 0.90);
     }
 
@@ -652,7 +635,7 @@ pub(crate) fn draw_sand_hopper(
             let tail = sd_taper(
                 u,
                 v,
-                (-1.0 * s, 0.0),
+                (-s, 0.0),
                 ((-2.8 - 0.5 * hop) * s, 0.25 * stride * s),
                 1.35 * s,
                 0.55 * s,
@@ -1023,7 +1006,7 @@ pub(crate) fn draw_skater(
         line(pb, f_hip, f_knee, leg_c, 0.95);
         line(pb, f_knee, f_tip, leg_hi, 0.92);
 
-        let r_hip = lf.px(-1.0 * s + cock * 0.3, side * 1.0 * s);
+        let r_hip = lf.px(-s + cock * 0.3, side * 1.0 * s);
         let r_knee = lf.px(
             (-2.8 * spread - 0.8 * stroke * side) * s,
             side * (4.0 * spread) * s,
@@ -1171,7 +1154,7 @@ pub(crate) fn draw_pistol_shrimp(
     for side in [-1.0f32, 1.0] {
         for k in [-1.0f32, 0.0] {
             let l0 = lf.px((-0.8 + k * 1.1) * s + shift_u, side * 1.4 * s);
-            let l1 = lf.px((-1.2 + k * 1.1 + 0.5 * stride * side) * s + shift_u, side * 2.8 * s);
+            let l1 = lf.px((-1.2 + k * 1.1 + 0.95 * stride * side) * s + shift_u, side * 2.8 * s);
             line(pb, l0, l1, sh_c, 0.90);
             pb.plot(l1.0, l1.1, hi_c);
         }
@@ -1498,7 +1481,7 @@ pub(crate) fn draw_lampfish(
             let lit = lf.lit(nu, nv);
             let dome = (1.0 - (nu * nu * 0.45 + nv * nv * 0.55)).clamp(0.0, 1.0);
             let mut lum = 0.28 + 0.30 * dome + 0.52 * lit;
-            if u > 1.2 * s && d > -1.0 * s {
+            if u > 1.2 * s && d > -s {
                 lum += 0.22;
             }
             let mut col = shade3(LAMP_DEEP, LAMP_MID, LAMP_HI, lum);
@@ -2281,7 +2264,7 @@ mod tests {
             let mut a = body(kind);
             let mut b = body(kind);
             a.anim = 0.4;
-            b.anim = 2.2;
+            b.anim = 4.1;
             assert!(
                 painted(&drawn(&a)) != painted(&drawn(&b)),
                 "{kind:?} needs distinct animation frames"

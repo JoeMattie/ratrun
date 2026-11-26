@@ -1261,12 +1261,12 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
         }
         BossArtView::Lantern(v) => {
             let dir = facing_of(v.facing);
-            b.point(v.head, art_boss_lantern::HEAD_RADIUS);
+            b.point(v.pos, art_boss_lantern::HEAD_RADIUS);
             if v.state != LanternState::ArrivalLure {
                 // The visible body trails the head. Bound its long axis
                 // separately from the reach of the lure and locked attacks.
-                b.point(v.head - dir * 30.0, 24.0);
-                b.point(v.head - dir * 66.0, 16.0);
+                b.point(v.pos - dir * 30.0, 24.0);
+                b.point(v.pos - dir * 66.0, 16.0);
             }
             for bulb in [v.real_bulb, v.decoy].into_iter().flatten() {
                 b.point(bulb.pos, 6.0);

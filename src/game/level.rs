@@ -302,7 +302,7 @@ impl Palette {
             Theme::Outfall => Palette {
                 bg: (42, 43, 37),
                 bg_alt: (49, 49, 42),
-                wall: (30, 47, 49),
+                wall: (34, 58, 63),
                 wall_edge: (60, 91, 89),
                 accent: (105, 230, 223),
                 blood: (96, 158, 155),

@@ -147,7 +147,8 @@ impl BossController for HorseshoeCrabController {
             | BossState::Magpie(_)
             | BossState::MegaRat(_)
             | BossState::Hawk(_)
-            | BossState::Cobra(_) => {}
+            | BossState::Cobra(_)
+            | BossState::Lantern(_) => {}
         }
 
         // The art owns the multiplier and the contact rule; apply them after the

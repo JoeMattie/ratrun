@@ -91,5 +91,4 @@ pub mod art_pickups3;
 pub mod art_wave5;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod art_boss_lantern;
-#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod art_roster_outfall;

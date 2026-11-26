@@ -559,11 +559,11 @@ pub struct RouteChip<'a> {
     pub chosen: bool,
 }
 
+pub const MAX_ROUTE_CHIPS: usize = 3;
+
 #[derive(Clone, Copy, Debug)]
 pub struct KeepThreeView<'a, const ROUTES: usize = MAX_ROUTE_CHIPS> {
-    pub const MAX_ROUTE_CHIPS: usize = 3;
-
-/// Sector just cleared (unchosen upgrades stay behind here).
+    /// Sector just cleared (unchosen upgrades stay behind here).
     pub from_level: CampaignLevel,
     /// Next sector the player is packing for.
     pub next_level: CampaignLevel,

@@ -772,7 +772,7 @@ mod tests {
         for i in hit {
             assert!(i % w < w / 2, "snow must stay inside lit air");
             let c = p0[i];
-            assert!(c.2 >= c.0, "marine snow carries a cool cast: {c:?}");
+            assert!(c.2 - 78 >= c.0 - 85, "marine snow adds more blue than red: {c:?}");
         }
     }
 

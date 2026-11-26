@@ -944,7 +944,7 @@ impl World {
     // ---- Named minibosses (wave 3) -------------------------------------
 
     /// The living miniboss, if one is active.
-    fn living_miniboss(&self) -> Option<(&Enemy, &super::ecs::systems::miniboss::Miniboss)> {
+    pub(crate) fn living_miniboss(&self) -> Option<(&Enemy, &super::ecs::systems::miniboss::Miniboss)> {
         self.ecs.iter_entities().find_map(|entity| {
             let e = entity.get::<Enemy>()?;
             let mb = entity.get::<super::ecs::systems::miniboss::Miniboss>()?;

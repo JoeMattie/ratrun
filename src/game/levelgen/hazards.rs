@@ -34,7 +34,7 @@ use crate::game::collision::{SizeClass, TILE_F, TileKind, TileMap};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::enemy::EnemyKind;
 use crate::game::hazards::{DripShaft, InkPad, SewerOpening, SteamGrate};
-use crate::game::level::{MazeSection, RoomKind, Theme, TileRect};
+use crate::game::level::{Level, MazeSection, RoomKind, Theme, TileRect};
 use crate::math::Vec2;
 
 use super::layout::Layout;
@@ -505,10 +505,9 @@ pub(super) fn tidal_exclusions(level: &Level) -> Vec<TileRect> {
     for maze in &level.mazes {
         avoid.extend([maze.ring.inflate(4), around(maze.fork, 3)]);
     }
-    avoid.extend(level.tiles.iter_walls().filter_map(|(x, y, kind)| {
-        matches!(kind, WallKind::Doorway { .. } | WallKind::RatHole { .. })
-            .then(|| around((x, y), 2))
-    }));
+    avoid.extend(level.tiles.iter_walls()
+        .filter(|&(_, _, kind)| matches!(kind, WallKind::Doorway { .. } | WallKind::RatHole { .. }))
+        .map(|(x, y, _)| around((x, y), 2)));
     avoid.extend(level.objects.one_way_doors.iter().map(|door| around(door.cell, 3)));
     avoid.extend(level.objects.shop_holes.iter().map(|shop| around(shop.mouth, 3)));
     avoid.extend(level.objects.sticky_traps.iter().map(|trap| around(cell_of(trap.pos), 2)));

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The Outfall.** The storm gate opens a third Sector 2 route after the
+  Sewer. Cross wet sand bowls and pilings under the surge, skirt tidal drops,
+  and look for lure traps that release Congers.
+- **Outfall encounters.** Eight ordinary enemies join the roster and four
+  named encounters guard the return culvert. The Library tracks their moves,
+  the new floor and its fixtures.
+- **The Lantern.** An anglerfish lures you in, snuffs sconces and casts a
+  decoy before pulling you toward its jaws.
+- **Outfall lighting and foreground.** Cyan wall lamps, caustics and marine
+  snow light the culvert. Kelp, broken hull ribs and bubble chains cross the
+  view when Foreground is enabled.
+- **Return Current.** The Outfall's four-intensity score adds a displaced
+  bell echo over a D-minor bass line.
+
 - **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
   facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
 - **Shrink Draught.** A short-lived dose makes you smaller and quicker.
@@ -29,7 +43,7 @@
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
 - **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
-  circles, and Bell Diver leaves a crack where it will surface. All 24 have
+  circles, and Bell Diver leaves a crack where it will surface. The 24 earlier minibosses have
   two attacks, with their own pace and a Library entry for both.
 - Added an interactive testbed for trying every weapon, evolution, pickup,
   enemy, miniboss, and boss on any sector. Launch it with `--testbed` or the

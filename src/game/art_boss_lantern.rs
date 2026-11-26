@@ -2202,7 +2202,7 @@ mod tests {
         assert_eq!(HEAD_RADIUS, 18.0);
         assert_eq!(BODY_RADIUS, 18.0);
         assert!((80.0..=96.0).contains(&BODY_LENGTH));
-        assert!(CULL_MARGIN >= 108.0);
+        const { assert!(CULL_MARGIN >= 108.0) };
         assert_eq!(BOSS_BASE_HP, 1600.0);
         assert_eq!(BOSS_HP_SCALE, 1.25);
         assert_eq!(CONTACT_DAMAGE, 8.0);

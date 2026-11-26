@@ -1503,7 +1503,7 @@ fn outfall_lantern_card_runs_arrival_feint_snuff_and_gape() {
         let dark = scene.world.level.objects.outfall_boss_snuff == Some(0);
         let sample = match view.state {
             LanternState::ArrivalLure => {
-                let showed = view.real_bulb.is_some_and(|bulb| bulb.pos.dist(view.head) > 8.0);
+                let showed = view.real_bulb.is_some_and(|bulb| bulb.pos.dist(view.pos) > 8.0);
                 let first = showed && !arrival;
                 arrival |= showed;
                 first

@@ -111,7 +111,7 @@ use crate::game::campaign::Keepable;
 use crate::game::collision::{cell_of, SizeClass};
 use crate::game::gem::{Gem, Pickup};
 use crate::game::ecs::constants::PLAYER_RADIUS;
-use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossState, HazardShape};
+use crate::game::ecs::systems::boss::{Boss, BossKind, BossProjectile, BossState, HazardShape};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossShape, MinibossState};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::PickupKind;

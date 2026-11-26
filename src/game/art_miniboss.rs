@@ -8298,7 +8298,7 @@ fn draw_false_bulb(
         INK,
         flash,
     );
-    for k in -2..=2 {
+    for k in -2i32..=2 {
         let tb = mouth_c + s * (k as f32 * 2.5) + f * 0.4;
         let t_len = 3.0 + if k.abs() <= 1 { 1.0 } else { 0.0 } + jaw_open * 0.9;
         let tt = tb + f * t_len + Vec2::new(0.0, -0.8);
@@ -8591,7 +8591,7 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
             jaw_len,
             jaw_half,
         } => {
-            let sel = selected.or_else(|| match active_shape {
+            let sel = selected.or(match active_shape {
                 Some(MinibossShape::False { selected: s, .. }) => s,
                 _ => None,
             });

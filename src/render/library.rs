@@ -1021,18 +1021,27 @@ fn pose_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
         BossKind::Lantern => {
             use crate::game::art_boss_lantern::{self as lantern, LanternBulbView, LanternState, LanternView};
             let view = LanternView {
-                head: c,
+                pos: c,
                 facing,
                 anim,
                 progress: cycle,
                 state: LanternState::Swim,
+                hit_flash: 0.0,
+                hp_frac: 1.0,
+                phase: 1,
+                attack_origin: c,
+                attack_target: c,
+                attack_facing: facing,
+                attack_locked: false,
                 attack: None,
                 stamp: None,
                 real_bulb: Some(LanternBulbView {
                     pos: c + Vec2::new(28.0, -7.0),
                     radius: 40.0,
                     gain: 1.0,
-                    flicker_phase: 0,
+                    flicker: 0.0,
+                    is_decoy: false,
+                    planted: false,
                 }),
                 decoy: None,
             };

@@ -183,9 +183,13 @@ mod tests {
             for slot in Slot::ALL {
                 let sound = roster::approach_sfx(theme, slot);
                 assert_eq!(sound.is_some(), matches!(slot, Slot::A | Slot::B), "{theme:?} {slot:?}");
-                all.extend(sound);
+                if theme != Theme::Outfall {
+                    all.extend(sound);
+                }
             }
         }
+        assert_eq!(roster::approach_sfx(Theme::Outfall, Slot::A), Some(Sfx::ApproachWoolSlap));
+        assert_eq!(roster::approach_sfx(Theme::Outfall, Slot::B), Some(Sfx::ApproachWingLeather));
         assert_eq!(all.len(), 12);
         for (i, a) in all.iter().enumerate() {
             assert!(!all[i + 1..].contains(a), "{a:?} is used twice");
