@@ -734,6 +734,20 @@ impl World {
         self.level_index
     }
 
+    /// The director's curve clock at a given elapsed time, including the
+    /// difficulty override used by practice runs.
+    pub(crate) fn curve_clock_at(&self, elapsed: f32) -> f32 {
+        director::curve_clock(self.difficulty_override.unwrap_or(self.level_index), elapsed)
+    }
+
+    /// Render-side fixture outage on the director's clock.
+    pub(crate) fn blackout(&self) -> f32 {
+        crate::render::lighting::blackout::factor(
+            self.level.theme,
+            self.curve_clock_at(self.elapsed),
+        )
+    }
+
     /// Is this the campaign's last level? Completing it wins the run.
     #[inline]
     pub fn is_final_level(&self) -> bool {
@@ -2366,7 +2380,16 @@ impl World {
 
         _s = crate::prof::scope(crate::prof::Stage::SceneFixturesAmbience);
         let ambience_started = std::time::Instant::now();
-        draw_fixtures(&mut self.light_map, pb, &self.level.objects.lights, self.level.theme, cam, self.elapsed);
+        let blackout = self.blackout();
+        draw_fixtures(
+            &mut self.light_map,
+            pb,
+            &self.level.objects.lights,
+            self.level.theme,
+            cam,
+            self.elapsed,
+            blackout,
+        );
         draw_ambience(&mut self.light_map, pb, &self.level.objects.emitters, cam, self.elapsed, self.player.pos);
         let ambience_cost = ambience_started.elapsed();
 
@@ -2874,7 +2897,7 @@ impl World {
         // and belong to screen space: `draw` stamps them after the resample, so
         // they never scale and are never darkened by the ambient.
         _s = crate::prof::scope(crate::prof::Stage::Lighting);
-        self.apply_lighting(pb, cam, ambience_cost);
+        self.apply_lighting(pb, cam, ambience_cost, blackout);
 
         // Parallax foreground layer: overhead things nearer the eye than the
         // floor, drawn at world resolution (so it works at every zoom) after
@@ -3276,7 +3299,13 @@ impl World {
     }
 
     /// Render-only lighting pass; never mutates simulation state or `self.rng`.
-    fn apply_lighting(&mut self, pb: &mut PixelBuffer, cam: Vec2, ambience_cost: std::time::Duration) {
+    fn apply_lighting(
+        &mut self,
+        pb: &mut PixelBuffer,
+        cam: Vec2,
+        ambience_cost: std::time::Duration,
+        blackout: f32,
+    ) {
         #[cfg(test)]
         if self.lighting == LightingMode::Off {
             return;
@@ -3295,6 +3324,7 @@ impl World {
             squeak,
             cam,
             elapsed: self.elapsed,
+            blackout,
             mode: self.light_map.quality(self.lighting),
             depth: self.lighting_depth,
             fx: self.lighting_fx,
@@ -5201,15 +5231,14 @@ mod hostile_layer_tests {
         u32::from(r) + u32::from(g) + u32::from(b)
     }
 
-    /// An enemy pellet 60 px from the rat is **exactly the same pixels with
-    /// lighting Full, Soft and Off**: it is self-lit, not part of the shaded
-    /// scene. (Before the split it was drawn under the light pass and went
-    /// near-black in an unlit corner.)
+    /// During a blackout, an enemy pellet stays bright in Full, Hard and Off.
+    /// It is stamped over the shaded scene as part of the hostile layer.
     #[test]
     fn enemy_pellets_are_not_darkened_by_lighting() {
         let mut frames = Vec::new();
         for mode in [LightingMode::Full, LightingMode::Hard, LightingMode::Off] {
             let mut w = World::new(Theme::Sewer, 7);
+            w.elapsed = 304.0;
             w.player.pos = w.level.start;
             w.lighting = mode;
             w.smoke_enabled = false;
@@ -5266,6 +5295,7 @@ mod hostile_layer_tests {
     #[test]
     fn the_wick_ring_is_drawn_over_friendly_effects() {
         let mut w = World::new(Theme::Sewer, 7);
+        w.elapsed = 304.0;
         w.player.pos = w.level.start;
         w.lighting = LightingMode::Full;
         w.smoke_enabled = true;

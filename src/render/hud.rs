@@ -386,6 +386,7 @@ pub enum CalloutKind {
     /// Growth Serum (batch 13): the rat is huge and crushes what it walks over.
     /// Appended last so the legacy kinds keep their order.
     GrowthSerum,
+    Blackout,
 }
 
 impl CalloutKind {
@@ -411,6 +412,7 @@ impl CalloutKind {
             CalloutKind::AutoPick => TRAIL_GOLD,
             CalloutKind::Nest => TRAIL_GOLD,
             CalloutKind::GrowthSerum => SERUM_PINK,
+            CalloutKind::Blackout => WARN_AMBER,
         }
     }
 }

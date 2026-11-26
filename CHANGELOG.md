@@ -15,6 +15,9 @@ first time.
   an experimental wedge-glyph mode. Costs about 0.4 ms a frame at 120x40.
 - **Standing water.** The Sewers are very wet, the Laundry and Kitchen have
   puddles, and the rat splashes through them. Lamps reflect in the water.
+- **Blackouts.** Indoor lamps go out for 8s at 5:00 and 11:00. The Lab's
+  second outage moves to 7:30 and lasts 18s. Enemy glints, shots and attack
+  warnings stay visible.
 - **Round-glyph particles.** Dust motes in lit rooms, sparks off hits, and
   bubbles and steam from pipes and grates, drawn with small round glyphs.
 - **Hantavirus is deployed by droppings.** The rat leaves one behind it every

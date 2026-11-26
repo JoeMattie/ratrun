@@ -182,8 +182,10 @@ pub(crate) fn draw_fixtures(
     theme: Theme,
     cam: Vec2,
     elapsed: f32,
+    blackout: f32,
 ) {
     let (primary, alternate) = colors(theme);
+    let power = 1.0 - blackout;
     for fixture in fixtures {
         let p = fixture.pos - cam;
         if p.x < -6.0 || p.y < -4.0 || p.x >= pb.w as f32 + 6.0 || p.y >= pb.h as f32 + 4.0 {
@@ -211,7 +213,7 @@ pub(crate) fn draw_fixtures(
             Kind::Broken => (3, alternate),
             // A wall lamp is drawn at its face, not on the hanging jig.
             Kind::Sconce => {
-                draw_sconce(map, pb, theme, fixture, x, y, elapsed);
+                draw_sconce(map, pb, theme, fixture, (x, y), elapsed, power);
                 continue;
             }
             Kind::Sun => continue,
@@ -223,10 +225,13 @@ pub(crate) fn draw_fixtures(
         }
         pb.plot(x - half, y, (82, 85, 92));
         pb.plot(x + half, y, (82, 85, 92));
-        let lit = fixture.kind != Kind::Broken
-            || (elapsed * 7.7 + (fixture.seed & 63) as f32 * 0.43).sin() > 0.84;
+        let lit = power > 0.0
+            && (fixture.kind != Kind::Broken
+                || (elapsed * 7.7 + (fixture.seed & 63) as f32 * 0.43).sin() > 0.84);
+        let glass = (71, 52, 46);
+        let lens = if lit { palette::mix(glass, color, power) } else { glass };
         for dx in (-half + 1)..half {
-            pb.plot(x + dx, y, if lit { color } else { (71, 52, 46) });
+            pb.plot(x + dx, y, lens);
         }
         if lit {
             map.mark_emissive_rect(pb, x - half + 1, y, 2 * half - 1, 1);
@@ -248,18 +253,20 @@ fn draw_sconce(
     pb: &mut PixelBuffer,
     theme: Theme,
     fixture: &LightFixture,
-    x: i32,
-    y: i32,
+    (x, y): (i32, i32),
     elapsed: f32,
+    power: f32,
 ) {
     let casing = (39, 43, 49);
     let tint = sconce_color(theme, fixture.seed);
-    let lit = !sconce_spent(fixture.seed) || sconce_sputter(fixture.seed, elapsed);
+    let lit = power > 0.0 && (!sconce_spent(fixture.seed) || sconce_sputter(fixture.seed, elapsed));
     let housing = housing(theme);
     // A lit lamp is a near-white lens inside a frame of its own tint; a spent
     // one is dark glass and a cold rim.
-    let lens = if lit { lens_color(tint) } else { (71, 52, 46) };
-    let rim = if lit { rim_color(tint) } else { (48, 42, 40) };
+    let glass = (71, 52, 46);
+    let cold_rim = (48, 42, 40);
+    let lens = if lit { palette::mix(glass, lens_color(tint), power) } else { glass };
+    let rim = if lit { palette::mix(cold_rim, rim_color(tint), power) } else { cold_rim };
     // The cage's bars sit at the ends of the lens (a bulkhead's wire cage), in
     // the lens colour at a little under half, so the bulkhead reads as a lit
     // pane behind bars rather than one wide light.
@@ -474,6 +481,11 @@ pub(super) fn light(
             light.shadow_softness = ShadowSoftness::None;
         }
     }
+    if fixture.kind != Kind::Sun {
+        let power = 1.0 - scene.blackout;
+        light.energy *= power;
+        light.scatter *= power;
+    }
     light
 }
 
@@ -535,7 +547,8 @@ mod tests {
             thrash: None,
             squeak: None,
             cam: Vec2::ZERO,
-            elapsed: 0.0,
+            elapsed: w.elapsed,
+            blackout: w.blackout(),
             mode: LightingMode::Full,
             depth: ColorDepth::Truecolor,
             fx: false,
@@ -548,15 +561,17 @@ mod tests {
         let mut pb = PixelBuffer::new(160, 160);
         pb.clear(FLOOR);
         let mut map = LightMap::new();
+        let scene = scene(w);
         draw_fixtures(
             &mut map,
             &mut pb,
             &w.level.objects.lights,
             w.level.theme,
             Vec2::ZERO,
-            0.0,
+            scene.elapsed,
+            scene.blackout,
         );
-        map.apply_scene(&mut pb, &scene(w));
+        map.apply_scene(&mut pb, &scene);
         pb
     }
 
@@ -742,6 +757,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn blackout_extinguishes_fixture_lenses_pools_and_sconce_wash() {
+        let mut w = test_world(Theme::Sewer);
+        let sconce = mount(&mut w.level, 4, 2, 3);
+        let pendant = LightFixture {
+            pos: Vec2::new(128.0, 112.0),
+            kind: LightFixtureKind::Pendant,
+            radius: 46.0,
+            seed: 1,
+        };
+        w.level.objects.lights.push(pendant);
+        w.elapsed = 299.0;
+        let before = lit(&w);
+        w.elapsed = 304.0;
+        let dark = lit(&w);
+        let fixtures = std::mem::take(&mut w.level.objects.lights);
+        let bare = lit(&w);
+        w.level.objects.lights = fixtures;
+        w.elapsed = 310.0;
+        let after = lit(&w);
+
+        for (x, y) in [(72, 53), (72, 64), (128, 116)] {
+            assert_eq!(dark.pixel_at(x, y), bare.pixel_at(x, y));
+            assert!(luminance(before.pixel_at(x, y)) > luminance(dark.pixel_at(x, y)));
+            assert!(luminance(after.pixel_at(x, y)) > luminance(dark.pixel_at(x, y)));
+        }
+        for fixture in [sconce, pendant] {
+            let x = fixture.pos.x.round() as usize;
+            let y = fixture.pos.y.round() as usize;
+            assert!(luminance(before.pixel_at(x, y)) > luminance(dark.pixel_at(x, y)));
+            assert!(luminance(after.pixel_at(x, y)) > luminance(dark.pixel_at(x, y)));
+        }
+    }
+
     /// Every housing is at least five pixels wide and every one of its pixels is
     /// marked emissive: the lighting pass can never darken the lamp itself.
     #[test]
@@ -763,6 +812,7 @@ mod tests {
             &lamp.level.objects.lights,
             Theme::Sewer,
             Vec2::ZERO,
+            0.0,
             0.0,
         );
         let h = housing(Theme::Sewer);

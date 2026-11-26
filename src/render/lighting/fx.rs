@@ -350,6 +350,7 @@ pub(super) mod testkit {
             squeak: None,
             cam,
             elapsed: w.elapsed,
+            blackout: w.blackout(),
             mode,
             depth,
             fx: true,

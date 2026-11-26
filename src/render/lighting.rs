@@ -36,6 +36,7 @@ mod specular;
 mod surface;
 mod upsample;
 mod water;
+pub(crate) mod blackout;
 
 pub(crate) use ambience::draw_ambience;
 pub(crate) use fixtures::draw_fixtures;
@@ -76,6 +77,8 @@ pub struct LightScene<'a> {
     pub squeak: Option<(Vec2, f32)>,
     pub cam: Vec2,
     pub elapsed: f32,
+    /// Fraction of fixed fixture light lost to the scheduled outage.
+    pub blackout: f32,
     pub mode: LightingMode,
     pub depth: ColorDepth,
     /// The batch-13 lighting effects (`fx.rs`): off, the pass is the
