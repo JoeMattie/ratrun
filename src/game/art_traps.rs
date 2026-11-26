@@ -1553,7 +1553,7 @@ pub fn draw_sticky_trap_ground(
     // tie to break.
     if view.state == StickyTrapState::Stuck {
         for victim in view.victims.iter().take(STICKY_TRAP_SLOTS).flatten().copied() {
-            let vp = sticky_victim_screen(&fr, &victim);
+            let vp = sticky_victim_screen(cam, &victim);
             let vprog = clamp01(victim.progress);
             let fade = (1.0 - (vprog - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0);
             let su = if pull_u < -1.5 { -1.0 } else { 1.0 };
@@ -1848,11 +1848,21 @@ fn sticky_effective_victim(view: &StickyTrapView, fr: &Frame) -> Vec2 {
     }
 }
 
-/// Screen position of one slot's victim (its pad slot, as the sim wrote it:
-/// world pixels are buffer pixels).
+/// Screen position of one slot's victim.
+///
+/// The simulation writes `StickyVictimView::pos` (the body's fixed pad slot) in
+/// **world** pixels — this layer draws in buffer pixels, so the camera offset
+/// has to come off here, exactly as `draw_sticky_victim_mound` and
+/// `draw_sticky_tear` do with `victim.pos - fr.pos`.
+///
+/// Using the world position as a buffer position drew every holding strand
+/// from the board toward one fixed point on the screen: the strands' sampled
+/// beads (and their little glossy droplets) marched away from the board as a
+/// trail of amber dots, which read as stray particles emitted out of a glue
+/// board that had a body stuck to it.
 #[inline]
-fn sticky_victim_screen(_fr: &Frame, victim: &StickyVictimView) -> Vec2 {
-    victim.pos
+fn sticky_victim_screen(cam: Vec2, victim: &StickyVictimView) -> Vec2 {
+    victim.pos - cam
 }
 
 /// **Foreground / overlay layer** for a sticky trap (draw AFTER entities).
@@ -1889,7 +1899,7 @@ pub fn draw_sticky_trap(
             continue;
         };
         let prog = clamp01(victim.progress);
-        let vp = sticky_victim_screen(&fr, &victim);
+        let vp = sticky_victim_screen(cam, &victim);
         let vr = victim.radius.clamp(2.0, 9.0);
         let to_v = vp - fr.pos;
         let dir = safe_dir(to_v);
@@ -4439,5 +4449,94 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_traps.ppm", out).unwrap();
+    }
+
+    /// Regression: a glue board's holding strands are drawn in **buffer**
+    /// pixels, but the simulation writes each victim's pad slot
+    /// (`StickyVictimView::pos`) in **world** pixels. Reading that world
+    /// position as a buffer position aimed every strand at one fixed point on
+    /// the screen, so a board holding a body sprayed a trail of amber beads
+    /// away from itself — the owner's *"bad guys getting stuck in sticky traps
+    /// causes weird particles to emit toward bottom centre of the screen"*.
+    ///
+    /// This layer is entirely camera-relative, so the test asks for the two
+    /// things that rule the bug out: every pixel a stuck board writes stays on
+    /// the board, and the same board drawn from a second camera differs by
+    /// nothing but that camera's own whole-pixel shift.
+    #[test]
+    fn a_stuck_board_draws_its_strands_on_the_board_at_any_camera() {
+        let board = Vec2::new(600.0, 420.0);
+        let mut view = StickyTrapView::new(board, Vec2::new(1.0, 0.0));
+        view.state = StickyTrapState::Stuck;
+        view.progress = 0.4;
+        view.load = 2;
+        for (slot, at) in view
+            .victims
+            .iter_mut()
+            .zip([board + Vec2::new(-6.0, -4.0), board + Vec2::new(6.5, 5.0)])
+        {
+            *slot = Some(StickyVictimView {
+                pos: at,
+                radius: 2.5,
+                kind: StickyVictimKind::Small,
+                color: EnemyKind::Skitterer.color(),
+                progress: 0.35,
+            });
+        }
+        view.victim_pos = board + Vec2::new(6.5, 5.0);
+        view.victim_radius = 2.5;
+
+        const W: usize = 140;
+        const H: usize = 120;
+        /// Where the board lands in the first clip, in buffer pixels.
+        const AT: (usize, usize) = (64, 58);
+        /// The camera shift between the two clips, in buffer pixels.
+        const SHIFT: usize = 4;
+        // Far enough from every edge that neither clip is clipped: the board's
+        // own art reaches 28 px (the strands ~20) and `AT` is over 48 px in.
+        let bg: Rgb = (0, 0, 0);
+        let accent = (90, 220, 200);
+        let mut a = PixelBuffer::new(W, H);
+        let mut b = PixelBuffer::new(W, H);
+        a.clear(bg);
+        b.clear(bg);
+        let cam_a = board - Vec2::new(AT.0 as f32, AT.1 as f32);
+        let cam_b = board - Vec2::new((AT.0 + SHIFT) as f32, (AT.1 + SHIFT) as f32);
+        draw_sticky_trap_ground(&mut a, &view, cam_a, accent);
+        draw_sticky_trap(&mut a, &view, cam_a, accent);
+        draw_sticky_trap_ground(&mut b, &view, cam_b, accent);
+        draw_sticky_trap(&mut b, &view, cam_b, accent);
+
+        // 1. Every pixel of a stuck board is on the board.
+        let mut ink = 0usize;
+        let mut far = 0i32;
+        for y in 0..H {
+            for x in 0..W {
+                if a.pixel_at(x, y) == bg {
+                    continue;
+                }
+                ink += 1;
+                let dx = (x as i32 - AT.0 as i32).abs();
+                let dy = (y as i32 - AT.1 as i32).abs();
+                far = far.max(dx.max(dy));
+            }
+        }
+        assert!(ink > 200, "the clip drew almost nothing ({ink} px)");
+        assert!(
+            far <= 30,
+            "a stuck board wrote a pixel {far} px from itself: its strands are \
+             aimed at a screen fixed point instead of at the body on the pad",
+        );
+
+        // 2. The same board from another camera is the same picture, shifted.
+        for y in 0..H - SHIFT {
+            for x in 0..W - SHIFT {
+                assert_eq!(
+                    a.pixel_at(x, y),
+                    b.pixel_at(x + SHIFT, y + SHIFT),
+                    "the board drew differently at ({x}, {y}) after a pure camera shift",
+                );
+            }
+        }
     }
 }

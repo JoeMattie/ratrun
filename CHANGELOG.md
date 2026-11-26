@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Glue boards.** A stuck body's strands stay on the board. A board holding a
+  body used to trail stray amber specks off toward the bottom of the screen.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP
