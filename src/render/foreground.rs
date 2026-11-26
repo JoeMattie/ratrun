@@ -673,6 +673,29 @@ impl ForeLayer {
         self.items.iter().map(|p| (p.item, p.anchor, p.corridor))
     }
 
+    #[cfg(test)]
+    pub(crate) fn capture_shadow_only(
+        &mut self,
+        item: ForeItem,
+        anchor: Vec2,
+        size: Vec2,
+        zoom: f32,
+    ) -> Vec2 {
+        let normal = item.normal();
+        let (near, _) = project(size, normal);
+        let block = pixel_scale(&item);
+        let (_, shadow_end) = cross_extent(item, block, block / 2);
+        let world_cross = near - shadow_end - shadow_offset(item) + 14.0 * zoom;
+        let cam = anchor - size * 0.5;
+        let cam = cam + normal * (item.cross - world_cross - cam.dot(normal));
+        let plan = plan_band(View { cam, size, zoom }, item, anchor, &[])
+            .expect("the band shadow enters the view");
+        assert_eq!(plan.body.fade, 0.0);
+        assert!(plan.shadow.fade > 0.0);
+        self.items.retain(|band| band.item == item);
+        cam + size * 0.5
+    }
+
     fn plan_frame(
         &mut self,
         view: View,
@@ -1614,7 +1637,9 @@ mod tests {
                     }
                 }
                 let &(first_step, first_depth) = depths.first().expect("shadow never reached the viewport");
-                assert!(first_step > 0 && first_depth <= 4.0, "{axis:?}, edge {edge}: {depths:?}");
+                // At the angled corner the first faded samples can round to
+                // the floor colour. Allow three screen pixels for entry.
+                assert!(first_step > 0 && first_depth <= 3.0 * zoom, "{axis:?}, edge {edge}: {depths:?}");
                 let growth = depths.windows(2).filter(|w| w[1].0 == w[0].0 + 1 && w[1].1 > w[0].1).count();
                 assert!(growth >= 5, "{axis:?}, edge {edge}: {depths:?}");
                 let (inside, _) = render(&mut world, &mut layer, camera(28), zoom, 0.0);
