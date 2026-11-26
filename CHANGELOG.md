@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Super Dash.** The lane preview fades out at its tip instead of ending
+  abruptly. A wall that cuts it short keeps its faint mark.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP
