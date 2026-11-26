@@ -43,6 +43,42 @@ pub const SURGE_WARN_SECS: f32 = 1.0;
 pub const SURGE_ACTIVE_SECS: f32 = 1.1;
 pub const SURGE_DISTANCE: f32 = 64.0;
 
+/// The angular step from one surge's push direction to the next: the golden
+/// angle. With the jitter below, consecutive bursts are always at least
+/// 77.5° apart and the sequence still looks arbitrary (it is not a compass
+/// direction and not a repeat).
+const SURGE_STEP: f32 = 2.399_963_2;
+/// Jitter added to one surge's step, in radians (±30°).
+const SURGE_JITTER: f32 = 0.523_598_8;
+/// How far a surge's push may wander from its starting direction over the
+/// 1.1 s it runs, in radians (±35°).
+pub const SURGE_WANDER: f32 = 0.610_865_4;
+
+/// One 64-bit mix, used to draw a surge's angle from `(seed, index)`.
+#[inline]
+fn surge_hash(seed: u64, index: u64) -> u64 {
+    let mut h = seed ^ index.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^ (h >> 31)
+}
+
+/// A `0.0..1.0` draw from `(seed, index)`, salted so one surge has several
+/// independent ones (its phase, its jitter and the phase of its wander).
+#[inline]
+fn surge_unit(seed: u64, index: u64, salt: u64) -> f32 {
+    // The top 24 bits, so the value stays under 1.0.
+    (surge_hash(seed ^ salt, index) >> 40) as f32 * (1.0 / 16_777_216.0)
+}
+
+/// The push direction a surge starts with: a hashed phase, its index on the
+/// golden-angle step, and a hashed ±30° jitter.
+fn surge_start_angle(seed: u64, index: u64) -> f32 {
+    let phase = surge_unit(seed, index, 0x51ed_2b1f_00c3_a5d9) * std::f32::consts::TAU;
+    let jitter = (surge_unit(seed, index, 0x2f9e_4a77_1b6d_c03b) * 2.0 - 1.0) * SURGE_JITTER;
+    phase + index as f32 * SURGE_STEP + jitter
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LurePhase {
     Ready,
@@ -92,34 +128,47 @@ pub struct SurgeView {
     pub phase: SurgePhase,
 }
 
-/// One direction per seed and one shared clock for simulation and warnings.
+/// One shared clock for simulation, warnings and the visible current.
+///
+/// The push direction belongs to the **surge**, not the map: it is hashed
+/// from `(seed, surge index = floor(elapsed / SURGE_PERIOD))` to any angle, so
+/// two bursts of one level never push the same way. Within a burst it wanders
+/// smoothly by up to ±[`SURGE_WANDER`] (a sine of the surge's own hashed
+/// phase), and the one-second warning before it shows exactly the direction
+/// the burst will start with. Pure in `(seed, elapsed)`: no rng draw, no
+/// state, so the crests, the bot and the lighting cannot disagree.
 pub fn outfall_surge(seed: u64, elapsed: f32) -> SurgeView {
-    let mut hash = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    let diag = std::f32::consts::FRAC_1_SQRT_2;
-    let dirs = [
-        Vec2::new(1.0, 0.0),
-        Vec2::new(diag, diag),
-        Vec2::new(0.0, 1.0),
-        Vec2::new(-diag, diag),
-        Vec2::new(-1.0, 0.0),
-        Vec2::new(-diag, -diag),
-        Vec2::new(0.0, -1.0),
-        Vec2::new(diag, -diag),
-    ];
-    let dir = dirs[((hash ^ (hash >> 31)) & 7) as usize];
     let clock = elapsed % SURGE_PERIOD;
-    let phase = if elapsed >= SURGE_PERIOD
-        && elapsed < (elapsed / SURGE_PERIOD).floor() * SURGE_PERIOD + SURGE_ACTIVE_SECS
+    let cycle = (elapsed / SURGE_PERIOD).floor().max(0.0);
+    // The burst that opens at this cycle's start (there is none before the
+    // first period), or the one the warning at the end of this cycle is for.
+    let (index, progress, phase) = if elapsed >= SURGE_PERIOD
+        && elapsed < cycle * SURGE_PERIOD + SURGE_ACTIVE_SECS
     {
-        SurgePhase::Active
+        (
+            (cycle as u64).max(1),
+            ((elapsed - cycle * SURGE_PERIOD) / SURGE_ACTIVE_SECS).clamp(0.0, 1.0),
+            SurgePhase::Active,
+        )
     } else if clock >= SURGE_PERIOD - SURGE_WARN_SECS {
-        SurgePhase::Warning
+        (cycle as u64 + 1, 0.0, SurgePhase::Warning)
     } else {
-        SurgePhase::Quiet
+        (cycle as u64 + 1, 0.0, SurgePhase::Quiet)
     };
-    SurgeView { dir, phase }
+    // The wander starts and ends at zero, so a burst's opening direction is
+    // exactly its hashed start angle (and consecutive bursts stay >= 60°
+    // apart); the hashed bit only decides which way it bends.
+    let bend = if surge_unit(seed, index, 0xa5d9_51ed_c3b0_2f9e) < 0.5 {
+        -1.0
+    } else {
+        1.0
+    };
+    let angle = surge_start_angle(seed, index)
+        + bend * SURGE_WANDER * (progress * std::f32::consts::TAU).dsin();
+    SurgeView {
+        dir: Vec2::from_angle(angle),
+        phase,
+    }
 }
 
 /// Distance covered by the sine-bell current over this elapsed-time slice.

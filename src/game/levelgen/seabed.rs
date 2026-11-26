@@ -3,9 +3,10 @@
 //!
 //! Plants are **purely decorative**: never a tile, never blocking, invisible to
 //! gameplay, the bot, fog and the minimap. This stage runs **last** in
-//! `levelgen::generate_stages` (after `puddles::place`) on `Theme::Outfall`
-//! only, using its own salted RNG (`level_seed ^` [`SEABED_SALT`]) over the
-//! finished grid and writing nothing but [`Level::plants`].
+//! `levelgen::generate_stages` (after `puddles::place`, before the Outfall
+//! seabed patches that some of them sit on) on `Theme::Outfall` only, using
+//! its own salted RNG (`level_seed ^` [`SEABED_SALT`]) over the finished grid
+//! and writing nothing but [`Level::plants`].
 //!
 //! ## Why neither the map pin nor any scripted trace can move
 //!

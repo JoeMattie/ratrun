@@ -138,8 +138,8 @@ use crate::game::gem::{Gem, Gold, Pickup, PickupKind};
 use crate::game::hazards::{InkPad, LureTrap, SteamGrate};
 use crate::game::level::{
     BossArena, Level, LevelObjects, LightFixture, LightFixtureKind, OneWayDoor, Palette, Pit,
-    PitKind, Prop, PropKind, Puddle, RatHole, RoomKind, ShopHole, ShopHoleRole, SlidingCargo, Theme,
-    TileRect, TrailerDeck,
+    PitKind, Prop, PropKind, RatHole, RoomKind, SeabedKind, SeabedPatch, ShopHole, ShopHoleRole,
+    SlidingCargo, Theme, TileRect, TrailerDeck,
 };
 use crate::game::library::{self, Key, ObjectKind};
 use crate::game::loadout::{Loadout, PassiveKind};
@@ -902,17 +902,17 @@ impl LibraryScene {
         );
         let level = &self.world.level;
         if level.theme == Theme::Outfall && self.world.flat_lit {
-            for puddle in &level.puddles {
-                crate::game::art_puddle::draw_puddle_among_with(
+            for patch in &level.seabed_patches {
+                self.floor_buf
+                    .set_pen(crate::game::art_seabed::seabed_pen(patch.kind));
+                crate::game::art_seabed::draw_seabed_patch(
                     &mut self.floor_buf,
-                    puddle,
-                    &level.puddles,
+                    patch,
+                    &level.tiles,
                     self.world.cam,
-                    self.world.elapsed,
-                    level.theme,
-                    false,
                 );
             }
+            self.floor_buf.set_pen(0);
         }
         self.floor_plate.resize(w, h);
         if k == 1 {
@@ -1368,6 +1368,7 @@ fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
         boss: BossArena::default(),
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
+        seabed_patches: Vec::new(),
         plants: Vec::new(),
         clothes_piles: Vec::new(),
     }
@@ -1425,6 +1426,7 @@ fn deck_patch() -> Level {
             slides: Vec::new(),
         },
         puddles: Vec::new(),
+        seabed_patches: Vec::new(),
         plants: Vec::new(),
         clothes_piles: Vec::new(),
     }
@@ -1950,12 +1952,13 @@ fn stage_outfall_trick(kind: EnemyKind) -> Staged {
     script.fit = true;
     let at = match kind {
         EnemyKind::Skater => {
-            // Start on dry sand within reach of the pool. The lit edge is
+            // Start on hard sand within reach of the soft Silt. The patch is
             // wide enough to give the splash room before the far bank.
-            level.puddles.push(Puddle {
-                pos: aim - Vec2::new(18.0, 0.0),
+            level.seabed_patches.push(SeabedPatch {
+                center: aim - Vec2::new(18.0, 0.0),
                 rx: 25.0,
                 ry: 18.0,
+                kind: SeabedKind::Silt,
                 seed: 2,
             });
             script.cue = Some(skater_bank_cue);
@@ -2126,10 +2129,11 @@ fn stage_lantern() -> Staged {
     let wall = (cx, cy - 2);
     level = blocked(level, wall.0, wall.1, 1, 1);
     let fixture = outfall_card_sconce(&mut level, wall);
-    level.puddles.push(Puddle {
-        pos: aim + Vec2::new(24.0, 27.0),
+    level.seabed_patches.push(SeabedPatch {
+        center: aim + Vec2::new(24.0, 27.0),
         rx: 34.0,
         ry: 18.0,
+        kind: SeabedKind::Shingle,
         seed: 2,
     });
     let mut world = sandbox(level);
@@ -2725,11 +2729,19 @@ pub(super) fn outfall_floor_patch() -> Level {
         });
     }
     let aim = level.start;
-    level.puddles.push(Puddle {
-        pos: aim + Vec2::new(-9.0, 8.0),
+    level.seabed_patches.push(SeabedPatch {
+        center: aim + Vec2::new(-9.0, 8.0),
         rx: 25.0,
         ry: 15.0,
+        kind: SeabedKind::Silt,
         seed: 2,
+    });
+    level.seabed_patches.push(SeabedPatch {
+        center: aim + Vec2::new(26.0, -12.0),
+        rx: 18.0,
+        ry: 11.0,
+        kind: SeabedKind::Gravel,
+        seed: 5,
     });
     let bulb = aim + Vec2::new(25.0, 0.0);
     level.objects.lure_traps.push(LureTrap::new(

@@ -135,6 +135,7 @@ fn repair_outfall_lures(level: &mut Level, attempt: u32) -> bool {
     }
     puddles::place(level, attempt);
     seabed::place(level, attempt);
+    puddles::place_seabed_patches(level, attempt);
     true
 }
 
@@ -167,6 +168,8 @@ pub struct StageTimings {
     pub puddles: u64,
     /// Outfall seabed plants (`seabed::place`).
     pub seabed: u64,
+    /// Outfall seabed patches (`puddles::place_seabed_patches`).
+    pub seabed_patches: u64,
     /// Laundry clothes piles (`laundry_piles::place`).
     pub laundry_piles: u64,
 }
@@ -189,6 +192,7 @@ impl StageTimings {
             lights: self.lights.min(other.lights),
             puddles: self.puddles.min(other.puddles),
             seabed: self.seabed.min(other.seabed),
+            seabed_patches: self.seabed_patches.min(other.seabed_patches),
             laundry_piles: self.laundry_piles.min(other.laundry_piles),
         }
     }
@@ -207,6 +211,7 @@ impl StageTimings {
             + self.lights
             + self.puddles
             + self.seabed
+            + self.seabed_patches
             + self.laundry_piles
     }
 }
@@ -316,6 +321,7 @@ fn generate_stages(
         boss: crate::game::level::BossArena::default(),
         trailer: crate::game::level::TrailerDeck::default(),
         puddles: Vec::new(),
+        seabed_patches: Vec::new(),
         plants: Vec::new(),
         clothes_piles: Vec::new(),
     };
@@ -331,6 +337,12 @@ fn generate_stages(
     // Independent salted decoration stages after gameplay placement.
     stage!(puddles, puddles::place(&mut level, attempt));
     stage!(seabed, seabed::place(&mut level, attempt));
+    // The Outfall's gravel patches read the finished plants (some scatter sits
+    // near them), so this runs after `seabed` and before the clothes piles.
+    stage!(
+        seabed_patches,
+        puddles::place_seabed_patches(&mut level, attempt)
+    );
     stage!(laundry_piles, laundry_piles::place(&mut level, attempt));
     level
 }
@@ -893,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn outfall_seed_sweep_keeps_dry_routes_lures_sconces_and_wet_banks() {
+    fn outfall_seed_sweep_keeps_dry_routes_lures_sconces_and_seabed_patches() {
         use crate::game::art_crabpot::{CrabPotState, DOOR_DEPTH, POT_HALF};
         use crate::game::hazards::OUTFALL_LURE_COUNT;
         use crate::game::level::{LightFixtureKind, Rectf, TileRect};
@@ -913,7 +925,13 @@ mod tests {
             let objects = &accepted.objects;
             assert_eq!(objects.lure_traps.len(), OUTFALL_LURE_COUNT, "seed {seed}");
             assert!((4..=8).contains(&objects.tidal_pits.len()), "seed {seed}");
-            assert!((240..=265).contains(&accepted.puddles.len()), "seed {seed}");
+            assert!(accepted.puddles.is_empty(), "seed {seed}: the Outfall is wet");
+            assert!(
+                (puddles::SEABED_PATCH_COUNT.0..=puddles::SEABED_PATCH_COUNT.1)
+                    .contains(&accepted.seabed_patches.len()),
+                "seed {seed}: {} seabed patches",
+                accepted.seabed_patches.len()
+            );
             assert!((8..=lights::OUTFALL_SCONCE_CAP).contains(&objects.lights.len()), "seed {seed}");
             let entry = accepted.start_room().unwrap().rect;
             assert!(objects.sticky_traps.is_empty() && objects.mousetraps.is_empty(), "seed {seed}");
@@ -945,20 +963,25 @@ mod tests {
                 && f.is_live_sconce()).count(), 4, "seed {seed}");
             assert!(objects.lights.iter().all(|f| f.kind == LightFixtureKind::Sconce));
 
-            let (mut walkable, mut wet) = (0, 0);
-            for y in (0..accepted.tiles.rows()).step_by(2) {
-                for x in (0..accepted.tiles.cols()).step_by(2) {
+            let (mut walkable, mut covered) = (0, 0);
+            for y in (0..accepted.tiles.rows()).step_by(4) {
+                for x in (0..accepted.tiles.cols()).step_by(4) {
                     let at = TileMap::tile_rect(x, y).center();
                     if accepted.tiles.get(x, y) == TileKind::Open && accepted.pit_at(at).is_none() {
                         walkable += 1;
-                        wet += accepted.wet_at(at) as usize;
+                        covered += accepted
+                            .seabed_patches
+                            .iter()
+                            .any(|patch| patch.contains(at)) as usize;
                     }
                 }
             }
-            let coverage = wet as f32 / walkable as f32;
-            println!("Outfall seed {seed}: wet {coverage:.3}, pits {}, fixtures {}",
+            let coverage = covered as f32 / walkable as f32;
+            println!("Outfall seed {seed}: seabed {coverage:.3}, pits {}, fixtures {}",
                 objects.tidal_pits.len(), objects.lights.len());
-            assert!((0.30..=0.42).contains(&coverage), "seed {seed}: wet {coverage:.3}");
+            // Sampled every fourth cell, so the band is a hair wider than the
+            // all-cell contract tested in `levelgen::puddles`.
+            assert!((0.24..=0.31).contains(&coverage), "seed {seed}: seabed {coverage:.3}");
         }
         assert!(valid_by_attempt.into_iter().sum::<usize>() >= 20);
         assert!(valid_by_attempt.into_iter().all(|count| count > 0));

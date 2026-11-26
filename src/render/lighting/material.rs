@@ -122,8 +122,9 @@ pub(super) fn resolve(b: u8, theme: Theme, wall: bool) -> MaterialKind {
         (Theme::Printworks, _) => MaterialKind::Stone,
         (Theme::Trailer, false) => MaterialKind::Wood,
         (Theme::Trailer, true) => MaterialKind::Metal,
-        // Dry seabed sand is matte (wet puddles stamp `MaterialKind::Water`);
-        // pier pilings are weathered timber.
+        // Dry seabed sand is matte, and the seabed patches stamp their own
+        // matte pen (`art_seabed::seabed_pen`); pier pilings are weathered
+        // timber. The Outfall has no standing water, so no `Water` pixel.
         (Theme::Outfall, false) => MaterialKind::Stone,
         (Theme::Outfall, true) => MaterialKind::Wood,
     }

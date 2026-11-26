@@ -76,16 +76,9 @@ fn style_for(theme: Theme) -> WaterStyle {
             ul_highlight: (120, 138, 144),
             ul_alpha: 0.50,
         },
-        Theme::Outfall => WaterStyle {
-            darken: 0.94,
-            tint: (30, 62, 86), // cool slate-blue ocean shallows (distinct from black tidal drops)
-            body_alpha: 0.56,
-            rim_tint: (12, 24, 36),
-            rim_alpha: 0.52,
-            ul_highlight: (106, 168, 192),
-            ul_alpha: 0.64,
-        },
-        Theme::Lab | Theme::Printworks | Theme::Trailer => WaterStyle {
+        // The Outfall has no puddles any more (its floor is seabed patches,
+        // `art_seabed`); this arm keeps a sane sheet for a sandbox level.
+        Theme::Lab | Theme::Printworks | Theme::Trailer | Theme::Outfall => WaterStyle {
             darken: 0.90,
             tint: (36, 54, 64),
             body_alpha: 0.44,
@@ -297,27 +290,6 @@ pub fn draw_puddle_among_with(
                                 }
                             }
                         }
-                        Theme::Outfall => {
-                            let fx = wx.div_euclid(10);
-                            let fy = wy.div_euclid(8);
-                            let fh = hash3(fx, fy, puddle.seed ^ 0x0FA1);
-                            if (fh & 7) == 0 {
-                                let sox = 1 + ((fh >> 4) % 7) as i32;
-                                let soy = 1 + ((fh >> 8) % 5) as i32;
-                                let rx = wx - fx * 10;
-                                let ry = wy - fy * 8;
-                                if rx == sox && ry == soy {
-                                    let accent = if (fh & 16) != 0 {
-                                        (96, 152, 174) // faint sea-foam fleck
-                                    } else {
-                                        (18, 46, 38) // drifting dark kelp speck
-                                    };
-                                    col = mix(col, accent, 0.52);
-                                } else if (fh & 32) != 0 && rx == sox + 1 && ry == soy {
-                                    col = mix(col, (76, 128, 150), 0.36);
-                                }
-                            }
-                        }
                         _ => {}
                     }
                 }
@@ -484,7 +456,7 @@ mod tests {
     fn draw_puddle_changes_pixels_inside_and_none_outside_bounds() {
         let puddle = sample_puddle();
         let floor_col: Rgb = (22, 32, 30);
-        for theme in [Theme::Sewer, Theme::Laundry, Theme::Kitchen, Theme::Outfall] {
+        for theme in [Theme::Sewer, Theme::Laundry, Theme::Kitchen] {
             let mut pb = PixelBuffer::new(160, 100);
             pb.clear(floor_col);
             draw_puddle(&mut pb, &puddle, Vec2::ZERO, 1.0, theme);
