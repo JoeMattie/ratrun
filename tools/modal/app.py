@@ -11,7 +11,7 @@ import time
 import modal
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-OUTPUT = Path("/Users/joe/dev/ratrun/.review/model")
+OUTPUT = ROOT / ".review" / "model2"
 TIMEOUT = 1_500
 MAX_SHARDS = 700
 CPU = 0.5
@@ -69,7 +69,7 @@ def run_command(binary, job):
 
 @app.function(
     image=image, cpu=(CPU, CPU), memory=(MEMORY_MIB, MEMORY_MIB), timeout=TIMEOUT,
-    max_containers=80, scaledown_window=5, block_network=True,
+    max_containers=160, scaledown_window=5, block_network=True,
 )
 def shard(job):
     try:

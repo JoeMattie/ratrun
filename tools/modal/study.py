@@ -1,4 +1,4 @@
-"""Run screening, refit at range edges, and confirm on fresh Modal seeds."""
+"""Run bounded screening and confirm on fresh Modal seeds."""
 
 import argparse
 import json
@@ -10,7 +10,7 @@ import tomllib
 from threadpoolctl import threadpool_limits
 
 from app import OUTPUT, RATE, TIMEOUT, estimate_cost
-from design import AUGMENT_POINTS, CONFIRM_RUNS, SKILLS, manifest
+from design import CONFIRM_RUNS, SKILLS, manifest
 from fit import fit, load_stage
 from report import report
 
@@ -28,7 +28,7 @@ def cost_estimate(output, screen):
         active_seconds[job["skill"]] = receipt["seconds"] / job["runs"]
     planned = [*pilot["jobs"], *screen["jobs"]]
     for skill in SKILLS:
-        runs = [8] * AUGMENT_POINTS + [min(8, CONFIRM_RUNS - start) for start in range(0, CONFIRM_RUNS, 8)]
+        runs = [min(8, CONFIRM_RUNS - start) for start in range(0, CONFIRM_RUNS, 8)]
         planned.extend({"skill": skill, "runs": count} for count in runs)
     return {
         "seconds_per_campaign_by_skill": active_seconds,
@@ -55,7 +55,7 @@ def run_stage(output, spec):
     )
 
 
-def study(output, defaults, max_compute_usd, resume_screen):
+def study(output, defaults, max_compute_usd, resume_screen, baseline):
     proof = json.loads((output / "determinism.json").read_bytes())
     if not proof["bytes_equal"]:
         raise ValueError("Complete the native–Modal pilot comparison before dispatching")
@@ -69,28 +69,23 @@ def study(output, defaults, max_compute_usd, resume_screen):
         raise ValueError("The timeout ceiling exceeds the approved compute budget")
     run_stage(output, screen)
     with threadpool_limits(limits=1):
-        result = fit(output, defaults, augmented=False)
-    write_json(output / "solution-screen.json", result)
-    if result["edges"]:
-        print("Expanding range edges: " + ", ".join(result["edges"]), flush=True)
-        run_stage(output, manifest("augment", defaults, result))
-        with threadpool_limits(limits=1):
-            result = fit(output, defaults, augmented=True)
+        result = fit(output, defaults)
     write_json(output / "solution.json", result)
     print(f"Confirming candidate with weighted loss {result['loss']:.3f}", flush=True)
     run_stage(output, manifest("confirm", defaults, result))
-    report(output)
+    report(output, baseline)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--defaults", required=True, type=Path)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--max-compute-usd", type=float, default=16.)
+    parser.add_argument("--max-compute-usd", type=float, default=20.)
     parser.add_argument("--resume-screen", action="store_true")
+    parser.add_argument("--baseline", type=Path, help="Round 1 confirmation.json")
     args = parser.parse_args()
     study(args.output.resolve(), tomllib.loads(args.defaults.read_text()),
-          args.max_compute_usd, args.resume_screen)
+          args.max_compute_usd, args.resume_screen, args.baseline)
 
 
 if __name__ == "__main__":

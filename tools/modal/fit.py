@@ -15,7 +15,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from threadpoolctl import threadpool_limits
 
 from app import OUTPUT, SKILLS
-from design import INITIAL_BOUNDS, KNOBS, overlay
+from design import BOUNDS, KNOBS, overlay
 
 FLOORS = ("Sewer", "Kitchen", "Lab", "Flatbed")
 BOSSES = ("jaguar", "horseshoe crab", "broom human", "subject r-01",
@@ -30,7 +30,6 @@ WINDOW_DEATH = [f"death_window_{w}" for w in range(1, 28)]
 BINARY = [["win", "loss"], ["close_win", "no_close_win"]]
 BINARY += [[f"clear_{b}", f"fall_{b}"] for b in BOSSES]
 PROBABILITY_GROUPS = [*BINARY, FLOOR_DEATH, WINDOW_DEATH]
-XP_STEPS = next(i for i, k in enumerate(KNOBS) if k.name == "xp_steps")
 
 
 def load_stage(output, name):
@@ -274,23 +273,14 @@ def objective(models, values):
 
 
 def solve(models, bounds):
-    search_bounds = list(map(tuple, bounds))
-    search_bounds[XP_STEPS] = tuple(x * 4 for x in bounds[XP_STEPS])
-    integral = [i == XP_STEPS for i in range(len(bounds))]
-
-    def game_values(vectors):
-        values = np.atleast_2d(vectors.T).copy()
-        values[:, XP_STEPS] /= 4
-        return values
-
     def loss(vectors):
-        return sum(objective(models, game_values(vectors)).values())
+        return sum(objective(models, np.atleast_2d(vectors.T)).values())
 
     best = differential_evolution(
-        loss, search_bounds, integrality=integral, vectorized=True, updating="deferred",
+        loss, bounds, vectorized=True, updating="deferred",
         seed=2026, popsize=12, maxiter=300, polish=False, tol=0.002,
     )
-    return game_values(best.x)[0], float(best.fun)
+    return best.x, float(best.fun)
 
 
 def validation(model, x, profiles, baseline):
@@ -321,20 +311,25 @@ def validation(model, x, profiles, baseline):
     return results
 
 
-def edge_expansion(values, bounds):
-    expanded = [list(pair) for pair in bounds]
-    edges = []
+def boundary_tradeoffs(models, values, bounds, candidate_loss):
+    """Measure which targets change on moving each near-edge knob inward."""
+    edges = {}
     for i, (value, (low, high)) in enumerate(zip(values, bounds, strict=True)):
         width = high - low
         if value - low <= width * .02:
-            expanded[i][0] = max(.25, low - width * .25)
-            if i == XP_STEPS:
-                expanded[i][0] = max(.25, low - .25)
-            edges.append(f"{KNOBS[i].name} lower")
-        if high - value <= width * .02:
-            expanded[i][1] = high + width * .25 if i != XP_STEPS else high + .25
-            edges.append(f"{KNOBS[i].name} upper")
-    return edges, expanded
+            side, interior = "lower", low + width * .10
+        elif high - value <= width * .02:
+            side, interior = "upper", high - width * .10
+        else:
+            continue
+        moved = values.copy()
+        moved[i] = interior
+        edges[KNOBS[i].name] = {
+            "side": side, "interior": interior,
+            "loss_delta": {key: loss[0] - candidate_loss[key]
+                           for key, loss in objective(models, moved).items()},
+        }
+    return edges
 
 
 def clean(value):
@@ -348,21 +343,14 @@ def clean(value):
     return value
 
 
-def fit(output, defaults, augmented):
+def fit(output, defaults):
     screen, data, seconds = load_stage(output, "screen")
     ids = list(screen["points"])
     train, test = train_test_split(ids, test_size=.20, random_state=23)
-    values = dict(screen["points"])
-    bounds = INITIAL_BOUNDS
-    if augmented:
-        augment, extra, extra_seconds = load_stage(output, "augment")
-        if screen["source_revision"] != augment["source_revision"]:
-            raise ValueError("screen and augmentation used different revisions")
-        values.update(augment["points"])
-        data.update(extra)
-        train += list(augment["points"])
-        bounds = augment["bounds"]
-        seconds += extra_seconds
+    values = screen["points"]
+    bounds = BOUNDS
+    if not np.array_equal(screen["bounds"], bounds):
+        raise ValueError("screen manifest has different feel bounds")
 
     def x(ids):
         return np.array([values[i] for i in ids])
@@ -387,28 +375,26 @@ def fit(output, defaults, augmented):
             "continuous_support": model.support,
         }
     candidate, loss = solve(models, bounds)
-    edges, expanded = edge_expansion(candidate, bounds)
+    target_loss = {key: value[0] for key, value in objective(models, candidate).items()}
+    edges = boundary_tradeoffs(models, candidate, bounds, target_loss)
     prediction = {s: {k: y[0] for k, y in m.predict(candidate).items()}
                   for s, m in zip(SKILLS, models, strict=True)}
     sensitivity = {}
     for i, knob in enumerate(KNOBS):
         before, after = x(train), x(train)
         low, high = bounds[i]
-        delta = .125 if i == XP_STEPS else .05
-        before[:, i] = np.maximum(low, before[:, i] - delta)
-        after[:, i] = np.minimum(high, after[:, i] + delta)
-        if i == XP_STEPS:
-            before[:, i] = np.floor(before[:, i] * 4) / 4
-            after[:, i] = np.ceil(after[:, i] * 4) / 4
+        step = 10. if knob.unit == " HP" else .10
+        before[:, i] = np.maximum(low, before[:, i] - step / 2)
+        after[:, i] = np.minimum(high, after[:, i] + step / 2)
         for skill, model in zip(SKILLS, models, strict=True):
             a, b = model.predict(before), model.predict(after)
             sensitivity.setdefault(skill, {})[knob.name] = {
-                key: np.mean((b[key] - a[key]) * .1 / (after[:, i] - before[:, i])) for key in a
+                key: np.mean((b[key] - a[key]) * step / (after[:, i] - before[:, i])) for key in a
             }
     result = {
         "revision": screen["source_revision"], "values": candidate, "loss": loss,
-        "loss_by_target": {key: value[0] for key, value in objective(models, candidate).items()},
-        "bounds": bounds, "edges": edges, "expanded_bounds": expanded,
+        "loss_by_target": target_loss,
+        "bounds": bounds, "edges": edges,
         "train": train, "holdout": test, "validation": scores, "choices": choices,
         "heldout_wins": heldout_wins,
         "candidate": prediction, "sensitivity": sensitivity, "screen_seconds": seconds,
@@ -421,11 +407,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--defaults", type=Path, required=True)
-    parser.add_argument("--augmented", action="store_true")
     args = parser.parse_args()
     with threadpool_limits(limits=1):
         defaults = tomllib.loads(args.defaults.read_text())
-        result = fit(args.output, defaults, args.augmented)
+        result = fit(args.output, defaults)
     (args.output / "solution.json").write_text(json.dumps(result, separators=(",", ":"), allow_nan=False))
     print(f"Loss {result['loss']:.3f}. Edges: {', '.join(result['edges']) or 'none'}.")
 
