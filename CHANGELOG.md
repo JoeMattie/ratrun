@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Global light.** `AO ONLY` now grounds the room at a glance: contact
+  shadows at walls, inside corners, prop bases and bodies are about twice as
+  deep and reach about twice as far, and the wall itself darkens down to the
+  floor line. `AO + GI` is no longer a general brightening: bounce is about
+  twice as strong but only beside the surface that emitted it, so a lamp,
+  lava, water or the sconce wash tints what it faces and the rest of the
+  frame stays as dark as before.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP
