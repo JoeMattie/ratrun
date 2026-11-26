@@ -42,6 +42,20 @@ pub enum PointerAction {
     ScrollDown,
 }
 
+/// One touch contact's phase, from the browser's pointer events.
+///
+/// For `pointerType === "touch"` the page calls [`WebGame::touch`] and **not**
+/// [`WebGame::pointer`]: Rust owns the stick, the buttons, taps, swipes and
+/// pinch from then on. Mouse and pen keep the pointer path.
+#[wasm_bindgen]
+#[derive(Clone, Copy)]
+pub enum TouchPhase {
+    Start,
+    Move,
+    End,
+    Cancel,
+}
+
 #[wasm_bindgen]
 pub struct WebGame {
     app: App,
@@ -80,10 +94,30 @@ impl WebGame {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.size = (cols, rows);
         self.frames.presenter.invalidate();
+        // The contact positions are in the old grid: drop them without a
+        // release edge (a held charge is cancelled, never fired).
+        self.app.touch_reset();
     }
 
     pub fn focus(&mut self, focused: bool) {
         self.events.push_back(Event::Focus(focused));
+    }
+
+    /// One touch contact. `phase` is the browser's pointer phase, `id` its
+    /// `pointerId`, and `col`/`row` are **fractional** cell coordinates in the
+    /// game grid (0..cols, 0..rows), so a floating stick moves smoothly inside
+    /// a cell.
+    ///
+    /// The page calls this for every touch contact instead of [`Self::pointer`];
+    /// `unlock_audio()` stays the page's job on the first trusted touch.
+    pub fn touch(&mut self, phase: TouchPhase, id: i32, col: f32, row: f32) {
+        let phase = match phase {
+            TouchPhase::Start => crate::touch::TouchPhase::Start,
+            TouchPhase::Move => crate::touch::TouchPhase::Move,
+            TouchPhase::End => crate::touch::TouchPhase::End,
+            TouchPhase::Cancel => crate::touch::TouchPhase::Cancel,
+        };
+        self.app.touch(phase, id, col, row);
     }
 
     pub fn unlock_audio(&mut self) {
@@ -160,6 +194,11 @@ impl WebGame {
                     self.app.input.set_focused(focused);
                     if focused {
                         self.frames.presenter.invalidate();
+                    } else {
+                        // The page stops reporting a contact that was down when
+                        // the window lost focus: drop it without a release edge,
+                        // so a held Super Dash is cancelled rather than fired.
+                        self.app.touch_reset();
                     }
                 }
             }

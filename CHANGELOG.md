@@ -47,6 +47,14 @@
 - **The Outfall.** Seabed gravel, shell grit, pebbles, silt and shingle patches
   replace standing puddles on the ocean floor, and pale drifting motes float
   through the water in both dim and lit areas.
+- **Touch controls (web).** On a phone the game draws its controls in the
+  grid: a stick that floats to wherever your thumb lands on the left, Dash
+  at the bottom right and the ACTIVE weapons beside it when you carry one.
+  Hold Dash to charge a Super Dash. The top-left button pauses, and it is
+  Back on every menu that takes one; the top-right one opens the map. A tap
+  presses what it lands on, a swipe scrolls a list and a pinch steps the
+  zoom. They appear on the first touch and leave on any key or mouse move,
+  so a desktop run is exactly as it was.
 
 ## 0.4.4 (2026-11-26, playtest build)
 
