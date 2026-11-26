@@ -6182,7 +6182,7 @@ mod outfall_diver_tests {
         let mut pb = PixelBuffer::new(size.0, size.1);
         pb.set_materials(true);
         pb.clear(BG);
-        w.draw_player(&mut pb, Vec2::ZERO);
+        w.draw_player(&mut pb, Vec2::ZERO, Vec2::ZERO);
         pb
     }
 

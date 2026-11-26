@@ -467,7 +467,7 @@ mod tests {
     use crate::game::collision::TileMap;
     use crate::game::level::{MAP_COLS, MAP_ROWS};
     use crate::game::world::World;
-    use rand::RngExt;
+    use rand::{rngs::StdRng, RngExt, SeedableRng};
 
     const DT: f32 = 1.0 / 60.0;
     const EAST: Vec2 = Vec2 { x: 1.0, y: 0.0 };
@@ -496,7 +496,7 @@ mod tests {
         w.end_tick();
     }
 
-    fn crab_count(w: &World) -> usize {
+    fn crab_count(w: &mut World) -> usize {
         w.enemies().iter().filter(|e| e.kind == KIND && e.alive()).count()
     }
 
@@ -508,7 +508,7 @@ mod tests {
             (445.0, 9),
         ] {
             spawn_tick(&mut w, time);
-            assert_eq!(crab_count(&w), count, "at {time}");
+            assert_eq!(crab_count(&mut w), count, "at {time}");
         }
         assert_eq!(group_room(60.0, 60.0, None, 4), 2);
         assert_eq!(group_room(60.0, 60.0, None, 5), 1, "insufficient room for a group");
@@ -523,11 +523,11 @@ mod tests {
         w.ecs.despawn(lost);
         w.spawn_enemy(KIND, pos, 1.0);
         spawn_tick(&mut w, 60.0);
-        assert_eq!(crab_count(&w), 1);
+        assert_eq!(crab_count(&mut w), 1);
         spawn_tick(&mut w, 84.99);
-        assert_eq!(crab_count(&w), 1);
+        assert_eq!(crab_count(&mut w), 1);
         spawn_tick(&mut w, 85.0);
-        assert_eq!(crab_count(&w), 4);
+        assert_eq!(crab_count(&mut w), 4);
     }
 
     #[test]
@@ -536,23 +536,25 @@ mod tests {
         let mut w = open_world(Theme::Outfall);
         let pos = w.player.pos + EAST * 50.0;
         let named = w.spawn_miniboss(MinibossKind::Gasket, 0, pos);
-        let mut expected = w.rng.clone();
+        w.rng = StdRng::seed_from_u64(23);
+        let mut expected = StdRng::seed_from_u64(23);
         spawn_tick(&mut w, 181.0);
-        assert_eq!(crab_count(&w), 0);
+        assert_eq!(crab_count(&mut w), 0);
         w.ecs.despawn(named);
         w.ecs.resource_mut::<BossDue>().due = true;
         spawn_tick(&mut w, 190.0);
-        assert_eq!(crab_count(&w), 0);
+        assert_eq!(crab_count(&mut w), 0);
         w.ecs.resource_mut::<BossDue>().due = false;
         spawn_tick(&mut w, director::BOSS_TIME);
-        assert_eq!(crab_count(&w), 0);
+        assert_eq!(crab_count(&mut w), 0);
         assert_eq!(w.rng.random::<u64>(), expected.random::<u64>());
     }
 
     #[test]
     fn one_group_draws_only_one_ordinary_placement_and_initialisation() {
         let mut w = open_world(Theme::Outfall);
-        let mut expected = w.rng.clone();
+        w.rng = StdRng::seed_from_u64(23);
+        let mut expected = StdRng::seed_from_u64(23);
         let center = spawn_point_reachable(
             &mut expected, &w.level, &w.player, w.viewport, &mut SpawnScratch::default(),
         ).unwrap();
@@ -683,7 +685,7 @@ mod tests {
             let mut w = open_world(theme);
             spawn_tick(&mut w, FROM_CLOCK);
             spawn_tick(&mut w, LATE_CLOCK);
-            assert_eq!(crab_count(&w), 0);
+            assert_eq!(crab_count(&mut w), 0);
             assert_eq!(w.ecs.resource::<CrabSpawner>().last_change, None);
         }
     }

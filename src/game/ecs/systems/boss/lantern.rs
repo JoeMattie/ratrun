@@ -901,6 +901,7 @@ mod tests {
             player_pos: rat,
             player_vel: Vec2::ZERO,
             player_radius: PLAYER_RADIUS,
+            player_hurt_radius: PLAYER_RADIUS,
             arena,
             level: &level,
             flow: &flow,

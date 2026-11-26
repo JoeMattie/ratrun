@@ -844,6 +844,7 @@ mod tests {
 
     fn hazard_probe_system(
         mut probe: ResMut<HazardProbe>,
+        level: Res<crate::game::level::Level>,
         mut player: ResMut<Player>,
         mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
         mut particles: ResMut<Particles>,
@@ -856,6 +857,7 @@ mod tests {
             return;
         };
         probe.hit |= resolve_hazards(
+            &level,
             &mut boss,
             DT,
             &mut player,

@@ -92,7 +92,7 @@ use rand::RngExt;
 use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
 use crate::game::collision::{cardinal_vec, SizeClass, TileKind, TileMap};
 use crate::game::level::{
-    Level, MazeSection, RatHoleRole, Room, RoomKind, ShopHoleRole, TileRect,
+    Level, MazeSection, RatHoleRole, Room, RoomKind, ShopHoleRole, Theme, TileRect,
 };
 use crate::math::Vec2;
 

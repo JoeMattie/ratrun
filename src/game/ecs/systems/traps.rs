@@ -1808,10 +1808,11 @@ mod tests {
 
     #[test]
     fn crab_pot_warns_then_snaps_empty_opens_and_resets_without_rng() {
-        use rand::Rng;
+        use rand::RngExt;
         use CrabPotState::*;
         let (mut w, c) = pot_world();
-        let mut expected_rng = w.rng.clone();
+        w.rng = StdRng::seed_from_u64(23);
+        let mut expected_rng = StdRng::seed_from_u64(23);
         assert_eq!(pot(&w).state, Set);
         pot_ticks(&mut w, 1);
         assert_eq!(pot(&w).state, Closing);
@@ -1832,7 +1833,7 @@ mod tests {
         assert_eq!(pot(&w).state, Open);
         pot_ticks(&mut w, 1);
         assert_eq!(pot(&w).state, Set);
-        assert_eq!(w.rng.next_u64(), expected_rng.next_u64());
+        assert_eq!(w.rng.random::<u64>(), expected_rng.random::<u64>());
     }
 
     #[test]
@@ -1949,14 +1950,15 @@ mod tests {
 
     #[test]
     fn crab_pot_kill_goes_through_the_normal_loot_path() {
-        use rand::Rng;
+        use rand::RngExt;
         let (mut w, c) = pot_world();
         w.player.pos = c + FACING * 100.0;
         let weak = add_enemy(&mut w, EnemyKind::SandHopper, c, 1.0);
         w.ecs.get_mut::<Enemy>(weak).unwrap().hp = 0.5;
-        let mut expected_rng = w.rng.clone();
+        w.rng = StdRng::seed_from_u64(23);
+        let mut expected_rng = StdRng::seed_from_u64(23);
         pot_ticks(&mut w, 22);
-        assert_eq!(w.rng.next_u64(), expected_rng.next_u64());
+        assert_eq!(w.rng.random::<u64>(), expected_rng.random::<u64>());
         assert!(!w.ecs.get::<Enemy>(weak).unwrap().alive());
         w.begin_tick(DT, Vec2::ZERO, false);
         w.ecs.run_system_cached(loot::reap_enemies_system).unwrap();

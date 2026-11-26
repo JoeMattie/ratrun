@@ -1251,6 +1251,7 @@ fn outfall_caustics_vary_over_space_and_time_and_are_absent_on_other_floors() {
             "Outfall caustics must animate continuously over elapsed (fx={fx})"
         );
         // Spatial variation across the lit floor (bright net vs troughs).
+        let a = &a;
         let unique: std::collections::HashSet<Rgb> = (32..96)
             .flat_map(|x| (24..72).map(move |y| a.pixel_at(x, y)))
             .collect();
