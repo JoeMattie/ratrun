@@ -10,7 +10,7 @@
 // Not simulation: platform maths is fine in the capture scenes (see above).
 #![allow(clippy::disallowed_methods)]
 
-use crate::input_event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crate::input_event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
@@ -47,6 +47,7 @@ use crate::render::{
 };
 use crate::render::shop as shop_ui;
 use crate::scores::{ScoreEntry, ScoreTable};
+use crate::touch::{Slot as TouchSlot, TouchControls, TouchLayout, TouchOutput, TouchPhase};
 
 use menu::{HitMap, RunSummary, Target};
 
@@ -403,6 +404,14 @@ pub struct App {
     screen: Screen,
     pub should_quit: bool,
     pub input: InputState,
+    /// On-screen touch controls (`crate::touch`). Only the web host feeds them,
+    /// so on native they never leave rest and nothing is drawn.
+    touch: TouchControls,
+    /// This frame's folded touch output (edges live exactly one frame).
+    touch_out: TouchOutput,
+    /// Are the on-screen controls on screen? Set by the first touch, cleared by
+    /// any keyboard key or real mouse move — the contract's visibility rule.
+    touch_active: bool,
     audio: Option<AudioEngine>,
     /// The music intensity tier last *requested* from the synth (0 calm menu,
     /// 1 groove, 2 horde, 3 Boss Overdrive).
@@ -741,6 +750,9 @@ impl App {
             screen: Screen::Title,
             should_quit: false,
             input: InputState::new(kitty),
+            touch: TouchControls::new(),
+            touch_out: TouchOutput::default(),
+            touch_active: false,
             audio,
             music_intensity: 0,
             scores,
@@ -883,6 +895,37 @@ impl App {
         // terminal that cannot report a lone modifier), like the legends.
         app.hud.dash_key = app.dash_key();
         app
+    }
+
+    /// One touch contact from the web host (`WebGame::touch`). Queued and
+    /// folded into the next `update`, which is where every edge is derived.
+    ///
+    /// `col`/`row` are **fractional** cell coordinates in the frame's grid
+    /// (0..cols, 0..rows), so a floating stick moves smoothly inside a cell.
+    /// Native never calls this: the controls stay at rest and nothing is drawn
+    /// (see [`crate::touch`]).
+    pub fn touch(&mut self, phase: TouchPhase, id: i32, col: f32, row: f32) {
+        self.touch.push(phase, id, col, row);
+        // The controls appear on the first touch and stay until a keyboard key
+        // or a real mouse move claims the screen back (`update`).
+        self.touch_active = true;
+        self.repaint = true;
+    }
+
+    /// Are the on-screen controls drawn? (The contract's visibility flag; the
+    /// tests read it, nothing in the simulation does.)
+    pub fn touch_visible(&self) -> bool {
+        self.touch_active
+    }
+
+    /// Drop every on-screen contact **without** a release edge: the page lost the
+    /// pointer (the window lost focus, the canvas was replaced, the game
+    /// resized). A held Dash is a cancelled charge rather than a fired Super
+    /// Dash, exactly as a held key or pad button is when a terminal loses
+    /// focus.
+    pub fn touch_reset(&mut self) {
+        self.touch.reset();
+        self.repaint = true;
     }
 
     /// Force the dash mapping. `main` calls this with the answer the terminal
@@ -1133,6 +1176,14 @@ impl App {
     /// The throttle vector fed to the world: keyboard unit vector, or — when
     /// the mouse was the last input — toward the cursor, easing to a stop.
     fn resolve_move_dir(&self) -> Vec2 {
+        // The on-screen floating stick is an analog stick like the pad's: the
+        // dead zone, the rescale and the clamp are `PadState::move_vec`'s
+        // (through `touch::dead_zone`), and it sums with the keyboard the same
+        // way, so the simulation sees an ordinary analog `move_dir`. A finger on
+        // the glass wins over the steering pointer: it is the newest input.
+        if self.touch_out.stick != Vec2::ZERO {
+            return (self.input.move_dir() + self.touch_out.stick).clamp_len(1.0);
+        }
         // Mouse aim: the pointer aims, so it never steers — WASD/arrows and
         // the pad stick are the only movement. Classic and Gamepad keep the
         // steering pointer.
@@ -1466,6 +1517,124 @@ impl App {
         self.menu_music();
     }
 
+    /// Back from any device: the Back action, a right click (the pointer's
+    /// second Back gesture, live in every menu and on the expanded map) or the
+    /// on-screen Back button, which stands in Pause's slot off the field.
+    fn back_pressed(&self) -> bool {
+        self.input.back_pressed() || self.touch_out.back_press
+    }
+
+    /// The on-screen controls for the screen on show: a live run gets the stick
+    /// and the action buttons, every menu and overlay gets the Back button in
+    /// Pause's slot.
+    ///
+    /// The rectangles come from the **previous** frame's field and minimap
+    /// (`App` resolves its pointer hit map one render behind the same way), so a
+    /// contact that arrives on the first frame of a screen still lands on the
+    /// controls the player is looking at.
+    fn touch_layout_for_screen(&self) -> TouchLayout {
+        let area = self.last_area;
+        if area.is_empty() {
+            return TouchLayout::default();
+        }
+        // The expanded map is an overlay: Back, not Pause.
+        if matches!(self.screen, Screen::Playing) && !self.map_open {
+            return TouchLayout::play(
+                area,
+                self.last_game,
+                self.touch_actives_owned(),
+                self.last_minimap,
+            );
+        }
+        // The Back button goes where the Back action (or a right click) really
+        // leaves the screen today; a plate whose only exit is a row of its own
+        // (the level-up cards, the chest, the manifest, the intro cards, the
+        // victory and incident plates, the title) gets none, because a button
+        // that does not work is worse than no button. Its taps still land: the
+        // barer layout is still a `Menu`.
+        let back = matches!(
+            self.screen,
+            Screen::SectorSelect
+                | Screen::Story
+                | Screen::Paused
+                | Screen::Options
+                | Screen::Graphics
+                | Screen::Shop
+                | Screen::Library
+                | Screen::Controls
+                | Screen::Nest
+        );
+        if back {
+            let field = if self.world.is_some() { self.last_game } else { Rect::new(0, 0, 0, 0) };
+            TouchLayout::menu(area, field)
+        } else {
+            TouchLayout::default()
+        }
+    }
+
+    /// Does the rack carry one of the two ACTIVE weapons? They are the only
+    /// weapons the Actives button can fire, so it is shown only when one is
+    /// owned.
+    fn touch_actives_owned(&self) -> bool {
+        self.world.as_ref().is_some_and(|w| {
+            w.player
+                .loadout
+                .weapons
+                .iter()
+                .any(|weapon| weapon.kind.is_active())
+        })
+    }
+
+    /// Hand the touch layer's taps and swipes to the **existing** pointer path:
+    /// a tap is a left click at its cell and a swipe is one wheel step per two
+    /// cells. The screens' hit maps, the wheel and `mouse_action` then treat
+    /// them exactly as they treat a mouse, so cards, rows, the Library, the
+    /// sliders and the scrolling lists all work without a second path.
+    fn inject_touch_pointer(&mut self) {
+        // A binding capture consumes raw presses: a tap must never bind a mouse
+        // button on the Controls screen.
+        if self.bind_capture.is_some() {
+            return;
+        }
+        let out = self.touch_out;
+        let mut injected = false;
+        for (column, row) in out.taps.into_iter().flatten() {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                self.input.mouse_events.push(MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                });
+                injected = true;
+            }
+        }
+        if out.scroll_steps != 0 {
+            let kind = if out.scroll_steps > 0 {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            };
+            for _ in 0..out.scroll_steps.unsigned_abs() {
+                self.input.mouse_events.push(MouseEvent {
+                    kind,
+                    column: out.scroll_at.0,
+                    row: out.scroll_at.1,
+                    modifiers: KeyModifiers::NONE,
+                });
+                injected = true;
+            }
+        }
+        if injected {
+            // A tapped card, a stepped slider and a scrolled list all change what
+            // is on screen: render this frame.
+            self.repaint = true;
+        }
+    }
+
     /// Resolve against the last displayed frame. Stop on the first activation:
     /// queued presses cannot land on controls revealed by that activation.
     fn mouse_action(&mut self) -> Option<Target> {
@@ -1633,6 +1802,24 @@ impl App {
         if self.input.hud_labels_changed {
             self.sync_control_labels();
         }
+        // On-screen touch controls (the web host is the only feeder): this
+        // frame's contacts become the analog stick, the dash edges, the action
+        // presses and the pointer gestures (`crate::touch`). A keyboard key or a
+        // real mouse move hands the screen back and hides the controls.
+        if self.touch_active
+            && (!self.input.pressed.is_empty()
+                || self
+                    .input
+                    .mouse_events
+                    .iter()
+                    .any(|ev| matches!(ev.kind, MouseEventKind::Moved | MouseEventKind::Drag(_))))
+        {
+            self.touch_active = false;
+            self.repaint = true;
+        }
+        let touch_layout = self.touch_layout_for_screen();
+        self.touch_out = self.touch.frame(&touch_layout, self.input.controls.deadzone);
+        self.inject_touch_pointer();
         // Deferred stings first: a queued fanfare lands after the sound that
         // caused it (see `queue_sting`).
         self.tick_stings(dt);
@@ -2274,7 +2461,7 @@ impl App {
     /// One frame of the nest. Every key and pointer action lives here.
     fn update_nest(&mut self, click: Option<Target>) {
         // Back is the live binding (Esc / pad B by default), plus Backspace.
-        if click == Some(Target::Back) || self.input.back_pressed()
+        if click == Some(Target::Back) || self.back_pressed()
             || self.input.just_pressed(KeyCode::Backspace)
         {
             if self.nest_ui.pending.take().is_some() {
@@ -2522,7 +2709,7 @@ impl App {
         // Back (the live binding: Esc / pad B by default, plus Backspace)
         // leaves the card first, then the screen.
         let back = click == Some(Target::Back)
-            || self.input.back_pressed()
+            || self.back_pressed()
             || self.input.just_pressed(KeyCode::Backspace);
         if click == Some(Target::LibraryCard) {
             self.library_ui.card_open = false;
@@ -2581,7 +2768,7 @@ impl App {
             }
             _ => {}
         }
-        if self.input.back_pressed() {
+        if self.back_pressed() {
             self.close_options();
             return;
         }
@@ -2767,7 +2954,7 @@ impl App {
             }
             _ => {}
         }
-        if self.input.back_pressed() || self.input.action_pressed(Action::Graphics) {
+        if self.back_pressed() || self.input.action_pressed(Action::Graphics) {
             self.close_graphics();
             return;
         }
@@ -2919,7 +3106,7 @@ impl App {
             self.controls_row = (self.controls_row + 1) % n;
             self.sfx(Sfx::UiMove);
         }
-        if self.input.back_pressed() {
+        if self.back_pressed() {
             self.close_controls();
             return;
         }
@@ -3113,7 +3300,7 @@ impl App {
     /// and read; starting one refuses.
     fn update_sector_select(&mut self, click: Option<Target>) {
         if click == Some(Target::Back)
-            || self.input.back_pressed()
+            || self.back_pressed()
             || self.input.action_pressed(Action::Quit)
         {
             self.sfx(Sfx::UiSelect);
@@ -3152,7 +3339,7 @@ impl App {
     fn update_story(&mut self, click: Option<Target>) {
         if click == Some(Target::Back)
             || self.input.confirm_pressed()
-            || self.input.back_pressed()
+            || self.back_pressed()
             || self.input.action_pressed(Action::Quit)
         {
             self.sfx(Sfx::UiSelect);
@@ -3409,6 +3596,19 @@ impl App {
         if self.input.action_pressed(Action::ZoomOut) {
             self.step_zoom(1);
         }
+        // A two-finger pinch steps that same ladder, one rung per 1.25× change
+        // in the fingers' distance (positive = pull the view in, the `Z` key's
+        // direction). It goes through `step_zoom`, so the wheel, the keys and a
+        // pinch can never disagree about the rungs.
+        if self.touch_out.zoom_steps != 0 {
+            let steps = self.touch_out.zoom_steps;
+            for _ in 0..steps.max(0) {
+                self.step_zoom(-1);
+            }
+            for _ in 0..steps.saturating_neg().max(0) {
+                self.step_zoom(1);
+            }
+        }
         // Take back control mid-run: `U` flips auto-pick — the same preference
         // the level-up screen's pill and the options row set — so a player who
         // turned it on always gets the cards back. Discrete presses only.
@@ -3444,14 +3644,20 @@ impl App {
         }
         let mut esc_used = false;
         let mut right_spent = false;
-        if self.input.action_pressed(Action::Map) || click == Some(Target::Minimap) {
+        if self.input.action_pressed(Action::Map)
+            || self.touch_out.map_press
+            || click == Some(Target::Minimap)
+        {
             self.map_open = !self.map_open;
             self.sfx(Sfx::UiMove);
         } else if self.map_open
-            && (self.input.action_pressed(Action::Back) || self.input.right_clicked())
+            && (self.input.action_pressed(Action::Back)
+                || self.input.right_clicked()
+                || self.touch_out.back_press)
         {
-            // The expanded map is an overlay: a right click closes it exactly
-            // as Esc does (and, like Esc, never also pauses).
+            // The expanded map is an overlay: a right click (or the on-screen
+            // Back, which takes Pause's slot open-map) closes it exactly as Esc
+            // does (and, like Esc, never also pauses).
             right_spent = self.input.right_clicked();
             self.map_open = false;
             esc_used = true;
@@ -3468,8 +3674,10 @@ impl App {
             return;
         }
         // Esc is both the pause key and the map's close key, so the map's own
-        // close this frame wins: closing the map never pauses.
+        // close this frame wins: closing the map never pauses. The on-screen
+        // Pause button is the Pause action (in a menu that same slot is Back).
         if click == Some(Target::Pause)
+            || self.touch_out.pause_press
             || (!esc_used
                 && (self.input.action_pressed(Action::Back)
                     || self.input.action_pressed(Action::Pause)))
@@ -3517,12 +3725,14 @@ impl App {
             .as_ref()
             .is_none_or(|w| w.player.dash_cd <= 0.0);
         // The dash button itself: its press edge, whether it is still held and
-        // its release edge, on whatever device the dash Action is bound to.
-        // The sim owns the Super Dash charge meter; this is only the button.
+        // its release edge, on whatever device the dash Action is bound to —
+        // the pad's `RB`, or the on-screen Dash button, which is a full
+        // press/hold/release triple like any other. The sim owns the Super Dash
+        // charge meter; this is only the button.
         let mut dash_hold = DashHold {
-            down: self.input.dash_down(),
-            held: self.input.dash_held(),
-            up: self.input.dash_up(),
+            down: self.input.dash_down() || self.touch_out.dash_down,
+            held: self.input.dash_held() || self.touch_out.dash_held,
+            up: self.input.dash_up() || self.touch_out.dash_up,
         };
         // Classic/Gamepad: a left click is dash + (ready) actives, and a right
         // click is the actives on their own — `active_pressed` reads every
@@ -3538,14 +3748,16 @@ impl App {
         // machine-gun taps instead of charging.
         let (mut dash, mut active) = if self.input.controls.mouse_aims() {
             (
-                self.input.action_pressed(Action::Dash),
-                click_dash || self.input.action_pressed(Action::FireActives),
+                self.input.action_pressed(Action::Dash) || self.touch_out.dash_press,
+                click_dash
+                    || self.input.action_pressed(Action::FireActives)
+                    || self.touch_out.active_press,
             )
         } else {
             let click = click_dash && dash_ready;
             (
-                click_dash || self.input.dash_pressed_fresh(),
-                click || self.input.active_pressed(),
+                click_dash || self.input.dash_pressed_fresh() || self.touch_out.dash_press,
+                click || self.input.active_pressed() || self.touch_out.active_press,
             )
         };
         if right_spent {
@@ -3823,7 +4035,7 @@ impl App {
             self.activate_shop_row();
             return;
         }
-        if click == Some(Target::ShopLeave) || self.input.back_pressed() {
+        if click == Some(Target::ShopLeave) || self.back_pressed() {
             self.close_shop();
             return;
         }
@@ -3895,7 +4107,7 @@ impl App {
             self.confirm_molt();
             return;
         }
-        if click == Some(Target::ShopCancel) || self.input.back_pressed() {
+        if click == Some(Target::ShopCancel) || self.back_pressed() {
             // Free cancel: nothing is spent until the second selection.
             self.shop_molt = None;
             self.sfx(Sfx::UiMove);
@@ -4819,7 +5031,7 @@ impl App {
             return;
         }
         if click == Some(Target::Resume)
-            || self.input.back_pressed()
+            || self.back_pressed()
             || self.input.action_pressed(Action::Pause)
         {
             self.screen = Screen::Playing;
@@ -5348,7 +5560,96 @@ impl App {
         if self.console.anim > 0.001 {
             crate::render::console::draw(frame, area, &self.console);
         }
+        // The on-screen touch controls: over the field and the HUD, under the
+        // cursor. Nothing at all is drawn until a touch has been seen.
+        self.draw_touch(frame);
         self.draw_cursor(frame);
+    }
+
+    /// Draw the floating stick and the action buttons (or the one Back button a
+    /// menu shows) over the finished screen.
+    ///
+    /// Composed **after** every screen's own art — the pixel viewport, the
+    /// overlays, the HUD rails, the minimap and every plate — and **before** the
+    /// cheese cursor, and outside [`PictureKey`]: these are overlaid cells, not
+    /// part of the world picture, so they never force a redraw. The rectangles
+    /// come from [`App::touch_layout_for_screen`], the same function the input
+    /// routes contacts through, so art and hit test cannot disagree.
+    ///
+    /// Nothing is drawn until the first touch (`App::touch_active`), and a
+    /// keyboard key or a mouse move hides it again: a desktop frame with no
+    /// touch is byte-for-byte the frame it was before these controls existed.
+    fn draw_touch(&self, frame: &mut Frame) {
+        use crate::render::touch_art::{draw_button, draw_stick, ButtonView};
+        if !self.touch_active {
+            return;
+        }
+        let layout = self.touch_layout_for_screen();
+        let depth = crate::term::color_depth();
+        let (dash_ready, dash_charge) = self.touch_dash_gauge();
+        let (actives_ready, actives_charge) = self.touch_actives_gauge();
+        let buf = frame.buffer_mut();
+        if let Some(view) = self.touch.stick_view() {
+            draw_stick(buf, &view, depth);
+        }
+        for (slot, rect) in layout.slots() {
+            let Some(kind) = slot.kind() else { continue };
+            let (ready, charge) = match slot {
+                TouchSlot::Dash => (dash_ready, dash_charge),
+                TouchSlot::Actives => (actives_ready, actives_charge),
+                _ => (true, 0.0),
+            };
+            let view = ButtonView {
+                kind,
+                rect,
+                pressed: self.touch.holds(slot),
+                ready,
+                charge,
+            };
+            draw_button(buf, &view, depth);
+        }
+    }
+
+    /// The Dash button's readout: is the dash off cooldown, and how full is a
+    /// held Super Dash charge (0..1, `0.0` when nothing is charging).
+    fn touch_dash_gauge(&self) -> (bool, f32) {
+        let Some(w) = self.world.as_ref() else {
+            return (true, 0.0);
+        };
+        let charge = if w.player.dash_charging {
+            w.player.dash_charge
+        } else {
+            0.0
+        };
+        (w.player.dash_cd <= 0.0, charge)
+    }
+
+    /// The Actives button's readout: is one of the owned ACTIVE weapons charged,
+    /// and how close is the best one? An active weapon's `timer` **is** its
+    /// charge meter (`systems::weapons::active_weapons_system`), so this reads
+    /// the same clock the press spends.
+    fn touch_actives_gauge(&self) -> (bool, f32) {
+        let Some(w) = self.world.as_ref() else {
+            return (false, 0.0);
+        };
+        let mut ready = false;
+        let mut charge: f32 = 0.0;
+        for weapon in w
+            .player
+            .loadout
+            .weapons
+            .iter()
+            .filter(|weapon| weapon.kind.is_active())
+        {
+            if weapon.timer <= 0.0 {
+                ready = true;
+                charge = 1.0;
+            } else {
+                let full = weapon.cooldown().max(0.01);
+                charge = charge.max((1.0 - weapon.timer / full).clamp(0.0, 1.0));
+            }
+        }
+        (ready, charge)
     }
 
     /// Draw the console's `perf` overlay: frame time, tick time and entity
@@ -6125,6 +6426,7 @@ mod tests {
     use crate::input_event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseEvent, MouseEventKind,
     };
+    use crate::touch::{Slot as TouchSlot, TouchPhase};
 
     /// What crossterm builds from a lone left-Ctrl press under the Kitty
     /// protocol with report-all-keys (`CSI 57442;5:1u`).
@@ -6149,6 +6451,15 @@ mod tests {
     /// score file.
     fn test_app() -> App {
         App::with_options(false, None, ScoreTable::default(), false, Some(TEST_SEED))
+    }
+
+    /// A rectangle's centre in fractional cells (ratatui's `Rect` has no
+    /// `center`), for the touch contacts the tests aim at a control.
+    fn centre(rect: Rect) -> (f32, f32) {
+        (
+            f32::from(rect.x) + f32::from(rect.width) * 0.5,
+            f32::from(rect.y) + f32::from(rect.height) * 0.5,
+        )
     }
 
     /// End-to-end harness: drives the real `App` through ratatui's `Terminal`
@@ -6275,6 +6586,34 @@ mod tests {
         fn click(&mut self, text: &str) {
             let pos = self.locate(text);
             self.events(&[], &[(MouseEventKind::Down(MouseButton::Left), pos)]);
+        }
+
+        /// Advance one frame with on-screen touch contacts, exactly as
+        /// `WebGame::frame` folds the page's `touch()` calls in: the contacts
+        /// queue before `update`, which is where the edges are derived.
+        /// `contacts` are `(phase, pointerId, col, row)` in fractional cells.
+        fn touch_frame(&mut self, contacts: &[(TouchPhase, i32, f32, f32)]) -> String {
+            self.app.input.begin_frame();
+            for &(phase, id, col, row) in contacts {
+                self.app.touch(phase, id, col, row);
+            }
+            self.app.update(1.0 / 60.0);
+            self.terminal.draw(|f| self.app.render(f)).unwrap();
+            self.screen_text()
+        }
+
+        /// Tap a cell with one finger: down on this frame, up on the next (the
+        /// screen sees the Start frame's edges and the End frame's tap).
+        fn touch_tap(&mut self, col: f32, row: f32) {
+            self.touch_frame(&[(TouchPhase::Start, 1, col, row)]);
+            self.touch_frame(&[(TouchPhase::End, 1, col, row)]);
+        }
+
+        /// A button's centre in fractional cells.
+        fn button_centre(&self, slot: TouchSlot) -> (f32, f32) {
+            let rect = self.app.touch_layout_for_screen().button(slot);
+            assert!(!rect.is_empty(), "{slot:?} is not on this screen");
+            centre(rect)
         }
 
         fn show_upgrade_cards(&mut self) {
@@ -18705,6 +19044,256 @@ mod tests {
             crate::spectate::render_wall(&mut buf, area, &wall);
             let head: String = (0..vw).map(|x| buf[(x, 0)].symbol()).collect();
             assert_eq!(head, ver);
+        }
+    }
+
+    // ---- On-screen touch controls (v0.5 mobile) --------------------------
+
+    /// A dragged stick moves through `resolve_move_dir` (the pad stick's own
+    /// path, dead zone included) and the lift stops the rat dead.
+    #[test]
+    fn a_stick_drag_drives_the_rat_and_the_lift_stops_it() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        let zone = h.app.touch_layout_for_screen().stick_zone;
+        assert!(!zone.is_empty(), "the play screen has a stick zone");
+        let (base_x, base_y) = centre(zone);
+
+        h.touch_frame(&[(TouchPhase::Start, 1, base_x, base_y)]);
+        assert!(h.app.touch_visible(), "the first touch shows the controls");
+        // Five cells right is the stick's full horizontal throw.
+        h.touch_frame(&[(TouchPhase::Move, 1, base_x + 5.0, base_y)]);
+        let out = h.app.touch_out;
+        assert!(out.stick.x > 0.99, "full throttle right: {:?}", out.stick);
+        assert_eq!(out.stick.y, 0.0);
+
+        let x0 = h.app.world.as_ref().unwrap().player.pos.x;
+        for _ in 0..12 {
+            h.touch_frame(&[]);
+        }
+        let x1 = h.app.world.as_ref().unwrap().player.pos.x;
+        assert!(x1 > x0 + 4.0, "the rat walks right: {x0} -> {x1}");
+
+        // Lift: the analog vector goes to zero and the rat stops. The
+        // throttle's own easing coasts for a few ticks, exactly as it does
+        // when a movement key is released, so let it settle first.
+        h.touch_frame(&[(TouchPhase::End, 1, base_x + 5.0, base_y)]);
+        assert_eq!(h.app.touch_out.stick, Vec2::ZERO, "a lift returns zero");
+        for _ in 0..20 {
+            h.touch_frame(&[]);
+        }
+        let x2 = h.app.world.as_ref().unwrap().player.pos.x;
+        for _ in 0..12 {
+            h.touch_frame(&[]);
+        }
+        let x3 = h.app.world.as_ref().unwrap().player.pos.x;
+        assert!((x3 - x2).abs() < 0.5, "a released stick stops the rat: {x2} -> {x3}");
+    }
+
+    /// One tap on the Dash button is one dash; nothing else fires.
+    #[test]
+    fn a_dash_tap_is_exactly_one_dash() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        let (cx, cy) = h.button_centre(TouchSlot::Dash);
+        let before = h.app.dashes_used;
+        h.touch_frame(&[(TouchPhase::Start, 2, cx, cy)]);
+        h.touch_frame(&[(TouchPhase::End, 2, cx, cy)]);
+        for _ in 0..3 {
+            h.touch_frame(&[]);
+        }
+        assert_eq!(
+            h.app.dashes_used,
+            before + 1,
+            "a tap is one dash and a lift is not a second"
+        );
+        let w = h.app.world.as_ref().unwrap();
+        assert!(w.player.dash_cd > 0.0, "the dash went on cooldown");
+        assert!(!w.player.dash_charging, "without Super Dash the tap just dashes");
+    }
+
+    /// Holding the Dash button charges the Super Dash (the pad's `RB` gesture)
+    /// and the release fires the long dash — not a tap.
+    #[test]
+    fn a_held_dash_charges_and_releases_a_super_dash() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player
+                .loadout
+                .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+            w.player.dash_cd = 0.0;
+        }
+        let (cx, cy) = h.button_centre(TouchSlot::Dash);
+        h.touch_frame(&[(TouchPhase::Start, 3, cx, cy)]);
+        assert!(
+            h.app.world.as_ref().unwrap().player.dash_charging,
+            "the press starts the charge and never dashes"
+        );
+        // A full meter: 0.90 s at level 1, comfortably inside 60 frames.
+        for _ in 0..60 {
+            h.touch_frame(&[]);
+        }
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(w.player.dash_charging, "a full meter is held, not fired");
+            assert!(
+                w.player.dash_charge >= 0.99,
+                "the hold filled the meter: {}",
+                w.player.dash_charge
+            );
+        }
+        h.touch_frame(&[(TouchPhase::End, 3, cx, cy)]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(!w.player.dash_charging, "the release spends the meter");
+        assert!(
+            w.player.dash_active > 0.5,
+            "a full charge is the long dash, not the 0.32 s tap: {}",
+            w.player.dash_active
+        );
+    }
+
+    /// Pause is Pause in play and the same slot is Back everywhere else.
+    #[test]
+    fn the_pause_slot_is_pause_in_play_and_back_on_every_menu() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        let pause = h.app.touch_layout_for_screen().button(TouchSlot::Pause);
+        let (px, py) = h.button_centre(TouchSlot::Pause);
+
+        h.touch_tap(px, py);
+        assert!(matches!(h.app.screen, Screen::Paused), "Pause pauses");
+
+        // Options over the pause plate: the same slot is Back now.
+        h.frame(&[KeyCode::Char('o')]);
+        assert!(matches!(h.app.screen, Screen::Options));
+        let back = h.app.touch_layout_for_screen().button(TouchSlot::Back);
+        assert_eq!(
+            (back.x, back.y),
+            (pause.x, pause.y),
+            "Back takes Pause's slot (position, not size)"
+        );
+        let (bx, by) = centre(back);
+        h.touch_tap(bx, by);
+        assert!(
+            matches!(h.app.screen, Screen::Paused),
+            "Back leaves Options for the pause screen, not the field"
+        );
+        // …and Back again leaves the pause screen for play.
+        h.touch_tap(px, py);
+        assert!(matches!(h.app.screen, Screen::Playing));
+    }
+
+    /// A tap that started on no control is a left click at that cell, so the
+    /// level-up cards are picked through the ordinary pointer path.
+    #[test]
+    fn a_tap_on_a_level_up_card_picks_it() {
+        let mut h = Harness::new(80, 26);
+        h.show_upgrade_cards();
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::LevelUp));
+        let card = h
+            .app
+            .hits
+            .rect_for(Target::Upgrade(1))
+            .expect("the second card is on screen");
+        let (cx, cy) = centre(card);
+        h.touch_tap(cx, cy);
+        assert!(
+            matches!(h.app.screen, Screen::Playing),
+            "the tapped card is taken and the screen closes"
+        );
+        let loadout = &h.app.world.as_ref().unwrap().player.loadout;
+        assert!(
+            loadout
+                .passives
+                .iter()
+                .any(|(kind, _)| *kind == PassiveKind::Armor),
+            "the tapped card was Armor: {:?}",
+            loadout.passives
+        );
+    }
+
+    /// Two fingers that both started clear of the controls step the zoom ladder
+    /// through the same entry point `Z`/`X` use.
+    #[test]
+    fn a_pinch_steps_the_zoom_ladder() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        let field = h.app.last_game;
+        let zoom0 = h.app.world.as_ref().unwrap().zoom;
+        // Both fingers on the right half: clear of the stick zone and of every
+        // button (the Map is on the field's top row, the Dash at its bottom).
+        let y = f32::from(field.y) + 8.0;
+        let a = f32::from(field.x) + 54.0;
+        let b = a + 10.0;
+        h.touch_frame(&[(TouchPhase::Start, 4, a, y), (TouchPhase::Start, 5, b, y)]);
+        // Fingers apart by 1.4×: one rung in.
+        h.touch_frame(&[(TouchPhase::Move, 4, a, y), (TouchPhase::Move, 5, a + 14.0, y)]);
+        let zoom1 = h.app.world.as_ref().unwrap().zoom;
+        assert!(
+            zoom1 < zoom0,
+            "a pinch apart pulls the view in: {zoom0} -> {zoom1}"
+        );
+        // …and back together again, one rung out.
+        h.touch_frame(&[(TouchPhase::Move, 4, a, y), (TouchPhase::Move, 5, a + 9.0, y)]);
+        let zoom2 = h.app.world.as_ref().unwrap().zoom;
+        assert!(
+            zoom2 > zoom1,
+            "a pinch together widens the view: {zoom1} -> {zoom2}"
+        );
+    }
+
+    /// The stick and a button are separate contacts: both work in one frame.
+    #[test]
+    fn the_stick_and_the_dash_button_work_together() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        let (bx, by) = centre(h.app.touch_layout_for_screen().stick_zone);
+        let (dx, dy) = h.button_centre(TouchSlot::Dash);
+        let before = h.app.dashes_used;
+
+        h.touch_frame(&[(TouchPhase::Start, 6, bx, by), (TouchPhase::Start, 7, dx, dy)]);
+        h.touch_frame(&[(TouchPhase::Move, 6, bx + 5.0, by)]);
+        let out = h.app.touch_out;
+        assert!(out.stick.x > 0.99, "the stick still drives: {:?}", out.stick);
+        assert!(out.dash_held, "the dash button is still owned by its contact");
+        assert_eq!(h.app.dashes_used, before + 1, "the dash fired as well");
+    }
+
+    /// Any keyboard key hands the screen back to the keyboard and hides the
+    /// controls; a new touch brings them back.
+    #[test]
+    fn a_keypress_hides_the_controls() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.touch_frame(&[(TouchPhase::Start, 8, 10.0, 12.0)]);
+        assert!(h.app.touch_visible());
+        h.frame(&[KeyCode::Char('w')]);
+        assert!(!h.app.touch_visible(), "a key hides the controls");
+        h.touch_frame(&[(TouchPhase::Start, 9, 10.0, 12.0)]);
+        assert!(h.app.touch_visible(), "a touch shows them again");
+    }
+
+    /// A desktop that never sees a touch renders the frame it rendered before
+    /// the controls existed: the empty touch frame is inert and nothing is
+    /// drawn.
+    #[test]
+    fn with_no_touch_ever_the_frames_are_identical() {
+        let mut plain = Harness::new(80, 24);
+        let mut folded = Harness::new(80, 24);
+        for frame in 0..4 {
+            plain.frame(&[]);
+            // The same frames with the touch layer's empty output folded in,
+            // which is what the web host does on a mouse-only page.
+            folded.touch_frame(&[]);
+            assert!(!folded.app.touch_visible(), "no touch, no controls");
+            assert_eq!(
+                plain.screen_text(),
+                folded.screen_text(),
+                "frame {frame} changed when the touch layer ran empty"
+            );
         }
     }
 }

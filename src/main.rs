@@ -31,6 +31,7 @@ mod scores;
 mod spectate;
 mod term;
 mod titleart;
+mod touch;
 
 mod game;
 mod tuning;
