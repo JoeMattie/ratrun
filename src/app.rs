@@ -4065,10 +4065,8 @@ impl App {
         }
         self.keep_entries = entries_for(&items);
         self.keep_splices.clear();
-        if self.tuning.campaign.carry {
-            if let Some(w) = self.world.as_ref() {
-                self.keep_splices.extend(w.player.loadout.splices.iter().map(|kind| kind.name()));
-            }
+        if let Some(w) = self.world.as_ref().filter(|_| self.tuning.campaign.carry) {
+            self.keep_splices.extend(w.player.loadout.splices.iter().map(|kind| kind.name()));
         }
         self.keep_items = items;
         self.keep_selected = vec![false; self.keep_items.len()];
