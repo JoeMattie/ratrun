@@ -3113,17 +3113,84 @@ mod tests {
         let song = song_for(Theme::Outfall);
         assert_eq!(song.name, "Return Current");
         assert_eq!(song.floor, "Outfall");
-        assert_eq!(song.bpm, 84);
+        assert_eq!(song.bpm, 100);
         assert_eq!(song.beats_per_bar, 4);
-        assert_eq!(song.bars, 24);
+        assert_eq!(song.bars, 40);
+        assert_eq!(
+            song.sections,
+            &[(0u16, 8), (8, 8), (16, 8), (24, 8), (32, 8)][..]
+        );
         assert!(song.style.enhanced_drums);
-        assert!(song.style.pad_detune <= 0.006);
+        assert!(song.style.pad_detune <= 0.0045);
         for role in Role::ALL {
             assert!(
                 !song.parts[role.index()].is_empty(),
                 "Outfall {} part should be populated",
                 role.name()
             );
+        }
+        // Pad stays rhythmic and non-drone-y (no held whole-bar or multi-bar notes).
+        for &(_, midi, gate, _) in song.parts[Role::Pad.index()] {
+            if midi != 0 {
+                assert!(
+                    gate <= 8,
+                    "Outfall pad note holds for {gate} steps (keep <= 8 to avoid drones)"
+                );
+            }
+        }
+        // Bass walks and changes roots across bars instead of holding a pedal.
+        let steps_per_bar = song.steps_per_bar();
+        let mut bar_roots = vec![None::<u8>; song.bars as usize];
+        let mut cur = 0u32;
+        for &(delta, midi, _, _) in song.parts[Role::Bass.index()] {
+            cur += u32::from(delta);
+            if midi != 0 {
+                let bar = (cur / steps_per_bar) as usize;
+                if bar_roots[bar].is_none() {
+                    bar_roots[bar] = Some(midi);
+                }
+            }
+        }
+        let roots: Vec<u8> = bar_roots.into_iter().flatten().collect();
+        assert_eq!(roots.len(), song.bars as usize, "every bar should carry bass motion");
+        let root_changes = roots.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(
+            root_changes >= (song.bars as usize) / 2,
+            "Outfall bass changes root only {root_changes} times across {} bars",
+            song.bars
+        );
+        // No two 8-bar sections are identical copies in Lead or Bass.
+        for role in [Role::Bass, Role::Lead] {
+            let mut decoded = Vec::new();
+            let mut step = 0u32;
+            for &(delta, midi, gate, _) in song.parts[role.index()] {
+                step += u32::from(delta);
+                if midi != 0 {
+                    decoded.push((step, midi, gate));
+                }
+            }
+            let mut seen: Vec<Vec<(u32, u8, u8)>> = Vec::new();
+            for &(start_bar, len_bars) in song.sections {
+                let lo = u32::from(start_bar) * steps_per_bar;
+                let hi = u32::from(start_bar + len_bars) * steps_per_bar;
+                let slice: Vec<(u32, u8, u8)> = decoded
+                    .iter()
+                    .copied()
+                    .filter(|&(st, _, _)| (lo..hi).contains(&st))
+                    .map(|(st, m, g)| (st - lo, m, g))
+                    .collect();
+                assert!(
+                    !slice.is_empty(),
+                    "Outfall {} section at bar {start_bar} is empty",
+                    role.name()
+                );
+                assert!(
+                    !seen.contains(&slice),
+                    "Outfall {} section at bar {start_bar} repeats an earlier section verbatim",
+                    role.name()
+                );
+                seen.push(slice);
+            }
         }
         // Smooth intensity transitions across 0 -> 1 -> 2 -> 3 -> 2 -> 0 in both palettes:
         // switching intensity slews role gains over GAIN_SLEW_SECS so the transition
