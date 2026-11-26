@@ -55,7 +55,7 @@ Use **one name per concept** everywhere:
 
 ## 4. Canonical Weapon, Evolution & Passive Tags
 
-Never slice `.name().chars().take(4)` for compact strips (`Tail Whip` and `Tail Thrash` collide as `Tail`). Always call `crate::render::hud::weapon_tag(kind, evolved)` so every 2–5 char rack uses one consistent abbreviation whose **first two letters are unique across all 26 weapons and evolutions**:
+Never slice `.name().chars().take(4)` for compact strips (`Tail Whip` and `Tail Thrash` collide as `Tail`). Always call `crate::render::hud::weapon_tag(kind, evolved)` so every 2–5 char rack uses one consistent abbreviation whose **first two letters are unique across all 28 weapons and evolutions**:
 
 | Base Weapon | Tag (`2-char`) | Evolution | Tag (`2-char`) | Partner Passive |
 |---|---|---|---|---|
@@ -72,6 +72,7 @@ Never slice `.name().chars().take(4)` for compact strips (`Tail Whip` and `Tail 
 | Acid Rain | `RAIN` (`RA`) | Downspout | `ACID` (`AC`) | Long Fuse |
 | Hantavirus | `VIR` (`VI`) | Dead Letter | `DEAD` (`DE`) | Second Scent |
 | Spiked Tail | `BARB` (`BA`) | Barbed Wire | `WIRE` (`WI`) | Counterweight |
+| Lava Breath | `LAVA` (`LA`) | Caldera | `CLDR` (`CL`) | Long Fuse |
 
 **Passive names & 3-char HUD tags**:
 `Fat Reserves` (`HP`), `Quick Paws` (`SPD`), `Sharp Teeth` (`DMG`), `Frenzy` (`FIR`), `Whiskers` (`MAG`), `Resilience` (`REG`), `Thick Hide` (`ARM`), `Spring Heel` (`DSH`), `Counterweight` (`SHV`), `Long Fuse` (`FUS`), `Second Scent` (`XP+`), `Lens Cap` (`RCH`).

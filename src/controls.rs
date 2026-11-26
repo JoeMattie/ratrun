@@ -1422,7 +1422,7 @@ impl Controls {
         ];
         self.pause_narrow = vec![
             format!("move WASD · dash {dash} · actives {actives}"),
-            format!("{click_tail}{pause} unpause · {graphics} graphics"),
+            format!("{click_tail}{pause} unpause"),
         ];
     }
 

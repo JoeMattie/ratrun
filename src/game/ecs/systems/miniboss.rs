@@ -1542,7 +1542,7 @@ fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
 ///
 /// The layout is part of the row data ([`StampLayout`]); a row that does not
 /// use stamps still gets three centres, so the field is never left stale.
-fn lock_stamps(mb: &mut Miniboss) {
+pub(crate) fn lock_stamps(mb: &mut Miniboss) {
     let origin = mb.origin;
     let aim = mb.aim;
     let left = aim.perp();
@@ -2062,7 +2062,9 @@ mod tests {
         w.director.spawn_timer = 1.0e6;
         w.director.elite_timer = 1.0e6;
         let p = w.player.pos;
-        let e = w.spawn_miniboss(K::BellDiver, 1, p + Vec2::new(60.0, 0.0));
+        // Use a surface body to exercise the normal Nuke path. Burrow's
+        // independent immunity would absorb the Nuke on this tick.
+        let e = w.spawn_miniboss(K::Corkscrew, 1, p + Vec2::new(60.0, 0.0));
         let hp0 = w.ecs.get::<Enemy>(e).unwrap().hp;
         let max = w.ecs.get::<Enemy>(e).unwrap().max_hp;
         w.spawn_pickup(Pickup { pos: p, kind: PickupKind::Nuke, bob: 0.0 });
@@ -2119,8 +2121,9 @@ mod tests {
             }
         }
         assert!(killed, "Hantavirus never ticked the miniboss down");
-        assert_eq!(chests(&mut w), 1, "a DOT kill must leave exactly one chest");
-        assert_eq!(gold_values(&mut w), vec![MINIBOSS_GOLD]);
+        let unclaimed = chests(&mut w);
+        assert_eq!(unclaimed + w.pending_chests as usize, 1, "a DOT kill yields one chest");
+        assert_eq!(gold_values(&mut w).into_iter().map(u32::from).sum::<u32>() + w.gold, MINIBOSS_GOLD.into());
     }
 
     /// The chest never lands in a wall, an unreachable pocket or a flatbed pit.

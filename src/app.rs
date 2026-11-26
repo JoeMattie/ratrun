@@ -8167,6 +8167,79 @@ mod tests {
                 hh.app.select_idx = floor.min(Theme::playable().len() - 1);
                 hh.frame(&[]);
             }
+            "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet" => {
+                use crate::game::weapon::{LASER_ARC_DEG, LASER_SWEEP_SECS};
+                hh.enter_playing();
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                let (kind, rank, ticks, evolved) = match target.as_str() {
+                    "lava-volley" => (WeaponKind::LavaBreath, 5, 118, false),
+                    "lava-pools" => (WeaponKind::LavaBreath, 5, 137, true),
+                    "dropping-r1" => (WeaponKind::Hantavirus, 1, 32, false),
+                    "dropping-r5" => (WeaponKind::Hantavirus, 5, 32, false),
+                    _ => (WeaponKind::LaserEyes, 5, 9, false),
+                };
+                let pos = w.player.pos;
+                let mut aim = pos + Vec2::new(100.0, 0.0);
+                if kind == WeaponKind::LaserEyes {
+                    // Lay a normal Sewer puddle just below a horizontal sweep
+                    // sample in the hall, where the camera can see its mirror.
+                    w.level.puddles.push(crate::game::level::Puddle {
+                        pos: pos + Vec2::new(34.0, 16.0),
+                        rx: 29.0,
+                        ry: 12.0,
+                        seed: 5,
+                    });
+                    let half = LASER_ARC_DEG[4].to_radians() * 0.5;
+                    let phase = ticks as f32 / (60.0 * LASER_SWEEP_SECS[4]);
+                    aim = pos + Vec2::from_angle(half * (1.0 - 2.0 * phase)) * 100.0;
+                    w.shake_scale = 0.0;
+                }
+                w.player.face = Vec2::new(1.0, 0.0);
+                w.player.loadout.weapons.clear();
+                w.player.loadout.apply(&Upgrade::NewWeapon(kind));
+                let weapon = &mut w.player.loadout.weapons[0];
+                weapon.level = rank;
+                weapon.timer = 0.0;
+                weapon.evolved = evolved;
+                for _ in 0..ticks {
+                    w.update_with_aim(1.0 / 60.0, Vec2::ZERO, false, false, Some(aim));
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            t if t.starts_with("miniboss-first-") => {
+                use crate::game::collision::SizeClass;
+                use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossState};
+                let name = t.trim_start_matches("miniboss-first-");
+                let theme = Theme::playable().into_iter()
+                    .find(|theme| theme.name().eq_ignore_ascii_case(name))
+                    .expect("playable sector");
+                hh.enter_playing();
+                if theme != Theme::Sewer {
+                    hh.app.start_practice(theme);
+                    hh.frame(&[KeyCode::Enter]);
+                }
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.elapsed = 186.0;
+                let which = miniboss::schedule_for(theme, 0);
+                let pos = w.testbed_spawn_point(Vec2::new(1.0, 0.0), 30.0,
+                    which.body_radius(), SizeClass::Large);
+                let rat = w.player.pos;
+                let e = w.spawn_miniboss(which, 0, pos);
+                let mut mb = w.ecs.get_mut::<Miniboss>(e).unwrap();
+                mb.state = MinibossState::Tell;
+                mb.timer = 0.55;
+                mb.announced = true;
+                mb.tell_cued = true;
+                mb.origin = pos;
+                mb.target = rat;
+                mb.aim = (rat - pos).normalized();
+                miniboss::lock_stamps(&mut mb);
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             // A named miniboss mid-tell, with its nameplate and the 15:00 clock
             // (wave 3). The appointment is pinned past the live schedule so the
             // test body is not immediately retreated.
@@ -9234,6 +9307,10 @@ mod tests {
                 hh.frame(&[KeyCode::Enter]);
                 hh.frame(&[]);
             }
+            "graphics-play" => {
+                hh.enter_playing();
+                hh.frame(&[KeyCode::Char('g')]);
+            }
             "console" => {
                 hh.enter_playing();
                 for _ in 0..40 {
@@ -9248,7 +9325,7 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
-            "map" => {
+            "map" | "map-corner" => {
                 hh.enter_playing();
                 for tick in 0..600u32 {
                     let mv = match (tick / 90) % 4 {
@@ -9262,7 +9339,11 @@ mod tests {
                         hh.frame(&[KeyCode::Enter]);
                     }
                 }
-                hh.frame(&[KeyCode::Tab]);
+                hh.app.map_animation_start =
+                    std::time::Instant::now() - std::time::Duration::from_millis(312);
+                if target == "map" {
+                    hh.frame(&[KeyCode::Tab]);
+                }
                 hh.frame(&[]);
             }
             t if t.starts_with("cobra") => {

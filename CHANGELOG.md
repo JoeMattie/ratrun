@@ -2,15 +2,15 @@
 
 ## Unreleased
 
-- 1× smoothing defaults to Off.
-- The foreground layer defaults to Off. Older saves reset smoothing and foreground and retain their other graphics settings.
-- Press `G` during play or pause to open Graphics, then `S` to cycle smoothing over the frozen field.
+- **Graphics shortcuts and defaults.** Press `G` in play or pause to open
+  Graphics and `S` there to cycle smoothing. Smoothing and foreground default
+  to Off. Older saves retain their other graphics settings.
 - **Still water.** Puddle glints and reflections stay still at rest. Passing
   splash ripples brighten the water and bend reflections as they spread.
-- **Laser Eyes beams reach the screen edge at every zoom, stopping at
-  walls.** The thinner beams light their path and reflect brightly in puddles.
+- **Laser Eyes reaches across the widest view and stops at walls.** The thinner beams light their path and reflect brightly in puddles.
   Damage falls off with distance, and higher ranks deal full damage farther
   from the muzzle.
+- **Hantavirus droppings cast green light.** Higher ranks shine brighter, and the glow fades as they dry.
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
 - **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
@@ -19,6 +19,11 @@
 - Added an interactive testbed for trying every weapon, evolution, pickup,
   enemy, miniboss, and boss on any sector. Launch it with `--testbed` or the
   console's `testbed` command.
+- **Pulsing rat marker.** A bright halo helps locate you on the minimap and Tab map.
+- **Clearer map boundaries.** Known walls are solid warm grey and unexplored
+  edges are dotted. The Tab map footer explains both marks.
+- **Foreground bands.** Switch on Foreground to reveal oversized pipes,
+  catwalks and other overhead objects that cross the view.
 
 ## 0.3.0 (2026-11-25)
 
@@ -40,7 +45,6 @@ first time.
 - **Hantavirus is deployed by droppings.** The rat leaves one behind it every
   cycle; the first enemy to step in one takes the infection, which then jumps
   down the pack as before.
-- **Hantavirus droppings cast green light.** Higher ranks shine brighter, and the glow fades as they dry.
 - **The Drake.** A big duck wanders into the Sewers from 2:30. It winds up,
   shows you the lane, and pecks three times. It is slow to recover.
 - **The giant rat is drawn properly** at every size, instead of the small
@@ -50,8 +54,6 @@ first time.
 - **Gene splices last one sector.** Both sockets are empty again on the next
   floor, so the shop matters every time.
 - **Loot markers shrink when the view is zoomed out.**
-- **Your position pulses with a soft halo on the map and minimap.**
-- **Walls read as solid lines on the map and minimap.** Unexplored edges fade into the red veil in a dotted pattern.
 - **MIT licence.**
 - **Foreground layer, rebuilt.** The overhead things are few, huge and
   attached: pipes, ducts, rails and clotheslines run wall to wall, hoods and
