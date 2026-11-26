@@ -53,6 +53,8 @@ pub struct Bullet {
     pub hit_cd: f32,
     /// Weapon that fired this projectile (used for weapon-specific impact VFX).
     pub weapon: Option<WeaponKind>,
+    /// Pistol Shrimp bubble appearance. Collision uses the ordinary shot radius.
+    pub outfall_bubble: bool,
 }
 
 impl Bullet {
@@ -72,6 +74,7 @@ impl Bullet {
             lob: None,
             hit_cd: 0.0,
             weapon: None,
+            outfall_bubble: false,
         }
     }
 }

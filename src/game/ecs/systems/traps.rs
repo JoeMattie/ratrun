@@ -323,7 +323,8 @@ pub fn enemy_units(kind: EnemyKind) -> u8 {
         | EnemyKind::HouseCentipede
         | EnemyKind::MurderHornet
         | EnemyKind::Lilliputian => 1,
-        // Unreachable: `archetype()` answers one of the sixteen kinds above.
+        EnemyKind::Skater | EnemyKind::Lampfish => 1,
+        EnemyKind::FrySchool => 2,
         _ => 1,
     }
 }
@@ -510,10 +511,11 @@ fn is_ground(kind: EnemyKind) -> bool {
     // The Wick Moth flies (a teardrop with a lit tail) exactly like the Bat, so
     // glue and mousetraps do not hold it either. A registered kind flies or
     // walks exactly as its base body does.
-    !matches!(
-        kind.archetype(),
-        EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
-    )
+    !kind.outfall_swims()
+        && !matches!(
+            kind.archetype(),
+            EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
+        )
 }
 
 /// `(hold seconds, movement multiplier)` for a ground enemy caught by glue.
@@ -1675,6 +1677,19 @@ mod tests {
             STICKY_TRAP_SLOTS as u8 >= STICKY_TRAP_CAPACITY,
             "the slot array must hold a full load of 1-unit bodies"
         );
+    }
+
+    #[test]
+    fn outfall_glue_uses_body_weight_and_exempts_swimmers() {
+        assert_eq!(enemy_units(EnemyKind::SandHopper), 1);
+        assert_eq!(enemy_units(EnemyKind::Skater), 1);
+        assert_eq!(enemy_units(EnemyKind::Conger), 2);
+        assert_eq!(enemy_units(EnemyKind::PistolShrimp), 2);
+        assert_eq!(enemy_units(EnemyKind::FrySchool), 2);
+        assert_eq!(enemy_units(EnemyKind::Grouper), 4);
+        assert!(is_ground(EnemyKind::FrySchool));
+        assert!(!is_ground(EnemyKind::GlassShrimp));
+        assert!(!is_ground(EnemyKind::Lampfish));
     }
 
     /// A mixed crowd fills a board exactly: 4 + 2 + 2 units fit, the next small

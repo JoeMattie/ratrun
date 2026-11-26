@@ -1,8 +1,8 @@
 //! Enemies: kinds, per-kind stats, and steering behavior toward the player.
 //!
-//! `EnemyKind` is append-only and `EnemyKind::all()` lists every kind: the 48
+//! `EnemyKind` is append-only and `EnemyKind::all()` lists every kind: the 56
 //! ordinary bodies the floor rosters own (`game/roster.rs`), one **guest**
-//! (the Drake, which no roster slot carries) and the legacy `Boss` body: 50.
+//! (the Drake, which no roster slot carries) and the legacy `Boss` body: 58.
 //! Stats, name, colour and XP key on the kind itself; behaviour keys on
 //! [`EnemyKind::archetype`], the existing body whose steering, attack and nav
 //! size class a kind reuses until it has a rule of its own.
@@ -133,6 +133,16 @@ pub enum EnemyKind {
     /// names the Brute as its archetype only so the *nav* size class, the glue
     /// weight, `holds()` and the steering rules agree with a body of its mass.
     Drake,
+
+    // Outfall, in roster slot order.
+    SandHopper,
+    GlassShrimp,
+    Conger,
+    Skater,
+    PistolShrimp,
+    Lampfish,
+    Grouper,
+    FrySchool,
 }
 
 impl EnemyKind {
@@ -204,6 +214,14 @@ impl EnemyKind {
             // times 1.6, so a pecking duck is a real fight and not a fodder
             // body that happens to be wide.
             EnemyKind::Drake => 92.8,
+            EnemyKind::SandHopper => 6.0,
+            EnemyKind::GlassShrimp => 4.0,
+            EnemyKind::Conger => 16.0,
+            EnemyKind::Skater => 14.0,
+            EnemyKind::PistolShrimp => 12.0,
+            EnemyKind::Lampfish => 11.0,
+            EnemyKind::Grouper => 60.0,
+            EnemyKind::FrySchool => 26.0,
         }
     }
     pub fn speed(self) -> f32 {
@@ -263,6 +281,14 @@ impl EnemyKind {
             // Dry-floor speed. The paddling 40 px/s on a puddle is the floor's
             // own rule (`drake::water_gait`), not this number.
             EnemyKind::Drake => 30.0,
+            EnemyKind::SandHopper => 30.0,
+            EnemyKind::GlassShrimp => 42.0,
+            EnemyKind::Conger => 38.0,
+            EnemyKind::Skater => 12.0,
+            EnemyKind::PistolShrimp => 22.0,
+            EnemyKind::Lampfish => 24.0,
+            EnemyKind::Grouper => 16.0,
+            EnemyKind::FrySchool => 22.0,
         }
     }
     /// Collision radius, which also picks the navigation size class
@@ -296,11 +322,17 @@ impl EnemyKind {
             // The guest: a big body (the rat is 3), one size class above the
             // Brute's 6.5 and the widest ordinary body in the game.
             EnemyKind::Drake => 8.0,
+            EnemyKind::SandHopper => 2.5,
+            EnemyKind::GlassShrimp => 2.0,
+            EnemyKind::Conger => 4.0,
+            EnemyKind::Skater => 3.0,
+            EnemyKind::PistolShrimp => 3.0,
+            EnemyKind::Lampfish => 3.0,
+            EnemyKind::Grouper => 6.5,
+            EnemyKind::FrySchool => 12.0,
             // A registration borrows its base body's collision radius, and so
-            // its navigation size class, until its floor's art pass says
-            // otherwise. `archetype()` is always one of the kinds above, so
-            // this cannot recurse; `debug_assert` catches a future variant
-            // that forgot to name a base kind.
+            // its navigation size class. Kinds with their own archetype
+            // must define a radius above.
             _ => {
                 debug_assert!(self.archetype() != self, "a kind must name its archetype");
                 self.archetype().radius()
@@ -364,6 +396,14 @@ impl EnemyKind {
             // Body contact only: the Sewer's ground fodder's number. It is the
             // peck that hurts (`drake::PECK_DAMAGE`), not the shoulder.
             EnemyKind::Drake => 5.0,
+            EnemyKind::SandHopper => 5.0,
+            EnemyKind::GlassShrimp => 4.0,
+            EnemyKind::Conger => 8.0,
+            EnemyKind::Skater => 5.0,
+            EnemyKind::PistolShrimp => 6.0,
+            EnemyKind::Lampfish => 5.0,
+            EnemyKind::Grouper => 15.0,
+            EnemyKind::FrySchool => 5.0,
         }
     }
     pub fn xp(self) -> u32 {
@@ -421,6 +461,14 @@ impl EnemyKind {
             EnemyKind::LooseBungee => 4,
             // The guest: three times the Sewer heavy (the Sluice Toad's 10).
             EnemyKind::Drake => 30,
+            EnemyKind::SandHopper => 1,
+            EnemyKind::GlassShrimp => 1,
+            EnemyKind::Conger => 3,
+            EnemyKind::Skater => 3,
+            EnemyKind::PistolShrimp => 4,
+            EnemyKind::Lampfish => 3,
+            EnemyKind::Grouper => 10,
+            EnemyKind::FrySchool => 3,
         }
     }
     pub fn color(self) -> Rgb {
@@ -496,6 +544,14 @@ impl EnemyKind {
             // `art_duck`'s own colour; this is what the rim, the corpse and the
             // Library card read).
             EnemyKind::Drake => (236, 232, 220),
+            EnemyKind::SandHopper => (184, 147, 106),
+            EnemyKind::GlassShrimp => (151, 211, 213),
+            EnemyKind::Conger => (124, 163, 149),
+            EnemyKind::Skater => (109, 211, 182),
+            EnemyKind::PistolShrimp => (226, 137, 126),
+            EnemyKind::Lampfish => (123, 187, 208),
+            EnemyKind::Grouper => (146, 125, 164),
+            EnemyKind::FrySchool => (175, 199, 150),
         }
     }
 
@@ -619,6 +675,14 @@ impl EnemyKind {
             | EnemyKind::MurderHornet
             | EnemyKind::TermiteHorde
             | EnemyKind::Lilliputian => self,
+            EnemyKind::SandHopper => EnemyKind::Skitterer,
+            EnemyKind::GlassShrimp => EnemyKind::Bat,
+            EnemyKind::Conger => EnemyKind::Cat,
+            EnemyKind::Skater => self,
+            EnemyKind::PistolShrimp => EnemyKind::Spitter,
+            EnemyKind::Lampfish => self,
+            EnemyKind::Grouper => EnemyKind::Brute,
+            EnemyKind::FrySchool => self,
         }
     }
 
@@ -630,79 +694,71 @@ impl EnemyKind {
     /// tell → peck → recover state machine from the day it shipped.
     #[inline]
     pub fn is_registration(self) -> bool {
-        self != EnemyKind::Drake && self.archetype() != self
+        // The historical registrations are contiguous in the append-only enum.
+        (EnemyKind::PipeEel as usize..=EnemyKind::LooseBungee as usize).contains(&(self as usize))
     }
     /// Spitters fire enemy bullets; others are melee.
     ///
     /// A wave-3 kind is never `ranged`: its damage arrives as a floor hazard the
     /// behaviour system resolves (`enemy_wave3`), not as a bullet.
     pub fn ranged(self) -> bool {
-        match self {
-            EnemyKind::Spitter | EnemyKind::Boss => true,
-            // A registration shoots exactly when its base body does.
-            _ => self.is_registration() && self.archetype().ranged(),
-        }
+        matches!(self.archetype(), EnemyKind::Spitter | EnemyKind::Boss)
     }
 
-    /// One of the five kinds `WAVE3_DESIGN.md` §9 added.
+    /// Runs one of the five wave-3 state machines.
     #[inline]
     pub fn is_wave3(self) -> bool {
-        match self {
+        matches!(
+            self.archetype(),
             EnemyKind::Pillbug
-            | EnemyKind::BellFlea
-            | EnemyKind::WickMoth
-            | EnemyKind::Porter
-            | EnemyKind::Turnkey => true,
-            // A registration runs its base body's wave-3 state machine.
-            _ => self.is_registration() && self.archetype().is_wave3(),
-        }
+                | EnemyKind::BellFlea
+                | EnemyKind::WickMoth
+                | EnemyKind::Porter
+                | EnemyKind::Turnkey
+        )
     }
 
-    /// One of the four kinds the wave-4 batch added (`enemy_wave4`).
+    /// Runs a wave-4 state machine.
     #[inline]
     pub fn is_wave4(self) -> bool {
-        match self {
+        matches!(
+            self.archetype(),
             EnemyKind::BigSnake
-            | EnemyKind::HouseCentipede
-            | EnemyKind::MurderHornet
-            | EnemyKind::TermiteHorde
-            | EnemyKind::Lilliputian => true,
-            // A registration runs its base body's wave-4 state machine.
-            _ => self.is_registration() && self.archetype().is_wave4(),
-        }
+                | EnemyKind::HouseCentipede
+                | EnemyKind::MurderHornet
+                | EnemyKind::TermiteHorde
+                | EnemyKind::Lilliputian
+        )
     }
 
     /// A body that cannot be shoved around by an ordinary melee hit.
-    ///
-    /// Wave 4: the snake's mass and the horde's thousands of mouths are
-    /// immovable for the same reason the Pillbug is — a `heavy()` body takes
-    /// the whip hit but is never swung.
     #[inline]
     pub fn heavy(self) -> bool {
-        match self {
+        matches!(
+            self.archetype(),
             EnemyKind::Brute
-            | EnemyKind::Boss
-            | EnemyKind::Pillbug
-            | EnemyKind::BigSnake
-            | EnemyKind::TermiteHorde => true,
-            // The guest: a body twice the rat's width and four times its mass
-            // keeps its footing (and fills a glue board like the floor's
-            // heavy).
-            EnemyKind::Drake => true,
-            // A registration is exactly as immovable as its base body: the
-            // floor's heavy (a Sluice Toad, a Pie Weight, …) takes the whip
-            // hit without ever being swung.
-            _ => self.is_registration() && self.archetype().heavy(),
-        }
+                | EnemyKind::Boss
+                | EnemyKind::Pillbug
+                | EnemyKind::BigSnake
+                | EnemyKind::TermiteHorde
+        )
+    }
+
+    /// The Outfall swimmers that cross tidal drops without falling.
+    pub fn outfall_swims(self) -> bool {
+        matches!(self, EnemyKind::GlassShrimp | EnemyKind::Lampfish)
+    }
+
+    pub(crate) fn has_outfall_state(self) -> bool {
+        matches!(self, EnemyKind::Skater | EnemyKind::Lampfish | EnemyKind::FrySchool)
     }
 
     /// Every kind, in enum order. The console's `spawn` command and its Tab
     /// completion read this table rather than a retyped list.
     ///
-    /// 50 kinds: the 16 earlier bodies, the 33 wave-four registrations, the
-    /// guest (the Drake, appended last: it is nobody's roster slot) and the
-    /// legacy `Boss` body (second, where it has always been).
-    pub fn all() -> [EnemyKind; 50] {
+    /// 58 kinds: the 16 earlier bodies (including the legacy Boss), the 33
+    /// wave-four registrations, the Drake guest, and the eight Outfall bodies.
+    pub fn all() -> [EnemyKind; 58] {
         [
             EnemyKind::Skitterer,
             EnemyKind::Bat,
@@ -756,6 +812,14 @@ impl EnemyKind {
             EnemyKind::LooseBungee,
             // The guest, appended after the roster's 33 registrations.
             EnemyKind::Drake,
+            EnemyKind::SandHopper,
+            EnemyKind::GlassShrimp,
+            EnemyKind::Conger,
+            EnemyKind::Skater,
+            EnemyKind::PistolShrimp,
+            EnemyKind::Lampfish,
+            EnemyKind::Grouper,
+            EnemyKind::FrySchool,
         ]
     }
 
@@ -815,6 +879,14 @@ impl EnemyKind {
             EnemyKind::LooseBungee => "loosebungee",
             // The guest (one word: the console's `spawn` command slugs names).
             EnemyKind::Drake => "drake",
+            EnemyKind::SandHopper => "sandhopper",
+            EnemyKind::GlassShrimp => "glassshrimp",
+            EnemyKind::Conger => "conger",
+            EnemyKind::Skater => "skater",
+            EnemyKind::PistolShrimp => "pistolshrimp",
+            EnemyKind::Lampfish => "lampfish",
+            EnemyKind::Grouper => "grouper",
+            EnemyKind::FrySchool => "fryschool",
         }
     }
 }
@@ -1047,6 +1119,29 @@ impl Default for EnemyMods {
     }
 }
 
+/// Attack clocks and locked geometry for the Outfall specials.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum OutfallAttack {
+    #[default]
+    Idle,
+    Tell { start: Vec2, dir: Vec2, remaining: f32 },
+    Splash { start: Vec2, dir: Vec2, spent: bool },
+    Lunge {
+        start: Vec2,
+        dir: Vec2,
+        remaining: f32,
+        previous: Vec2,
+        hit: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OutfallState {
+    pub attack: OutfallAttack,
+    pub rearm: f32,
+    pub bunched: bool,
+}
+
 #[derive(Clone)]
 pub struct Enemy {
     /// Monotonic runtime identifier assigned on spawn (0 if constructed outside `World`).
@@ -1090,10 +1185,11 @@ pub struct Enemy {
     pub w4: W4,
     /// A named body underground, temporarily immune to hits and contact.
     pub buried: bool,
-    /// A named body's movement or attack currently fixes its position.
+    /// A body's movement or attack currently fixes its position.
     pub position_locked: bool,
     /// Appointment fodder carries no kill credit, drops or horde budget.
     pub summoned: bool,
+    pub(crate) outfall: OutfallState,
 }
 
 impl Enemy {
@@ -1143,6 +1239,7 @@ impl Enemy {
             buried: false,
             position_locked: false,
             summoned: false,
+            outfall: OutfallState::default(),
         }
     }
 
@@ -1253,6 +1350,17 @@ impl Enemy {
             return;
         }
 
+        if self.kind.has_outfall_state() && self.position_locked {
+            self.vel = Vec2::ZERO;
+            if self.flash > 0.0 {
+                self.flash -= dt;
+            }
+            if self.contact_cd > 0.0 {
+                self.contact_cd -= dt;
+            }
+            return;
+        }
+
         let to = target - self.pos;
         let dist = to.len();
         let direct = to.normalized();
@@ -1272,7 +1380,7 @@ impl Enemy {
         // or walks exactly as the base body it names, until its own batch.
         let archetype = self.kind.archetype();
         let desired = match archetype {
-            EnemyKind::Bat => {
+            EnemyKind::Bat | EnemyKind::Lampfish => {
                 self.wander += dt * 4.0;
                 (chase + Vec2::from_angle(self.wander) * 0.6).normalized() * speed
             }
@@ -1295,14 +1403,15 @@ impl Enemy {
         // Animation + facing.
         let sp = self.vel.len();
         // Flyers buzz constantly; crawlers scuttle in proportion to speed.
-        let cadence = if matches!(archetype, EnemyKind::Bat) {
+        let cadence = if matches!(archetype, EnemyKind::Bat | EnemyKind::Lampfish) {
             22.0
         } else {
             4.0 + sp * 0.5
         };
         self.anim += dt * cadence;
         if sp > 1.0 {
-            self.facing += (self.vel.normalized() - self.facing) * (8.0 * dt).min(1.0);
+            let turn_rate = if self.kind == EnemyKind::Conger { 4.0 } else { 8.0 };
+            self.facing += (self.vel.normalized() - self.facing) * (turn_rate * dt).min(1.0);
         }
 
         if self.flash > 0.0 {
@@ -1314,13 +1423,13 @@ impl Enemy {
     }
 
     pub fn hurt(&mut self, dmg: f32) {
-        self.apply_damage(dmg);
+        self.apply_damage(dmg, None);
     }
 
     /// Land `dmg` after the kind's own incoming-damage rule and return what was
     /// actually taken (so `hurt_from`'s caller can draw and record the truth).
     ///
-    /// The Termite Horde is the one body with a rule of its own
+    /// The Termite Horde has a per-hit cap
     /// ([`crate::game::ecs::systems::enemy_wave4::HORDE_HIT_CAP`]): one hit can
     /// remove at most a capped fraction of its pool, so a single-target dart
     /// only chips the swarm while a many-hit area volley (`rain`, a nova, a
@@ -1328,14 +1437,17 @@ impl Enemy {
     /// same pass spots a hard enough hit and raises the split flag the wave-4
     /// system turns into a second, smaller horde.
     ///
-    /// Every other kind is a plain `hp -= dmg` with the historical flash and
-    /// side effects, so nothing about the older bodies changes.
-    fn apply_damage(&mut self, dmg: f32) -> f32 {
+    /// Bunched Fry School takes double damage from any direction.
+    fn apply_damage(&mut self, dmg: f32, from: Option<Vec2>) -> f32 {
         use crate::game::ecs::systems::enemy_wave4 as w4;
         if self.buried {
             return 0.0;
         }
-        let mut dmg = dmg.max(0.0);
+        let mult = from.map_or_else(
+            || self.outfall_damage_mult(),
+            |point| self.damage_mult_from(point),
+        );
+        let mut dmg = (dmg * mult).max(0.0);
         if self.kind.archetype() == EnemyKind::TermiteHorde {
             if self.hp > 0.0
                 && self.w4.tier >= w4::HORDE_SPLIT_TIER
@@ -1355,7 +1467,7 @@ impl Enemy {
     /// kind's directional armour applied ([`Enemy::damage_mult_from`]). Returns
     /// the damage actually taken, which is what a caller should draw and record.
     pub fn hurt_from(&mut self, dmg: f32, from: Vec2) -> f32 {
-        self.apply_damage(dmg * self.damage_mult_from(from))
+        self.apply_damage(dmg, Some(from))
     }
 
     /// The Pillbug's shell: while it is curled, a hit arriving from its frontal
@@ -1429,7 +1541,17 @@ impl Enemy {
                 if self.w4.phase == w4::HORNET_PHASE_RECOVER => {
                     w4::HORNET_RECOVER_MULT
                 }
-            _ => 1.0,
+            _ => self.outfall_damage_mult(),
+        }
+    }
+
+    /// Fry School is vulnerable from every direction while bunched. Both
+    /// direct hits and pools read this multiplier through their damage paths.
+    fn outfall_damage_mult(&self) -> f32 {
+        if self.kind == EnemyKind::FrySchool && self.outfall.bunched {
+            2.0
+        } else {
+            1.0
         }
     }
 
@@ -1642,15 +1764,14 @@ mod tests {
         }
     }
 
-    /// The console's spawn table is the enum: 49 kinds, no duplicates, and the
-    /// 33 wave-four registrations are the tail of it (`all()` is append-only).
+    /// The console table follows the enum order, without duplicates.
     #[test]
     fn all_lists_every_kind_once() {
         let all = EnemyKind::all();
         assert_eq!(
             all.len(),
-            50,
-            "16 earlier kinds + 33 registrations + the guest"
+            58,
+            "16 earlier kinds + 33 registrations + the guest + eight Outfall bodies"
         );
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
@@ -1662,10 +1783,52 @@ mod tests {
             33,
             "the batch registers 33 ordinary kinds (the guest is not one)"
         );
-        // The guest is appended last and is nobody's roster slot.
+        // The guest keeps its original ordinal and is nobody's roster slot.
         assert_eq!(all[49], EnemyKind::Drake);
         assert!(!EnemyKind::Drake.is_registration());
         assert_eq!(EnemyKind::Drake.archetype(), EnemyKind::Brute);
+    }
+
+    #[test]
+    fn outfall_ordinary_stats_and_archetypes() {
+        use EnemyKind::*;
+
+        // Slot order doubles as the append-only save index.
+        let rows = [
+            (SandHopper, 6.0, 30.0, 5.0, 1, 2.5, Skitterer),
+            (GlassShrimp, 4.0, 42.0, 4.0, 1, 2.0, Bat),
+            (Conger, 16.0, 38.0, 8.0, 3, 4.0, Cat),
+            (Skater, 14.0, 12.0, 5.0, 3, 3.0, Skater),
+            (PistolShrimp, 12.0, 22.0, 6.0, 4, 3.0, Spitter),
+            (Lampfish, 11.0, 24.0, 5.0, 3, 3.0, Lampfish),
+            (Grouper, 60.0, 16.0, 15.0, 10, 6.5, Brute),
+            (FrySchool, 26.0, 22.0, 5.0, 3, 12.0, FrySchool),
+        ];
+        let all = EnemyKind::all();
+        for (i, (kind, hp, speed, damage, xp, radius, archetype)) in rows.into_iter().enumerate() {
+            assert_eq!(all[50 + i], kind);
+            assert_eq!(kind as usize, 50 + i);
+            assert_eq!(crate::game::roster::floor(Theme::Outfall).slots[i].kind, kind);
+            assert_eq!(
+                (kind.base_hp(), kind.speed(), kind.damage(), kind.xp(), kind.radius()),
+                (hp, speed, damage, xp, radius),
+            );
+            assert_eq!(kind.archetype(), archetype);
+            assert_eq!(kind.ranged(), kind == PistolShrimp);
+            assert_eq!(kind.heavy(), kind == Grouper);
+            assert!(!kind.is_wave3() && !kind.is_wave4());
+        }
+    }
+
+    #[test]
+    fn conger_turns_its_facing_at_half_the_cats_rate() {
+        let mut cat = Enemy::spawn_with_phases(EnemyKind::Cat, Vec2::ZERO, 1.0, 2.2, 0.0, 0.0);
+        let mut conger = Enemy::spawn_with_phases(EnemyKind::Conger, Vec2::ZERO, 1.0, 2.2, 0.0, 0.0);
+        let north = Vec2::new(0.0, -20.0);
+        cat.steer(north, Vec2::ZERO, 0.05, 1.0);
+        conger.steer(north, Vec2::ZERO, 0.05, 1.0);
+        assert_eq!(cat.vel, conger.vel);
+        assert_eq!(cat.facing.y, conger.facing.y * 2.0);
     }
 
     /// Every registration inherits from a kind that already existed, the
