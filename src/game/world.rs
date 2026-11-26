@@ -3879,7 +3879,7 @@ impl World {
         }
         if self.player.buffs.headlamp > 0.0 {
             let head = if self.player.buffs.is_giant() || self.player.buffs.tiny > 0.0 {
-                art_rat_giant::headlamp_mount(&self.player, self.elapsed, scale, outfit)
+                art_rat_giant::headlamp_mount(&self.player, self.elapsed, scale, outfit, self.rat_gait)
             } else {
                 art_rat::headlamp_mount(&self.player, self.elapsed, outfit)
             } + bob_lean;

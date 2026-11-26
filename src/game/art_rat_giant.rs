@@ -723,8 +723,14 @@ pub(super) fn draw_giant_rat_with_outfit(
     }
 }
 
-pub(crate) fn headlamp_mount(player: &Player, elapsed: f32, scale: f32, outfit: RatOutfit) -> Vec2 {
-    let pose = GiantPose::from_player_with_outfit(player, elapsed, Vec2::ZERO, scale, outfit);
+pub(crate) fn headlamp_mount(
+    player: &Player,
+    elapsed: f32,
+    scale: f32,
+    outfit: RatOutfit,
+    gait: Option<RatGait>,
+) -> Vec2 {
+    let pose = GiantPose::from_player_with_outfit(player, elapsed, Vec2::ZERO, scale, outfit, gait);
     pose.place(if pose.diver { HELMET_U } else { 3.2 }, 0.0)
 }
 

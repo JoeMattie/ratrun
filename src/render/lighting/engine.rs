@@ -1026,17 +1026,22 @@ impl LightMap {
         drop(_prank);
         crate::prof::count(crate::prof::Stage::CShaped, self.shaped.len() as u64);
         let mut shadow_index = 0;
+        let mut headlamp = None;
         for &entry in self.shaped.iter().take(cap) {
             let mut light = entry.light;
             if !self.grid.overlaps(light) {
                 continue;
             }
             crate::prof::count(crate::prof::Stage::CShapedLit, 1);
+            if is_headlamp(entry.tag) {
+                headlamp = Some(entry);
+                continue;
+            }
             let directional = matches!(light.shape, LightShape::Directional { .. });
             let tag = if directional { LightTag::Sun } else { entry.tag };
             // Ground sources reach specular and water through the grid. Keep
             // them out of the strongest-light list used to cast body shadows.
-            if fx && tag != LightTag::Ground && !is_headlamp(tag) {
+            if fx && tag != LightTag::Ground {
                 let mut fx_light = FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed));
                 if let Some(steady_total) = entry.steady_total {
                     let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
@@ -1106,6 +1111,15 @@ impl LightMap {
         if fx {
             let _p = crate::prof::scope(crate::prof::Stage::LComposite);
             upsample::bounce(&mut self.grid, &frame);
+        }
+        // Keep the beam clipped to its tile rays. A separable bounce can carry
+        // its contribution around a sampled corner and into the beam's shadow.
+        if let Some(entry) = headlamp {
+            let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
+            self.grid.splat(entry.light, None, None, entry.tag, pass, entry.lure_air);
+        }
+        if fx {
+            let _p = crate::prof::scope(crate::prof::Stage::LComposite);
             air::grid_pass(&mut self.grid, &frame);
         }
         let hp = (scene.player.hp / scene.player.max_hp().max(1.0)).clamp(0.0, 1.0);
