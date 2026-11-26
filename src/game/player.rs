@@ -226,6 +226,13 @@ pub struct Player {
     /// Console `speed x`: a multiplier on the rat's move speed. Defaults to
     /// `1.0` (no change); `player_system` multiplies it into the throttle.
     pub speed_mult: f32,
+    /// Enabled for one tick by autoplay. No game systems read these values.
+    pub(crate) observed_damage: Option<ObservedDamage>,
+}
+
+pub(crate) struct ObservedDamage {
+    pub hp_lost: f32,
+    pub min_hp_fraction: f32,
 }
 
 /// Weapon damage gained per character level above the first: +4 %, so level 14
@@ -451,6 +458,7 @@ impl Player {
             decoy_at: None,
             god: false,
             speed_mult: 1.0,
+            observed_damage: None,
         }
     }
 
@@ -566,7 +574,15 @@ impl Player {
         // contact, which `contact_system` never lands while the serum runs.
         let raw = raw * self.buffs.damage_taken_scale();
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
+        let hp_before = self.hp;
         self.hp -= dmg;
+        if self.observed_damage.is_some() {
+            let fraction = self.health_fraction();
+            if let Some(observation) = &mut self.observed_damage {
+                observation.hp_lost += hp_before.max(0.0) - self.hp.max(0.0);
+                observation.min_hp_fraction = observation.min_hp_fraction.min(fraction);
+            }
+        }
         self.iframes = self.hit_iframes() + super::shop::iframe_extra(&self.loadout.splices);
         self.hurt_flash = 0.25;
         true
@@ -574,6 +590,10 @@ impl Player {
 
     pub fn alive(&self) -> bool {
         self.hp > 0.0
+    }
+
+    pub(crate) fn health_fraction(&self) -> f32 {
+        (self.hp / self.max_hp().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0)
     }
 }
 
