@@ -11,13 +11,18 @@
   home screen with its own rat icon, opens fullscreen and keeps itself
   cached for offline play. Mouse, pen and keyboard behave as before.
 - **Touch controls (web).** The game draws its controls in the grid: a stick
-  that floats to wherever your thumb lands on the left, Dash at the bottom
-  right and the ACTIVE weapons beside it when you carry one. Hold Dash to
-  charge a Super Dash. The top-left button pauses, and it is Back on every
-  menu that takes one. The top-right button opens the map. A tap presses
-  what it lands on, a swipe scrolls a list and a pinch steps the zoom. The
-  controls appear on the first touch and leave on any key or mouse move, so
-  a desktop run is exactly as it was.
+  that floats to wherever your thumb lands on the left, and Dash with the
+  ACTIVE weapons beside it when you carry one. That pair sits directly above
+  the minimap, right-aligned with it and never on top of it; on a screen too
+  short for the row the minimap shows its small size while the controls are
+  up and comes back at its own size when they go. Both plates are darker
+  than they were and their marks are full contrast, so a thumb finds them on
+  a dark floor. Hold Dash to charge a Super Dash. The top-left button
+  pauses, and it is Back on every menu that takes one. The top-right button
+  opens the map, clear of the minimap and the top bar. A tap presses what it
+  lands on, a swipe scrolls a list and a pinch steps the zoom. The controls
+  appear on the first touch and leave on any key or mouse move, so a desktop
+  run is exactly as it was.
 - **Global light.** `GLOBAL LIGHT` now starts at `AO + GI`. A save still on
   the old default `OFF` moves to it once. Set it back in Graphics and it
   stays where you put it. `AO ONLY` grounds the room: contact shadows at

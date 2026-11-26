@@ -4,9 +4,12 @@
 //!
 //! All colours stay in Rat Run's facility palette (`PLATE`, `EDGE`, `MUTED`,
 //! `COAT`, `TAIL`, Super Dash ice-blue, active-weapon amber) and blend toward
-//! each cell's existing foreground and background so the field stays readable
-//! underneath (~35–55 % ink at rest). Every emitted colour folds cleanly
-//! through [`palette::to_term`] at truecolor, 256-colour and 16-colour depths.
+//! each cell's existing foreground and background so the field still reads
+//! underneath. The two action buttons are the ones a thumb has to find, so Dash
+//! and Actives rest at ~65 % plate ink with a full-contrast glyph, and press
+//! down darker still. Pause, Back and Map stay lighter (~45 %), and the stick
+//! keeps its own translucency. Every emitted colour folds cleanly through
+//! [`palette::to_term`] at truecolor, 256-colour and 16-colour depths.
 //!
 //! # Zero-Allocation Contract
 //!
@@ -614,16 +617,17 @@ fn button_palette(v: &ButtonView, dash_charge: f32) -> ButtonPalette {
     }
 
     if !v.ready {
+        // Recharging: still dimmer than at rest, but its glyph is legible.
         return ButtonPalette {
             plate_rgb: PLATE_DIM_RGB,
-            plate_alpha: 0.38,
+            plate_alpha: 0.54,
             edge_hi_rgb: EDGE_RGB,
-            edge_hi_alpha: 0.46,
+            edge_hi_alpha: 0.60,
             edge_lo_rgb: TRACK_RGB,
-            edge_lo_alpha: 0.40,
+            edge_lo_alpha: 0.52,
             icon_rgb: MUTED_RGB,
             icon_sub_rgb: EDGE_RGB,
-            icon_alpha: 0.56,
+            icon_alpha: 0.82,
             bold: false,
         };
     }
@@ -633,54 +637,56 @@ fn button_palette(v: &ButtonView, dash_charge: f32) -> ButtonPalette {
             if charge_full {
                 ButtonPalette {
                     plate_rgb: palette::mix(DASH_CHARGE_PLATE, DASH_CHARGE_RGB, 0.30),
-                    plate_alpha: 0.62,
+                    plate_alpha: 0.70,
                     edge_hi_rgb: DASH_FULL_RGB,
-                    edge_hi_alpha: 0.92,
+                    edge_hi_alpha: 1.0,
                     edge_lo_rgb: DASH_CHARGE_RGB,
-                    edge_lo_alpha: 0.86,
+                    edge_lo_alpha: 0.92,
                     icon_rgb: DASH_FULL_RGB,
                     icon_sub_rgb: DASH_CHARGE_RGB,
-                    icon_alpha: 0.95,
+                    icon_alpha: 1.0,
                     bold: true,
                 }
             } else if charging {
                 ButtonPalette {
                     plate_rgb: palette::mix(PLATE_RGB, DASH_CHARGE_PLATE, 0.35 + 0.55 * dash_charge),
-                    plate_alpha: 0.52,
+                    plate_alpha: 0.66,
                     edge_hi_rgb: DASH_CHARGE_RGB,
-                    edge_hi_alpha: 0.78,
+                    edge_hi_alpha: 0.88,
                     edge_lo_rgb: EDGE_RGB,
-                    edge_lo_alpha: 0.52,
+                    edge_lo_alpha: 0.62,
                     icon_rgb: DASH_CHARGE_RGB,
                     icon_sub_rgb: MUTED_RGB,
-                    icon_alpha: 0.88,
+                    icon_alpha: 0.96,
                     bold: true,
                 }
             } else {
+                // Resting: the thumb has to find it on a dark floor, so the
+                // plate carries ~65 % ink and the streak is full contrast.
                 ButtonPalette {
                     plate_rgb: PLATE_RGB,
-                    plate_alpha: 0.48,
+                    plate_alpha: 0.65,
                     edge_hi_rgb: EDGE_HI_RGB,
-                    edge_hi_alpha: 0.56,
+                    edge_hi_alpha: 0.78,
                     edge_lo_rgb: EDGE_RGB,
-                    edge_lo_alpha: 0.46,
+                    edge_lo_alpha: 0.66,
                     icon_rgb: COAT_RGB,
                     icon_sub_rgb: MUTED_RGB,
-                    icon_alpha: 0.86,
+                    icon_alpha: 1.0,
                     bold: true,
                 }
             }
         }
         ButtonKind::Actives => ButtonPalette {
             plate_rgb: PLATE_RGB,
-            plate_alpha: 0.48,
+            plate_alpha: 0.65,
             edge_hi_rgb: ACTIVE_GOLD_RGB,
-            edge_hi_alpha: 0.58,
+            edge_hi_alpha: 0.80,
             edge_lo_rgb: EDGE_RGB,
-            edge_lo_alpha: 0.46,
+            edge_lo_alpha: 0.66,
             icon_rgb: ACTIVE_CORE_RGB,
             icon_sub_rgb: ACTIVE_GOLD_RGB,
-            icon_alpha: 0.86,
+            icon_alpha: 1.0,
             bold: true,
         },
         ButtonKind::Pause | ButtonKind::Back | ButtonKind::Map => ButtonPalette {

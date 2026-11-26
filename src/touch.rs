@@ -49,6 +49,7 @@ use std::collections::VecDeque;
 use ratatui::layout::Rect;
 
 use crate::math::Vec2;
+use crate::render::minimap::{self, MinimapSize};
 use crate::render::touch_art::{self, ButtonKind, StickView};
 
 /// One touch contact, as the page reports it (`pointerdown`, `pointermove`,
@@ -133,6 +134,11 @@ pub struct TouchLayout {
     pub surface: Surface,
     /// Where a stick may start (empty in a menu).
     pub stick_zone: Rect,
+    /// The compact minimap panel this layout kept clear of, as
+    /// [`crate::render::minimap::compact_rect_for_size`] draws it for this
+    /// frame's field (empty in a menu, and when the radar is
+    /// [`MinimapSize::Hidden`]).
+    pub minimap: Rect,
     /// [`Slot::Dash`], [`Slot::Actives`], the pause/back slot and [`Slot::Map`].
     /// An absent control is an empty rect.
     buttons: [(Slot, Rect); 4],
@@ -143,6 +149,7 @@ impl Default for TouchLayout {
         TouchLayout {
             surface: Surface::Menu,
             stick_zone: EMPTY,
+            minimap: EMPTY,
             buttons: [
                 (Slot::Dash, EMPTY),
                 (Slot::Actives, EMPTY),
@@ -155,35 +162,26 @@ impl Default for TouchLayout {
 
 impl TouchLayout {
     /// The controls for a live run: a floating stick anywhere in the left 45 %
-    /// of the field, Dash at the bottom right, Actives just left of it, Pause
-    /// at the field's top left and Map at its top right.
+    /// of the field, and Dash with Actives beside it in the bottom-right
+    /// region — directly above the compact minimap and right-aligned with it,
+    /// one cell clear (see the `action_row` helper) — Pause at the field's top
+    /// left and Map at its top right.
     ///
     /// `area` is the whole frame and `field` the pixel-viewport rect
     /// (`App::last_game`) — the field's top row already sits below the top HUD
-    /// rail. `minimap` is the compact minimap's rect when one is on screen: the
-    /// Map button is placed clear of it.
-    pub fn play(area: Rect, field: Rect, actives: bool, minimap: Rect) -> Self {
+    /// rail, and the bottom HUD row below it, so a control clamped into the
+    /// field can cover neither rail. `minimap_size` is the player's saved
+    /// compact size: the radar's rect comes from
+    /// [`crate::render::minimap::compact_rect_for_size`], the same function the
+    /// minimap draws from, so the buttons and the radar cannot drift — and when
+    /// the radar would leave no room above it, [`play_minimap_size`] asks for a
+    /// [`MinimapSize::Small`] radar instead.
+    pub fn play(area: Rect, field: Rect, actives: bool, minimap_size: MinimapSize) -> Self {
         let field = usable_field(area, field);
-        let (dw, dh) = touch_art::button_size(ButtonKind::Dash);
-        let dash = clamp_into(
+        let minimap = minimap::compact_rect_for_size(
             field,
-            field.right().saturating_sub(dw.saturating_add(INSET)),
-            field.bottom().saturating_sub(dh.saturating_add(INSET)),
-            dw,
-            dh,
+            play_minimap_size(field, actives, minimap_size),
         );
-        let actives_rect = if actives {
-            let (aw, ah) = touch_art::button_size(ButtonKind::Actives);
-            clamp_into(
-                field,
-                dash.x.saturating_sub(aw.saturating_add(INSET)),
-                dash.y,
-                aw,
-                ah,
-            )
-        } else {
-            EMPTY
-        };
         let (pw, ph) = touch_art::button_size(ButtonKind::Pause);
         let pause = pause_slot(field, pw, ph);
         let (mw, mh) = touch_art::button_size(ButtonKind::Map);
@@ -195,19 +193,41 @@ impl TouchLayout {
             mh,
         );
         if !minimap.is_empty() && map.intersects(minimap) {
-            // The compact map owns the field's top-right corner: sit under it.
-            map = clamp_into(
+            // A radar tall enough to reach the field's top row owns it: the
+            // Map sits beside it at the same height, else under it.
+            let beside = clamp_into(
                 field,
-                map.x,
-                minimap.bottom().saturating_add(INSET),
+                minimap.x.saturating_sub(mw.saturating_add(INSET)),
+                field.y.saturating_add(INSET),
                 mw,
                 mh,
             );
+            map = if clear_of(beside, &[minimap, pause]) {
+                beside
+            } else {
+                clamp_into(
+                    field,
+                    map.x,
+                    minimap.bottom().saturating_add(INSET),
+                    mw,
+                    mh,
+                )
+            };
         }
+        let row = action_row(field, minimap, actives, &[pause, map]);
+        let (dw, dh) = touch_art::button_size(ButtonKind::Dash);
+        let dash = clamp_into(field, row.right().saturating_sub(dw), row.y, dw, dh);
+        let actives_rect = if actives {
+            let (aw, ah) = touch_art::button_size(ButtonKind::Actives);
+            clamp_into(field, row.x, row.y, aw, ah)
+        } else {
+            EMPTY
+        };
         let zone_w = (f32::from(field.width) * STICK_ZONE_SHARE) as u16;
         TouchLayout {
             surface: Surface::Play,
             stick_zone: Rect::new(field.x, field.y, zone_w.min(field.width), field.height),
+            minimap,
             buttons: [
                 (Slot::Dash, dash),
                 (Slot::Actives, actives_rect),
@@ -227,6 +247,7 @@ impl TouchLayout {
         TouchLayout {
             surface: Surface::Menu,
             stick_zone: EMPTY,
+            minimap: EMPTY,
             buttons: [
                 (Slot::Dash, EMPTY),
                 (Slot::Actives, EMPTY),
@@ -310,6 +331,106 @@ fn clamp_into(field: Rect, x: u16, y: u16, w: u16, h: u16) -> Rect {
         w,
         h,
     )
+}
+
+/// The compact minimap size a touch play screen draws at: the player's saved
+/// preference, unless the radar would leave no room for the Dash row directly
+/// above it — then [`MinimapSize::Small`], which is smaller **on this screen
+/// while the controls are up only**. Nothing is saved: the preference comes
+/// straight back when the controls hide.
+///
+/// The radar's own sizes are relative to the field (a `Normal` radar needs 18
+/// rows and leaves 15 behind), so the rung above fits at every size that shows
+/// one today; this is the guard that keeps the controls clear if that table
+/// ever grows.
+pub fn play_minimap_size(field: Rect, actives: bool, preferred: MinimapSize) -> MinimapSize {
+    let rect = minimap::compact_rect_for_size(field, preferred);
+    if rect.is_empty() || actions_fit_above(field, rect, actives) {
+        return preferred;
+    }
+    // No radar at all is worse than a smaller one. A preference too big for
+    // this field already resolved through `effective_compact_size`.
+    if minimap::compact_rect_for_size(field, MinimapSize::Small).is_empty() {
+        preferred
+    } else {
+        MinimapSize::Small
+    }
+}
+
+/// Does the Dash row fit directly above `minimap`, right-aligned with it and one
+/// cell clear, inside `field`?
+fn actions_fit_above(field: Rect, minimap: Rect, actives: bool) -> bool {
+    let (w, h) = action_row_size(actives);
+    contains_rect(field, minimap)
+        && w <= minimap.width
+        && minimap.y >= field.y.saturating_add(h.saturating_add(INSET))
+}
+
+/// The `(width, height)` of the Dash-plus-Actives row: the contract's thumb
+/// sizes (`7 × 3` for Dash, `5 × 3` for Actives), one cell between them. The
+/// layout never shrinks a button below these (only a field too small for the
+/// thumb clips it).
+fn action_row_size(actives: bool) -> (u16, u16) {
+    let (dw, dh) = touch_art::button_size(ButtonKind::Dash);
+    let (aw, ah) = touch_art::button_size(ButtonKind::Actives);
+    if actives {
+        (dw.saturating_add(INSET).saturating_add(aw), dh.max(ah))
+    } else {
+        (dw, dh)
+    }
+}
+
+/// The Dash-plus-Actives row: directly above `minimap` with a one-cell gap and
+/// right-aligned with it; else to its left, bottom-aligned; else the field's
+/// own bottom-right corner. `avoid` is every other control the row must not
+/// cover — the corner is taken only when no clear rung is left.
+fn action_row(field: Rect, minimap: Rect, actives: bool, avoid: &[Rect]) -> Rect {
+    let (w, h) = action_row_size(actives);
+    let above = if minimap.width >= w && contains_rect(field, minimap) {
+        minimap
+            .y
+            .checked_sub(h.saturating_add(INSET))
+            .filter(|&y| y >= field.y)
+            .map_or(EMPTY, |y| Rect::new(minimap.right() - w, y, w, h))
+    } else {
+        EMPTY
+    };
+    let left = if minimap.height >= h && contains_rect(field, minimap) {
+        minimap
+            .x
+            .checked_sub(w.saturating_add(INSET))
+            .filter(|&x| x >= field.x)
+            .map_or(EMPTY, |x| Rect::new(x, minimap.bottom() - h, w, h))
+    } else {
+        EMPTY
+    };
+    let corner = clamp_into(
+        field,
+        field.right().saturating_sub(w.saturating_add(INSET)),
+        field.bottom().saturating_sub(h.saturating_add(INSET)),
+        w,
+        h,
+    );
+    let rungs = [above, left, corner];
+    rungs
+        .into_iter()
+        .find(|rect| !rect.is_empty() && !rect.intersects(minimap) && clear_of(*rect, avoid))
+        .or_else(|| rungs.into_iter().find(|rect| !rect.is_empty()))
+        .unwrap_or(EMPTY)
+}
+
+/// Is `inner` wholly inside `outer`?
+fn contains_rect(outer: Rect, inner: Rect) -> bool {
+    !inner.is_empty()
+        && inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.right() <= outer.right()
+        && inner.bottom() <= outer.bottom()
+}
+
+/// Does `rect` stay clear of every non-empty rect in `others`?
+fn clear_of(rect: Rect, others: &[Rect]) -> bool {
+    !others.iter().any(|other| !other.is_empty() && rect.intersects(*other))
 }
 
 /// The gamepad stick's dead zone, rescaled so a fully deflected stick is 1:
@@ -687,7 +808,7 @@ mod tests {
     }
 
     fn layout() -> TouchLayout {
-        TouchLayout::play(Rect::new(0, 0, 80, 24), field(), true, EMPTY)
+        TouchLayout::play(Rect::new(0, 0, 80, 24), field(), true, MinimapSize::Normal)
     }
 
     #[test]
@@ -701,11 +822,103 @@ mod tests {
             assert!(!rect.is_empty(), "every control is placed");
             assert!(rect.x >= field().x && rect.y >= field().y, "{rect:?} starts inside");
             assert!(rect.right() <= field().right() && rect.bottom() <= field().bottom());
+            assert!(
+                !rect.intersects(l.minimap),
+                "{rect:?} covers the radar {:?}",
+                l.minimap
+            );
         }
         assert!(!dash.intersects(actives), "Actives sits left of Dash");
         assert!(!pause.intersects(map), "Pause is left, Map is right");
         assert_eq!(l.surface, Surface::Play);
         assert!(l.stick_zone.width < field().width / 2, "the stick owns the left side");
+    }
+
+    /// The radar's rect is the art's own (`compact_rect_for_size`), and the Dash
+    /// row sits directly above it, right-aligned with it and one cell clear.
+    #[test]
+    fn dash_and_actives_sit_above_the_radar_right_aligned_with_it() {
+        let l = layout();
+        let radar = l.minimap;
+        assert_eq!(radar, minimap::compact_rect_for_size(field(), MinimapSize::Normal));
+        let dash = l.button(Slot::Dash);
+        let actives = l.button(Slot::Actives);
+        assert_eq!(dash.bottom() + INSET, radar.y, "one cell between Dash and the radar");
+        assert_eq!(actives.bottom(), dash.bottom(), "Actives sits beside Dash");
+        assert_eq!(actives.right() + INSET, dash.x, "one cell between Actives and Dash");
+        assert_eq!(dash.right(), radar.right(), "the row is right-aligned with the radar");
+        assert_eq!(actives.x, radar.right() - 13, "the row is Dash and Actives side by side");
+    }
+
+    /// The Dash keeps the contract's `7 × 3` thumb and Actives its `5 × 3`, at
+    /// every integration grid.
+    #[test]
+    fn the_buttons_keep_the_contract_thumb_size() {
+        for (w, h) in [(120u16, 40u16), (127, 30), (123, 35), (100, 24)] {
+            let area = Rect::new(0, 0, w, h);
+            let field = Rect::new(0, 3, w, h.saturating_sub(4));
+            let l = TouchLayout::play(area, field, true, MinimapSize::Normal);
+            assert_eq!((l.button(Slot::Dash).width, l.button(Slot::Dash).height), (7, 3));
+            assert_eq!(
+                (l.button(Slot::Actives).width, l.button(Slot::Actives).height),
+                (5, 3)
+            );
+        }
+    }
+
+    /// The rungs of [`action_row`]: above the radar, else to its left, else the
+    /// field's own corner — each clear of the radar and of the other controls.
+    #[test]
+    fn the_dash_row_falls_back_left_of_the_radar_and_then_to_the_corner() {
+        let field = Rect::new(0, 3, 60, 20);
+        let avoid = [Rect::new(1, 4, 5, 3)];
+        // A radar with no room above it: the row goes to its left, bottom-aligned.
+        let radar = Rect::new(40, 5, 18, 16);
+        let row = action_row(field, radar, true, &avoid);
+        assert_eq!(row, Rect::new(40 - 1 - 13, radar.bottom() - 3, 13, 3));
+        assert!(!row.intersects(radar) && clear_of(row, &avoid));
+        // Still no room to the left: the field's bottom-right corner.
+        let wide = Rect::new(10, 5, 50, 16);
+        let row = action_row(field, wide, true, &avoid);
+        assert_eq!(row, Rect::new(60 - 1 - 13, 23 - 3 - 1, 13, 3));
+        // No radar at all (Hidden, or a field with no room for one): the corner.
+        let row = action_row(field, EMPTY, true, &avoid);
+        assert_eq!(row, Rect::new(60 - 1 - 13, 23 - 3 - 1, 13, 3));
+    }
+
+    /// Whichever size [`play_minimap_size`] hands back, the Dash row has room
+    /// above the radar it draws — the shrink to `Small` is enough, and it is
+    /// only ever asked for when the saved `Normal` leaves none.
+    #[test]
+    fn the_radar_only_shrinks_to_leave_room_above_it() {
+        for w in [48u16, 57, 72, 80, 100, 120, 127, 160, 200] {
+            for h in [12u16, 14, 18, 20, 24, 30, 40, 60] {
+                for actives in [false, true] {
+                    let field = Rect::new(0, 3, w, h);
+                    for preferred in [MinimapSize::Normal, MinimapSize::Small] {
+                        let size = play_minimap_size(field, actives, preferred);
+                        let radar = minimap::compact_rect_for_size(field, size);
+                        if radar.is_empty() {
+                            assert_eq!(size, preferred, "{w}x{h}: no radar, no reason to step");
+                            continue;
+                        }
+                        assert!(
+                            actions_fit_above(field, radar, actives),
+                            "{w}x{h} actives={actives} preferred={preferred:?} left no room above {radar:?}"
+                        );
+                        if actions_fit_above(
+                            field,
+                            minimap::compact_rect_for_size(field, preferred),
+                            actives,
+                        ) {
+                            assert_eq!(size, preferred, "{w}x{h}: the saved size already fits");
+                        } else {
+                            assert_eq!(size, MinimapSize::Small);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

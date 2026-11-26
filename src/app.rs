@@ -1528,10 +1528,12 @@ impl App {
     /// and the action buttons, every menu and overlay gets the Back button in
     /// Pause's slot.
     ///
-    /// The rectangles come from the **previous** frame's field and minimap
-    /// (`App` resolves its pointer hit map one render behind the same way), so a
-    /// contact that arrives on the first frame of a screen still lands on the
-    /// controls the player is looking at.
+    /// The rectangles come from the **previous** frame's field (`App` resolves
+    /// its pointer hit map one render behind the same way), so a contact that
+    /// arrives on the first frame of a screen still lands on the controls the
+    /// player is looking at. The minimap comes from
+    /// [`App::drawn_minimap_size`] — the same size `draw_game` draws the radar
+    /// at — so the controls and the radar cannot drift apart.
     fn touch_layout_for_screen(&self) -> TouchLayout {
         let area = self.last_area;
         if area.is_empty() {
@@ -1543,7 +1545,7 @@ impl App {
                 area,
                 self.last_game,
                 self.touch_actives_owned(),
-                self.last_minimap,
+                self.drawn_minimap_size(),
             );
         }
         // The Back button goes where the Back action (or a right click) really
@@ -1570,6 +1572,20 @@ impl App {
         } else {
             TouchLayout::default()
         }
+    }
+
+    /// The compact minimap size this frame draws at: the player's saved
+    /// preference, cut to [`minimap::MinimapSize::Small`] while the on-screen
+    /// controls are up and the radar would leave them no room above it (see
+    /// [`crate::touch::play_minimap_size`]). Render-only: the saved setting is
+    /// never written, so the radar comes back at its own size the moment the
+    /// controls hide.
+    fn drawn_minimap_size(&self) -> minimap::MinimapSize {
+        let saved = self.scores.minimap_size;
+        if !self.touch_active || !matches!(self.screen, Screen::Playing) || self.map_open {
+            return saved;
+        }
+        crate::touch::play_minimap_size(self.last_game, self.touch_actives_owned(), saved)
     }
 
     /// Does the rack carry one of the two ACTIVE weapons? They are the only
@@ -6234,7 +6250,9 @@ impl App {
         let _p = crate::prof::scope(crate::prof::Stage::Minimap);
         self.map_frame.refresh(w);
         let hovered = self.hits.hovered == Some(Target::Minimap);
-        let compact_size = self.scores.minimap_size;
+        // The radar's size here is the one `App::touch_layout_for_screen` laid
+        // the touch buttons out against, so the two cannot drift.
+        let compact_size = self.drawn_minimap_size();
         let mut view = self
             .map_frame
             .view_sized(w, expanded, compact_size, hovered);
@@ -19367,6 +19385,116 @@ mod tests {
         assert!(out.stick.x > 0.99, "the stick still drives: {:?}", out.stick);
         assert!(out.dash_held, "the dash button is still owned by its contact");
         assert_eq!(h.app.dashes_used, before + 1, "the dash fired as well");
+    }
+
+    /// The Dash/Actives row lives in the bottom-right region without ever
+    /// covering the compact radar, the HUD rails or another control: on every
+    /// integration grid, with the radar Normal, Small and Hidden, each control
+    /// keeps the contract's thumb size, sits fully on screen, and a finger on
+    /// the radar is never a button press.
+    #[test]
+    fn the_touch_controls_keep_clear_of_the_minimap_the_hud_and_each_other() {
+        use crate::game::weapon::WeaponKind;
+        use crate::render::minimap::MinimapSize;
+        for (w, h) in [(120u16, 40u16), (127, 30), (123, 35), (100, 24)] {
+            for size in [MinimapSize::Normal, MinimapSize::Small, MinimapSize::Hidden] {
+                let mut hh = Harness::new(w, h);
+                hh.enter_playing();
+                hh.app.scores.minimap_size = size;
+                // One ACTIVE weapon, so the Actives button is on screen too.
+                hh.app
+                    .world
+                    .as_mut()
+                    .unwrap()
+                    .player
+                    .loadout
+                    .apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+                let [top, field, bottom] = game_rows(Rect::new(0, 0, w, h));
+
+                // A thumb in the field's left part brings the controls up.
+                let (tx, ty) = (f32::from(field.x) + 8.0, f32::from(field.y) + 6.0);
+                hh.touch_frame(&[(TouchPhase::Start, 1, tx, ty)]);
+                assert!(hh.app.touch_visible(), "the touch did not show the controls");
+
+                let layout = hh.app.touch_layout_for_screen();
+                let minimap = hh.app.last_minimap;
+                assert_eq!(
+                    layout.minimap, minimap,
+                    "the layout and the drawn radar disagree at {w}x{h} {size:?}"
+                );
+                let controls: Vec<(TouchSlot, Rect)> = layout.slots().collect();
+                assert_eq!(
+                    controls.len(),
+                    4,
+                    "Dash, Actives, Pause and Map at {w}x{h} {size:?}: {controls:?}"
+                );
+                for (slot, rect) in &controls {
+                    // The contract's thumb sizes, never a shrunken button.
+                    let thumb = if *slot == TouchSlot::Dash { (7, 3) } else { (5, 3) };
+                    assert_eq!(
+                        (rect.width, rect.height),
+                        thumb,
+                        "{slot:?} lost its thumb size at {w}x{h} {size:?}"
+                    );
+                    assert!(
+                        rect.x < w && rect.y < h && rect.right() <= w && rect.bottom() <= h,
+                        "{slot:?} {rect:?} hangs off a {w}x{h} screen"
+                    );
+                    assert!(
+                        !rect.intersects(top) && !rect.intersects(bottom),
+                        "{slot:?} {rect:?} covers a HUD rail at {w}x{h} {size:?}"
+                    );
+                    assert!(
+                        !rect.intersects(minimap),
+                        "{slot:?} {rect:?} covers the radar {minimap:?} at {w}x{h} {size:?}"
+                    );
+                }
+                for (i, (a, ra)) in controls.iter().enumerate() {
+                    for (b, rb) in controls.iter().skip(i + 1) {
+                        assert!(
+                            !ra.intersects(*rb),
+                            "{a:?} {ra:?} and {b:?} {rb:?} overlap at {w}x{h} {size:?}"
+                        );
+                    }
+                }
+                // Nothing on the radar is owned by a control, so a finger there
+                // reaches the pointer path instead of firing a dash.
+                if !minimap.is_empty() {
+                    for y in minimap.y..minimap.bottom() {
+                        for x in minimap.x..minimap.right() {
+                            assert_eq!(
+                                layout.control_at((x, y)),
+                                None,
+                                "({x},{y}) on the radar belongs to a control at {w}x{h} {size:?}"
+                            );
+                        }
+                    }
+                    let (cx, cy) = centre(minimap);
+                    hh.touch_frame(&[
+                        (TouchPhase::End, 1, tx, ty),
+                        (TouchPhase::Start, 2, cx, cy),
+                    ]);
+                    let out = hh.app.touch_out;
+                    assert!(
+                        !out.dash_press
+                            && !out.active_press
+                            && !out.pause_press
+                            && !out.map_press,
+                        "a finger on the radar fired a button at {w}x{h} {size:?}"
+                    );
+                }
+
+                // The saved preference is render-only: the radar comes back at
+                // its own size as soon as a key hides the controls.
+                hh.frame(&[KeyCode::Char('w')]);
+                assert!(!hh.app.touch_visible(), "a key hides the controls");
+                assert_eq!(
+                    hh.app.last_minimap,
+                    crate::render::minimap::compact_rect_for_size(hh.app.last_game, size),
+                    "the radar did not return to {size:?} at {w}x{h}"
+                );
+            }
+        }
     }
 
     /// Any keyboard key hands the screen back to the keyboard and hides the
