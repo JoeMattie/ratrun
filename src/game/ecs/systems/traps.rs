@@ -130,7 +130,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
-use crate::game::art_crabpot::{CrabPotState, CrabPotView, POT_HALF};
+use crate::game::art_crabpot::{CrabPotState, CrabPotView, DOOR_DEPTH, POT_HALF};
 use crate::game::art_traps::{
     local_box_contains, MousetrapState, MousetrapView, StickyTrapState, StickyVictimKind,
     StickyVictimView, TrapBait, MOUSETRAP_ARMOUR_IGNORED, MOUSETRAP_BAIT_TAKE_RADIUS,
@@ -144,8 +144,13 @@ use crate::game::art_traps::{
     STICKY_TRAP_SLOW_MULT,
 };
 use crate::game::ecs::components::{ChestSpawn, Entity, SpawnId};
-use crate::game::ecs::constants::PLAYER_RADIUS;
-use crate::game::ecs::resources::{NextSpawnId, RngRes, SfxQueue, TickInput};
+use crate::game::director::{self, Director};
+use crate::game::ecs::constants::{ENEMY_CAP, PLAYER_RADIUS};
+use crate::game::ecs::resources::{
+    BossDue, BossOverride, Cvars, DebugFlags, DifficultyLevel, NextEnemyId, NextSpawnId, RngRes,
+    RunCounters, SfxQueue, TickInput,
+};
+use crate::game::ecs::systems::{boss::Boss, crab, miniboss::MinibossSchedule};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Pickup;
 use crate::game::level::{Level, Theme};
@@ -428,6 +433,7 @@ pub struct Scratch {
     held: Vec<Entity>,
     /// Bodies given a crossing slow this tick (see `TrapRuntime::cross_prev`).
     cross_now: Vec<Entity>,
+    empty_pots: Vec<(Vec2, Vec2)>,
 }
 
 /// ECS side table for the floor traps, indexed exactly like `LevelObjects`.
@@ -589,11 +595,6 @@ fn prune_pot_bodies(
     pot.caught = slot.held.iter().flatten().count() as u8;
 }
 
-fn release_empty_pot_crab(_pos: Vec2, _facing: Vec2) {
-    // TODO(outfall-crab integration): replace with
-    // crate::game::ecs::systems::crab::release_pot_crab(...) at the call site.
-}
-
 fn tick_crab_pots(
     views: &mut [CrabPotView],
     slots: &mut [PotSlot],
@@ -603,6 +604,7 @@ fn tick_crab_pots(
     hits: &mut Vec<(u64, Entity)>,
     damage_numbers: &mut DamageNumbers,
     sfx: &mut SfxQueue,
+    empty_pots: &mut Vec<(Vec2, Vec2)>,
 ) {
     use CrabPotState::*;
 
@@ -668,7 +670,9 @@ fn tick_crab_pots(
                     if !killed {
                         enemy.crab_pot_held = true;
                         enemy.vel = Vec2::ZERO;
-                        if matches!(enemy.kind, EnemyKind::Skater | EnemyKind::Lampfish) {
+                        if enemy.kind == EnemyKind::ShoreCrab {
+                            crab::cancel_attack(&mut enemy);
+                        } else if matches!(enemy.kind, EnemyKind::Skater | EnemyKind::Lampfish) {
                             super::floor_outfall::cancel_attack(&mut enemy);
                         }
                         slot.held[pot.caught as usize] = Some(entity);
@@ -687,7 +691,7 @@ fn tick_crab_pots(
                 prune_pot_bodies(slot, pot, enemies, slot.elapsed >= POT_HORDE_HOLD_SECS);
                 if !pot.caught_rat && pot.caught == 0 {
                     if !slot.caught_any {
-                        release_empty_pot_crab(pot.pos, pot.facing);
+                        empty_pots.push((pot.pos, pot.facing));
                     }
                     slot.enter(pot, Open);
                 } else {
@@ -952,14 +956,62 @@ pub fn traps_system(
     mut sfx: ResMut<SfxQueue>,
     mut next_id: ResMut<NextSpawnId>,
     mut scratch: Local<Scratch>,
+    spawn: (
+        Res<RunCounters>,
+        Res<DifficultyLevel>,
+        Res<DebugFlags>,
+        Res<Cvars>,
+        Res<Director>,
+        Res<BossDue>,
+        Res<BossOverride>,
+        Res<MinibossSchedule>,
+    ),
+    mut next_enemy_id: ResMut<NextEnemyId>,
+    bosses: Query<&Boss>,
 ) {
     let dt = input.dt;
     traps.sync(&level, &mut enemies);
     if level.theme == Theme::Outfall && !level.objects.crab_pots.is_empty() {
+        let scratch = &mut *scratch;
         tick_crab_pots(
             &mut level.objects.crab_pots, &mut traps.pots, dt, &mut player, &mut enemies,
-            &mut scratch.hits, &mut damage_numbers, &mut sfx,
+            &mut scratch.hits, &mut damage_numbers, &mut sfx, &mut scratch.empty_pots,
         );
+        if !scratch.empty_pots.is_empty() {
+            let (counters, difficulty, debug, cvars, director, due, forced, appointments) = spawn;
+            let elapsed = counters.elapsed;
+            let blocked = debug.peace
+                || appointments.suppress(elapsed)
+                || (!counters.testbed && appointments.next_appointment().is_some_and(|at| elapsed >= at))
+                || director.boss_spawned
+                || due.due
+                || due.claimed
+                || forced.0.is_some()
+                || !bosses.is_empty()
+                || enemies.iter().any(|(_, _, enemy)| enemy.named && enemy.alive());
+            let cap = if cvars.enemy_cap == 0 { ENEMY_CAP } else { cvars.enemy_cap };
+            let mut room = cap.saturating_sub(1 + enemies.iter().count());
+            let mut live = enemies.iter().filter(|(_, _, enemy)| {
+                enemy.kind == EnemyKind::ShoreCrab && enemy.alive()
+            }).count();
+            for (pos, facing) in scratch.empty_pots.drain(..) {
+                if blocked || room == 0 || elapsed >= director::BOSS_TIME {
+                    break;
+                }
+                let facing = safe_dir(facing);
+                let mouth = POT_HALF + DOOR_DEPTH;
+                if let Some(mut enemy) = [mouth, mouth + 4.0, mouth + 8.0].into_iter().find_map(|offset| {
+                    crab::release_pot_crab(
+                        &level, pos + facing * offset, player.pos, difficulty.0, elapsed, live, blocked,
+                    )
+                }) {
+                    enemy.id = next_enemy_id.take();
+                    commands.spawn((enemy, next_id.take()));
+                    live += 1;
+                    room -= 1;
+                }
+            }
+        }
     }
 
     // Art `hit_flash`: a short 1 -> 0 flash when the bar strikes. Decayed for

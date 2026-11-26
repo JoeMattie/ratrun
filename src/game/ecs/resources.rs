@@ -1620,3 +1620,10 @@ pub struct DrakeSpawner {
     /// count that went down (a Drake is never despawned any other way).
     pub live: u8,
 }
+
+/// The Outfall guest's group cooldown and the last observed live crabs.
+#[derive(Resource, Default)]
+pub struct CrabSpawner {
+    pub last_change: Option<f32>,
+    pub live: Vec<Entity>,
+}

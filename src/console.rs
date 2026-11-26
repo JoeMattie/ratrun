@@ -2599,6 +2599,9 @@ fn find_passive(name: &str) -> Option<PassiveKind> {
 
 fn find_enemy(name: &str) -> Option<EnemyKind> {
     let s = slug(name);
+    if s == "crab" {
+        return Some(EnemyKind::ShoreCrab);
+    }
     EnemyKind::all().into_iter().find(|e| slug(e.name()) == s)
 }
 

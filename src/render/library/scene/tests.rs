@@ -1479,6 +1479,30 @@ fn outfall_trick_cards_run_their_real_rules() {
 }
 
 #[test]
+fn the_shore_crab_card_pinches_at_the_dummy() {
+    use crate::game::art_crab::CrabState;
+    use crate::game::ecs::systems::crab::{claw_warning, crab_view};
+
+    let mut scene = LibraryScene::build(Key::Enemy(EnemyKind::ShoreCrab)).unwrap();
+    let subject = scene.subject().unwrap();
+    assert_eq!(scene.world.level.theme, Theme::Outfall);
+    let (mut tell, mut pinch, mut recover) = (false, false, false);
+    one_loop(&mut scene, |scene| {
+        let body = scene.world.ecs.get::<Enemy>(subject).unwrap();
+        match crab_view(body).state {
+            CrabState::Tell => tell = true,
+            CrabState::Pinch => {
+                let (shape, _, _, _) = claw_warning(body).unwrap();
+                pinch |= shape.contains(scene.world.player.pos, 0.0);
+            }
+            CrabState::Recover => recover = true,
+            CrabState::Scuttle => {}
+        }
+    });
+    assert!(tell && pinch && recover);
+}
+
+#[test]
 fn outfall_named_cards_show_both_halves_of_the_tell_and_the_strike() {
     for kind in roster::appointments(Theme::Outfall) {
         let mut scene = LibraryScene::build(Key::Miniboss(kind)).unwrap();

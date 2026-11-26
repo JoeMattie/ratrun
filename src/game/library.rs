@@ -350,6 +350,7 @@ fn enemy_name(k: EnemyKind) -> &'static str {
         EnemyKind::Lampfish => "Lampfish",
         EnemyKind::Grouper => "Grouper",
         EnemyKind::FrySchool => "Fry School",
+        EnemyKind::ShoreCrab => "Shore Crab",
     }
 }
 
@@ -470,7 +471,7 @@ pub fn theme_of(key: Key) -> Theme {
         Key::Enemy(
             EnemyKind::SandHopper | EnemyKind::GlassShrimp | EnemyKind::Conger
             | EnemyKind::Skater | EnemyKind::PistolShrimp | EnemyKind::Lampfish
-            | EnemyKind::Grouper | EnemyKind::FrySchool,
+            | EnemyKind::Grouper | EnemyKind::FrySchool | EnemyKind::ShoreCrab,
         )
         | Key::Miniboss(
             MinibossKind::Gasket | MinibossKind::Swell | MinibossKind::Shade
@@ -578,6 +579,7 @@ pub fn all_rows() -> Vec<Row> {
         EnemyKind::Lampfish,
         EnemyKind::Grouper,
         EnemyKind::FrySchool,
+        EnemyKind::ShoreCrab,
     ] {
         let (hint, dossier) = enemy_text(k);
         rows.push(Row {
@@ -1063,6 +1065,10 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
         EnemyKind::FrySchool => (
             "Outfall · from 9:45",
             "The school spreads in the dark. Near a live light or Subject R-47, it bunches and stops. Strike the smaller, softer target while it holds.",
+        ),
+        EnemyKind::ShoreCrab => (
+            "Outfall · from 1:00",
+            "Small groups scuttle sideways. Step out of the marked box before the claws close. Strike while the shell is exposed.",
         ),
     }
 }
@@ -2036,14 +2042,16 @@ fn enemy_facts(k: EnemyKind, f: &mut Facts) {
 /// generic boss body).
 pub fn enemy_floors(k: EnemyKind) -> Option<String> {
     use crate::game::roster;
-    // The guest is in no roster slot: it keeps one floor and one clock of its
-    // own (`ecs::systems::drake::FROM_CLOCK`), and it is the only body the
-    // card calls a guest.
-    if k == EnemyKind::Drake {
-        let secs = crate::game::ecs::systems::drake::FROM_CLOCK.round() as u32;
+    let guest = match k {
+        EnemyKind::Drake => Some((Theme::Sewer, crate::game::ecs::systems::drake::FROM_CLOCK)),
+        EnemyKind::ShoreCrab => Some((Theme::Outfall, crate::game::ecs::systems::crab::FROM_CLOCK)),
+        _ => None,
+    };
+    if let Some((theme, clock)) = guest {
+        let secs = clock.round() as u32;
         return Some(format!(
             "{} · guest · from {}:{:02}",
-            Theme::Sewer.name(),
+            theme.name(),
             secs / 60,
             secs % 60
         ));
@@ -2132,6 +2140,7 @@ pub fn enemy_answer(k: EnemyKind) -> &'static str {
         EnemyKind::Lampfish => "ring warns of a lunge",
         EnemyKind::Grouper => "split stalk snuffs a lamp",
         EnemyKind::FrySchool => "bunches near light",
+        EnemyKind::ShoreCrab => "claws lock, then pinch",
     }
 }
 

@@ -495,6 +495,7 @@ pub fn gold_row(kind: EnemyKind) -> (f32, u32) {
         EnemyKind::Lampfish => (0.054, 2),
         EnemyKind::Grouper => gold_row(EnemyKind::Brute),
         EnemyKind::FrySchool => (0.065, 2),
+        EnemyKind::ShoreCrab => (0.05, 2),
         _ => (0.025, 1),
     }
 }

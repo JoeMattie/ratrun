@@ -54,3 +54,4 @@ pub mod miniboss_behaviour;
 pub mod weapons_wave5;
 pub mod floor_outfall;
 pub mod outfall;
+pub mod crab;

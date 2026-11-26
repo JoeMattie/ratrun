@@ -448,6 +448,7 @@ impl DamageCause {
             DamageCause::EnemyContact(EnemyKind::Lampfish) => "lampfish contact",
             DamageCause::EnemyContact(EnemyKind::Grouper) => "grouper contact",
             DamageCause::EnemyContact(EnemyKind::FrySchool) => "fry school contact",
+            DamageCause::EnemyContact(EnemyKind::ShoreCrab) => "shore crab contact",
             DamageCause::EnemyBullet => "spitter bullets",
             DamageCause::PistolShrimpBubble => "pistol shrimp bubble",
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
@@ -1903,6 +1904,9 @@ fn floor_attack_landing(en: &Enemy, p: Vec2) -> Option<f32> {
             let scale = if base > 0.0 { en.damage / base } else { 1.0 };
             Some(drake::PECK_DAMAGE * scale)
         }
+        EnemyKind::ShoreCrab => {
+            crate::game::ecs::systems::crab::pending_pinch(en, p, SOON, slack)
+        }
         // The roll is the can's one warned hit (its body's own damage), along
         // the lane it rocked over: a rolling can within a couple of ticks'
         // travel of the rat. (A rock that ends this tick only starts the roll.)
@@ -1965,6 +1969,7 @@ fn floor_attack_name(kind: EnemyKind) -> &'static str {
         EnemyKind::Drake => "drake peck",
         EnemyKind::Skater => "skater splash",
         EnemyKind::Lampfish => "lampfish lunge",
+        EnemyKind::ShoreCrab => "shore crab pinch",
         _ => match kind.archetype() {
             EnemyKind::BellFlea => "bell flea landing",
             EnemyKind::Turnkey => "turnkey crossbar",
@@ -2099,6 +2104,7 @@ fn enemy_kind_name(kind: EnemyKind) -> &'static str {
         EnemyKind::Lampfish => "lampfish",
         EnemyKind::Grouper => "grouper",
         EnemyKind::FrySchool => "fry school",
+        EnemyKind::ShoreCrab => "shore crab",
     }
 }
 

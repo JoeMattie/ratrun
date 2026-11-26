@@ -236,6 +236,7 @@ fn enemy_material(kind: EnemyKind) -> MaterialKind {
         EnemyKind::Lampfish => MaterialKind::Slime,
         EnemyKind::Grouper => MaterialKind::Slime,
         EnemyKind::FrySchool => MaterialKind::Slime,
+        EnemyKind::ShoreCrab => MaterialKind::Shell,
     }
 }
 
