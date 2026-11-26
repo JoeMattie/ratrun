@@ -64,6 +64,9 @@ fn place_hanging_lights(level: &mut Level, rng: &mut rand::rngs::StdRng) {
             rect: room.rect,
             kind: zone,
         });
+        if level.theme == Theme::Outfall {
+            continue;
+        }
 
         let span = room.rect.w.max(room.rect.h) as f32 * 16.0;
         let horizontal = room.rect.w >= room.rect.h;
@@ -145,6 +148,7 @@ fn place_emitters(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         Theme::Laundry => [Fog, Steam, Drip, Insects],
         Theme::Printworks => [Cable, Dust, Exhaust, Pilot],
         Theme::Trailer => [Exhaust, Fire, Dust, Cable],
+        Theme::Outfall => [Fog, Drip, Fog, Drip],
     };
     let (cx, cy) = crate::game::collision::cell_of(level.start);
     for (slot, kind) in plan.into_iter().enumerate() {
@@ -282,6 +286,7 @@ fn place_emitters(level: &mut Level, rng: &mut rand::rngs::StdRng) {
 /// [`RAIL_LAMP_CAP`]. Batch 12 raised it from 26: the roles ask for about fifty
 /// and the budget always bound, so corridors were starved.
 const SCONCE_CAP: usize = 40;
+pub(super) const OUTFALL_SCONCE_CAP: usize = 12;
 /// How far a wall lamp's fan reaches into the room (world px). Batch 9 was a
 /// modest 46 px pool; batch 12 made a wall lamp a room light, so the fan runs
 /// 110 px — nearly seven tiles — with the soft edge falling to nothing at the
@@ -512,6 +517,10 @@ fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
     if faces.is_empty() {
         return;
     }
+    if level.theme == Theme::Outfall {
+        place_outfall_sconces(level, rng, &faces, &doorways);
+        return;
+    }
     let hanging: Vec<Vec2> = level
         .objects
         .lights
@@ -579,6 +588,84 @@ fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
             seed: rng.random(),
         });
     }
+}
+
+fn place_outfall_sconces(
+    level: &mut Level,
+    rng: &mut rand::rngs::StdRng,
+    faces: &[Face],
+    doorways: &[(i32, i32)],
+) {
+    let public: Vec<_> = faces.iter().copied().filter(|f| {
+        let (dx, dy) = cardinal_delta(f.dir);
+        let beyond = TileMap::tile_rect(f.floor.0 + dx, f.floor.1 + dy).center();
+        !near(doorways, f.floor, SCONCE_DOOR_GAP)
+            && level.pit_at(f.pos()).is_none()
+            && level.pit_at(beyond).is_none()
+            && level.mazes.iter().all(|m| !m.ring.contains(f.floor.0, f.floor.1))
+    }).collect();
+    let mut chosen = Vec::new();
+    // One mount on each side of the entry bowl where possible.
+    if let Some(start) = level.start_room() {
+        for dir in [Cardinal::North, Cardinal::East, Cardinal::South, Cardinal::West] {
+            let (dx, dy) = cardinal_delta(dir);
+            let rect = start.rect.to_world();
+            let target = start.center() - Vec2::new(dx as f32 * rect.w, dy as f32 * rect.h) * 0.5;
+            if let Some(face) = public.iter().copied()
+                .filter(|f| f.dir == dir && start.rect.contains(f.floor.0, f.floor.1))
+                .filter(|&f| admits(f, &[], &chosen))
+                .min_by(|a, b| a.pos().dist_sq(target).total_cmp(&b.pos().dist_sq(target)))
+            {
+                chosen.push(face);
+            }
+        }
+        for face in public.iter().copied().filter(|f| start.rect.contains(f.floor.0, f.floor.1)) {
+            if chosen.len() == 4 {
+                break;
+            }
+            if admits(face, &[], &chosen) {
+                chosen.push(face);
+            }
+        }
+    }
+    let entry_count = chosen.len();
+    let mut basins: Vec<_> = level.rooms.iter()
+        .filter(|r| matches!(r.kind, RoomKind::Hall | RoomKind::Room))
+        .collect();
+    basins.sort_by_key(|room| std::cmp::Reverse(room.rect.area()));
+    for room in basins {
+        if chosen.len() == OUTFALL_SCONCE_CAP {
+            break;
+        }
+        if chosen.iter().any(|f| room.rect.contains(f.floor.0, f.floor.1)) {
+            continue;
+        }
+        if let Some(face) = public.iter().copied()
+            .filter(|f| room.rect.contains(f.floor.0, f.floor.1))
+            .filter(|&f| admits(f, &[], &chosen))
+            .min_by(|a, b| a.pos().dist_sq(room.center()).total_cmp(&b.pos().dist_sq(room.center())))
+        {
+            chosen.push(face);
+        }
+    }
+    for face in public {
+        if chosen.len() >= 8 {
+            break;
+        }
+        if level.start_room().is_some_and(|r| r.rect.contains(face.floor.0, face.floor.1)) {
+            continue;
+        }
+        if admits(face, &[], &chosen) {
+            chosen.push(face);
+        }
+    }
+    level.objects.lights.extend(chosen.into_iter().enumerate().map(|(index, face)| {
+        let mut seed: u32 = rng.random();
+        if index < entry_count && LightFixture::sconce_spent(seed) {
+            seed |= 1;
+        }
+        LightFixture { pos: face.pos(), kind: LightFixtureKind::Sconce, radius: SCONCE_RADIUS, seed }
+    }));
 }
 
 /// A corridor gets one lamp every 8–12 cells, alternating sides: the rhythm the

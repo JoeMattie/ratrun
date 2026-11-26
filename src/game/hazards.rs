@@ -27,8 +27,169 @@
 //! (`EnemyKind::Bat`) and a dash ignore it entirely — that is the whole
 //! counter-play.
 
-use crate::game::collision::TILE_F;
+use crate::game::collision::{cell_of, segment_rect_hit, SizeClass, TileMap, TILE_F};
+use crate::game::level::Level;
 use crate::math::Vec2;
+
+// ---- Outfall ---------------------------------------------------------------
+
+pub const LURE_ARM_RADIUS: f32 = 16.0;
+pub const LURE_WARN_SECS: f32 = 0.7;
+pub const LURE_BULB_RADIUS: f32 = 6.0;
+pub const LURE_LIGHT_RANGE: f32 = 26.0;
+pub const OUTFALL_LURE_COUNT: usize = 6;
+pub const SURGE_PERIOD: f32 = 9.0;
+pub const SURGE_WARN_SECS: f32 = 1.0;
+pub const SURGE_ACTIVE_SECS: f32 = 0.6;
+pub const SURGE_DISTANCE: f32 = 20.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LurePhase {
+    Ready,
+    Warning,
+    Spent,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LureTrap {
+    pub pos: Vec2,
+    pub phase: LurePhase,
+    pub warning_left: f32,
+    /// Age of the spent pulse. A failed release uses the same clock.
+    pub spent_age: f32,
+    pub failed: bool,
+    /// Generator-ranked positions, checked again at release.
+    pub landings: Vec<Vec2>,
+}
+
+impl LureTrap {
+    pub fn new(pos: Vec2, landings: Vec<Vec2>) -> Self {
+        Self {
+            pos,
+            phase: LurePhase::Ready,
+            warning_left: 0.0,
+            spent_age: 0.0,
+            failed: false,
+            landings,
+        }
+    }
+
+    pub fn is_lit(&self) -> bool {
+        self.phase != LurePhase::Spent
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurgePhase {
+    Quiet,
+    Warning,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurgeView {
+    pub dir: Vec2,
+    pub phase: SurgePhase,
+}
+
+/// One direction per seed and one shared clock for simulation and warnings.
+pub fn outfall_surge(seed: u64, elapsed: f32) -> SurgeView {
+    let mut hash = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let diag = std::f32::consts::FRAC_1_SQRT_2;
+    let dirs = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(diag, diag),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(-diag, diag),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(-diag, -diag),
+        Vec2::new(0.0, -1.0),
+        Vec2::new(diag, -diag),
+    ];
+    let dir = dirs[((hash ^ (hash >> 31)) & 7) as usize];
+    let clock = elapsed % SURGE_PERIOD;
+    let phase = if elapsed >= SURGE_PERIOD
+        && elapsed < (elapsed / SURGE_PERIOD).floor() * SURGE_PERIOD + SURGE_ACTIVE_SECS
+    {
+        SurgePhase::Active
+    } else if clock >= SURGE_PERIOD - SURGE_WARN_SECS {
+        SurgePhase::Warning
+    } else {
+        SurgePhase::Quiet
+    };
+    SurgeView { dir, phase }
+}
+
+/// Also call this for the hostile overlay. The caller combines the director
+/// handoff, a due arrival and a Lantern present on the floor.
+pub fn outfall_surge_enabled(arriving_or_present: bool, testbed: bool, elapsed: f32) -> bool {
+    !arriving_or_present && (testbed || elapsed < crate::game::director::BOSS_TIME)
+}
+
+/// True for a legal Outfall footprint, including the dry side of pit lips.
+pub fn outfall_sand_clear(level: &Level, pos: Vec2, radius: f32, class: SizeClass) -> bool {
+    let (cx, cy) = cell_of(pos);
+    level.tiles.in_bounds(cx, cy)
+        && level.tiles.one_way_dir(cx, cy).is_none()
+        && level.tiles.circle_clear(pos, radius.max(0.001), class)
+        && !level.touches_tidal_pit(pos, radius)
+}
+
+/// Stop at the first obstacle on a current or boss pull. The swept pit and
+/// wall bounds are conservatively expanded by the full body radius. Gate
+/// leaves need a separate check because they let projectiles through.
+pub fn clamp_outfall_displacement(
+    level: &Level,
+    from: Vec2,
+    step: Vec2,
+    radius: f32,
+    class: SizeClass,
+) -> Vec2 {
+    let length = step.len();
+    if length <= 0.0 || !outfall_sand_clear(level, from, radius, class) {
+        return from;
+    }
+    let to = from + step;
+    let mut first = level.tiles.segment_hit(from, to, radius).unwrap_or(1.0);
+    for pit in &level.objects.tidal_pits {
+        if let Some(hit) = segment_rect_hit(from, to, radius, &pit.rect.to_world()) {
+            first = first.min(hit);
+        }
+    }
+    let (x0, y0) = cell_of(Vec2::new(from.x.min(to.x) - radius, from.y.min(to.y) - radius));
+    let (x1, y1) = cell_of(Vec2::new(from.x.max(to.x) + radius, from.y.max(to.y) + radius));
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if level.tiles.one_way_dir(x, y).is_some() {
+                if let Some(hit) = segment_rect_hit(from, to, radius, &TileMap::tile_rect(x, y)) {
+                    first = first.min(hit);
+                }
+            }
+        }
+    }
+
+    let end = if first < 1.0 {
+        from + step * (first - 0.01 / length).max(0.0)
+    } else {
+        to
+    };
+    if outfall_sand_clear(level, end, radius, class) {
+        end
+    } else {
+        from
+    }
+}
+
+/// A Conger uses the same radius and ray at placement and at release.
+pub fn lure_landing_clear(level: &Level, bulb: Vec2, at: Vec2) -> bool {
+    let step = at - bulb;
+    (20.0 * 20.0..=32.0 * 32.0).contains(&step.len_sq())
+        && clamp_outfall_displacement(level, bulb, step, 4.0, SizeClass::Large).dist_sq(at)
+            < 0.000001
+}
+
 
 // ---- Steam ----------------------------------------------------------------
 

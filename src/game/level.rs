@@ -64,50 +64,54 @@ pub enum Theme {
     /// that shapes it and the hazards; `art_trailer` owns the planks, the road
     /// seen through their gaps, the rails and the cargo art.
     Trailer,
+    /// The tidal basins beyond the Sewer's storm gate.
+    Outfall,
 }
 
 impl Theme {
-    /// The five **campaign floors** in facility order: the three stages of the
-    /// original route first (Sewer, Kitchen, Lab), then the two side-route
-    /// floors (Laundry, Printworks). The first three entries are therefore
+    /// Generated floors in facility order: the three stages of the
+    /// original route first (Sewer, Kitchen, Lab), then the side routes.
+    /// The first three entries are therefore
     /// still "the original route by level index".
     ///
     /// [`Theme::Trailer`] is deliberately **not** here: it is the getaway
     /// ride, a bonus practice floor and not a campaign step (see
     /// [`crate::game::campaign::getaway_theme`]). Lists that build or draw
     /// every theme the engine can render use [`Theme::playable`] instead.
-    pub fn all() -> [Theme; 5] {
+    pub fn all() -> [Theme; 6] {
         [
             Theme::Sewer,
             Theme::Kitchen,
             Theme::Lab,
             Theme::Laundry,
             Theme::Printworks,
+            Theme::Outfall,
         ]
     }
 
     /// The campaign stage (0, 1 or 2) a theme belongs to: the Sewer is stage
-    /// one, the Kitchen and the Laundry are both stage two, the Lab and the
+    /// one, the Kitchen, Laundry and Outfall are stage two, the Lab and the
     /// Printworks are both stage three. The Flatbed is a last-stage getaway,
     /// so it reads as stage three.
     pub fn stage(self) -> usize {
         match self {
             Theme::Sewer => 0,
-            Theme::Kitchen | Theme::Laundry => 1,
+            Theme::Kitchen | Theme::Laundry | Theme::Outfall => 1,
             Theme::Lab | Theme::Printworks | Theme::Trailer => 2,
         }
     }
 
     /// Every theme a `World` can be built on, in **route order**: stage one,
-    /// the two stage-two alternatives, the two stage-three alternatives, then
+    /// the three stage-two alternatives, the two stage-three alternatives, then
     /// the getaway ride last. Tests, the title's sector row and the sector
     /// select screen all list this order, so the row's cursor, the select
     /// screen's grid and a run's `level_index` never disagree.
-    pub fn playable() -> [Theme; 6] {
+    pub fn playable() -> [Theme; 7] {
         [
             Theme::Sewer,
             Theme::Kitchen,
             Theme::Laundry,
+            Theme::Outfall,
             Theme::Lab,
             Theme::Printworks,
             Theme::Trailer,
@@ -122,6 +126,7 @@ impl Theme {
             Theme::Laundry => "Laundry",
             Theme::Printworks => "Printworks",
             Theme::Trailer => "Flatbed",
+            Theme::Outfall => "Outfall",
         }
     }
 
@@ -294,6 +299,14 @@ impl Palette {
                 accent: (226, 178, 84),
                 blood: (150, 66, 48),
             },
+            Theme::Outfall => Palette {
+                bg: (42, 43, 37),
+                bg_alt: (49, 49, 42),
+                wall: (30, 47, 49),
+                wall_edge: (60, 91, 89),
+                accent: (105, 230, 223),
+                blood: (96, 158, 155),
+            },
         }
     }
 }
@@ -339,6 +352,9 @@ pub enum PropKind {
     PipeStack,
     /// A coiled chain on a hook (16 × 16 px).
     ChainCoil,
+    OutfallPiling,
+    OutfallBallast,
+    OutfallRib,
 }
 
 impl PropKind {
@@ -367,6 +383,9 @@ impl PropKind {
             PropKind::Toolbox => (20.0, 12.0),
             PropKind::PipeStack => (40.0, 18.0),
             PropKind::ChainCoil => (16.0, 16.0),
+            PropKind::OutfallPiling => (16.0, 16.0),
+            PropKind::OutfallBallast => (32.0, 16.0),
+            PropKind::OutfallRib => (16.0, 32.0),
         }
     }
 
@@ -446,6 +465,12 @@ pub fn theme_props(theme: Theme) -> &'static [PropKind] {
             PropKind::Toolbox,
             PropKind::PipeStack,
             PropKind::ChainCoil,
+        ],
+        Theme::Outfall => &[
+            PropKind::OutfallPiling,
+            PropKind::OutfallPiling,
+            PropKind::OutfallBallast,
+            PropKind::OutfallRib,
         ],
     }
 }
@@ -789,6 +814,11 @@ pub struct LevelObjects {
     pub sewer_opening: Option<super::hazards::SewerOpening>,
     /// Wet bands left by completed Corkscrew strikes.
     pub trench_puddles: Vec<TrenchPuddle>,
+    pub tidal_pits: Vec<Pit>,
+    pub lure_traps: Vec<super::hazards::LureTrap>,
+    /// Fixture indices. The Grouper and Lantern each own their own slot.
+    pub outfall_elite_snuff: Option<usize>,
+    pub outfall_boss_snuff: Option<usize>,
 }
 
 impl LevelObjects {
@@ -891,6 +921,8 @@ pub enum PitKind {
     BrokenPlank,
     /// A missing rail section on the bed's open edge.
     RailGap,
+    /// A tidal drop at the rim of an Outfall basin.
+    TidalDrop,
 }
 
 /// One fall hazard: the cells a body can drop through.
@@ -1090,17 +1122,16 @@ fn puddle_lobe(seed: u32, lobe: u32) -> f32 {
 /// One blob of standing water on a floor, in world pixels.
 ///
 /// Puddles are **floor decoration with a gameplay hook**, not geometry: they
-/// never paint a tile, never block, never slow and are never read by the
-/// navigation, the spawn checks or the bot. `systems::puddles` reads
-/// [`Level::wet_at`] to splash under the rat's feet and the renderer draws them
-/// under the wet-floor material so lamps reflect in them.
+/// never paint, block or slow a tile. The Outfall's Skater uses them for
+/// steering and splash attacks. `systems::puddles` reads [`Level::wet_at`]
+/// for footsteps, and the renderer draws the wet-floor material.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Puddle {
     /// Centre, world px. Always on an open floor cell (the generator's rule).
     pub pos: Vec2,
-    /// Half-width, world px (`24..=90` from the generator).
+    /// Half-width, world px.
     pub rx: f32,
-    /// Half-height, world px (`14..=60` from the generator).
+    /// Half-height, world px.
     pub ry: f32,
     /// Shape variation (the rim's lobes).
     pub seed: u32,
@@ -1131,8 +1162,12 @@ impl Puddle {
         let d = p - self.pos;
         let nx = d.x / self.rx;
         let ny = d.y / self.ry;
+        let radial_sq = nx * nx + ny * ny;
+        if radial_sq > 1.0 {
+            return false;
+        }
         let edge = self.edge_factor(d.y.datan2(d.x));
-        nx * nx + ny * ny <= edge * edge
+        radial_sq <= edge * edge
     }
 
     /// `0.0` outside, `1.0` deep inside, linear over the outer
@@ -1375,7 +1410,10 @@ impl Level {
             let cx = rng.random_range(area.x..area.right().max(area.x + 1));
             let cy = rng.random_range(area.y..area.bottom().max(area.y + 1));
             if self.tiles.passable(cx, cy, class) {
-                return Some(TileMap::tile_rect(cx, cy).center());
+                let centre = TileMap::tile_rect(cx, cy).center();
+                if self.theme != Theme::Outfall || self.pit_at(centre).is_none() {
+                    return Some(centre);
+                }
             }
         }
         None
@@ -1386,9 +1424,46 @@ impl Level {
         self.tiles.rect_clear(rect, SizeClass::Small)
     }
 
-    /// The fall hazard containing `p`, on the trailer level.
+    /// The fall hazard containing `p` on the Flatbed or in the Outfall.
     pub fn pit_at(&self, p: Vec2) -> Option<&Pit> {
-        self.trailer.pit_at(p)
+        if self.theme == Theme::Outfall {
+            self.objects.tidal_pits.iter().find(|pit| pit.contains_world(p))
+        } else {
+            self.trailer.pit_at(p)
+        }
+    }
+
+    /// Whether a body footprint meets tidal water. Flatbed callers retain
+    /// their existing deck-specific fall and recovery rules.
+    pub fn touches_tidal_pit(&self, pos: Vec2, radius: f32) -> bool {
+        self.objects.tidal_pits.iter().any(|pit| {
+            pit.contains_world(pos)
+                || super::collision::circle_rect_overlap(pos, radius, &pit.rect.to_world())
+        })
+    }
+
+    /// Whether an Outfall owner currently holds this fixture dark.
+    pub fn sconce_snuffed(&self, index: usize) -> bool {
+        self.objects.outfall_elite_snuff == Some(index)
+            || self.objects.outfall_boss_snuff == Some(index)
+    }
+
+    /// Closest visible, working mount, with fixture order breaking ties.
+    pub fn nearest_live_sconce(&self, from: Vec2, reach: f32) -> Option<(usize, Vec2)> {
+        let mut best = None;
+        let mut best_distance = reach * reach;
+        for (index, fixture) in self.objects.lights.iter().enumerate() {
+            let distance = from.dist_sq(fixture.pos);
+            if (distance < best_distance || (best.is_none() && distance == best_distance))
+                && fixture.is_live_sconce()
+                && !self.sconce_snuffed(index)
+                && self.tiles.segment_hit(from, fixture.pos, 0.0).is_none()
+            {
+                best = Some((index, fixture.pos));
+                best_distance = distance;
+            }
+        }
+        best
     }
 
     /// Is `p` on standing water? The puddle test only, and **floor cells only**:
@@ -1396,6 +1471,9 @@ impl Level {
     /// and that is not water the rat can step in.
     pub fn wet_at(&self, p: Vec2) -> bool {
         if self.puddles.is_empty() && self.objects.trench_puddles.is_empty() {
+            return false;
+        }
+        if self.theme == Theme::Outfall && self.pit_at(p).is_some() {
             return false;
         }
         self.tiles.get_at(p).is_open() && self.standing_water().any(|puddle| puddle.contains(p))
@@ -1418,6 +1496,7 @@ pub fn level_seed(theme: Theme, seed: u64, attempt: u32) -> u64 {
         Theme::Laundry => 0x41c6_4f0a_b4e8_d2c7u64,
         Theme::Printworks => 0x8f2d_9e55_1c73_a6b1u64,
         Theme::Trailer => 0x2f1d_4b8c_9a63_0d57u64,
+        Theme::Outfall => 0x5b27_8cc2_a86f_34d1u64,
     };
     let mut h = seed ^ t ^ ((attempt as u64) << 32);
     // splitmix64 finaliser: plenty to decorrelate neighbouring seeds.

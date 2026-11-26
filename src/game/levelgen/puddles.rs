@@ -81,6 +81,7 @@ pub fn count_for(theme: Theme) -> Option<(usize, usize)> {
         Theme::Laundry => Some((22, 30)),
         Theme::Kitchen => Some((8, 12)),
         Theme::Lab | Theme::Printworks | Theme::Trailer => None,
+        Theme::Outfall => Some((240, 265)),
     }
 }
 
@@ -103,7 +104,7 @@ pub(super) fn place(level: &mut Level, attempt: u32) {
     let mut rng = level_rng(level.theme, level.seed ^ PUDDLE_SALT, attempt);
     let blocked = blocked_cells(level);
     let bias = match level.theme {
-        Theme::Sewer | Theme::Laundry => Bias::Edges,
+        Theme::Sewer | Theme::Laundry | Theme::Outfall => Bias::Edges,
         Theme::Kitchen => Bias::Props,
         // `count_for` has already returned for these, so the arm is the "any
         // cell" default rather than a third policy.
@@ -111,7 +112,31 @@ pub(super) fn place(level: &mut Level, attempt: u32) {
     };
     let wanted = rng.random_range(min..=max);
     let mut puddles = Vec::with_capacity(wanted);
-    for _ in 0..wanted {
+    if level.theme == Theme::Outfall {
+        let cols = level.tiles.cols();
+        for room in level.rooms.iter().filter(|r| matches!(
+            r.kind, crate::game::level::RoomKind::Hall | crate::game::level::RoomKind::Room
+        )) {
+            // Start each bowl with a bank near its edge. The remaining
+            // centres use the map-wide edge-biased draws.
+            let Some((cx, cy)) = room.rect.cells()
+                .filter(|&(x, y)| {
+                    level.tiles.get(x, y) == TileKind::Open && !blocked[(y * cols + x) as usize]
+                })
+                .filter(|&(x, y)| room_edge_or_corridor(level, x, y))
+                .min_by(|&(x, y), &(a, b)| {
+                    let center = room.center();
+                    TileMap::tile_rect(x, y).center().dist_sq(center)
+                        .total_cmp(&TileMap::tile_rect(a, b).center().dist_sq(center))
+                })
+            else {
+                continue;
+            };
+            let (rx, ry) = size_for(level, cx, cy, &mut rng);
+            puddles.push(Puddle { pos: TileMap::tile_rect(cx, cy).center(), rx, ry, seed: rng.random() });
+        }
+    }
+    for _ in puddles.len()..wanted {
         let Some(centre) = one_centre(level, &blocked, &mut rng, bias) else {
             break;
         };
@@ -124,7 +149,48 @@ pub(super) fn place(level: &mut Level, attempt: u32) {
             seed: rng.random::<u32>(),
         });
     }
+    if level.theme == Theme::Outfall {
+        tune_outfall_coverage(level, &mut puddles);
+    }
     level.puddles = puddles;
+}
+
+/// Measure the union on the walkable grid and resize together. The placement
+/// draws and bank centres are already settled, so this reads no RNG.
+fn tune_outfall_coverage(level: &Level, puddles: &mut [Puddle]) {
+    let cols = level.tiles.cols();
+    let rows = level.tiles.rows();
+    let eligible: Vec<_> = (0..rows).flat_map(|y| (0..cols).map(move |x| (x, y)))
+        .map(|(x, y)| level.tiles.get(x, y) == TileKind::Open
+            && level.pit_at(TileMap::tile_rect(x, y).center()).is_none())
+        .collect();
+    let dry_cells = eligible.iter().filter(|&&open| open).count().max(1) as f32;
+    let mut wet = vec![false; eligible.len()];
+    for _ in 0..3 {
+        wet.fill(false);
+        for puddle in &*puddles {
+            let span = Vec2::new(puddle.rx, puddle.ry);
+            let (x0, y0) = cell_of(puddle.pos - span);
+            let (x1, y1) = cell_of(puddle.pos + span);
+            for y in y0.max(0)..=y1.min(rows - 1) {
+                for x in x0.max(0)..=x1.min(cols - 1) {
+                    let i = (y * cols + x) as usize;
+                    if eligible[i] && !wet[i] && puddle.contains(TileMap::tile_rect(x, y).center()) {
+                        wet[i] = true;
+                    }
+                }
+            }
+        }
+        let share = wet.iter().filter(|&&w| w).count() as f32 / dry_cells;
+        if (0.325..=0.395).contains(&share) {
+            break;
+        }
+        let scale = (0.36 / share.max(0.01)).sqrt().clamp(0.75, 1.35);
+        for puddle in &mut *puddles {
+            puddle.rx = (puddle.rx * scale).clamp(50.0, 150.0);
+            puddle.ry = (puddle.ry * scale).clamp(35.0, 115.0);
+        }
+    }
 }
 
 /// The half-width and half-height of a new puddle centred on cell `(cx, cy)`.
@@ -160,6 +226,7 @@ fn size_for(level: &Level, cx: i32, cy: i32, rng: &mut rand::rngs::StdRng) -> (f
             }
         }
         Theme::Laundry => (rng.random_range(30.0..=64.0), rng.random_range(20.0..=44.0)),
+        Theme::Outfall => (rng.random_range(80.0..=106.0), rng.random_range(52.0..=82.0)),
         // Kitchen spills: small, and slightly wider than deep, like a splash on
         // a tiled floor.
         _ => (rng.random_range(24.0..=40.0), rng.random_range(14.0..=26.0)),
@@ -214,7 +281,8 @@ fn draw(
             Bias::Edges => room_edge_or_corridor(level, cx, cy),
             Bias::Props => near_a_prop(level, cx, cy),
         };
-        if !wet_place && rng.random::<f32>() < BIAS_CHANCE {
+        let bias_chance = if level.theme == Theme::Outfall { 0.58 } else { BIAS_CHANCE };
+        if !wet_place && rng.random::<f32>() < bias_chance {
             continue;
         }
         return Some(TileMap::tile_rect(cx, cy).center());
@@ -304,7 +372,13 @@ fn blocked_cells(level: &Level) -> Vec<bool> {
                 .map(|trap| trap.pos)
                 .chain(level.objects.mousetraps.iter().map(|trap| trap.pos))
                 .any(|pos| pos.dist(centre) < TRAP_CLEAR_PX);
-            if on_a_trap {
+            let outfall_bank = level.theme == Theme::Outfall && (
+                level.touches_tidal_pit(centre, 16.0)
+                    || level.objects.lure_traps.iter().any(|trap| {
+                        trap.pos.dist_sq(centre) < TRAP_CLEAR_PX * TRAP_CLEAR_PX
+                    })
+            );
+            if on_a_trap || outfall_bank {
                 blocked[(cy * cols + cx) as usize] = true;
             }
         }
@@ -381,16 +455,13 @@ mod tests {
                         "{theme:?} seed {}: a puddle is on the start",
                         level.seed
                     );
-                    assert!(
-                        (24.0..=90.0).contains(&puddle.rx),
-                        "half-width {} outside 24..=90",
-                        puddle.rx
-                    );
-                    assert!(
-                        (14.0..=60.0).contains(&puddle.ry),
-                        "half-height {} outside 14..=60",
-                        puddle.ry
-                    );
+                    let (rx, ry) = if theme == Theme::Outfall {
+                        (50.0..=150.0, 35.0..=115.0)
+                    } else {
+                        (24.0..=90.0, 14.0..=60.0)
+                    };
+                    assert!(rx.contains(&puddle.rx), "{theme:?}: half-width {}", puddle.rx);
+                    assert!(ry.contains(&puddle.ry), "{theme:?}: half-height {}", puddle.ry);
                 }
             }
         }
