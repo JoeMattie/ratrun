@@ -61,21 +61,23 @@ only changes size on a coarse primary pointer. The first trusted touch unlocks
 audio, asks for fullscreen (`webkitRequestFullscreen` fallback), tries
 `screen.orientation.lock("landscape")` and takes a screen wake lock that is
 re-acquired on `visibilitychange` and released on `pagehide`. On a coarse pointer
-`CanvasRenderer.fit` solves for a font size near 100 columns wide and at least 34
-rows tall (clamped 8–20 px) so the in-game stick and buttons have a row to live
-in; where both cannot hold, the 34-row floor wins. Portrait on a touch device
-covers the grid with the `TURN YOUR PHONE` plate in `index.html` and stops the
-touch stream until the phone turns.
+`CanvasRenderer.fit` takes the largest font (clamped 8–20 px) that still gives at
+least `TOUCH_TARGET_COLS` (120) columns and `TOUCH_MIN_ROWS` (26) rows, so the
+in-game stick and buttons have rows to live in: a landscape phone lands near
+11 px (about 127×30) and a tablet stays near 120 columns. Both targets are named
+constants at the top of `canvas.js` so the owner can retune them. Portrait on a
+touch device covers the grid with the `TURN YOUR PHONE` plate in `index.html`
+and stops the touch stream until the phone turns.
 
-**Install and offline.** `web/manifest.webmanifest` (fullscreen, landscape,
-#090a0d, icons in `web/icons/`) is linked from `index.html` beside
-`apple-mobile-web-app-*` and `apple-touch-icon`. `web/sw.js` is a cache-first
-service worker; `web/build.sh` stamps the Cargo version into its cache name and
-copies the worker, the manifest and `web/icons` into `web/dist`, so each build
-gets a fresh cache and `activate` drops the rest. It registers only on https or
-localhost. A rebuild at the same version keeps the same cache name, so after
-rebuilding the preview either bump the version or clear the entry under DevTools
-→ Application → Service Workers before reloading.
+**Install and offline.** The manifest in `web/manifest.webmanifest` (fullscreen,
+landscape, #090a0d background and theme, icons in `web/icons/`) is linked from
+`index.html` beside `apple-mobile-web-app-*` and `apple-touch-icon`. `web/sw.js`
+is a cache-first service worker; `web/build.sh` stamps the Cargo version into
+its cache name and copies the worker, the manifest and `web/icons` into
+`web/dist`, so each build gets a fresh cache and `activate` drops the rest. It
+registers only on https or localhost. A rebuild at the same version keeps the
+same cache name, so after rebuilding the preview either bump the version or
+clear the entry under DevTools → Application → Service Workers before reloading.
 
 ```sh
 rustup target add wasm32-unknown-unknown

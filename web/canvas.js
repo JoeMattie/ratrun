@@ -5,10 +5,12 @@ const BACKGROUND = 0x090a0d;
 const BOLD = 1, DIM = 2, ITALIC = 4, UNDERLINE = 8;
 const REVERSED = 64, HIDDEN = 128, STRIKE = 256;
 
-// A phone in landscape asks for about one hundred columns, but the arena still
-// needs room for the on-screen stick, the buttons and the HUD, so the row floor
-// wins wherever the two cannot both hold.
-const TOUCH_COLUMNS = 100, TOUCH_ROWS = 34, TOUCH_MIN = 8, TOUCH_MAX = 20;
+// Touch grid targets, in CSS font pixels. A phone or tablet in landscape is
+// read at about TOUCH_TARGET_COLS columns wide, and never narrower than
+// TOUCH_MIN_ROWS rows tall, because the on-screen stick, the buttons and the
+// HUD all need rows to live in. Tune these, not the solver below.
+const TOUCH_TARGET_COLS = 120, TOUCH_MIN_ROWS = 26;
+const TOUCH_MIN_PX = 8, TOUCH_MAX_PX = 20;
 
 const rgba = rgb => 0xff000000 | (rgb & 255) << 16 | (rgb & 0xff00) | rgb >>> 16;
 const css = rgb => "#" + rgb.toString(16).padStart(6, "0");
@@ -72,8 +74,10 @@ export class CanvasRenderer {
   }
 
   // One reference measurement of the real font, then solve for the CSS font
-  // size that lands on TOUCH_COLUMNS wide and TOUCH_ROWS tall, keeping the
-  // smaller of the two so the row floor holds. Desktop sizing is untouched.
+  // size that lands on TOUCH_TARGET_COLS wide and TOUCH_MIN_ROWS tall. The grid
+  // grows as the font shrinks, so the largest font that meets both targets is
+  // the smaller of the two exact answers: 844x390 lands at 11px, which is about
+  // 127 columns by 30 rows. Desktop sizing is untouched.
   touchFontSize(width, height, ratio) {
     const reference = 10;
     this.textContext.font = `${reference * ratio}px ${FONT}`;
@@ -81,9 +85,9 @@ export class CanvasRenderer {
     const cellWidth = Math.max(1, size.width / 2) / reference;
     const cellHeight = Math.max(1,
       Math.ceil(size.fontBoundingBoxAscent + size.fontBoundingBoxDescent)) / reference;
-    const columns = width * ratio / TOUCH_COLUMNS / cellWidth;
-    const rows = height * ratio / TOUCH_ROWS / cellHeight;
-    return Math.max(TOUCH_MIN, Math.min(TOUCH_MAX, Math.floor(Math.min(columns, rows))));
+    const forColumns = width * ratio / TOUCH_TARGET_COLS / cellWidth;
+    const forRows = height * ratio / TOUCH_MIN_ROWS / cellHeight;
+    return Math.max(TOUCH_MIN_PX, Math.min(TOUCH_MAX_PX, Math.floor(Math.min(forColumns, forRows))));
   }
 
   paint(memory, pointer, length, textPointer) {

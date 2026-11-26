@@ -6,9 +6,9 @@
   rest of the grid is touch, and mouse, pen and keyboard behave as before.
   Landscape only: portrait shows `TURN YOUR PHONE` over a stopped grid. The
   first touch goes fullscreen, holds the screen awake and asks for a landscape
-  lock, and the grid sizes itself to about a hundred columns of touch. The
-  page installs to the home screen, opens fullscreen in landscape, and keeps
-  itself cached for offline play.
+  lock, and the grid sizes itself to about a hundred and twenty columns of
+  touch with at least 26 rows. The page installs to the home screen, opens
+  fullscreen in landscape, and keeps itself cached for offline play.
 
 ## 0.4.4 (2026-11-26, playtest build)
 
