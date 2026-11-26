@@ -583,10 +583,6 @@ fn apply_passive_stack(stats: &mut Stats, p: PassiveKind) -> f32 {
 #[derive(Clone)]
 pub struct Loadout {
     pub(crate) tuning: Option<crate::tuning::RunTuning>,
-    /// Multiplier on every hit the rat takes this floor
-    /// ([`crate::tuning::Player::sector_damage_taken_mult`]): the rat's HP is
-    /// one number on every sector, so the later floors soften incoming damage.
-    pub(crate) sector_damage_taken_mult: f32,
     pub weapons: Vec<Weapon>,
     /// Owned passive stacks, in **first-acquisition order**, one entry per
     /// `PassiveKind`, each count `>= 1`.
@@ -665,7 +661,6 @@ impl Loadout {
         let caps = SlotCaps::new(caps.weapons, caps.passives);
         Loadout {
             tuning: None,
-            sector_damage_taken_mult: 1.0,
             weapons: vec![Weapon::new(start)],
             passives: Vec::new(),
             stats: Stats::default(),
@@ -773,7 +768,6 @@ impl Loadout {
         }
         Loadout {
             tuning: None,
-            sector_damage_taken_mult: 1.0,
             weapons: kept_weapons,
             passives: kept_passives,
             stats,

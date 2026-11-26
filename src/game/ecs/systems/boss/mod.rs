@@ -3251,6 +3251,9 @@ pub fn resolve_hazards(
     level: &Level,
     boss: &mut Boss,
     dt: f32,
+    // `[enemies] sector_damage_mult`: the floor's hit softening, applied to the
+    // hazard's raw damage here (the one place a boss hazard hurts the rat).
+    dmg_scale: f32,
     player: &mut Player,
     enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
     enemy_order: &mut Vec<(u64, Entity)>,
@@ -3294,7 +3297,7 @@ pub fn resolve_hazards(
                     }
                     player.pos = player.clip_giant_displacement(from, player.pos, &level.tiles);
                 }
-            } else if player.take_damage(hazard.damage) {
+            } else if player.take_damage(hazard.damage * dmg_scale) {
                 player_hit = true;
                 hazard.fired = true;
                 if hazard.knockback > 0.0 {
@@ -4674,7 +4677,11 @@ pub fn boss_update_system(
     mut commands: Commands,
     mut fight: ResMut<BossFight>,
     mut counters: ResMut<RunCounters>,
-    (tick, tuning): (Res<TickInput>, Res<crate::tuning::RunTuning>),
+    (tick, tuning, sector): (
+        Res<TickInput>,
+        Res<crate::tuning::RunTuning>,
+        Res<crate::game::ecs::resources::LevelIndex>,
+    ),
     mut level: ResMut<Level>,
     mut player: ResMut<Player>,
     flow: Res<FlowField>,
@@ -4689,6 +4696,10 @@ pub fn boss_update_system(
     mut out: Local<BossOutput>,
 ) {
     let dt = tick.dt;
+    // The floor's hit softening. Every enemy-sourced hit this system lands (boss
+    // hazards, grounded contact, boss projectiles) is scaled by it before it
+    // reaches `Player::take_damage`; the rat itself reads no sector.
+    let dmg_scale = director::sector_damage_mult(&tuning, sector.0);
     // One mutable borrow of the resource, so the scratch buffer and the rng
     // stream can be borrowed at the same time.
     let fight = &mut *fight;
@@ -4796,6 +4807,7 @@ pub fn boss_update_system(
                 &level,
                 &mut boss,
                 dt,
+                dmg_scale,
                 &mut player,
                 &mut enemies,
                 &mut fight.scratch.enemy_order,
@@ -5046,6 +5058,7 @@ pub fn boss_update_system(
             &level,
             &mut boss,
             dt,
+            dmg_scale,
             &mut player,
             &mut enemies,
             &mut fight.scratch.enemy_order,
@@ -5059,8 +5072,10 @@ pub fn boss_update_system(
         // slipper passes overhead), and only when the state deals contact
         // damage at all (`contact_damage == 0` is the art's "blades stopped" /
         // "safe pocket" state).
-        let contact = boss.contact_damage * tuning.bosses.contact_damage_mult
-            * balance.contact_damage_mult;
+        let contact = boss.contact_damage
+            * tuning.bosses.contact_damage_mult
+            * balance.contact_damage_mult
+            * dmg_scale;
         if !boss.is_airborne() && boss.contact_cd <= 0.0 && contact > 0.0 {
             let shapes = boss.hit_shapes();
             if shapes.circle_hits_grounded(player.pos, player.buffs.hurt_radius())
@@ -5117,7 +5132,7 @@ pub fn boss_update_system(
             p.pos = next;
         }
         if collision::segment_circle_hit(p.prev, p.pos, p.radius, player.pos, player.buffs.hurt_radius())
-            && player.take_damage(p.damage)
+            && player.take_damage(p.damage * dmg_scale)
         {
             vfx::emit_player_hurt(&mut particles, &mut fight.rng.0, player.pos);
             sfx.0.push(Sfx::Hurt);

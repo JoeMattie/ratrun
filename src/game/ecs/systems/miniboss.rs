@@ -58,7 +58,8 @@ use crate::game::ecs::constants::PLAYER_RADIUS;
 #[cfg(test)]
 use crate::game::director::MINIBOSS_TIMES;
 use crate::game::ecs::resources::{
-    NextEnemyId, NextSpawnId, RatTrack, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
+    LevelIndex, NextEnemyId, NextSpawnId, RatTrack, RngRes, RunCounters, SfxQueue, TickInput,
+    Viewport,
 };
 use super::miniboss_shapes::{self as shapes, MilkSplash, MilkSpray, SignatureTrack, WakeTrail};
 use crate::game::ecs::systems::spawn::{in_maze, spawn_point_reachable, widest_view, SpawnScratch};
@@ -1297,7 +1298,12 @@ pub(crate) struct MinibossScratch {
 /// grid sees the named body and any fodder it called on their new cells.
 pub fn miniboss_system(
     mut commands: Commands,
-    (input, rat_track, tuning): (Res<TickInput>, Res<RatTrack>, Res<crate::tuning::RunTuning>),
+    (input, rat_track, tuning, sector): (
+        Res<TickInput>,
+        Res<RatTrack>,
+        Res<crate::tuning::RunTuning>,
+        Res<LevelIndex>,
+    ),
     counters: ResMut<RunCounters>,
     mut schedule: ResMut<MinibossSchedule>,
     mut level: ResMut<Level>,
@@ -1314,6 +1320,10 @@ pub fn miniboss_system(
 ) {
     let MinibossScratch { order, owners, summon_order } = &mut *behaviour_scratch;
     let dt = input.dt;
+    // The floor's hit softening (`[enemies] sector_damage_mult`): a named
+    // body's signature strike carries it before it reaches the rat, exactly as
+    // an ordinary body's contact does.
+    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, sector.0);
     let elapsed = counters.elapsed;
     schedule.milk_splashes.retain(|splash| !splash.expired(elapsed));
     let ppos = player.pos;
@@ -1399,14 +1409,14 @@ pub fn miniboss_system(
                 } else {
                     if timer >= TELL_LOCK {
                         e.vel = Vec2::ZERO;
-                        strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
+                        strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0, dmg_scale);
                     }
                     if timer >= TELL_TIME {
                         mb.state = MinibossState::Active;
                         mb.timer = 0.0;
                         mb.active_cued = false;
                         if mb.kind.is_outfall() {
-                            strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
+                            strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0, dmg_scale);
                         }
                     }
                 }
@@ -1420,7 +1430,7 @@ pub fn miniboss_system(
                     mb.active_cued = true;
                     sfx.0.push(Sfx::MinibossTell);
                 }
-                strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
+                strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0, dmg_scale);
                 if mb.timer >= mb.active_duration() {
                     if let (MinibossKind::Corkscrew, true, Some(MinibossShape::Trench { a, b, half })) =
                         (mb.kind, level.objects.sewer_opening.is_some(), mb.active_shape())
@@ -1524,12 +1534,13 @@ fn strike_rat(
     sfx: &mut SfxQueue,
     particles: &mut Particles,
     rng: &mut StdRng,
+    dmg_scale: f32,
 ) {
     let Some(shape) = mb.active_shape() else {
         return;
     };
     let bit = multi_hit_bit(mb.signature(), mb.timer);
-    if apply_strike(mb, player, &shape, bit) {
+    if apply_strike(mb, player, &shape, bit, dmg_scale) {
         sfx.0.push(Sfx::Hurt);
         crate::game::particle::vfx::emit_player_hurt(particles, rng, player.pos);
     }
@@ -1540,6 +1551,8 @@ pub(super) fn apply_strike(
     player: &mut Player,
     shape: &MinibossShape,
     bit: Option<u8>,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) -> bool {
     let already_hit = if let Some(bit) = bit {
         mb.multi_hit_mask & bit != 0
@@ -1555,7 +1568,7 @@ pub(super) fn apply_strike(
     if bit.is_some() && immunity == mb.multi_hit_iframes && player.dash_active <= 0.0 {
         player.iframes = 0.0;
     }
-    if !player.take_damage(mb.signature_damage) {
+    if !player.take_damage(mb.signature_damage * dmg_scale) {
         player.iframes = immunity;
         return false;
     }
@@ -3084,9 +3097,9 @@ mod tests {
             m.timer = t;
             let live = m.active_shape().expect("active strike");
             let mut player = Player::new(m.origin + position, WeaponKind::Gnaw);
-            assert!(apply_strike(&mut m, &mut player, &live, None), "{kind:?}");
+            assert!(apply_strike(&mut m, &mut player, &live, None, 1.0), "{kind:?}");
             player.iframes = 0.0;
-            assert!(!apply_strike(&mut m, &mut player, &live, None), "{kind:?}");
+            assert!(!apply_strike(&mut m, &mut player, &live, None, 1.0), "{kind:?}");
         }
     }
 

@@ -393,6 +393,8 @@ pub(super) fn cancel_attack(e: &mut Enemy) {
 fn tick_attack(
     e: &mut Enemy, player: &mut Player, level: &Level, target: Vec2, dt: f32,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) -> bool {
     if e.crab_pot_held || e.stun > 0.0 {
         cancel_attack(e);
@@ -426,7 +428,7 @@ fn tick_attack(
             && claw_box(e).contains(player.pos, player.buffs.point_hit_radius())
         {
             e.w4.role = 1;
-            landed = player.take_damage(pinch_damage(e));
+            landed = player.take_damage(pinch_damage(e) * dmg_scale);
             if landed {
                 sfx.0.push(Sfx::Hurt);
             }
@@ -454,10 +456,14 @@ pub fn crab_system(
     mut rng: ResMut<RngRes>,
     decoys: Query<(&SpawnId, &super::powerups::Decoy)>,
     mut enemies: Query<(&SpawnId, &mut Enemy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the pinch is
+    // the crab's one hit on the rat.
+    sector: crate::game::ecs::resources::SectorDamage,
 ) {
     if debug.freeze || !enemies.iter().any(|(_, e)| e.kind == KIND) {
         return;
     }
+    let dmg_scale = sector.mult();
     let rat = player.pos;
     let decoy_radius = super::powerups::WINDUP_MOUSE_RADIUS;
     let decoy = decoys.iter().filter(|(_, d)| d.live()).max_by_key(|(id, _)| id.0);
@@ -470,7 +476,7 @@ pub fn crab_system(
                 && e.pos.dist_sq(d.pos) <= decoy_radius * decoy_radius
                 && los_clear(&level, e.pos, d.pos, e.radius))
             .map_or(rat, |(_, d)| d.pos);
-        if tick_attack(&mut e, &mut player, &level, target, input.dt, &mut sfx) {
+        if tick_attack(&mut e, &mut player, &level, target, input.dt, &mut sfx, dmg_scale) {
             vfx::emit_player_hurt(&mut particles, &mut rng.0, rat);
         }
     }

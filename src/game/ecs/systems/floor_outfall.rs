@@ -360,14 +360,28 @@ fn arm_attack(e: &mut Enemy, level: &Level, rat: Vec2) -> bool {
     true
 }
 
-fn damage_rat(e: &Enemy, player: &mut Player, base: f32, sfx: &mut SfxQueue) {
-    let damage = base * (e.damage / e.kind.damage());
+fn damage_rat(
+    e: &Enemy,
+    player: &mut Player,
+    base: f32,
+    sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
+) {
+    let damage = base * (e.damage / e.kind.damage()) * dmg_scale;
     if player.take_damage(damage) {
         sfx.0.push(Sfx::Hurt);
     }
 }
 
-fn resolve_attack(e: &mut Enemy, level: &Level, player: &mut Player, sfx: &mut SfxQueue) {
+fn resolve_attack(
+    e: &mut Enemy,
+    level: &Level,
+    player: &mut Player,
+    sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
+) {
     match e.outfall.attack {
         OutfallAttack::Idle => {
             if arm_attack(e, level, player.pos) {
@@ -380,7 +394,7 @@ fn resolve_attack(e: &mut Enemy, level: &Level, player: &mut Player, sfx: &mut S
                 cancel_attack(e);
             } else {
                 if attack_shape(e, start, dir).contains(player.pos, PLAYER_RADIUS + player.buffs.giant_hit_padding()) {
-                    damage_rat(e, player, SKATER_SPLASH_DAMAGE, sfx);
+                    damage_rat(e, player, SKATER_SPLASH_DAMAGE, sfx, dmg_scale);
                 }
                 e.outfall.attack = OutfallAttack::Splash { start, dir, spent: true };
             }
@@ -392,7 +406,7 @@ fn resolve_attack(e: &mut Enemy, level: &Level, player: &mut Player, sfx: &mut S
                 return;
             }
             if !hit && lunge_segment(e.radius, previous, e.pos).contains(player.pos, PLAYER_RADIUS + player.buffs.giant_hit_padding()) {
-                damage_rat(e, player, LAMPFISH_LUNGE_DAMAGE, sfx);
+                damage_rat(e, player, LAMPFISH_LUNGE_DAMAGE, sfx, dmg_scale);
                 hit = true;
             }
             if remaining <= 0.0 {
@@ -412,11 +426,15 @@ pub fn floor_outfall_system(
     mut player: ResMut<Player>,
     mut sfx: ResMut<SfxQueue>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the Skater's
+    // splash and the Lampfish's lunge carry it.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     if level.theme != Theme::Outfall {
         return;
     }
+    let dmg_scale = sector.mult();
     refresh_snuff(&mut level, enemies.iter().map(|(_, id, e)| (id, e)), false);
     if debug.freeze {
         return;
@@ -429,7 +447,7 @@ pub fn floor_outfall_system(
     order.sort_unstable_by_key(|&(id, _)| id);
     for &(_, entity) in order.iter() {
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else { continue };
-        resolve_attack(&mut e, &level, &mut player, &mut sfx);
+        resolve_attack(&mut e, &level, &mut player, &mut sfx, dmg_scale);
     }
 }
 
@@ -481,18 +499,18 @@ mod tests {
         let mut sfx = SfxQueue::default();
         let hp = rat.hp;
 
-        resolve_attack(&mut e, &level, &mut rat, &mut sfx);
+        resolve_attack(&mut e, &level, &mut rat, &mut sfx, 1.0);
         let tell = outfall_enemy_tell(&e).expect("warn before release");
         assert_eq!(tell.phase, OutfallTellPhase::Tell);
         assert!(tell.shape.contains(rat_pos, 0.0));
         assert!(!tell.shape.contains(rat_pos + Vec2::new(0.0, 3.0), 0.0));
         assert_eq!(rat.hp, hp);
         advance_attack(&mut e, &level, true, SKATER_TELL_SECS);
-        resolve_attack(&mut e, &level, &mut rat, &mut sfx);
+        resolve_attack(&mut e, &level, &mut rat, &mut sfx, 1.0);
         assert!((hp - rat.hp - (SKATER_SPLASH_DAMAGE * 1.5 * 0.5 - 1.0)).abs() < 1e-4);
         let after = rat.hp;
         rat.iframes = 0.0;
-        resolve_attack(&mut e, &level, &mut rat, &mut sfx);
+        resolve_attack(&mut e, &level, &mut rat, &mut sfx, 1.0);
         assert_eq!(rat.hp, after);
     }
 
@@ -522,19 +540,19 @@ mod tests {
         assert!(outfall_enemy_tell(&e).unwrap().shape.contains(rat.pos, PLAYER_RADIUS));
 
         advance_attack(&mut e, &level, false, LAMPFISH_TELL_SECS);
-        resolve_attack(&mut e, &level, &mut rat, &mut sfx);
+        resolve_attack(&mut e, &level, &mut rat, &mut sfx, 1.0);
         assert_eq!(rat.hp, hp, "the head has yet to reach the rat");
 
         let half = LAMPFISH_LUNGE_SECS * 0.5;
         advance_attack(&mut e, &level, false, half);
-        resolve_attack(&mut e, &level, &mut rat, &mut sfx);
+        resolve_attack(&mut e, &level, &mut rat, &mut sfx, 1.0);
         assert!(rat.hp < hp);
         assert!(e.pos.dist(START + RIGHT * (LAMPFISH_LUNGE_LEN * 0.5)) < 1e-4);
         let after = rat.hp;
         rat.iframes = 0.0;
         rat.pos = START + RIGHT * 17.0;
         advance_attack(&mut e, &level, false, half);
-        resolve_attack(&mut e, &level, &mut rat, &mut sfx);
+        resolve_attack(&mut e, &level, &mut rat, &mut sfx, 1.0);
         assert_eq!(rat.hp, after);
         assert!(e.pos.dist(START + RIGHT * LAMPFISH_LUNGE_LEN) < 1e-4);
         assert_eq!(e.outfall.rearm, LAMPFISH_REARM_SECS);

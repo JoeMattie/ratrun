@@ -3,8 +3,10 @@
 ## Unreleased
 
 - **Round-four balance.** The owner's fresh-start playtest is the shipped
-  balance. Subject R-47 keeps one health value on every sector and the
-  facility floors halve incoming damage instead of doubling health. The
+  balance. Subject R-47 keeps one health value, one regeneration and one
+  armour value on every sector: nothing on the rat changes with the floor.
+  The facility floors' enemies hit half as hard instead
+  (`[enemies] sector_damage_mult`), which is where the softening belongs. The
   Sewer horde is heavier, the later floors ease off, and adaptive horde
   power scaling is on by default. See [docs/balance/README.md](docs/balance/README.md).
 - **Headlamp.** Illuminates your path for 18s and reveals it on the map.

@@ -40,7 +40,13 @@ pub fn outfall_motion_system(
     counters: Res<RunCounters>,
     input: Res<TickInput>,
     difficulty: Res<DifficultyLevel>,
-    arrival: (Res<Director>, Res<BossDue>),
+    // The sector row for the floor's hit softening travels with the arrival
+    // flags: this system is at bevy's 16-parameter limit.
+    arrival: (
+        Res<Director>,
+        Res<BossDue>,
+        Res<crate::game::ecs::resources::LevelIndex>,
+    ),
     debug: Res<DebugFlags>,
     dash: Res<DashTrack>,
     mut player: ResMut<Player>,
@@ -59,7 +65,8 @@ pub fn outfall_motion_system(
         .filter(|&last| last + input.dt == elapsed)
         .unwrap_or(elapsed - input.dt);
     origins.last_elapsed = Some(elapsed);
-    let (director, due) = arrival;
+    let (director, due, sector) = arrival;
+    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, sector.0);
     let enabled = outfall_surge_enabled(
         director.boss_spawned
             || due.is_pending()
@@ -78,7 +85,7 @@ pub fn outfall_motion_system(
         let (radius, class) = player.movement_body(&level.tiles);
         if level.pit_at(player.pos).is_some() {
             if let Some(safe) = recover(&level, player.pos, Some(input.previous_pos), radius, class) {
-                let damaged = player.take_damage(FALL_PLAYER_DAMAGE);
+                let damaged = player.take_damage(FALL_PLAYER_DAMAGE * dmg_scale);
                 player.pos = safe;
                 player.vel = Vec2::ZERO;
                 player.iframes = player.iframes.max(FALL_PLAYER_IFRAMES);

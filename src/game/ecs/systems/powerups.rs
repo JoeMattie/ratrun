@@ -955,6 +955,9 @@ mod tests {
         mut numbers: ResMut<DamageNumbers>,
         mut rng: ResMut<RngRes>,
         mut sfx: ResMut<SfxQueue>,
+        // The floor's hit softening, as `boss_update_system` supplies it (the
+        // probe runs on the world's own sector row).
+        sector: crate::game::ecs::resources::SectorDamage,
         mut order: Local<Vec<(u64, Entity)>>,
     ) {
         let Some(mut boss) = probe.boss.take() else {
@@ -964,6 +967,7 @@ mod tests {
             &level,
             &mut boss,
             DT,
+            sector.mult(),
             &mut player,
             &mut enemies,
             &mut order,

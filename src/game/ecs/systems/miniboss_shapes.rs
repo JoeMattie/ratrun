@@ -779,12 +779,12 @@ mod tests {
             let hp = rat.hp;
             let armor = rat.loadout.stats.armor;
             let front = mb.active_shape().unwrap();
-            assert!(apply_strike(&mut mb, &mut rat, &front, None));
+            assert!(apply_strike(&mut mb, &mut rat, &front, None, 1.0));
             assert_eq!(hp - rat.hp, damage - armor);
             mb.timer += 0.1;
             rat.iframes = 0.0;
             let front = mb.active_shape().unwrap();
-            assert!(!apply_strike(&mut mb, &mut rat, &front, None));
+            assert!(!apply_strike(&mut mb, &mut rat, &front, None, 1.0));
         }
     }
 
@@ -854,8 +854,8 @@ mod tests {
             }
             rat.pos = center;
             let bit = multi_hit_bit(sig, time);
-            assert!(apply_strike(&mut mb, &mut rat, &disk, bit));
-            assert!(!apply_strike(&mut mb, &mut rat, &disk, bit));
+            assert!(apply_strike(&mut mb, &mut rat, &disk, bit, 1.0));
+            assert!(!apply_strike(&mut mb, &mut rat, &disk, bit, 1.0));
         }
     }
 
@@ -865,16 +865,16 @@ mod tests {
         let mut mb = staged(RETURN);
         let mut rat = Player::new(point(22.0, 0.0), WeaponKind::Gnaw);
         let outward = resolve(RETURN, &mb, Some((0.25, 0.25)));
-        assert!(apply_strike(&mut mb, &mut rat, &outward, multi_hit_bit(sig, 0.25)));
-        assert!(!apply_strike(&mut mb, &mut rat, &outward, multi_hit_bit(sig, 0.25)));
+        assert!(apply_strike(&mut mb, &mut rat, &outward, multi_hit_bit(sig, 0.25), 1.0));
+        assert!(!apply_strike(&mut mb, &mut rat, &outward, multi_hit_bit(sig, 0.25), 1.0));
         let returning = resolve(RETURN, &mb, Some((0.75, 0.75)));
         let second = multi_hit_bit(sig, 0.75);
         assert_eq!(outward, returning);
         rat.dash_active = 0.1;
-        assert!(!apply_strike(&mut mb, &mut rat, &returning, second));
+        assert!(!apply_strike(&mut mb, &mut rat, &returning, second, 1.0));
         rat.dash_active = 0.0;
-        assert!(apply_strike(&mut mb, &mut rat, &returning, second));
-        assert!(!apply_strike(&mut mb, &mut rat, &returning, second));
+        assert!(apply_strike(&mut mb, &mut rat, &returning, second, 1.0));
+        assert!(!apply_strike(&mut mb, &mut rat, &returning, second, 1.0));
     }
 
     #[test]
@@ -884,11 +884,11 @@ mod tests {
         assert!(locked_tell_hit(WAKE, &mb).is_none());
         mb.timer = TELL_LOCK + 0.25;
         let live = locked_tell_hit(WAKE, &mb).expect("delay elapsed");
-        assert!(!apply_strike(&mut mb, &mut rat, &live, None));
+        assert!(!apply_strike(&mut mb, &mut rat, &live, None, 1.0));
         rat.pos = point(8.0, 0.0);
-        assert!(apply_strike(&mut mb, &mut rat, &live, None));
+        assert!(apply_strike(&mut mb, &mut rat, &live, None, 1.0));
         rat.iframes = 0.0;
-        assert!(!apply_strike(&mut mb, &mut rat, &live, None));
+        assert!(!apply_strike(&mut mb, &mut rat, &live, None, 1.0));
     }
 
     #[test]

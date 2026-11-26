@@ -291,6 +291,8 @@ fn needle_tick(
     level: &Level,
     player: &mut Player,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) -> bool {
     let mut landed = false;
     match n.phase {
@@ -314,7 +316,7 @@ fn needle_tick(
                     ppos,
                     SYRINGE_RAY_WIDTH * 0.5,
                 )
-                && player.take_damage(SYRINGE_DAMAGE)
+                && player.take_damage(SYRINGE_DAMAGE * dmg_scale)
             {
                 n.hit = true;
                 landed = true;
@@ -391,12 +393,15 @@ pub fn floor_lab_system(
     mut sfx: ResMut<SfxQueue>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy, Option<&mut Needle>)>,
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`).
+    sector: crate::game::ecs::resources::SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     // Cheap gate: no syringe on the map, nothing to do (no sort, no rng).
     if !enemies.iter().any(|(_, _, e, _)| owns(e.kind)) {
         return;
     }
+    let dmg_scale = sector.mult();
     let dt = input.dt;
     // The live key (highest `SpawnId` wins): the rule the steering lure and
     // waves 3 and 4 use, so the walk and the needle agree.
@@ -431,7 +436,7 @@ pub fn floor_lab_system(
         let target = lure_target(&e, ppos, decoy, &level);
         // Explicit reborrows: `Mut`/`ResMut` down to the plain `&mut T` the
         // helpers take.
-        if needle_tick(&mut needle, &mut e, target, ppos, dt, &level, &mut player, &mut sfx) {
+        if needle_tick(&mut needle, &mut e, target, ppos, dt, &level, &mut player, &mut sfx, dmg_scale) {
             vfx::emit_player_hurt(&mut particles, &mut rng.0, ppos);
         }
     }

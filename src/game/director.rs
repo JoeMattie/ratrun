@@ -208,6 +208,20 @@ pub(crate) fn level_slot(level: usize) -> usize {
     level.min(LEVEL_CLOCK_OFFSET.len() - 1)
 }
 
+/// `[enemies] sector_damage_mult` for the floor being simulated: the softening
+/// every hit the floor's enemies — and the floor's own hazards — land on the
+/// rat is multiplied by **where the hit is created**, before it reaches
+/// [`crate::game::player::Player::take_damage`].
+///
+/// The owner's ruling is that nothing on the rat may change with the sector, so
+/// the rat's HP, armour, regen, heals and passives are one set of numbers on
+/// every floor and the later sectors' easing lives here instead. Rows follow
+/// campaign order and clamp like every other sector table ([`level_slot`]).
+#[inline]
+pub(crate) fn sector_damage_mult(tuning: &crate::tuning::RunTuning, level: usize) -> f32 {
+    tuning.enemies.sector_damage_mult[level_slot(level)]
+}
+
 /// The difficulty clock, in seconds: the real run clock, frozen at
 /// [`BOSS_TIME`], shifted by the level's opening offset.
 ///

@@ -129,8 +129,8 @@ use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::ecs::resources::{
-    DamageLedger, EnemyIndex, GridScratch, LevelIndex, NeighborScratch, RngRes, RunCounters, Shake,
-    SfxQueue,
+    DamageLedger, EnemyIndex, GridScratch, LevelIndex, NeighborScratch, RngRes, RunCounters,
+    SectorDamage, Shake, SfxQueue,
 };
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
@@ -281,10 +281,14 @@ pub fn enemy_bullet_hits_system(
     mut particles: ResMut<Particles>,
     mut sfx: ResMut<SfxQueue>,
     mut shake: ResMut<Shake>,
+    // The floor's own hit softening (`[enemies] sector_damage_mult`): every
+    // enemy bullet and lob carries it before it reaches `take_damage`.
+    sector: SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     let ppos = player.pos;
     let hurt_radius = player.buffs.hurt_radius();
+    let dmg_scale = sector.mult();
     let mut hit = false;
     order_bullets(&bullets, &mut order);
     for &(_id, entity) in order.iter() {
@@ -295,7 +299,7 @@ pub fn enemy_bullet_hits_system(
             continue;
         }
         if collision::segment_circle_hit(b.prev_pos, b.pos, b.radius, ppos, hurt_radius)
-            && player.take_damage(b.damage)
+            && player.take_damage(b.damage * dmg_scale)
         {
             hit = true;
             // Consume the bullet only when the hit landed; an i-framed
@@ -378,6 +382,9 @@ pub fn contact_system(
     mut player: ResMut<Player>,
     counters: Res<RunCounters>,
     level_index: Res<LevelIndex>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): ordinary, elite
+    // and named contact alike is scaled before it reaches `take_damage`.
+    sector: SectorDamage,
     index: Res<EnemyIndex>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut rng: ResMut<RngRes>,
@@ -444,6 +451,7 @@ pub fn contact_system(
             );
         }
     }
+    let hit_dmg = hit_dmg * sector.mult();
     if hit_dmg > 0.0 && player.take_damage(hit_dmg) {
         // Dev aid (`RATRUN_HIT_TRACE`): one line per landed contact hit, so
         // "how many hits does a carried rat survive late in a later level" is

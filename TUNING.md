@@ -31,7 +31,7 @@ Any effective change marks the run **TUNED** and voids Nest banking, high scores
 | `player` | Base health, regeneration, movement, armor, magnet radius, dash and hit immunity. The Nest, passives and splices apply to the player base as usual. |
 | `xp` | Geometric step cost, steps per level, the three-card opening ramp, weapon damage per level, drops, gem tier thresholds and merge rules. Enemy-kind XP is in `enemies.kinds`. |
 | `director`, `director.sectors.<1–4>` | Pulse frequency, opening pulse, rate and live-budget tables, elite cadence, curve speed, HP corrections, sector ramps, boss arrival and cleanup pressure. Rate and HP knot tables interpolate, while the live budget holds each value until its next row. Keep curve times in ascending order. The pulse interval multiplier adjusts frequency without changing the number of bodies in each pulse. |
-| `enemies`, `enemies.kinds.<Kind>` | Global HP, contact damage and speed multipliers, and per-kind base HP, speed, damage, XP, and gold. Base overrides apply before global multipliers. Attacks that use the body's damage stat also use its tuned damage. |
+| `enemies`, `enemies.kinds.<Kind>` | Global HP, contact damage and speed multipliers, the per-sector HP and hit-damage rows, and per-kind base HP, speed, damage, XP, and gold. Base overrides apply before global multipliers. Attacks that use the body's damage stat also use its tuned damage. |
 | `minibosses` | Four appointment times, HP by sector and appointment, signature damage, contact damage, and XP. Appointments at or after boss arrival are skipped. |
 | `bosses`, `bosses.kinds.<Kind>` | Global and per-kind HP and contact multipliers, per-kind hazard damage and warning multipliers, and separate swipe controls for the Jungle Cat. Sector-one HP scale covers bare practice. The Lantern has separate sector-one and later-sector defaults. |
 | `loot` | Gold probability and value, named payouts, rare pickup odds and weights, healing, chest fallback and evolution eligibility, and Purse payout. Enemies and minibosses have their own XP tables. |
@@ -45,12 +45,19 @@ bodies. It ships as `[2.45, 0.86956522, 0.86956522, 0.86956522]`: the Sewer's
 horde carries the owner's half-HP playtest weight and the facility floors
 ease off.
 
-`[player] sector_damage_taken_mult` scales every hit the rat takes by the
-world's campaign sector, after armor and before the hit lands. It ships as
-`[1.0, 0.5, 0.5, 0.5]`. The rat's own health is one number on every floor
-(`[player] max_hp`, `79.477` by default): the owner asked for flat HP, so the
-later floors soften incoming damage instead of doubling health. Each new
-floor applies its own row to the carried build.
+`[enemies] sector_damage_mult` scales every hit the floor's enemies deal by
+the world's campaign sector, before it reaches the rat and therefore before
+its armor. It ships as `[1.0, 0.5, 0.5, 0.5]`. It covers ordinary and elite
+contact, enemy bullets and lobs, floor-roster attacks, the Drake, the Shore
+Crab, miniboss strikes, boss contact, hazards and projectiles, and the
+floors' own hazards (mousetraps, crab pots, steam, the drip shaft, the pits on
+Outfall and Flatbed, sliding cargo).
+
+There is **no** player-side sector knob, by owner ruling: the rat's HP, armor,
+regeneration, heals, passives and splices are one set of numbers on every
+floor (`[player] max_hp` ships at `79.477`, the fresh-start level-one value).
+The later floors ease off by hitting softer, not by changing the rat. A level-
+dependent *enemy* value is fine; a level-dependent rat value is not.
 
 ## Sector buildup
 

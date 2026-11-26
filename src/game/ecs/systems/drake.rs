@@ -405,6 +405,8 @@ fn drake_tick(
     level: &Level,
     player: &mut Player,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) -> bool {
     d.on_water = level.wet_at(e.pos);
     // A stunned Drake drops whatever it was doing and walks again (the Sump
@@ -482,7 +484,7 @@ fn drake_tick(
                     // armour, Growth Serum, splices).
                     let base = e.kind.damage();
                     let scale = if base > 0.0 { e.damage / base } else { 1.0 };
-                    if player.take_damage(PECK_DAMAGE * scale) {
+                    if player.take_damage(PECK_DAMAGE * scale * dmg_scale) {
                         landed = true;
                         sfx.0.push(Sfx::Hurt);
                     }
@@ -536,9 +538,13 @@ pub fn drake_system(
     mut sfx: ResMut<SfxQueue>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy, Option<&mut Drake>)>,
     decoys: Query<(&SpawnId, &powerups::Decoy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the peck is
+    // the guest's one hit on the rat.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     // Cheap gate: no Drake on the floor, no sort and no rng.
     if !enemies.iter().any(|(_, _, e, _)| e.kind == EnemyKind::Drake) {
         return;
@@ -591,6 +597,7 @@ pub fn drake_system(
             &level,
             &mut player,
             &mut sfx,
+            dmg_scale,
         ) {
             vfx::emit_player_hurt(&mut particles, &mut rng.0, rat);
         }

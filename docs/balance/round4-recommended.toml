@@ -4,12 +4,14 @@
 # ships these values, so an ordinary run plays this game with no tuning file.
 # Loading this file against the shipped build reports no changed fields.
 #
-# One ruling moved two knobs after the playtest:
+# Two rulings moved the sector knobs after the playtest:
 #   * the rat's HP is one number on every sector (79.477, the level-one value
 #     of this file) instead of this file's half-health Sewer;
-#   * the later floors halve the damage the rat takes
-#     ([player] sector_damage_taken_mult = [1.0, 0.5, 0.5, 0.5]) instead of
-#     doubling its health. Every other field below is shipped verbatim.
+#   * nothing on the rat changes with the sector (HP, regen, armour, heals,
+#     passives), so the later floors halve what their *enemies* deal -
+#     [enemies] sector_damage_mult = [1.0, 0.5, 0.5, 0.5] - instead of
+#     doubling the rat's health or softening the hit on the rat's side.
+#     Every other field below is shipped verbatim.
 #
 # Owner playtest with fresh starts on every campaign floor.
 # The Sewer keeps the half-HP test's 79.477 base HP. Its new horde bodies
@@ -21,6 +23,7 @@ carry = false
 
 [enemies]
 sector_hp_mult = [2.45, 0.86956522, 0.86956522, 0.86956522]
+sector_damage_mult = [1.0, 0.5, 0.5, 0.5]
 
 [director]
 power_scaling = true

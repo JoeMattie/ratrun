@@ -118,6 +118,10 @@ pub fn trailer_system(
     mut particles: ResMut<Particles>,
     mut rng: ResMut<RngRes>,
     bosses: Query<&Boss>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the deck's
+    // holes and its sliding cargo carry it, as they did when the softening sat
+    // on the rat.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
     mut bump: Local<u32>,
 ) {
@@ -125,6 +129,7 @@ pub fn trailer_system(
         return;
     }
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     let deck = &level.trailer;
 
     // ---- the expansion joints -------------------------------------------
@@ -140,7 +145,7 @@ pub fn trailer_system(
     if player.alive() && deck.pit_at(player.pos).is_some() {
         let (radius, class) = player.movement_body(&level.tiles);
         if let Some(safe) = nearest_plank_for_body(&level, player.pos, radius, class, 0) {
-            let fell = player.take_damage(FALL_PLAYER_DAMAGE);
+            let fell = player.take_damage(FALL_PLAYER_DAMAGE * dmg_scale);
             player.pos = safe;
             player.vel = Vec2::ZERO;
             // The fall's own grace replaces (never shortens) any i-frames.
@@ -245,7 +250,7 @@ pub fn trailer_system(
             let d = player.pos - centre;
             let radius = player.buffs.hurt_radius();
             if d.x.abs() <= slide.half.x + radius && d.y.abs() <= slide.half.y + radius {
-                if player.take_damage(SLIDE_DAMAGE) {
+                if player.take_damage(SLIDE_DAMAGE * dmg_scale) {
                     let (body, class) = player.movement_body(&level.tiles);
                     let push = slide.dir * (slide.half.x + body + 2.0);
                     player.pos = if player.buffs.is_giant() {

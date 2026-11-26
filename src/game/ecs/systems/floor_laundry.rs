@@ -322,6 +322,8 @@ fn peg_tick(
     dt: f32,
     player: &mut Player,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) -> bool {
     let mut bit = false;
     match jaws.phase {
@@ -346,7 +348,7 @@ fn peg_tick(
             // other hit (a blocked touch does not spend the strike).
             if !jaws.spent
                 && view.touches(player.pos, player.buffs.hurt_radius())
-                && player.take_damage(PEG_JAW_DAMAGE)
+                && player.take_damage(PEG_JAW_DAMAGE * dmg_scale)
             {
                 jaws.spent = true;
                 bit = true;
@@ -438,9 +440,13 @@ pub fn floor_laundry_system(
     mut sfx: ResMut<SfxQueue>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy, Option<&mut PegJaws>)>,
     mut bullets: Query<&mut Bullet>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the peg's jaw
+    // carries it.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
 
     // ---- Starch Bulb: the jet picks up after half a second ---------------
     // Each jet depends only on itself, so storage order is harmless here.
@@ -499,7 +505,7 @@ pub fn floor_laundry_system(
             continue;
         };
         let target = lure_target(&e, player.pos, decoy, &level);
-        if peg_tick(&mut e, &mut jaws, target, &level, dt, &mut player, &mut sfx) {
+        if peg_tick(&mut e, &mut jaws, target, &level, dt, &mut player, &mut sfx, dmg_scale) {
             // The one rng draw in this file: the same hurt burst every other
             // hit makes, and only when a bite actually lands.
             let at = player.pos;

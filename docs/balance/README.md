@@ -576,10 +576,11 @@ Rather than shipping the Round 4 Modal candidate or running a second large fresh
 
 The owner playtested [`round4-playtest.toml`](round4-playtest.toml) with fresh starts on every campaign floor and judged it **"pretty good"**. Those values now ship as the game's defaults ([`round4-recommended.toml`](round4-recommended.toml) is that file with the ruling below folded in), so an ordinary run plays that game with no tuning file, and loading the file against the shipped build reports no changed fields.
 
-One owner ruling moved two player knobs after the playtest:
+Two owner rulings moved the sector knobs after the playtest:
 
 - **The rat's HP does not change between sectors.** `[player] max_hp` ships at `79.477` — the playtest file's level-one value — on every floor, and the branch's `[player] sector_hp_mult` knob is gone.
-- **The later floors halve incoming damage instead.** `[player] sector_damage_taken_mult = [1.0, 0.5, 0.5, 0.5]` is applied once, in `Player::take_damage`, after armour, so Kitchen, Lab and Flatbed keep the file's doubled durability with one flat HP number.
+- **Nothing on the rat changes with the sector either** ("we can't be changing rat HP per level … health regen should be fixed as well"). HP, regeneration, armour, heals, passives and splices are one set of numbers on all four floors; there is no player-side sector knob at all. The old `[player] sector_damage_taken_mult` — which multiplied every hit *after* armour, and so quietly halved the rat's armour and its 1 HP floor on the later sectors — is gone.
+- **The later floors halve what their enemies deal instead.** `[enemies] sector_damage_mult = [1.0, 0.5, 0.5, 0.5]` is applied where each hit is created (ordinary and elite contact, enemy bullets and lobs, floor-roster attacks, the Drake, the Shore Crab, miniboss strikes, boss attacks/hazards/projectiles, and the floors' own hazards — traps, steam, the drip shaft, pits and sliding cargo), before it reaches `Player::take_damage`. Kitchen, Lab and Flatbed keep the playtest's doubled durability with one flat HP number, and the rat's armour is now worth the same flat HP on every floor.
 
 Every other field is the playtest file verbatim:
 
@@ -587,7 +588,7 @@ Every other field is the playtest file verbatim:
 | --- | --- |
 | `[campaign] carry` | `false` |
 | `[player] max_hp` | `79.477` on every sector (the `sector_hp_mult` knob was removed) |
-| `[player] sector_damage_taken_mult` | `[1.0, 0.5, 0.5, 0.5]` |
+| `[enemies] sector_damage_mult` | `[1.0, 0.5, 0.5, 0.5]` |
 | `[enemies] sector_hp_mult` | `[2.45, 0.86956522, 0.86956522, 0.86956522]` |
 | `[director] power_scaling` | `true` |
 | `[director] power_hp_exponent` | `0.45` |
@@ -601,9 +602,9 @@ Every other field is the playtest file verbatim:
 | `[bosses] fresh_build_level` | `[1.13083333, 1.03404255, 1.00956522]` |
 | `[minibosses] fresh_hp` | `[[270, 1395, 2520, 3825], [297, 1440, 2610, 3915], [306, 1402.5, 2550, 3782.5]]` |
 
-**Equivalence proof:** `--tuning-dump` of the shipped build matches the previous build run with [`round4-playtest.toml`](round4-playtest.toml) on all `828` fields except the two above — `player.max_hp` (`158.954` → `79.477`) and the `player.sector_hp_mult` → `player.sector_damage_taken_mult` swap. No other value moved.
+**Equivalence proof:** `--tuning-dump` of the shipped build matches the previous build run with [`round4-playtest.toml`](round4-playtest.toml) on all `828` fields except the two above — `player.max_hp` (`158.954` → `79.477`) and the `player.sector_hp_mult` → `enemies.sector_damage_mult` swap (`828` fields still, since one sector array replaced another under `[enemies]`). No other value moved.
 
-**HP-dependent side effects:** regeneration is flat HP/s (`0.4647` base plus `+0.5` a stack), so with one HP number it is relatively twice as strong on Kitchen, Lab and Flatbed as it was in the playtest file. Every heal expressed as a fraction of max HP (Medkit `35%`, Bandage `25%`, the Chest fallback) scales with the rat's HP, so it stays proportional to the halved hits it now takes. Armor stays a flat subtraction from a hit that is half as large, so it is worth relatively more on the later floors, and the `1 HP` minimum hit becomes `0.5` there.
+**HP-dependent side effects:** regeneration is flat HP/s (`0.4647` base plus `+0.5` a stack), the same on every sector, so with one HP number it is relatively twice as strong on Kitchen, Lab and Flatbed as it was in the playtest file. Every heal expressed as a fraction of max HP (Medkit `35%`, Bandage `25%`, the Chest fallback) scales with the rat's HP, so it stays proportional to the halved hits it now takes. Armour is a flat subtraction from the *scaled* enemy hit, so a point of armour is worth one HP on every sector and the `1 HP` minimum hit is one HP everywhere (it used to become `0.5` on sectors 2–4). The one numerical difference against the old player-side multiplier is exactly that ordering: with armour `a` and an incoming hit `h`, the old code landed `(h - a).max(1) × 0.5` on a later sector and the new code lands `(h × 0.5 - a).max(1)`, which is `armour × 0.5` softer. With armour `0` — the starting build — the two are identical.
 
 ---
 
