@@ -41,7 +41,7 @@ const EMISSIVE_PEN: u8 = 14;
 /// Duration of the short muzzle gout in seconds (contract: `< 0.25`).
 const BREATH_SECS: f32 = 0.25;
 
-/// Held animation rate for churning molten cores and ember wobble (6 Hz).
+/// Held step rate for airborne glob ember/surface wobble (6 Hz).
 const CHURN_HZ: f32 = 6.0;
 
 // Supporting lava and crust tones.
@@ -303,12 +303,13 @@ pub fn draw_glob(pb: &mut PixelBuffer, g: &LavaGlob, cam: Vec2, elapsed: f32) {
 
 /// Draw one molten **Lava Breath** ground pool at `w2s(p.pos, cam)`.
 ///
-/// Renders an irregular volcanic splat of radius `p.radius` with a bright
-/// churning core stepped at 6 Hz (`elapsed` + `p.seed`, so still frames never
-/// shimmer between steps). As `p.age -> p.life`, dark basalt crust creeps
-/// inward from the rim until only a dull crust and a faint smoldering center
-/// remain. Molten pixels stamp [`EMISSIVE_PEN`]; cooled crust stamps pen `0`.
-pub fn draw_pool(pb: &mut PixelBuffer, p: &LavaPool, cam: Vec2, elapsed: f32) {
+/// Renders an irregular volcanic splat of radius `p.radius` with a fixed, still
+/// molten magma pattern seeded from `p.seed` (independent of `elapsed`, so it
+/// never steps choppily). Only the continuous `p.age / p.life` cooling changes
+/// the pool over time: dark basalt crust creeps smoothly inward from the rim
+/// until only a dull crust and a faint smoldering center remain. Molten pixels
+/// stamp [`EMISSIVE_PEN`]; cooled crust stamps pen `0`.
+pub fn draw_pool(pb: &mut PixelBuffer, p: &LavaPool, cam: Vec2, _elapsed: f32) {
     if pb.w == 0 || pb.h == 0 || p.radius <= 0.0 || p.life <= 0.0 {
         return;
     }
@@ -327,16 +328,16 @@ pub fn draw_pool(pb: &mut PixelBuffer, p: &LavaPool, cam: Vec2, elapsed: f32) {
 
     let prev_pen = pb.pen();
     let cool = (p.age / p.life).clamp(0.0, 1.0);
-    let step = (elapsed.max(0.0) * CHURN_HZ).floor() as u32;
     let lobes = make_splat_lobes(p.seed);
 
-    // Two drifting convection hot-spots held at 6 Hz inside the pool core.
-    let sh_step = hash_u32(p.seed ^ step.wrapping_mul(0x9e37_79b9));
+    // Two fixed molten hot-spots seeded from `p.seed` (still pattern; only
+    // continuous `p.age` cooling animates the pool).
+    let sh_seed = hash_u32(p.seed);
     let c_span = (r * 0.32).round().max(1.0) as i32;
-    let hot1_x = (((sh_step & 7) as i32) * 2 * c_span) / 7 - c_span;
-    let hot1_y = ((((sh_step >> 3) & 7) as i32) * 2 * c_span) / 7 - c_span;
-    let hot2_x = ((((sh_step >> 6) & 7) as i32) * 2 * c_span) / 7 - c_span;
-    let hot2_y = ((((sh_step >> 9) & 7) as i32) * 2 * c_span) / 7 - c_span;
+    let hot1_x = (((sh_seed & 7) as i32) * 2 * c_span) / 7 - c_span;
+    let hot1_y = ((((sh_seed >> 3) & 7) as i32) * 2 * c_span) / 7 - c_span;
+    let hot2_x = ((((sh_seed >> 6) & 7) as i32) * 2 * c_span) / 7 - c_span;
+    let hot2_y = ((((sh_seed >> 9) & 7) as i32) * 2 * c_span) / 7 - c_span;
 
     let cool_q8 = (cool * 256.0).round() as i32;
     let fade_alpha = if cool <= 0.85 {
@@ -403,7 +404,7 @@ pub fn draw_pool(pb: &mut PixelBuffer, p: &LavaPool, cam: Vec2, elapsed: f32) {
                 (plate_h >> 1) - 24
             };
 
-            // Held 6 Hz convection hot-spots churning inside the molten core.
+            // Fixed molten hot-spots inside the pool core (attenuated smoothly by cooling).
             let d1_sq = (dx - hot1_x) * (dx - hot1_x) + d1_y;
             let d2_sq = (dx - hot2_x) * (dx - hot2_x) + d2_y;
             let mut hot_bump = 0;
@@ -425,7 +426,7 @@ pub fn draw_pool(pb: &mut PixelBuffer, p: &LavaPool, cam: Vec2, elapsed: f32) {
             }
             if d2 <= 1
                 && cool < 0.96
-                && ((sh_step ^ (dx.wrapping_add(dy * 3) as u32)) & 3) == 0
+                && ((sh_seed ^ (dx.wrapping_add(dy * 3) as u32)) & 3) == 0
             {
                 heat = heat.max(64);
             }
@@ -716,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_paints_inside_expected_box_and_holds_between_6hz_steps() {
+    fn pool_paints_inside_expected_box_and_is_still_across_elapsed() {
         let bg = (20, 28, 26);
         let pool = LavaPool {
             pos: Vec2::new(32.0, 32.0),
@@ -754,12 +755,18 @@ mod tests {
         assert!(inside >= 60, "expected substantial molten pool, got {inside} px");
         assert!(emissive >= 50, "fresh pool should mark molten pixels emissive, got {emissive}");
 
-        // Same 6 Hz step (both floor(t * 6) == 0): frame must be bit-identical.
+        // Pattern is still (fixed from seed): elapsed alone never changes pixels.
         let mut pb_b = PixelBuffer::new(64, 64);
         pb_b.set_materials(true);
-        pb_b.clear(bg);
-        draw_pool(&mut pb_b, &pool, Vec2::ZERO, 0.12);
-        assert_eq!(pb_a.pixels(), pb_b.pixels(), "pool must hold still between 6 Hz steps");
+        for t in [0.12f32, 0.50, 3.75, 12.34] {
+            pb_b.clear(bg);
+            draw_pool(&mut pb_b, &pool, Vec2::ZERO, t);
+            assert_eq!(
+                pb_a.pixels(),
+                pb_b.pixels(),
+                "pool pattern must stay still across elapsed={t}"
+            );
+        }
     }
 
     #[test]
