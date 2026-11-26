@@ -31,6 +31,9 @@
 //!   water receives. It replaces `specular`'s per-sample sheen on water,
 //!   which painted a puddle as one flat 4 px wash.
 //!
+//! Full and Hard also mirror Laser Eyes and Carbon Copy over the waterline
+//! and add glints along the reflected rays.
+//!
 //! Tiers: Full runs A (two lobes, view term), B and C; Hard runs B and A with
 //! the dominant lobe only; Coarse and Compact nothing, and nothing at all at
 //! 16 colours. With the effects off this file never runs, and with
@@ -45,6 +48,7 @@
 use super::engine::{Grid, LayerMask, LightingMode};
 use super::fx::{self, strength, Canvas, FxFrame, LightTag, DIR_ONE};
 use super::material::{self, MaterialKind};
+use super::sources::LaserSegment;
 use crate::game::art_puddle;
 use crate::game::ecs::resources::{PuddleSteps, RIPPLE_SLOTS};
 use crate::math::Vec2;
@@ -150,12 +154,17 @@ pub(super) const BODY_WOBBLE_PX: i32 = 1;
 /// Columns the body pass handles (a stack array); wider buffers skip the rest.
 const MAX_COLS: usize = 2048;
 
+/// A beam up to 10 px above a waterline can be seen in the water.
+const LASER_MIRROR_REACH: i32 = 10;
+const LASER_MIRROR: f32 = 0.85;
+
 // Hash salts: one stream per use, so the patterns do not line up.
 const GATE_SALT: u32 = 0x6a09_e667;
 const NX_SALT: u32 = 0xbb67_ae85;
 const NY_SALT: u32 = 0x3c6e_f372;
 const MIRROR_SALT: u32 = 0xa54f_f53a;
 const BODY_SALT: u32 = 0x510e_527f;
+const LASER_SALT: u32 = 0x1f83_d9ab;
 
 /// Is the water stage switched on at all? Read by the art: the dark-mirror
 /// base (`art_puddle::GLOSS_DEEPEN`) is drawn only while something lights it.
@@ -221,12 +230,25 @@ pub(super) fn gather_ripples(
 }
 
 /// The stage (`fx::strength::WATER`).
-pub(super) fn apply(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, ripples: &[WaterRipple]) {
-    run(grid, canvas, frame, ripples, strength::WATER);
+pub(super) fn apply(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    ripples: &[WaterRipple],
+    lasers: &[Option<LaserSegment>],
+) {
+    run(grid, canvas, frame, ripples, lasers, strength::WATER);
 }
 
 /// [`apply`] at strength `k`, so a test can prove 0 is a byte no-op.
-fn run(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, ripples: &[WaterRipple], k: f32) {
+fn run(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    ripples: &[WaterRipple],
+    lasers: &[Option<LaserSegment>],
+    k: f32,
+) {
     let full = match frame.mode {
         LightingMode::Full => true,
         LightingMode::Hard => false,
@@ -243,6 +265,9 @@ fn run(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, ripples: &[Wat
     }
     lamp_mirrors(grid, canvas, frame, ripples, k);
     glints(grid, canvas, frame, ripples, k, full);
+    for &laser in lasers.iter().flatten() {
+        laser_mirror(canvas, frame.cam, laser, ripples, k);
+    }
 }
 
 // ============================================================================
@@ -317,6 +342,53 @@ fn toward(p: Rgb, c: Rgb, a: f32) -> Rgb {
         }
     };
     (ch(p.0, c.0), ch(p.1, c.1), ch(p.2, c.2))
+}
+
+fn laser_mirror(canvas: &mut Canvas<'_>, cam: Vec2, laser: LaserSegment, ripples: &[WaterRipple], k: f32) {
+    let start = laser.start - cam;
+    let end = laser.end - cam;
+    let (x0, y0) = (start.x.round() as i32, start.y.round() as i32);
+    let (dx, dy) = (end.x.round() as i32 - x0, end.y.round() as i32 - y0);
+    let steps = dx.abs().max(dy.abs());
+    let inv_steps = 1.0 / steps.max(1) as f32;
+    let (w, h) = (canvas.w as i32, canvas.h as i32);
+    let color = pull_white(crate::game::particle::vfx::LASER_GLOW, 192);
+    let peak = (LASER_MIRROR * laser.brightness * k).min(1.0);
+    for step in 0..=steps {
+        let t = step as f32 * inv_steps;
+        let sx = x0 + (dx as f32 * t).round() as i32;
+        let sy = y0 + (dy as f32 * t).round() as i32;
+        if !(0..w).contains(&sx) {
+            continue;
+        }
+        let waterline = (sy.max(0)..=(sy + LASER_MIRROR_REACH).min(h - 1))
+            .find(|&y| is_water(canvas.mat[y as usize * canvas.w + sx as usize]));
+        let Some(waterline) = waterline else {
+            continue;
+        };
+        let d = waterline - sy;
+        // The surface is half a pixel above its first wet row. At a crossing,
+        // keep the reflection just below the direct ray.
+        let y = if d == 0 { sy + 1 } else { waterline + d - 1 };
+        let world_y = y + cam.y as i32;
+        let wet = Vec2::new(sx as f32, y as f32) + cam;
+        let x = sx + wobble(world_y, LASER_SALT) + ripple_shift(ripples, wet).round() as i32;
+        if !(0..w).contains(&x) || !(0..h).contains(&y) {
+            continue;
+        }
+        let i = y as usize * canvas.w + x as usize;
+        if !is_water(canvas.mat[i]) {
+            continue;
+        }
+        let fade = 1.0 - 0.025 * d as f32;
+        let glint = hash3(x + cam.x as i32, world_y, LASER_SALT) & 7 == 0;
+        let (tint, gain) = if glint {
+            ((255, 255, 255), (peak * fade + 0.12 * k).min(1.0))
+        } else {
+            (color, peak * fade)
+        };
+        canvas.px[i] = toward(canvas.px[i], tint, gain);
+    }
 }
 
 // ============================================================================
@@ -720,7 +792,7 @@ mod tests {
     use super::super::engine::{Grid, LightingMode};
     use super::super::fx::{testkit, FxLight, LightTag, DIR_ONE};
     use super::super::material::{self, MaterialKind};
-    use super::{body_mirrors, lamp_mirrors, run, WaterRipple, MIRROR_REACH};
+    use super::{body_mirrors, lamp_mirrors, run, LaserSegment, WaterRipple, MIRROR_REACH};
     use crate::game::level::{Level, LightFixtureKind, Theme};
     use crate::math::Vec2;
     use crate::render::framebuffer::PixelBuffer;
@@ -774,13 +846,12 @@ mod tests {
     ) {
         let level = Level::empty(Theme::Sewer);
         let mut frame = testkit::frame(&level, mode);
-        frame.elapsed = elapsed;
-        frame.step8 = super::super::fx::step8(frame.elapsed);
+        frame.step8 = super::super::fx::step8(elapsed);
         frame.cam = cam;
         frame.rat = rat.map_or(Vec2::new(-5000.0, -5000.0), |r| r + cam);
         frame.lights = lights;
         let mut canvas = testkit::canvas(pb);
-        run(g, &mut canvas, &frame, &[], k);
+        run(g, &mut canvas, &frame, &[], &[], k);
     }
 
     fn changed(a: &PixelBuffer, b: &PixelBuffer) -> Vec<(usize, usize)> {
@@ -1034,6 +1105,42 @@ mod tests {
         let moved = changed(&first, &passing);
         assert!(moved.iter().any(|&(_, y)| y == 14));
         assert!(moved.iter().all(|&(_, y)| (14..=19).contains(&y)));
+    }
+
+    #[test]
+    fn laser_mirrors_are_bright_and_follow_the_waterline() {
+        let before = wading(false);
+        let lasers = [
+            // Five pixels above the water in rows 14..34. Only columns 6..26
+            // are wet, and a wobble shifts the image by at most one column.
+            Some(LaserSegment {
+                start: Vec2::new(2.0, 9.0),
+                end: Vec2::new(30.0, 9.0),
+                brightness: 1.0,
+            }),
+            // More than 10 px above the puddle. It should have no image.
+            Some(LaserSegment {
+                start: Vec2::new(10.0, 2.0),
+                end: Vec2::new(26.0, 2.0),
+                brightness: 1.0,
+            }),
+        ];
+        let level = Level::empty(Theme::Sewer);
+        for mode in [LightingMode::Full, LightingMode::Hard] {
+            let mut after = wading(false);
+            let mut frame = testkit::frame(&level, mode);
+            frame.rat = Vec2::new(-5000.0, -5000.0);
+            {
+                let mut canvas = testkit::canvas(&mut after);
+                run(&grid(0), &mut canvas, &frame, &[], &lasers, 1.0);
+            }
+            let pixels = changed(&before, &after);
+            assert!(pixels.len() >= 18, "most of the wet row should reflect");
+            for (x, y) in pixels {
+                assert!((6..26).contains(&x) && y == 18, "wrote off the mirror at {x},{y}");
+                assert!(after.pixel_at(x, y).0 >= 190, "dim reflection at {x},{y}");
+            }
+        }
     }
 
     #[test]

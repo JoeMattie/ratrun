@@ -825,19 +825,15 @@ pub struct LaserFx {
     pub fired: u32,
     /// The old burst's pulse count at this level: the size of the burst a
     /// sweep replaces (the Carbon Copy afterimage's spark count), not a cadence
-    /// and not the per-body damage — one body the beams cross takes
-    /// `Weapon::laser_hit_damage()`, once per sweep.
+    /// and not the per-body damage.
     pub pulses: u32,
     /// The facing the sweep is centred on (unit vector).
     pub facing: Vec2,
     /// The beam's origin (the rat's eye line at the trigger tick).
     pub origin: Vec2,
-    /// Nominal beam length in px before the wall and screen stops (Lens Cap
-    /// applied). The length actually used — drawn, lit and hit-tested — is the
-    /// per-angle [`LaserFx::beam`].
-    pub reach: f32,
-    /// Per-**hit** damage at the owning weapon's level (Sharp Teeth applied):
-    /// the whole old burst's damage, so dps per body is unchanged.
+    /// Full-damage radius at the rank the sweep was cast.
+    pub full_damage_radius: f32,
+    /// Damage per hit before distance falloff and target defences.
     pub dmg: f32,
     /// Half the sweep's arc in radians.
     pub half: f32,
@@ -846,7 +842,7 @@ pub struct LaserFx {
     /// flag is what doubles their angular speed (see [`LaserFx::span`]).
     pub twin: bool,
     /// World angle of the first beam (it starts at `facing - half`) and the
-    /// length it reached after the wall and unzoomed-screen stops (art;
+    /// length it reached after the wall and widest-view stops (art;
     /// `beam` is the value `laser_visual` draws, and the same number the hit
     /// test used).
     pub angle: f32,
@@ -865,9 +861,6 @@ pub struct LaserFx {
     /// Was the boss already cut this sweep? (It is not an `Enemy`, so it has no
     /// `SpawnId` in the hit set.)
     pub boss_hit: bool,
-    /// Seconds since the beam last *started* a sweep: kept at 0 for the whole
-    /// sweep, so the two render readers that blink the beam see a steady bar.
-    pub since_pulse: f32,
     /// Full length of the sweep in seconds (`0` when idle), set at trigger.
     pub total: f32,
     /// Was the sweep in flight fired by the evolved (**Carbon Copy**) weapon?
@@ -894,17 +887,16 @@ pub struct LaserFx {
     /// Angles the replay's two beams held on the previous resolution.
     pub copy_prev_angle: f32,
     pub copy_prev_angle_b: f32,
+    /// Stopped lengths of those two replay beams, in the same order.
+    pub copy_beams: [f32; 2],
 }
 
 /// Bodies one Laser Eyes sweep may remember as already cut.
 ///
 /// The sweep is a per-cast "each body once" set, the same rule Super Dash uses
-/// per dash. Two beams reach 54–86 px through an arc, so a full horde screens a
-/// bounded number of bodies; the fixed set keeps the tick allocation-free. A
-/// sweep that somehow overflows simply stops recording new bodies (the extra
-/// ones can be cut again by a later tick of the same sweep), which cannot
-/// happen in play and cannot break a replay.
-pub const LASER_HIT_CAP: usize = 128;
+/// per dash. A screen-length beam can cross a full horde. The fixed set covers
+/// the normal enemy cap without allocating. On overflow, new hits are skipped.
+pub const LASER_HIT_CAP: usize = crate::game::ecs::constants::ENEMY_CAP;
 
 /// A fixed-size set of `SpawnId`s: "the bodies this sweep has already cut".
 #[derive(Clone, Copy)]
@@ -966,8 +958,8 @@ pub struct LaserCopy {
     pub facing: Vec2,
     /// The pulse count it was worth: the damage multiplier of one sweep hit.
     pub pulses: u32,
-    /// Beam length it used (already Lens Cap-stretched).
-    pub reach: f32,
+    /// Full-damage radius used by the recorded sweep.
+    pub full_damage_radius: f32,
     /// Per-hit damage it dealt; the afterimage deals half.
     pub dmg: f32,
 }
@@ -981,7 +973,7 @@ impl Default for LaserFx {
             pulses: 0,
             facing: Vec2::ZERO,
             origin: Vec2::ZERO,
-            reach: 0.0,
+            full_damage_radius: 0.0,
             dmg: 0.0,
             half: 0.0,
             twin: false,
@@ -993,7 +985,6 @@ impl Default for LaserFx {
             prev_angle_b: 0.0,
             hits: LaserHits::default(),
             boss_hit: false,
-            since_pulse: 0.0,
             total: 0.0,
             evolved: false,
             copy: None,
@@ -1007,6 +998,7 @@ impl Default for LaserFx {
             copy_boss_hit: false,
             copy_prev_angle: 0.0,
             copy_prev_angle_b: 0.0,
+            copy_beams: [0.0; 2],
         }
     }
 }
@@ -1048,7 +1040,7 @@ impl LaserFx {
             origin: self.origin,
             facing: self.facing,
             pulses: self.pulses,
-            reach: self.reach,
+            full_damage_radius: self.full_damage_radius,
             dmg: self.dmg,
         })
     }
@@ -1062,6 +1054,19 @@ impl LaserFx {
             (self.age / self.total).clamp(0.0, 1.0)
         }
     }
+
+    /// Beam art, lights and water share the fade over the last 15% of a sweep.
+    pub fn brightness(&self) -> f32 {
+        laser_fade(self.progress())
+    }
+
+    pub fn copy_brightness(&self) -> f32 {
+        0.65 * laser_fade(self.copy_age / self.copy_secs.max(1e-4))
+    }
+}
+
+fn laser_fade(progress: f32) -> f32 {
+    (1.0 - (progress - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0)
 }
 
 /// How many bodies one dash can remember as already hit. A dash crosses a

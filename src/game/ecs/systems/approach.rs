@@ -63,9 +63,9 @@ pub fn in_sim_view(pos: Vec2, player: Vec2, viewport: Vec2) -> bool {
 /// inside the edge, not on it). `inset` is clamped so the rectangle cannot
 /// invert.
 ///
-/// This is the **screen** every melee/beam reach is capped to: the
-/// [`Viewport`] resource at zoom 1.0, centred on the point the caller passes,
-/// never the render zoom (see the module docs of `spawn::widest_view`).
+/// This rectangle is ordinarily the [`Viewport`] resource at zoom 1.0,
+/// centred on the point the caller passes. Laser Eyes passes
+/// `spawn::widest_view(viewport)` to the ray helper below.
 #[inline]
 pub fn in_sim_view_inset(pos: Vec2, center: Vec2, viewport: Vec2, inset: f32) -> bool {
     let hw = (viewport.x * 0.5 - inset).max(0.0);
@@ -77,11 +77,9 @@ pub fn in_sim_view_inset(pos: Vec2, center: Vec2, viewport: Vec2, inset: f32) ->
 /// simulation view rectangle: the same rectangle [`in_sim_view_inset`] tests,
 /// centred on `center`, `viewport` px across, inset by `inset` px a side.
 ///
-/// The slab test of the ray against the rectangle, so a beam drawn from a
-/// point inside the view always ends **on** the screen and its hit test can
-/// never reach a body the player cannot see. `dir` must be a unit vector
-/// (every caller passes an angle); a zero direction returns `0.0`, and a
-/// rectangle that the inset collapsed returns `0.0` as well.
+/// Tests the ray against the rectangle's forward faces. Callers choose the
+/// view size without consulting the renderer. `dir` must be a unit vector
+/// (every caller passes an angle). A zero direction returns `0.0`.
 #[inline]
 pub fn sim_view_ray_exit(from: Vec2, dir: Vec2, center: Vec2, viewport: Vec2, inset: f32) -> f32 {
     let hw = (viewport.x * 0.5 - inset).max(0.0);

@@ -1003,6 +1003,17 @@ impl LightMap {
             let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
             self.grid.splat(light, shadow, soft, tag, pass);
         }
+        // Submit each bar's bounded samples together. Ranking them against
+        // unrelated dynamic lights would trim a long bar at its far end.
+        let laser_segments = super::sources::laser_segments(scene.ecs);
+        {
+            let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
+            for light in laser_segments.iter().flatten().copied().flat_map(|ray| ray.lights()) {
+                if self.grid.overlaps(light) {
+                    self.grid.splat(light, None, None, LightTag::Moving { priority: 1 }, pass);
+                }
+            }
+        }
         fx::sort_fx_lights(&mut self.fx_lights);
         let frame = FxFrame {
             mode: scene.mode,
@@ -1076,11 +1087,11 @@ impl LightMap {
                         own_water,
                     );
                 }
-                // Standing water: body mirrors, lamp mirrors, glints.
+                // Standing water: body, lamp and laser mirrors, with glints.
                 if own_water {
                     let mut ripples = [water::WaterRipple::NONE; water::MAX_RIPPLES];
                     let n = water::gather_ripples(scene.ecs, frame.cam, &mut ripples);
-                    water::apply(&self.grid, &mut canvas, &frame, &ripples[..n]);
+                    water::apply(&self.grid, &mut canvas, &frame, &ripples[..n], &laser_segments);
                 }
                 if !fx::skip("air") {
                     air::composite(&self.grid, &mut canvas, &frame);

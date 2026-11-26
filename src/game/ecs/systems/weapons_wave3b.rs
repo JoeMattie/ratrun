@@ -12,10 +12,9 @@
 //!   `Weapon::laser_sweep_secs` (L1 60° / 0.26 s, L5 110° / 0.34 s). From L4
 //!   (`Weapon::laser_twin`) they do not stop where they meet: they cross and
 //!   carry on to the opposite edges over the same sweep (an X-shaped scissor),
-//!   so the pair covers the whole arc at twice the angular speed. Everything the
-//!   beams pass over takes the whole old pulse burst's damage, once per sweep
-//!   (a per-sweep hit set **shared by both beams**). Each beam stops at the
-//!   first wall on its own ray, and its reach is the weapon's ×1.6.
+//!   so the pair covers the whole arc at twice the angular speed. A body takes
+//!   one distance-scaled pulse per sweep (both beams share one hit set). Each
+//!   beam stops at the first wall or the edge of the widest simulation view.
 //! - **Super Dash** is a weapon whose *fire* is the dash. `player_system`
 //!   records the dash's real travelled segments into [`DashTrack`]; this system
 //!   damages every body those segments crossed, once per body per dash. A
@@ -31,13 +30,13 @@
 //!
 //! Determinism: every walk is `SpawnId` order (or the cached `EnemyIndex`, which
 //! *is* that order), every rng draw happens inside a `vfx` emitter called only
-//! when something actually happened, and a run that never owns either weapon
-//! draws no rng and changes no value — the golden traces do not move.
+//! when something actually happened. Only traces that fire Laser Eyes can see
+//! its longer reach, distance falloff and smaller set of particle effects.
 
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
-use crate::game::collision::segment_circle_hit;
+use crate::game::collision::{segment_circle_hit, TileMap};
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::resources::{
     DamageLedger, DashTrack, EnemyIndex, LaserFx, MeleeNudge, RngRes, SfxQueue, Shake, TickInput,
@@ -45,14 +44,13 @@ use crate::game::ecs::resources::{
 };
 use crate::game::ecs::systems::approach::sim_view_ray_exit;
 use crate::game::ecs::systems::boss::Boss;
+use crate::game::ecs::systems::spawn::widest_view;
 use crate::game::enemy::Enemy;
 use crate::game::level::Level;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
-use crate::game::weapon::{
-    WeaponKind, LASER_HALF_WIDTH,
-};
+use crate::game::weapon::{WeaponKind, LASER_EYE_OFFSET, LASER_HALF_WIDTH};
 use crate::math::Vec2;
 
 #[cfg(debug_assertions)]
@@ -125,28 +123,21 @@ pub fn ray_hits_circle(origin: Vec2, dir: Vec2, len: f32, half_w: f32, center: V
     lateral <= half_w + r
 }
 
-/// The angular step a sweep is cut into when two ticks are far apart: a beam
-/// that jumped a whole tick's angle would skip a body whose radius is a few px.
-/// 0.035 rad (2°) is about 3 px of gap at the L5 reach (86 px), well under the
-/// smallest body's radius, so every body between two ticks is crossed by some
-/// sample.
-const SWEEP_STEP_RAD: f32 = 0.035;
-
-/// How often (seconds) the sweep emits its beam sparkle. The drawn beam is
-/// `art_rat::draw_laser_eyes`'s job; this is the particle garnish on top, and
-/// 60 a second of a 40-dot row would drown the frame budget.
-const LASER_SPARK_EVERY: f32 = 0.05;
+/// Keep adjacent sweep samples at most 3 px apart at the farthest end of the
+/// view, and keep at least the old angular resolution in very small views.
+const SWEEP_STEP_PX: f32 = 3.0;
+const MAX_SWEEP_STEP_RAD: f32 = 0.035;
 
 /// The numbers one Laser Eyes sweep was cast with, snapshotted at the trigger
 /// tick so a level-up card opened mid-sweep cannot change a hit already paid
 /// for (the same rule every projectile and lash follows).
 #[derive(Clone, Copy, Debug)]
 struct SweepCast {
-    /// The old burst's pulse count: the damage multiplier of one sweep hit.
+    /// The old pulse count, used by the afterimage's sparks.
     pulses: u32,
-    /// Nominal beam length before the wall stop (Lens Cap applied).
-    reach: f32,
-    /// Per-**hit** damage (the whole old burst's, Sharp Teeth applied).
+    /// Radius before damage falls off.
+    full_damage_radius: f32,
+    /// Damage per hit before falloff.
     dmg: f32,
     /// Fired by the evolved (**Carbon Copy**) weapon.
     evolved: bool,
@@ -173,6 +164,17 @@ fn sweep_pair(base: f32, half: f32, span: f32, t: f32) -> (f32, f32) {
     (base - half + span * t, base + half - span * t)
 }
 
+fn beam_length(tiles: &TileMap, origin: Vec2, dir: Vec2, center: Vec2, view: Vec2) -> f32 {
+    let edge = sim_view_ray_exit(origin, dir, center, view, 0.0);
+    let stop = tiles.segment_hit(origin, origin + dir * edge, LASER_HALF_WIDTH);
+    edge * stop.unwrap_or(1.0).clamp(0.0, 1.0)
+}
+
+fn laser_damage(pulse: f32, full_damage_radius: f32, distance_sq: f32) -> f32 {
+    let radius_sq = full_damage_radius * full_damage_radius;
+    pulse * (radius_sq / distance_sq.max(radius_sq))
+}
+
 /// Resolve one beam's angular **step**: every body the segment crosses at any
 /// sample angle between `from_angle` and `to_angle`, once per sweep.
 ///
@@ -189,7 +191,7 @@ fn sweep_step(
     origin: Vec2,
     from_angle: f32,
     to_angle: f32,
-    nominal: f32,
+    full_damage_radius: f32,
     dmg: f32,
     ghost: bool,
     hits: &mut crate::game::ecs::resources::LaserHits,
@@ -202,31 +204,23 @@ fn sweep_step(
     bosses: &mut Query<&mut Boss>,
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
+    view_center: Vec2,
     view: Vec2,
 ) -> f32 {
     let kind = WeaponKind::LaserEyes;
     let delta = to_angle - from_angle;
-    let steps = (delta.abs() / SWEEP_STEP_RAD).ceil().max(1.0) as u32;
-    let mut last_len = nominal;
+    let farthest = view.len() * 0.5 + view_center.dist(origin);
+    let step_rad = (SWEEP_STEP_PX / farthest).min(MAX_SWEEP_STEP_RAD);
+    let steps = (delta.abs() / step_rad).ceil().max(1.0) as u32;
+    let mut last_len = 0.0;
     for step in 0..=steps {
         let angle = from_angle + delta * (step as f32 / steps as f32);
         let dir = Vec2::from_angle(angle);
-        // Walls stop the beam: everything past the first face is shadowed.
-        let end = origin + dir * nominal;
-        let stop = level
-            .tiles
-            .segment_hit(origin, end, LASER_HALF_WIDTH)
-            .map(|t| t.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
-        // …and the **screen** stops it too: the beam is cut where this ray
-        // leaves the unzoomed view rectangle centred on the cast's own origin
-        // (`sim_view_ray_exit`), so the drawn beam and the hit test share one
-        // length and no body outside the view can be burned. Centring the
-        // rectangle on the cast's origin is what lets a Carbon Copy replay draw
-        // the lengths of the sweep it copies, whatever the rat has done since.
-        let screen = sim_view_ray_exit(origin, dir, origin, view, 0.0);
-        let len = (nominal * stop).min(screen);
+        let len = beam_length(&level.tiles, origin, dir, view_center, view);
         last_len = len;
+        if len <= 0.0 {
+            continue;
+        }
 
         for &entity in order {
             let Ok((_, id, mut e)) = enemies.get_mut(entity) else {
@@ -245,7 +239,8 @@ fn sweep_step(
             }
             let hp_before = e.hp.max(0.0);
             // Directional armour: the beam arrives from the rat's eyes.
-            let applied = e.hurt_from(dmg, origin);
+            let amount = laser_damage(dmg, full_damage_radius, origin.dist_sq(e.pos));
+            let applied = e.hurt_from(amount, origin);
             let killed = !e.alive();
             ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
             let pos = e.pos;
@@ -256,14 +251,11 @@ fn sweep_step(
             } else {
                 vfx::emit_laser_hit(particles, &mut rng.0, pos, pos - origin, killed);
             }
-            damage_numbers.record(
-                enemy_id,
-                pos,
-                enemy_radius,
-                applied,
-                killed,
-                DamageSource::Normal,
-            );
+            if applied >= 1.0 {
+                damage_numbers.record(
+                    enemy_id, pos, enemy_radius, applied, killed, DamageSource::Normal,
+                );
+            }
         }
 
         // The boss is a body too: its grounded hit shapes are cut like
@@ -278,12 +270,13 @@ fn sweep_step(
             }
             if !shapes.segment_hits_grounded(
                 origin,
-                origin + dir * len.max(0.5),
+                origin + dir * len,
                 LASER_HALF_WIDTH,
             ) {
                 continue;
             }
-            let amount = dmg * boss.damage_mult;
+            let amount = laser_damage(dmg, full_damage_radius, origin.dist_sq(boss.pos))
+                * boss.damage_mult;
             if !boss.take_damage(amount) {
                 continue;
             }
@@ -303,14 +296,11 @@ fn sweep_step(
             } else {
                 vfx::emit_laser_hit(particles, &mut rng.0, boss_pos, boss_pos - origin, killed);
             }
-            damage_numbers.record(
-                boss_id,
-                boss_pos,
-                boss_radius,
-                amount,
-                killed,
-                DamageSource::Normal,
-            );
+            if amount >= 1.0 {
+                damage_numbers.record(
+                    boss_id, boss_pos, boss_radius, amount, killed, DamageSource::Normal,
+                );
+            }
         }
     }
     last_len
@@ -329,16 +319,14 @@ fn sweep_step(
 /// close inward over `laser_sweep_secs`, meeting on the aim line as the sweep
 /// ends. From L4 they do not stop there — they cross and carry on to the
 /// opposite edges over the same sweep, so the pair moves twice as fast. Every
-/// body the pair crosses takes the whole old burst's damage once (one hit set,
-/// shared by both beams), so a body the beams pass over takes exactly what the
-/// fan dealt it and the weapon's dps per body is unchanged.
+/// body the pair crosses takes one pulse once (one hit set shared by both
+/// beams), scaled by inverse-square falloff beyond the rank's full-damage
+/// radius.
 ///
-/// **The screen caps the reach**: a beam is cut where it leaves the unzoomed
-/// simulation view ([`Viewport`], centred on the cast's own origin), so a body
-/// the player cannot see is never burned and `LaserFx::beam`/`beam_b` — the
-/// numbers the renderer and the lighting read — are the lengths the hit tests
-/// used. Carbon Copy's replay therefore draws the lengths of the sweep it
-/// copies.
+/// Walls and the widest simulation view ([`Viewport`] × max zoom-out) cap
+/// the reach. Live beams use the rat's current view; Carbon Copy uses the
+/// recorded origin. The simulation supplies the same stopped lengths to hit
+/// tests, beam art, lights and water.
 #[allow(clippy::too_many_arguments)]
 pub fn laser_eyes_system(
     input: Res<TickInput>,
@@ -358,10 +346,7 @@ pub fn laser_eyes_system(
     mut fallback: Local<Vec<Entity>>,
 ) {
     let dt = input.dt;
-    let (dmg_mult, fire_rate, reach_mult) = {
-        let s = player.loadout.stats;
-        (player.damage_mult(), s.fire_rate_mult.max(0.1), s.reach_mult)
-    };
+    let (dmg_mult, fire_rate) = (player.damage_mult(), player.loadout.stats.fire_rate_mult.max(0.1));
 
     // 1. Charge (and trigger). Only one sweep is in flight at a time, and a
     // sweep is always shorter than its cycle, so a retrigger cannot overlap.
@@ -375,11 +360,9 @@ pub fn laser_eyes_system(
             continue;
         }
         w.timer += (w.cooldown() / fire_rate).max(0.05);
-        // The beam's length is a ranged reach: Lens Cap stretches it. The
-        // per-hit damage is the whole old pulse burst's, so dps is unchanged.
         trigger = Some(SweepCast {
             pulses: w.laser_pulses().max(1),
-            reach: reach_mult * w.laser_reach(),
+            full_damage_radius: w.laser_full_damage_radius(),
             dmg: w.laser_hit_damage() * dmg_mult,
             evolved: w.evolved,
             half: w.laser_half_arc(),
@@ -396,12 +379,19 @@ pub fn laser_eyes_system(
             .map(|p| p - player.pos)
             .filter(|v| v.len_sq() > 4.0)
             .map(|v| v.normalized());
-        let base = match aimed {
-            Some(d) => d,
-            None if player.face.len_sq() > 1e-4 => player.face.normalized(),
-            None => Vec2::new(0.0, -1.0),
+        let face = if player.face.len_sq() > 1e-4 {
+            player.face.normalized()
+        } else {
+            Vec2::new(0.0, -1.0)
         };
-        let origin = player.pos;
+        let base = aimed.unwrap_or(face);
+        let eye = player.pos + face * LASER_EYE_OFFSET;
+        // Near a wall the decorative eyes can extend past the collision
+        // radius. Keep the cast on the rat's side of that wall.
+        let origin = match level.tiles.segment_hit(player.pos, eye, LASER_HALF_WIDTH) {
+            Some(t) => player.pos + face * (LASER_EYE_OFFSET * t - 0.01).max(0.0),
+            None => eye,
+        };
         let base_angle = base.angle();
         // Both beams start at the two outer edges of the arc at the same
         // instant and close inward, so there is no direction to alternate any
@@ -430,7 +420,7 @@ pub fn laser_eyes_system(
             pulses: cast.pulses,
             facing: base,
             origin,
-            reach: cast.reach,
+            full_damage_radius: cast.full_damage_radius,
             dmg: cast.dmg,
             half: cast.half,
             twin: cast.twin,
@@ -454,7 +444,7 @@ pub fn laser_eyes_system(
             ..LaserFx::default()
         };
         shake.amount = shake.amount.max(0.9);
-        vfx::emit_laser_muzzle(&mut particles, &mut rng.0, origin, base);
+        vfx::emit_laser_muzzle(&mut particles, &mut rng.0, player.pos, face);
         // One zap per sweep: the beam is continuous now, so its sound is too.
         sfx.0.push(Sfx::LaserEyes);
         if let Some(copy) = recorded {
@@ -478,10 +468,17 @@ pub fn laser_eyes_system(
     // `age`, so a replay with the same dt cuts the same band.
     fx.age += dt;
     let t = (fx.age / fx.total.max(1e-4)).clamp(0.0, 1.0);
-    let (half, span, reach, dmg) = (fx.half, fx.span(), fx.reach, fx.dmg);
+    let (half, span, full_damage_radius, dmg) = (fx.half, fx.span(), fx.full_damage_radius, fx.dmg);
+    let view = widest_view(viewport.0);
+    // Match the arena clamp of the widest ordinary view without reading the
+    // render camera. The recorded muzzle stays fixed as the rat moves.
+    let half_view = Vec2::new(view.x.min(level.arena.x), view.y.min(level.arena.y)) * 0.5;
+    let center = Vec2::new(
+        player.pos.x.clamp(half_view.x, level.arena.x - half_view.x),
+        player.pos.y.clamp(half_view.y, level.arena.y - half_view.y),
+    );
     let (angle, angle_b) = sweep_pair(fx.facing.angle(), half, span, t);
     let (prev, prev_b) = (fx.prev_angle, fx.prev_angle_b);
-    let spin = (fx.age / LASER_SPARK_EVERY).floor() != ((fx.age - dt) / LASER_SPARK_EVERY).floor();
     {
         let order: &[Entity] = stable_order(&index, &enemies, &mut fallback);
         let mut hits = fx.hits;
@@ -490,7 +487,7 @@ pub fn laser_eyes_system(
             fx.origin,
             prev,
             angle,
-            reach,
+            full_damage_radius,
             dmg,
             false,
             &mut hits,
@@ -503,7 +500,8 @@ pub fn laser_eyes_system(
             &mut bosses,
             &mut damage_numbers,
             &mut ledger,
-            viewport.0,
+            center,
+            view,
         );
         // The mirrored beam shares the same hit set, so the pair still cuts a
         // body once per sweep.
@@ -511,7 +509,7 @@ pub fn laser_eyes_system(
             fx.origin,
             prev_b,
             angle_b,
-            reach,
+            full_damage_radius,
             dmg,
             false,
             &mut hits,
@@ -524,7 +522,8 @@ pub fn laser_eyes_system(
             &mut bosses,
             &mut damage_numbers,
             &mut ledger,
-            viewport.0,
+            center,
+            view,
         );
         fx.hits = hits;
         fx.boss_hit = boss_hit;
@@ -535,10 +534,6 @@ pub fn laser_eyes_system(
         fx.angle_b = angle_b;
         fx.beam_b = len_b;
         fx.fired = fx.hits.len();
-        // The steady beam's garnish, at 20 Hz rather than once a tick.
-        if spin {
-            vfx::emit_laser_pulse(&mut particles, &mut rng.0, fx.origin, angle, len, fx.fired);
-        }
     }
 
     // 3. The Carbon Copy afterimage: the recorded sweep's own inward-closing
@@ -556,11 +551,11 @@ pub fn laser_eyes_system(
                 let mut boss_hit = fx.copy_boss_hit;
                 let ghost_dmg = copy.dmg
                     * crate::game::ecs::systems::evolutions::CARBON_COPY_DAMAGE;
-                sweep_step(
+                let len = sweep_step(
                     copy.origin,
                     c_prev,
                     c_angle,
-                    copy.reach,
+                    copy.full_damage_radius,
                     ghost_dmg,
                     true,
                     &mut hits,
@@ -573,13 +568,14 @@ pub fn laser_eyes_system(
                     &mut bosses,
                     &mut damage_numbers,
                     &mut ledger,
-                    viewport.0,
+                    copy.origin,
+                    view,
                 );
-                sweep_step(
+                let len_b = sweep_step(
                     copy.origin,
                     c_prev_b,
                     c_angle_b,
-                    copy.reach,
+                    copy.full_damage_radius,
                     ghost_dmg,
                     true,
                     &mut hits,
@@ -592,12 +588,14 @@ pub fn laser_eyes_system(
                     &mut bosses,
                     &mut damage_numbers,
                     &mut ledger,
-                    viewport.0,
+                    copy.origin,
+                    view,
                 );
                 fx.copy_hits = hits;
                 fx.copy_boss_hit = boss_hit;
                 fx.copy_prev_angle = c_angle;
                 fx.copy_prev_angle_b = c_angle_b;
+                fx.copy_beams = [len, len_b];
                 fx.copy_fired = fx.copy_hits.len();
             }
             fx.copy_left = (fx.copy_left - dt).max(0.0);
@@ -954,17 +952,16 @@ mod tests {
         }
     }
 
-    /// Per level: the beam's length (×1.6 the design row), the damage one body
-    /// takes **per sweep** (one old pulse's), the arc, its faster duration, and
-    /// which ranks cross the aim line.
+    /// Per level: full-damage radius, pulse damage, sweep angle and duration,
+    /// and which ranks cross the aim line.
     #[test]
     fn laser_numbers_per_level() {
-        for (level, (pulses, reach, dmg, arc_deg, secs, twin)) in [
-            (1u8, (3u32, 54.4f32, 6.0f32, 60.0f32, 0.26f32, false)),
-            (2, (3, 64.0, 7.0, 70.0, 0.28, false)),
-            (3, (4, 64.0, 8.0, 80.0, 0.30, false)),
-            (4, (4, 76.8, 9.0, 95.0, 0.32, true)),
-            (5, (5, 86.4, 10.0, 110.0, 0.34, true)),
+        for (level, (pulses, radius, dmg, arc_deg, secs, twin)) in [
+            (1u8, (3u32, 28.0f32, 6.0f32, 60.0f32, 0.26f32, false)),
+            (2, (3, 34.0, 7.0, 70.0, 0.28, false)),
+            (3, (4, 40.0, 8.0, 80.0, 0.30, false)),
+            (4, (4, 48.0, 9.0, 95.0, 0.32, true)),
+            (5, (5, 58.0, 10.0, 110.0, 0.34, true)),
         ] {
             let mut w = World::new(Theme::Sewer, 11);
             w.clear_enemies();
@@ -974,7 +971,7 @@ mod tests {
             let fx = *w.ecs.resource::<LaserFx>();
             assert!(fx.active(), "L{level} sweep did not start");
             assert_eq!(fx.pulses, pulses, "L{level} pulse multiplier");
-            assert!((fx.reach - reach).abs() < 1e-3, "L{level} beam length");
+            assert_eq!(fx.full_damage_radius, radius, "L{level} full-damage radius");
             assert_eq!(fx.dmg, dmg, "L{level} damage per sweep hit");
             assert!(
                 (fx.half - (arc_deg * 0.5f32).to_radians()).abs() < 1e-4,
@@ -1006,7 +1003,7 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 13);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 1); // 60° arc, 54.4 px, 6 damage
+        arm(&mut w, WeaponKind::LaserEyes, 1); // 60° arc, up to 6 damage
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
         // A lattice of bodies across the whole arc — both beams' halves, the
@@ -1127,7 +1124,7 @@ mod tests {
         arm(&mut w, WeaponKind::LaserEyes, 1);
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
-        // Three bodies dead ahead inside the 54.4 px beam, plus two well off
+        // Three bodies dead ahead inside the full-damage radius, plus two well off
         // the sweep (one beside, one behind the rat).
         let near = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
         let mid = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(18.0, 0.0), 1.0);
@@ -1169,7 +1166,8 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 14);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 5); // 86.4 px reach
+        arm(&mut w, WeaponKind::LaserEyes, 5);
+        w.player.pos = Vec2::new(996.0, 1000.0);
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
         // A solid column 16 px ahead of the rat, and a body behind it.
@@ -1180,10 +1178,13 @@ mod tests {
         let in_front = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(8.0, 0.0), 1.0);
         let behind_hp = enemy_hp(&w, behind_wall);
         let front_hp = enemy_hp(&w, in_front);
-        for _ in 0..60 {
-            if !w.ecs.resource::<LaserFx>().active() && w.ecs.resource::<LaserFx>().fired > 0 {
-                break;
-            }
+        run_laser(&mut w, 1.0 / 60.0);
+        let fx = *w.ecs.resource::<LaserFx>();
+        for (angle, len) in [(fx.angle, fx.beam), (fx.angle_b, fx.beam_b)] {
+            let end = fx.origin + Vec2::from_angle(angle) * len;
+            assert!(end.x > face - 3.0 && end.x <= face, "beam end {end:?}, wall {face}");
+        }
+        for _ in 0..25 {
             run_laser(&mut w, 1.0 / 60.0);
         }
         assert!(enemy_hp(&w, in_front) < front_hp, "the near body was shielded");
@@ -1194,103 +1195,73 @@ mod tests {
         );
     }
 
-    /// Batch 13's longer beam: at L1 the sweep reaches 54.4 px (×1.6 of the
-    /// 34 px design row), so a body the old beam would have left alone is cut,
-    /// and one past the new reach still is not.
     #[test]
-    fn the_beam_reaches_one_point_six_times_further() {
+    fn both_laser_beams_reach_the_widest_view_edges() {
+        for viewport in [Vec2::new(57.0, 36.0), Vec2::new(160.0, 80.0), Vec2::new(240.0, 124.0)] {
+            for face in [
+                Vec2::new(1.0, 0.0),
+                Vec2::new(0.0, -1.0),
+                Vec2::new(-1.0, 1.0).normalized(),
+            ] {
+                let mut w = World::new(Theme::Sewer, 31);
+                w.clear_enemies();
+                open_map(&mut w);
+                w.viewport = viewport;
+                w.player.pos = w.level.arena * 0.5;
+                w.player.face = face;
+                arm(&mut w, WeaponKind::LaserEyes, 1);
+
+                run_laser(&mut w, 1.0 / 60.0);
+                let origin = w.ecs.resource::<LaserFx>().origin;
+                // The cast stays anchored, while the view follows the rat.
+                w.player.pos += Vec2::new(10.0, -8.0);
+                run_laser(&mut w, 1.0 / 60.0);
+                let fx = w.ecs.resource::<LaserFx>();
+                assert_eq!(fx.origin, origin);
+                for (angle, len) in [(fx.angle, fx.beam), (fx.angle_b, fx.beam_b)] {
+                    let end = origin + Vec2::from_angle(angle) * len - w.player.pos;
+                    // At 2x the original width and height are the half-extents.
+                    let edge = (end.x.abs() / viewport.x).max(end.y.abs() / viewport.y);
+                    assert!((edge - 1.0).abs() < 1e-4, "viewport {viewport:?}, end {end:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn laser_damage_falls_off_with_the_square_of_distance() {
+        for rank in [1, 5] {
+            let mut weapon = Weapon::new(WeaponKind::LaserEyes);
+            weapon.level = rank;
+            let r = weapon.laser_full_damage_radius();
+            let pulse = weapon.laser_hit_damage();
+            for (distance, expected) in [(r * 0.5, 1.0), (r, 1.0), (r * 2.0, 0.25), (r * 4.0, 0.0625)] {
+                assert_eq!(laser_damage(pulse, r, distance * distance), pulse * expected);
+            }
+        }
+    }
+
+    #[test]
+    fn distant_laser_hits_under_one_damage_have_no_number() {
         let mut w = World::new(Theme::Sewer, 22);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 1); // 54.4 px, 6 damage
+        w.viewport = Vec2::new(160.0, 80.0);
+        w.player.pos = w.level.arena * 0.5;
         w.player.face = Vec2::new(1.0, 0.0);
-        let p = w.player.pos;
-        // 48 px is past the old 34 px reach; 66 px is past the new one even
-        // with the body's own radius.
-        let in_reach = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(48.0, 0.0), 1.0);
-        let past_reach = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(66.0, 0.0), 1.0);
-        let near_hp = enemy_hp(&w, in_reach);
-        let far_hp = enemy_hp(&w, past_reach);
-        let mut ticks = 0;
-        while ticks < 200 {
+        arm(&mut w, WeaponKind::LaserEyes, 1);
+        let eye = w.player.pos + w.player.face * LASER_EYE_OFFSET;
+        let near = w.spawn_enemy(EnemyKind::Cat, eye + Vec2::new(14.0, 0.0), 1.0);
+        let far = w.spawn_enemy(EnemyKind::Cat, eye + Vec2::new(112.0, 0.0), 1.0);
+        let outside = w.spawn_enemy(EnemyKind::Cat, eye + Vec2::new(180.0, 0.0), 1.0);
+        let [near_hp, far_hp, outside_hp] = [near, far, outside].map(|e| enemy_hp(&w, e));
+        for _ in 0..20 {
             run_laser(&mut w, 1.0 / 60.0);
-            ticks += 1;
-            if !w.ecs.resource::<LaserFx>().active() {
-                break;
-            }
         }
-        assert!(
-            (enemy_hp(&w, in_reach) - (near_hp - 6.0)).abs() < 1e-3,
-            "a body 48 px out must be inside the longer beam: {} -> {}",
-            near_hp,
-            enemy_hp(&w, in_reach)
-        );
-        assert_eq!(
-            enemy_hp(&w, past_reach),
-            far_hp,
-            "the beam reached past its own length"
-        );
-    }
-
-    /// **The screen caps the beam.** With a 240 x 80 px view (a narrow terminal
-    /// at 1x: 40 px from the rat to the top edge) a beam swept to the near edge
-    /// is cut far short of its 54.4 px nominal reach, so a body just past the
-    /// edge — a body the beam would otherwise reach — is not burned, while the
-    /// one on screen still is. The drawn length and the hit test are the same
-    /// number ([`LaserFx::beam`]), so what is drawn is what hits.
-    ///
-    /// A wide view leaves the weapon exactly as it was.
-    #[test]
-    fn the_beam_stops_at_the_edge_of_the_screen() {
-        let view = Vec2::new(240.0, 80.0);
-        let run_one = |view: Vec2, seed: u64| {
-            let mut w = World::new(Theme::Sewer, seed);
-            w.clear_enemies();
-            open_map(&mut w);
-            w.viewport = view;
-            arm(&mut w, WeaponKind::LaserEyes, 1); // 54.4 px nominal
-            w.player.face = Vec2::new(0.0, -1.0); // straight at the near edge
-            let p = w.player.pos;
-            let inside = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(0.0, -36.0), 1.0);
-            let outside = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(0.0, -50.0), 1.0);
-            let before = [enemy_hp(&w, inside), enemy_hp(&w, outside)];
-            let mut longest = 0.0f32;
-            let mut last = 0.0f32;
-            let mut ticks = 0;
-            while ticks < 200 {
-                run_laser(&mut w, 1.0 / 60.0);
-                ticks += 1;
-                let fx = *w.ecs.resource::<LaserFx>();
-                if !fx.active() {
-                    break;
-                }
-                assert!((fx.reach - 54.4).abs() < 1e-3, "the nominal reach moved");
-                longest = longest.max(fx.beam.max(fx.beam_b));
-                last = fx.beam;
-            }
-            let lost = [before[0] - enemy_hp(&w, inside), before[1] - enemy_hp(&w, outside)];
-            (lost, longest, last)
-        };
-
-        let (lost, longest, last) = run_one(view, 31);
-        assert!(
-            longest < 54.4 - 1.0,
-            "the beam was not cut by the 40 px half-height: {longest}"
-        );
-        // On the aim line the beam ends where the rectangle does: 40 px up.
-        assert!((last - 40.0).abs() < 1.0, "the beam ends on the top edge: {last}");
-        assert!(lost[0] > 0.0, "a body on screen must still be cut");
-        assert_eq!(
-            lost[1], 0.0,
-            "a body 50 px out is past the 40 px screen edge and must not be cut"
-        );
-
-        // The same layout with a view big enough to hold the far body: both
-        // are cut, exactly as before the cap existed.
-        let (lost, longest, _) = run_one(Vec2::new(1600.0, 1600.0), 32);
-        assert!(longest > 50.0, "a wide view does not shorten the beam: {longest}");
-        assert!(lost[0] > 0.0, "the near body is cut");
-        assert!(lost[1] > 0.0, "a wide view leaves the 50 px body in reach");
+        assert_eq!(near_hp - enemy_hp(&w, near), 6.0);
+        assert_eq!(far_hp - enemy_hp(&w, far), 0.375);
+        assert_eq!(enemy_hp(&w, outside), outside_hp);
+        assert_eq!(w.damage_numbers.len(), 1, "only the near hit should print");
     }
 
     /// The weapon never fires through the auto-fire pass: it charges itself and

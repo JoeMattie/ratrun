@@ -274,7 +274,6 @@ pub(super) struct FxFrame<'a> {
     pub level: &'a Level,
     /// World position of pixel (0, 0), rounded the way the grid snaps it.
     pub cam: Vec2,
-    pub elapsed: f32,
     /// `floor(elapsed * 8)`: the only clock an animated term may read.
     pub step8: u32,
     /// The rat's world position.
@@ -349,7 +348,6 @@ pub(super) mod testkit {
             thrash: None,
             squeak: None,
             cam,
-            elapsed: w.elapsed,
             mode,
             depth,
             fx: true,
@@ -422,7 +420,6 @@ pub(super) mod testkit {
             theme: level.theme,
             level,
             cam: Vec2::ZERO,
-            elapsed: 0.0,
             step8: 0,
             rat: Vec2::new(64.0, 48.0),
             lights: &[],

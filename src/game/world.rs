@@ -1118,19 +1118,13 @@ impl World {
     /// A sweep is **two** beams closing inward (one from each edge of the arc),
     /// so both are carried here and `art_rat::draw_laser_eyes` draws the pair
     /// plus the flash where they meet on the aim line. `brightness` is steady
-    /// for the whole sweep and only fades at its very end; the twin muzzle dots
-    /// stay lit regardless (see `art_rat::draw_laser_eyes`), so the rat visibly
-    /// *has* eyes.
+    /// for the whole sweep and only fades at its very end. The twin muzzle dots
+    /// stay lit through the sweep.
     pub fn laser_visual(&self) -> Option<art_rat::LaserBeam> {
         let fx = self.ecs.resource::<LaserFx>();
         if !fx.active() {
             return None;
         }
-        // Lit for the first half of each interval, then dark: that half-on,
-        // half-off cadence is the blink.
-        let lit = (1.0 - fx.since_pulse / (0.5 * crate::game::weapon::LASER_PULSE_INTERVAL))
-            .clamp(0.0, 1.0);
-        let fade = 1.0 - (fx.progress() - 0.85).max(0.0) / 0.15;
         Some(art_rat::LaserBeam {
             origin: fx.origin,
             angle: fx.angle,
@@ -1138,9 +1132,8 @@ impl World {
             angle_b: fx.angle_b,
             len_b: fx.beam_b,
             aim: fx.facing.angle(),
-            // A hard blink, so the dark interval is real.
-            brightness: lit * fade,
-            muzzle: 0.55 + 0.45 * lit,
+            brightness: fx.brightness(),
+            muzzle: 1.0,
         })
     }
 
@@ -2874,6 +2867,23 @@ impl World {
         _s = crate::prof::scope(crate::prof::Stage::Lighting);
         self.apply_lighting(pb, cam, ambience_cost);
 
+        // The beam cores are self-lit. Draw them after the water stage so
+        // painting a beam cannot erase the water material under its reflection.
+        if !self.hide_rat {
+            if let Some(beam) = self.laser_visual() {
+                art_rat::draw_laser_eyes(pb, beam, cam);
+            }
+        }
+        let laser = self.ecs.resource::<LaserFx>();
+        if laser.copy_active() {
+            if let Some(copy) = laser.copy {
+                let angles = [laser.copy_prev_angle, laser.copy_prev_angle_b];
+                for (angle, len) in angles.into_iter().zip(laser.copy_beams) {
+                    art_rat::draw_laser_bar(pb, copy.origin, angle, len, laser.copy_brightness(), cam);
+                }
+            }
+        }
+
         // Parallax foreground layer: overhead things nearer the eye than the
         // floor, drawn at world resolution (so it works at every zoom) after
         // the lighting pass — a fixed darkening instead of a per-pixel light —
@@ -3442,11 +3452,9 @@ impl World {
         if self.player.buffs.shield > 0.0 {
             art_wave3a::draw_bottle_cap_rim(pb, self.player.pos, self.elapsed, cam);
         }
-        // Wave 3: Laser Eyes' twin muzzle dots and its two inward-closing beams,
-        // drawn over the rat so the eyes read as the source (the pair and the
-        // flash where they meet are `draw_laser_eyes`'s own job).
+        // The muzzle dots sit on the rat and stay lit through the sweep.
         if let Some(beam) = self.laser_visual() {
-            art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
+            art_rat::draw_laser_muzzle(pb, &self.player, beam.muzzle, cam);
             self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 9);
         }
     }
