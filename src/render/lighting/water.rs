@@ -64,7 +64,7 @@ pub(super) const GLINT_HZ: f32 = 3.0;
 /// can sparkle at once (with the dashes: `× (1 + DASH_CHANCE / 16)`, 9.3 %);
 /// the lobe then keeps only the facets that face the light. Raising it makes
 /// the water busier.
-pub(super) const GLINT_DENSITY: u32 = 20;
+pub(super) const GLINT_DENSITY: u32 = 40;
 /// Candidates per 256 pixels on a live ripple ring (a ring sparkles harder).
 pub(super) const RIPPLE_DENSITY: u32 = 96;
 /// Half-width of a ripple ring's glint band, px.
@@ -75,18 +75,18 @@ pub(super) const RIPPLE_TILT: i32 = 40;
 /// A bigger tilt spreads the glints over more of the puddle (further from the
 /// mirror direction of the light).
 pub(super) const OCT1_CELL: i32 = 8;
-pub(super) const OCT1_TILT: i32 = 40;
+pub(super) const OCT1_TILT: i32 = 60;
 /// The fine octave: per-pixel grain tilt, Q0.7.
 pub(super) const OCT2_TILT: i32 = 22;
 /// The highlight's exponent: higher is a narrower lobe (fewer, harder glints).
-pub(super) const GLINT_POWER: i32 = 48;
+pub(super) const GLINT_POWER: i32 = 28;
 /// Lobe values under this are no glint at all (the rest is rescaled to 0..1),
 /// so a glint is a crisp point, never a faint smear. Raising it thins them.
-pub(super) const GLINT_MIN_LOBE: f32 = 0.30;
+pub(super) const GLINT_MIN_LOBE: f32 = 0.12;
 /// Received light (`Q8.8`, `LightInfo::dom`) under which water never glints,
 /// and at which a glint reaches full brightness.
-pub(super) const GLINT_MIN_LIGHT: f32 = 20.0;
-pub(super) const GLINT_FULL_LIGHT: f32 = 160.0;
+pub(super) const GLINT_MIN_LIGHT: f32 = 8.0;
+pub(super) const GLINT_FULL_LIGHT: f32 = 90.0;
 /// A full glint's lift toward white, in levels of 256. The brightness knob.
 pub(super) const GLINT_PEAK: f32 = 230.0;
 /// How far a glint's colour is pulled toward white, /256 (`specular`'s
@@ -106,7 +106,7 @@ const VIEW: [f32; 3] = [0.0, 0.24, 0.97];
 /// 58 on the Lab: `sources.rs`). Raising the energy brightens the sparkle
 /// round a wading rat.
 pub(super) const RAT_AURA_HEIGHT: f32 = 12.0;
-pub(super) const RAT_GLINT_ENERGY: f32 = 150.0;
+pub(super) const RAT_GLINT_ENERGY: f32 = 260.0;
 pub(super) const RAT_GLINT_RADIUS: f32 = 66.0;
 pub(super) const RAT_GLINT_RADIUS_LAB: f32 = 58.0;
 
@@ -115,7 +115,7 @@ pub(super) const RAT_GLINT_RADIUS_LAB: f32 = 58.0;
 /// The mirror image sits this many fixture heights below the lamp on screen.
 pub(super) const MIRROR_K: f32 = 1.0;
 /// The image's half-width (px): a base plus a share of the fixture's height.
-pub(super) const MIRROR_RX: f32 = 2.5;
+pub(super) const MIRROR_RX: f32 = 3.5;
 pub(super) const MIRROR_RX_PER_H: f32 = 0.08;
 /// Height over width of the image (a reflection is a vertical column).
 pub(super) const MIRROR_ASPECT: f32 = 2.2;
@@ -140,11 +140,11 @@ pub(super) const MIRROR_WOBBLE_PX: i32 = 1;
 
 /// How far (px) a water pixel looks up the screen for a body. Also where the
 /// image has faded to nothing.
-pub(super) const MIRROR_REACH: usize = 10;
+pub(super) const MIRROR_REACH: usize = 14;
 /// The body image's opacity next to the body (d = 1).
-pub(super) const BODY_MIRROR: f32 = 0.32;
+pub(super) const BODY_MIRROR: f32 = 0.58;
 /// The body image is this much darker than the body (0.30 = 30 %).
-pub(super) const BODY_DARKEN: f32 = 0.30;
+pub(super) const BODY_DARKEN: f32 = 0.15;
 /// ... and tinted this far toward the water under it.
 pub(super) const BODY_TINT: f32 = 0.15;
 /// How far (± px) a row of the body image shifts with the ripple field.
@@ -341,6 +341,7 @@ fn body_mirrors(canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f32, z: u32) {
         let yi = y as i32;
         let shift = wobble(cam_y + yi, z, BODY_SALT) * BODY_WOBBLE_PX;
         let row = y * stride;
+        #[allow(clippy::needless_range_loop)]
         for x in 0..w {
             let i = row + x;
             let m = canvas.mat[i];
@@ -794,7 +795,7 @@ mod tests {
         assert!(changed(&before, &after).is_empty());
         // A whisper of light is still none.
         let mut dim = puddle();
-        stage(&mut dim, &grid(10), LightingMode::Full, 1.0, Vec2::ZERO, None, &[], 1.0);
+        stage(&mut dim, &grid(6), LightingMode::Full, 1.0, Vec2::ZERO, None, &[], 1.0);
         assert!(changed(&before, &dim).is_empty());
     }
 
@@ -806,7 +807,9 @@ mod tests {
         let moved = changed(&before, &after);
         let water_px = 48 * 48;
         assert!(!moved.is_empty(), "a lit puddle sparkles");
-        assert!(moved.len() * 10 <= water_px, "sparse: {} of {water_px}", moved.len());
+        // Under a strong lamp about one water pixel in seven sparkles (the owner
+        // asked for glints he can see); never more than one in five.
+        assert!(moved.len() * 5 <= water_px, "sparse: {} of {water_px}", moved.len());
         for (x, y) in &moved {
             assert!(*x >= 16, "glint on stone at {x},{y}");
             let (a, b) = (before.pixel_at(*x, *y), after.pixel_at(*x, *y));
