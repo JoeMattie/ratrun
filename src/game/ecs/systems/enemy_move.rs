@@ -150,9 +150,6 @@ pub fn enemy_steering_system(
     slow: Query<&crate::game::ecs::systems::traps::TrapSlow>,
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
     ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
-    // A named miniboss owns its own position during a signature (tell and
-    // active window): see `miniboss::Miniboss::holds`.
-    minibosses: Query<&crate::game::ecs::systems::miniboss::Miniboss>,
     // Console `freeze on`: the horde holds still. Default false = normal.
     debug: Res<DebugFlags>,
 ) {
@@ -161,6 +158,9 @@ pub fn enemy_steering_system(
         // Freeze: bodies keep their positions and their timers tick down so
         // the horde resumes exactly where it left off when unfrozen.
         for (_, _, mut e) in enemies.iter_mut() {
+            if e.named {
+                continue;
+            }
             e.contact_cd = (e.contact_cd - dt).max(0.0);
             if e.flash > 0.0 {
                 e.flash -= dt;
@@ -201,17 +201,8 @@ pub fn enemy_steering_system(
         let (_, _, mut e) = enemies
             .get_mut(entity)
             .expect("ordered enemy must still be alive");
-        // One field per size class: a rat-sized enemy may take a rat-hole, a
-        // Cat or a Brute must route around it.
-        // A miniboss mid-tell/mid-signature stands still: its state machine
-        // owns the body's position, and it is held here (not by a `stun`) so a
-        // Sonic Squeak ring still slows it exactly like it slows an elite.
-        if minibosses.get(entity).is_ok_and(|mb| mb.holds()) {
-            e.vel = e.vel * (1.0 - (12.0 * dt).min(1.0));
-            e.contact_cd = (e.contact_cd - dt).max(0.0);
-            if e.flash > 0.0 {
-                e.flash -= dt;
-            }
+        // The named controller already advanced movement and contact timers.
+        if e.named {
             continue;
         }
         let mut flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
@@ -427,7 +418,7 @@ pub fn separation_system(
     index: Res<EnemyIndex>,
     scratch: Res<GridScratch>,
     mut neigh: ResMut<NeighborScratch>,
-    mut state: Local<Vec<(Vec2, f32)>>,
+    mut state: Local<Vec<(Vec2, f32, bool, bool)>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
 ) {
     // Debug builds (i.e. every `cargo test`): prove the cached order is still
@@ -446,12 +437,15 @@ pub fn separation_system(
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
-        state.push((e.pos, e.radius));
+        state.push((e.pos, e.radius, e.position_locked, e.buried));
     }
 
     let reach = scratch.max_radius * 2.0;
     for i in 0..state.len() {
-        let (pi, ri) = state[i];
+        let (pi, ri, planted, buried) = state[i];
+        if planted || buried {
+            continue;
+        }
         grid.neighbors_within(pi, reach, &mut neigh.0);
         let mut push = Vec2::ZERO;
         for &j in &neigh.0 {
@@ -459,7 +453,10 @@ pub fn separation_system(
             if j == i {
                 continue;
             }
-            let (pj, rj) = state[j];
+            let (pj, rj, _, buried) = state[j];
+            if buried {
+                continue;
+            }
             let sum = ri + rj;
             let d2 = pi.dist_sq(pj);
             if d2 < sum * sum {

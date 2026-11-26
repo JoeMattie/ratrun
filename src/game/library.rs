@@ -1016,9 +1016,8 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
         ),
         MinibossKind::SisterSnip => (
             "Laundry · 3:00 — named miniboss",
-            "She trims loose ends. The shears open over a wedge, hold the shape long \
-             enough to be read, and close once. Walk behind the pivot and the whole \
-             attack is behind you.",
+            "She trims loose ends. The shears cross a marked lane or close over a \
+             wedge. Step past the end of the lane or around the pivot.",
         ),
         MinibossKind::Bobbin => (
             "Laundry · 6:00 — named miniboss",
@@ -1094,15 +1093,13 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
         ),
         MinibossKind::RotorTechnician => (
             "Lab · 12:00 — named miniboss",
-            "Switch off before removing tail. A rotor head drags a live cable and turns \
-             its blade a long way round. The hub is the safest ground it owns: follow \
-             the blade near the axle and switch it off.",
+            "Switch off before removing tail. A rotor head drags a live cable out and \
+             back across the same arc. Step clear and wait for the return pass.",
         ),
         MinibossKind::SudsBailiff => (
             "Laundry · 9:00 — named miniboss",
-            "All delicates report to rinse. A soap dome with one flat, broken edge \
-             pushes a foam rim out with a wedge missing. Match the missing wedge and \
-             keep moving between the washers.",
+            "All delicates report to rinse. A soap dome slips under the floor and \
+             pushes a bar of foam across it. Watch where the gap settles.",
         ),
         MinibossKind::WringerBoy => (
             "Laundry · 12:00 — named miniboss",
@@ -1971,14 +1968,10 @@ fn miniboss_facts(k: MinibossKind, f: &mut Facts) {
             miniboss::appointment_signature_damage(at)
         ),
     );
-    f.push(
-        "TELL → HIT",
-        format!(
-            "{:.1}s tell, {:.1}s active",
-            miniboss::TELL_TIME,
-            k.active_duration()
-        ),
-    );
+    let [first, second] = k.signatures();
+    f.push("FIRST ATTACK", format!("{} · {:.1}s", first.shape.name(), first.active));
+    f.push("SECOND ATTACK", format!("{} · {:.1}s", second.shape.name(), second.active));
+    f.push("WARNING", format!("{:.1}s", miniboss::TELL_TIME));
     f.push(
         "RECOVERY",
         format!("{:.1}s to punish", miniboss::RECOVER_TIME),

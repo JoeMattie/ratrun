@@ -1016,11 +1016,11 @@ impl World {
             })
     }
 
-    /// Number of active enemies in the arena.
+    /// Number of active enemies counted against the horde budget.
     pub fn enemy_count(&self) -> usize {
         self.ecs
             .iter_entities()
-            .filter(|entity| entity.contains::<Enemy>())
+            .filter(|entity| entity.get::<Enemy>().is_some_and(|e| !e.summoned))
             .count()
     }
 
@@ -1597,7 +1597,7 @@ impl World {
         enemy.max_hp = enemy.hp;
         enemy.radius = kind.body_radius();
         enemy.damage = crate::game::ecs::systems::miniboss::MINIBOSS_CONTACT_DAMAGE;
-        enemy.speed_scale = crate::game::ecs::systems::miniboss::MINIBOSS_SPEED_SCALE;
+        enemy.speed_scale = kind.speed_scale();
         enemy.named = true;
         enemy.id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
@@ -2004,7 +2004,7 @@ impl World {
 
     /// Console `nuke`: reap every live enemy. Returns how many.
     pub fn nuke_all(&mut self) -> usize {
-        let n = self.enemy_count();
+        let n = self.ecs.iter_entities().filter(|entity| entity.contains::<Enemy>()).count();
         self.clear_enemies();
         n
     }
@@ -2031,7 +2031,7 @@ impl World {
         let mut query = self.ecs.query::<(Entity, &SpawnId, &Enemy)>();
         let candidates = query
             .iter(&self.ecs)
-            .map(|(entity, id, enemy)| (entity, *id, enemy.pos, enemy.alive()));
+            .map(|(entity, id, enemy)| (entity, *id, enemy.pos, enemy.targetable()));
         super::ecs::systems::weapons::nearest_of(candidates, from)
     }
 
@@ -2570,6 +2570,9 @@ impl World {
                 })
                 .count();
             for (_, e, mb, drake) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if e.buried {
+                    continue;
+                }
                 let s = self.w2s(e.pos, cam);
                 if !on_screen(s, e.radius * 3.0 + 8.0, viewport) {
                     continue;
@@ -3052,6 +3055,22 @@ impl World {
             }
         }
 
+        // A charge's rails are visible from the wind-up through the lunge.
+        {
+            use super::ecs::systems::miniboss::{Miniboss, MinibossShape};
+            let mut query = self.ecs.query::<(&SpawnId, &Enemy, &Miniboss)>();
+            for (_, e, mb) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let Some((MinibossShape::Trench { a, b, half }, _, live)) =
+                    mb.manoeuvre.charge_lane(e.pos, e.radius)
+                else {
+                    continue;
+                };
+                if e.alive() && on_screen(self.w2s((a + b) * 0.5, cam), a.dist(b) * 0.5 + half, viewport) {
+                    draw_hostile_lane(pb, self.w2s(a, cam), self.w2s(b, cam), half, live);
+                }
+            }
+        }
+
         // Enemy bullets: the same sprite as before, now over the smoke and the
         // ambient. Pocket Watch's crawling pellet keeps its dark chrono tail so
         // "the pellets are slow" is legible without reading the numbers.
@@ -3139,7 +3158,11 @@ impl World {
                 if !on_screen(self.w2s(mid, cam), margin, viewport) {
                     continue;
                 }
-                draw_drake_lane(pb, self.w2s(a, cam), self.w2s(b, cam), d.state == DrakeState::Peck);
+                draw_hostile_lane(
+                    pb, self.w2s(a, cam), self.w2s(b, cam),
+                    super::ecs::systems::drake::PECK_LANE_WIDTH * 0.5,
+                    d.state == DrakeState::Peck,
+                );
             }
         }
 
@@ -4178,7 +4201,7 @@ fn draw_floor_tell(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: palette::
 /// on, which is the same "shape first, colour second" rule the other floors'
 /// tells keep. The screen endpoints come from `World::w2s`, so this is the one
 /// place the lane is drawn and the shape is `drake::peck_lane`'s.
-fn draw_drake_lane(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), live: bool) {
+fn draw_hostile_lane(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), half: f32, live: bool) {
     const RAIL: palette::Rgb = (240, 236, 222);
     const RAIL_LIVE: palette::Rgb = (255, 250, 236);
     const CAP: palette::Rgb = (240, 158, 62);
@@ -4190,7 +4213,7 @@ fn draw_drake_lane(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), live: boo
     let dir = (dx / len, dy / len);
     let side = (-dir.1, dir.0);
     // Half the lane, in whole pixels either side of the centre line.
-    let half = (super::ecs::systems::drake::PECK_LANE_WIDTH * 0.5).round() as i32;
+    let half = half.round() as i32;
     let steps = len.ceil() as i32;
     let rail = if live { RAIL_LIVE } else { RAIL };
     for i in 0..=steps {

@@ -513,7 +513,7 @@ fn nearest_in_cone(
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
-        if !e.alive() {
+        if !e.targetable() {
             continue;
         }
         let d = e.pos.dist_sq(from);
@@ -552,7 +552,7 @@ fn nearest_visible_within(
         let Ok((_, id, e)) = enemies.get(entity) else {
             continue;
         };
-        if !e.alive() {
+        if !e.targetable() {
             continue;
         }
         let dist_sq = e.pos.dist_sq(from);
@@ -1064,7 +1064,7 @@ fn thrash_sweep(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if !e.alive() || e.pos.dist(ppos) > reach + e.radius {
+        if !e.targetable() || e.pos.dist(ppos) > reach + e.radius {
             continue;
         }
         // The arc is a melee sweep: it does not reach through a maze wall.
@@ -1237,7 +1237,7 @@ fn squeak_cone(
         let Ok((_, sid, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if !e.alive() {
+        if !e.targetable() {
             continue;
         }
         if !cone_hits_circle(origin, axis, reach, half, e.pos, e.radius) {
@@ -1383,7 +1383,7 @@ fn nova_ring(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if !e.alive() {
+        if !e.targetable() {
             continue;
         }
         let dist = e.pos.dist(origin);
@@ -1399,7 +1399,7 @@ fn nova_ring(
             continue;
         }
         for returning in [false, true] {
-            if !(if returning { in_hit } else { out_hit }) || !e.alive() {
+            if !(if returning { in_hit } else { out_hit }) || !e.targetable() {
                 continue;
             }
             let hp_before = e.hp.max(0.0);
@@ -1728,7 +1728,7 @@ fn fire_one(
                 let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                     continue;
                 };
-                if !e.alive()
+                if !e.targetable()
                     || !cone_hits_circle(ppos, spray_dir, fan_reach, fan_half, e.pos, e.radius)
                     || !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS)
                 {
@@ -1902,7 +1902,7 @@ fn fire_one(
                     continue;
                 };
                 // A swipe, not an aura: only the front half-circle.
-                if !e.alive()
+                if !e.targetable()
                     || !cone_hits_circle(ppos, dir, reach, WHIP_ARC_HALF, e.pos, e.radius)
                 {
                     continue;
@@ -1924,7 +1924,7 @@ fn fire_one(
                 // hit that has no native knockback (the whip), once per body
                 // per 0.4 s. `resolve_circle` keeps the nudge on legal floor
                 // instead of pushing a body into a wall.
-                if stats.shove_px > 0.0 && melee_nudge.ready(enemy_id as u64) {
+                if !e.position_locked && stats.shove_px > 0.0 && melee_nudge.ready(enemy_id as u64) {
                     let out = (pos - ppos).normalized();
                     melee_nudge.mark(enemy_id as u64, MELEE_NUDGE_COOLDOWN);
                     let shifted = pos + out * stats.shove_px;
@@ -2247,7 +2247,7 @@ fn ratchet_swing(
         // Heavy targets take the whip hit only (§3): elites, named
         // minibosses and every `EnemyKind::heavy()` body, a Pillbug included
         // (curled or not, it is never hooked or swung into).
-        if !e.alive() || e.elite || e.named || e.kind.heavy() {
+        if !e.targetable() || e.elite || e.named || e.kind.heavy() {
             continue;
         }
         let d = e.pos.dist(ppos);
@@ -2295,7 +2295,7 @@ fn ratchet_swing(
             let Ok((_, _, e)) = enemies.get(entity) else {
                 continue;
             };
-            if entity == hooked || !e.alive() {
+            if entity == hooked || !e.targetable() {
                 continue;
             }
             let rel = e.pos - ppos;
@@ -2358,7 +2358,7 @@ fn ratchet_swing(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if !e.alive() || e.elite || e.named || e.kind.heavy() {
+        if !e.targetable() || e.elite || e.named || e.kind.heavy() {
             continue;
         }
         let rel = e.pos - ppos;

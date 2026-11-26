@@ -342,6 +342,7 @@ enum Threat {
         radius: f32,
         damage: f32,
         kind: EnemyKind,
+        speed: f32,
         /// Growth Serum (batch 13): while the rat is giant this body is one it
         /// **crushes** rather than one it must avoid — set at scan time from
         /// `powerups::giant_crushes` and the live buff, so `threat_cost` only
@@ -1002,7 +1003,7 @@ impl Bot {
         self.boss_kind = None;
         for e in w.ecs.iter_entities() {
             if let Some(en) = e.get::<Enemy>() {
-                if !en.alive() || !self.sees(w, p, en.pos) {
+                if !en.targetable() || !self.sees(w, p, en.pos) {
                     continue;
                 }
                 self.threats.push(Threat::Enemy {
@@ -1011,6 +1012,8 @@ impl Bot {
                     radius: en.radius,
                     damage: en.damage,
                     kind: en.kind,
+                    speed: e.get::<Miniboss>()
+                        .map_or_else(|| en.kind.speed(), |mb| mb.kind.temperament().speed),
                     // Growth Serum: an ordinary body under a giant rat is not a
                     // hazard, it is a stomp. Elites and named bodies keep their
                     // full weight (they hit back at half damage).
@@ -1032,6 +1035,18 @@ impl Bot {
                 if let Some(mb) = e.get::<Miniboss>() {
                     if en.alive() && !mb.chest_dropped {
                         self.miniboss_pos = Some(en.pos);
+                        if let Some((shape, left, live)) =
+                            mb.manoeuvre.charge_lane(en.pos, en.radius)
+                        {
+                            let warn_left = if self.skill == Skill::Casual && !live {
+                                self.quantise_warn(left)
+                            } else {
+                                0.0
+                            };
+                            self.threats.push(Threat::MinibossHazard {
+                                shape, warn_left, active_left: left, damage: en.damage,
+                            });
+                        }
                         if let Some(shape) = mb.telegraph() {
                             // The telegraph is a danger for its whole tell:
                             // treat it as immediately lethal so the bot leaves
@@ -1039,7 +1054,7 @@ impl Bot {
                             let active_left = match mb.state {
                                 MinibossState::Tell => 1.0,
                                 MinibossState::Active => {
-                                    (mb.kind.active_duration() - mb.timer).max(0.0) + 0.1
+                                    (mb.active_duration() - mb.timer).max(0.0) + 0.1
                                 }
                                 _ => 0.0,
                             };
@@ -2610,8 +2625,9 @@ fn threat_cost(
             vel,
             radius,
             damage,
-            kind,
+            speed,
             stomp_free,
+            ..
         } => {
             // Each kind chases at `EnemyKind::speed` px/s (Skitterer 30, Bat
             // 42, Cat 38, Spitter 22, Brute 16) and the velocity sample
@@ -2619,7 +2635,6 @@ fn threat_cost(
             // `kind.speed() * speed_mult`. Predicting with it is measurably
             // better than a kind-speed chase model (the A/B lost 60 s of
             // median survival), so the kind only decides the weight below.
-            let _ = kind;
             // Growth Serum: a body the giant crushes is almost free to walk
             // into (`STOMP_FREE_CONTACT`). This is the one place the giant
             // changes the bot's reading of the floor, and it applies to
@@ -2629,7 +2644,7 @@ fn threat_cost(
             // Faster kinds are read a moment earlier: 0.9 x their own speed
             // (34 px for the 30-38 px/s crawlers and cats, 38 px for the
             // 42 px/s bat).
-            let reach = 34.0f32.max(kind.speed() * 0.9);
+            let reach = 34.0f32.max(speed * 0.9);
             let near = pred.dist(q) - radius - R;
             if near > reach {
                 0.0

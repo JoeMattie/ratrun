@@ -215,7 +215,7 @@ pub fn player_bullet_hits_system(
             let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                 continue;
             };
-            if !e.alive() {
+            if !e.targetable() {
                 continue;
             }
             if collision::segment_circle_hit(b.prev_pos, b.pos, b.radius, e.pos, e.radius) {
@@ -332,7 +332,7 @@ fn contact_one(
     };
     // An enemy killed earlier this tick (by a bullet or a pool) must
     // not still land contact damage or knockback.
-    if !e.alive() {
+    if !e.targetable() {
         return;
     }
     // Growth Serum (batch 13): an ordinary body touching the giant is being
@@ -349,6 +349,9 @@ fn contact_one(
             *hit_kind = Some(e.kind);
         }
         e.contact_cd = 0.6;
+        if e.position_locked {
+            return;
+        }
         // Knockback. (Split into two statements: `Mut<Enemy>` cannot
         // read `e.pos` while the same place is mutably borrowed.)
         let knockback = (e.pos - ppos).normalized() * 4.0;

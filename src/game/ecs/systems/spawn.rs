@@ -102,6 +102,7 @@ use crate::game::ecs::resources::{
 };
 use crate::game::ecs::systems::approach::in_sim_view;
 use crate::game::ecs::systems::miniboss::MinibossSchedule;
+use crate::game::ecs::systems::miniboss_behaviour::MinibossSummon;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, MazeSection, Room, RoomKind, Theme, TileRect};
 use crate::game::player::Player;
@@ -335,7 +336,7 @@ pub fn director_system(
     mut ids: DirectorIds,
     // `&mut`: the approach boost below is the one write the director makes to a
     // living body (its speed scale, never its position or its rng).
-    mut enemies: Query<(&SpawnId, &mut Enemy)>,
+    mut enemies: Query<(&SpawnId, &mut Enemy), Without<MinibossSummon>>,
     // Per-run scratch, reused across ticks: the per-level reachability cache
     // costs one flood fill per map and must not be recomputed per spawn.
     mut scratch: Local<SpawnScratch>,
@@ -761,7 +762,7 @@ fn live_slot_counts<E: std::ops::Deref<Target = Enemy>>(
 /// Never a named miniboss (it has its own arrival walk), never an elite, never
 /// a body whose own speed is already [`APPROACH_SPEED_CEIL`] or more.
 fn boost_approach(
-    enemies: &mut Query<(&SpawnId, &mut Enemy)>,
+    enemies: &mut Query<(&SpawnId, &mut Enemy), Without<MinibossSummon>>,
     approach: &mut Vec<(u64, f32)>,
     player: &Player,
     viewport: Vec2,

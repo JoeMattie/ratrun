@@ -13,6 +13,9 @@
   from the muzzle.
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
+- **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
+  circles, and Bell Diver leaves a crack where it will surface. All 24 have
+  two attacks, with their own pace and a Library entry for both.
 
 ## 0.3.0 (2026-11-25)
 

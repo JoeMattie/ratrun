@@ -50,3 +50,4 @@ pub mod approach;
 pub mod puddles;
 pub mod weapon_lava;
 pub mod miniboss_shapes;
+pub mod miniboss_behaviour;
