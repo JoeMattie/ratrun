@@ -69,6 +69,7 @@ pub const DEFAULT_MAX_SIM_SECONDS: f32 = 4800.0;
 /// Parsed command line.
 #[derive(Clone, Debug)]
 pub struct BatchOpts {
+    pub tuning: crate::tuning::Selection,
     pub runs: usize,
     pub seed: u64,
     pub start_level: usize,
@@ -116,6 +117,7 @@ pub struct BatchOpts {
 impl Default for BatchOpts {
     fn default() -> Self {
         BatchOpts {
+            tuning: crate::tuning::Selection::default(),
             runs: 10,
             seed: 1,
             start_level: 0,
@@ -408,6 +410,8 @@ fn death_outcome(d: DeathInfo, note: Option<String>) -> DeathOutcome {
 /// Everything the report prints.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BatchReport {
+    #[serde(default)]
+    pub tuning: crate::tuning::Report,
     pub skill: String,
     pub practice: bool,
     pub start_level: usize,
@@ -953,7 +957,10 @@ pub fn run_one(seed: u64, opts: AutoOpts, max_sim_seconds: f32) -> RunOutcome {
 /// The scan only reads the world, so the run is identical to [`run_one`]; the
 /// step loop is spelled out here because the scan needs a tick after each one.
 pub fn run_one_analyzed(seed: u64, opts: AutoOpts, max_sim_seconds: f32) -> RunOutcome {
-    let mut run = AutoRun::new(seed, opts);
+    analyzed(AutoRun::new(seed, opts), seed, max_sim_seconds)
+}
+
+fn analyzed(mut run: AutoRun, seed: u64, max_sim_seconds: f32) -> RunOutcome {
     let mut scan = AnomalyScan::new(seed);
     let mut simulated = 0.0f32;
     while !run.finished() && simulated < max_sim_seconds {
@@ -996,10 +1003,12 @@ fn run_row(opts: &BatchOpts, index: usize) -> RunOutcome {
         skill,
         ..auto_opts(opts)
     };
+    let mut run = AutoRun::with_tuning(seed, auto, opts.tuning.run.clone());
     let mut outcome = if opts.analyze {
-        run_one_analyzed(seed, auto, opts.max_sim_seconds)
+        analyzed(run, seed, opts.max_sim_seconds)
     } else {
-        run_one(seed, auto, opts.max_sim_seconds)
+        run_to_end(&mut run, DT, opts.max_sim_seconds);
+        outcome_of(seed, run.stats())
     };
     outcome.skill = skill.name().to_string();
     outcome
@@ -1104,12 +1113,13 @@ pub fn run_batch_traced(opts: &BatchOpts) -> BatchReport {
     for i in 0..opts.runs {
         let seed = run_seed(opts, i);
         let skill = skill_for(opts, i);
-        let mut run = AutoRun::new(
+        let mut run = AutoRun::with_tuning(
             seed,
             AutoOpts {
                 skill,
                 ..auto_opts(opts)
             },
+            opts.tuning.run.clone(),
         );
         let mut next_trace = 0.0f32;
         let mut last_elapsed = 0.0f32;
@@ -1385,7 +1395,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             gold_collected += level.gold_collected as f32;
             gold_spent += level.gold_spent as f32;
             gold_purchases += level.shop_purchases as f32;
-            add_gold_sources(&mut gold_src, level);
+            add_gold_sources(&mut gold_src, level, &opts.tuning.run.loot);
             if let Some(p) = level.progress.iter().find(|p| (p.at - 180.0).abs() < 0.01) {
                 gold_at_3m.push(p.gold as f32);
                 gold_collected_at_3m.push(p.gold_collected as f32);
@@ -1527,7 +1537,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                 gold_collected += level.gold_collected as f32;
                 gold_spent += level.gold_spent as f32;
                 gold_purchases += level.shop_purchases as f32;
-                add_gold_sources(&mut gold_src, level);
+                add_gold_sources(&mut gold_src, level, &opts.tuning.run.loot);
                 if let Some(p) = level.progress.iter().find(|p| (p.at - 180.0).abs() < 0.01) {
                     gold_at_3m.push(p.gold as f32);
                     gold_collected_at_3m.push(p.gold_collected as f32);
@@ -1701,6 +1711,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
     };
     let threads = opts.threads.max(1);
     BatchReport {
+        tuning: opts.tuning.report(),
         skill: if opts.cycle_skills {
             "mixed".to_string()
         } else {
@@ -1817,14 +1828,14 @@ fn evolution_aggs(
 /// Add one level's gold-by-source to `[purse, chests, elites, minibosses,
 /// boss]`. Elites, minibosses and the boss are kills times their fixed payout
 /// (the coin still has to be picked up, so these are upper bounds).
-fn add_gold_sources(into: &mut [f32; 5], level: &LevelOutcome) {
-    use crate::game::shop::{BOSS_GOLD, ELITE_GOLD, MINIBOSS_GOLD};
+fn add_gold_sources(into: &mut [f32; 5], level: &LevelOutcome, loot: &crate::tuning::Loot) {
+    let gold = |value| crate::game::shop::scaled(value, loot.gold_value_mult);
     into[0] += level.gold_purse as f32;
     into[1] += level.gold_chest as f32;
-    into[2] += (level.elite_kills * ELITE_GOLD) as f32;
-    into[3] += (level.minibosses.iter().filter(|m| m.killed).count() as u32 * MINIBOSS_GOLD) as f32;
+    into[2] += level.elite_kills.saturating_mul(gold(loot.elite_gold)) as f32;
+    into[3] += (level.minibosses.iter().filter(|m| m.killed).count() as u32).saturating_mul(gold(loot.miniboss_gold)) as f32;
     if level.boss_defeated {
-        into[4] += BOSS_GOLD as f32;
+        into[4] += gold(loot.boss_gold) as f32;
     }
 }
 
@@ -2451,20 +2462,19 @@ fn run_compare_cli(args: &[String], pos: usize) -> i32 {
 
 /// Handle `--bot-batch …`. Returns `None` when the flag is absent (so the real
 /// game starts normally), or the process exit code.
-pub fn maybe_run_cli() -> Option<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub fn maybe_run_cli(args: &[String], tuning: &crate::tuning::Selection) -> Option<i32> {
     // `--bot-compare a.json b.json` diff two saved reports.
     if let Some(pos) = args.iter().position(|a| a == "--bot-compare") {
-        return Some(run_compare_cli(&args, pos));
+        return Some(run_compare_cli(args, pos));
     }
     // `--bot-render saved.json` re-render a saved report without replaying it.
     if let Some(pos) = args.iter().position(|a| a == "--bot-render") {
-        return Some(run_render_cli(&args, pos));
+        return Some(run_render_cli(args, pos));
     }
     if !args.iter().any(|a| a == "--bot-batch") {
         return None;
     }
-    let opts = match parse_args(&args) {
+    let mut opts = match parse_args(args) {
         Ok(Some(opts)) => opts,
         Ok(None) => return None,
         Err(msg) => {
@@ -2473,6 +2483,7 @@ pub fn maybe_run_cli() -> Option<i32> {
             return Some(2);
         }
     };
+    opts.tuning = tuning.clone();
     // The nest stage is process-wide too (read only by `AutoRun::new`), and it
     // composes with `--caps`: the caps override still wins for the racks.
     crate::meta::set_batch_meta(opts.meta);
@@ -2500,7 +2511,7 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-4>] [--practice] \
 [--carry none|typical] [--route sewer|kitchen|laundry|outfall|lab|printworks|flatbed] \
 [--skill expert|skilled|casual] [--cycle-skills] \
 [--seed-exact] [--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] \
-[--trace] [--caps <W:P>] \
+[--trace] [--caps <W:P>] [--tuning <file.toml>] \
        ratrun --bot-compare <a.json> <b.json> [--json] \
        ratrun --bot-render <a.json>
 
@@ -2872,6 +2883,13 @@ pub fn render_table(r: &BatchReport) -> String {
         r.carry,
         r.base_seed
     ));
+    if !r.tuning.hash.is_empty() {
+        let source = r.tuning.path.as_ref().map_or_else(|| "built-in".into(), |path| path.display().to_string());
+        s.push_str(&format!("tuning: {source}  hash {}\n", r.tuning.hash));
+        for (field, value) in &r.tuning.diff {
+            s.push_str(&format!("  {field} = {value}\n"));
+        }
+    }
     s.push_str(&format!(
         "campaign wins: {}/{} ({}, 95% CI {})   sim time: {:.0}s in {:.1}s wall on {} thread(s) = {:.1}x sim-seconds per wall-second per thread\n",
         r.campaign_wins,
@@ -3208,6 +3226,7 @@ mod tests {
 
     fn tiny(skill: Skill, runs: usize, seed: u64) -> BatchOpts {
         BatchOpts {
+            tuning: crate::tuning::Selection::default(),
             runs,
             seed,
             start_level: 0,

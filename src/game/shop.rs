@@ -534,6 +534,25 @@ pub fn gold_for(floor_seed: u64, spawn_id: u64, kind: EnemyKind, elite: bool) ->
     }
 }
 
+pub(crate) fn gold_for_with(
+    floor_seed: u64, spawn_id: u64, kind: EnemyKind, elite: bool, tuning: &crate::tuning::Tuning,
+) -> u32 {
+    let loot = &tuning.loot;
+    let value = if kind == EnemyKind::Boss {
+        loot.boss_gold
+    } else if elite {
+        loot.elite_gold
+    } else {
+        let row = &tuning.enemies.kinds[&kind];
+        if gold_roll(floor_seed, spawn_id) < row.gold_chance * loot.gold_chance_mult {
+            row.gold
+        } else {
+            0
+        }
+    };
+    scaled(value, loot.gold_value_mult)
+}
+
 // ============================================================================
 // The shelf
 // ============================================================================

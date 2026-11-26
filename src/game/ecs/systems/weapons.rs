@@ -255,8 +255,8 @@ pub fn fire_weapons_system(
             (
                 w.kind,
                 w.level,
-                w.damage() * dmg_mult,
-                (w.cooldown() / fire_rate).max(0.05),
+                w.damage() * dmg_mult * player.loadout.weapon_damage_mult(w.kind),
+                (w.cooldown() * player.loadout.weapon_cooldown_mult(w.kind) / fire_rate).max(0.05),
                 w.level_projectiles(),
                 w.evolved,
             )
@@ -904,8 +904,8 @@ pub fn active_weapons_system(
             let (charge, dmg, reach, evolved) = {
                 let w = &player.loadout.weapons[i];
                 (
-                    (w.cooldown() / fire_rate).max(0.05),
-                    w.damage() * dmg_mult,
+                    (w.cooldown() * player.loadout.weapon_cooldown_mult(w.kind) / fire_rate).max(0.05),
+                    w.damage() * dmg_mult * player.loadout.weapon_damage_mult(w.kind),
                     // Wave 3 passive hooks: the thrash is a melee arc (Lens
                     // Cap's melee reach), the squeak is a radial ring (Long
                     // Fuse's splash radius **and** Lens Cap's ring reach: the

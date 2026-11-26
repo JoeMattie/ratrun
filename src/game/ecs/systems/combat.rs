@@ -477,7 +477,8 @@ pub fn contact_system(
         // below replaces; without the term the splice did nothing against the
         // commonest hit in the game). Zero without the splice.
         player.iframes =
-            CONTACT_IFRAMES + crate::game::shop::iframe_extra(&player.loadout.splices);
+            player.loadout.tuning.as_ref().map_or(CONTACT_IFRAMES, |t| t.player.contact_iframes)
+            + crate::game::shop::iframe_extra(&player.loadout.splices);
         let p = player.pos;
         vfx::emit_player_hurt(&mut particles, &mut rng.0, p);
         shake.amount = shake.amount.max(5.0);

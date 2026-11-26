@@ -204,7 +204,7 @@ pub mod lantern;
 // ============================================================================
 
 /// Which themed boss this is (one per campaign level).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum BossKind {
     /// Sewer — the Jungle Cat (Apex Jaguar).
     Cat,
@@ -371,13 +371,16 @@ impl BossKind {
     }
 
     /// Full starting HP on the supplied difficulty row.
-    pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
-        let scale = if self == BossKind::Lantern && difficulty == 0 {
+    pub(crate) fn hp_scale_for(self, difficulty: usize) -> f32 {
+        if self == BossKind::Lantern && difficulty == 0 {
             art_boss_lantern::BOSS_PRACTICE_HP_SCALE
         } else {
             self.hp_scale()
-        };
-        self.base_hp() * scale * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
+        }
+    }
+
+    pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
+        self.base_hp() * self.hp_scale_for(difficulty) * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
     }
 
     /// Single-circle collision radius used for movement and contact.
@@ -3910,10 +3913,14 @@ pub(crate) struct Arrival {
 /// ([`boss_spawn_system`]) and the console's `boss <kind> here`
 /// (`World::force_boss_here`), so the two cannot drift apart. The caller picks
 /// the place, emits the arrival burst from `fight.rng`, and spawns the body.
-pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival) -> Boss {
+pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival, tuning: &crate::tuning::Tuning) -> Boss {
     let hunting = !a.arena.contains_world(a.rat);
     // The director's curve freezes at BOSS_TIME; the boss spawns then.
-    let hp = a.kind.hp_pool(a.difficulty);
+    let row = &tuning.bosses.kinds[&a.kind];
+    let scale = if a.difficulty == 0 { row.first_sector_hp_scale } else { row.hp_scale };
+    let hp = row.base_hp * scale
+        * tuning.director.boss_hp_mult_for(a.difficulty, &tuning.bosses.build_level)
+        * tuning.bosses.hp_mult;
     let mut boss = Boss::new(a.kind, a.pos, hp, a.arena, a.dock, hunting);
     boss.id = a.id;
     boss.facing = (a.rat - a.pos).normalized();
@@ -3948,6 +3955,7 @@ pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival) -> Boss {
 #[allow(clippy::too_many_arguments)]
 pub fn boss_spawn_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     mut due: ResMut<BossDue>,
     mut fight: ResMut<BossFight>,
     mut next_enemy_id: ResMut<NextEnemyId>,
@@ -4028,6 +4036,7 @@ pub fn boss_spawn_system(
             id: next_enemy_id.take(),
             seed: level.seed,
         },
+        &tuning,
     );
     let accent = level.palette.accent;
     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
@@ -4653,7 +4662,7 @@ pub fn boss_update_system(
     mut commands: Commands,
     mut fight: ResMut<BossFight>,
     mut counters: ResMut<RunCounters>,
-    tick: Res<TickInput>,
+    (tick, tuning): (Res<TickInput>, Res<crate::tuning::RunTuning>),
     mut level: ResMut<Level>,
     mut player: ResMut<Player>,
     flow: Res<FlowField>,
@@ -4789,7 +4798,7 @@ pub fn boss_update_system(
                     // clear, so it cannot be lost on the floor.
                     counters.gold = counters
                         .gold
-                        .saturating_add(crate::game::shop::BOSS_GOLD);
+                        .saturating_add(crate::game::shop::scaled(tuning.loot.boss_gold, tuning.loot.gold_value_mult));
                     sfx.0.push(Sfx::Gold);
                 }
                 if out.trace.on {
@@ -5035,10 +5044,12 @@ pub fn boss_update_system(
         // slipper passes overhead), and only when the state deals contact
         // damage at all (`contact_damage == 0` is the art's "blades stopped" /
         // "safe pocket" state).
-        if !boss.is_airborne() && boss.contact_cd <= 0.0 && boss.contact_damage > 0.0 {
+        let contact = boss.contact_damage * tuning.bosses.contact_damage_mult
+            * tuning.bosses.kinds[&boss.kind].contact_damage_mult;
+        if !boss.is_airborne() && boss.contact_cd <= 0.0 && contact > 0.0 {
             let shapes = boss.hit_shapes();
             if shapes.circle_hits_grounded(player.pos, player.buffs.hurt_radius())
-                && player.take_damage(boss.contact_damage) {
+                && player.take_damage(contact) {
                     boss.contact_cd = if boss.kind == BossKind::Lantern {
                         art_boss_lantern::CONTACT_INTERVAL
                     } else {

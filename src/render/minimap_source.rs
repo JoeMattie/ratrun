@@ -298,8 +298,8 @@ impl MinimapFrame {
         let hud_compass_active = world.boss_offset().is_some()
             || (!world.director.boss_spawned
                 && world.elapsed
-                    >= crate::game::director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS
-                && world.elapsed < crate::game::director::BOSS_TIME);
+                    >= world.tuning().director.boss_time - crate::render::overlay::BOSS_WARNING_SECS
+                && world.elapsed < world.tuning().director.boss_time);
         MinimapView {
             player_cell: (
                 world.player.pos.x / TILE_F,

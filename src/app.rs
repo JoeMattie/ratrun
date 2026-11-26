@@ -668,6 +668,7 @@ pub struct App {
     /// Set the first time any state-changing console command runs in this run.
     /// A flagged run saves no high score, campaign record, or library counter.
     pub console_cheat: bool,
+    pub(crate) tuning: crate::tuning::RunTuning,
     /// Console `pause on`: the game stays paused even with the console closed.
     pub console_paused: bool,
     /// Console `timescale x`: a multiplier on the simulation dt (clamped
@@ -843,6 +844,7 @@ impl App {
             reset_armed: false,
             console: crate::console::Console::new(),
             console_cheat: false,
+            tuning: crate::tuning::RunTuning::default(),
             console_paused: false,
             timescale: 1.0,
             perf_on: false,
@@ -1201,7 +1203,7 @@ impl App {
         self.keep_selected.clear();
         self.keep_splices.clear();
         self.victory_loadout.clear();
-        let Some(world) = self.campaign.as_ref().map(|c| c.world()) else {
+        let Some(world) = self.campaign.as_ref().map(|c| World::from_campaign_tuned(c, self.tuning.clone())) else {
             return;
         };
         self.enter_world(world, via_story);
@@ -1247,12 +1249,13 @@ impl App {
             Some(testbed) => Loadout::new(testbed.weapon),
             None => Loadout::with_modifiers(Loadout::START_WEAPON, self.run_modifiers()),
         };
-        let mut world = World::new_level_with_theme(
+        let mut world = World::new_level_tuned(
             level,
             theme,
             seed,
             loadout,
             campaign::CampaignTotals::default(),
+            self.tuning.clone(),
         );
         // No carried build: play this sector's map and boss on the first
         // level's difficulty curve instead of the campaign's late-run one.
@@ -1343,7 +1346,7 @@ impl App {
         self.hud.reset();
         // Entering a floor is discovering it, and it resets the per-floor
         // discovery marks (the library's "seen" counts floors, not frames).
-        if self.testbed.is_none() {
+        if self.testbed.is_none() && !self.tuning.changed {
             self.scores.library.begin_floor();
             self.scores.library.mark_seen(LibraryKey::Floor(theme));
         }
@@ -1398,7 +1401,7 @@ impl App {
                 apex: self.apex_kills.min(u32::from(u8::MAX)) as u8,
                 won: self.run_won(w),
                 practice: self.practice.is_some(),
-                console_used: self.console_cheat,
+                console_used: self.console_cheat || self.tuning.changed,
             },
             None => return,
         };
@@ -1410,7 +1413,7 @@ impl App {
         if !self.slot_caps_pinned {
             self.slot_caps = meta::RunModifiers::from_profile(&self.scores.meta).caps;
         }
-        if self.persist {
+        if self.persist && !self.tuning.changed {
             self.scores.save();
         }
     }
@@ -2001,7 +2004,7 @@ impl App {
         let world = self
             .campaign
             .as_ref()
-            .map(|c| c.world())
+            .map(|c| World::from_campaign_tuned(c, self.tuning.clone()))
             .ok_or_else(|| "campaign could not start".to_string())?;
         self.enter_world(world, false);
         // A console-chosen stage or route is not an earned one: that run stays
@@ -3561,7 +3564,7 @@ impl App {
                     self.heals_picked += 1;
                 }
                 // Collecting a find catalogues it (never on a CONSOLE USED run).
-                if !self.console_cheat {
+                if !self.console_cheat && !self.tuning.changed {
                     self.scores.library.note_collected(pk);
                 }
             }
@@ -3575,7 +3578,7 @@ impl App {
                 // Every apex kill pays the nest a bonus (see `meta::APEX_BONUS`).
                 self.apex_kills = self.apex_kills.saturating_add(1);
                 // The Library's KILLED counter for the boss itself.
-                if let (Some(kind), false) = (boss_before, self.console_cheat) {
+                if let (Some(kind), false) = (boss_before, self.console_cheat || self.tuning.changed) {
                     self.scores.library.bump(
                         LibraryKey::Boss(kind),
                         library_index::Counter::Killed,
@@ -3598,7 +3601,7 @@ impl App {
                 // The Library's KILLED counter for the named miniboss (the
                 // survey only sees its `Brute` body).
                 let kind = miniboss_before.and_then(miniboss_kind_named);
-                if let (Some(kind), false) = (kind, self.console_cheat) {
+                if let (Some(kind), false) = (kind, self.console_cheat || self.tuning.changed) {
                     self.scores.library.bump(
                         LibraryKey::Miniboss(kind),
                         library_index::Counter::Killed,
@@ -3656,7 +3659,7 @@ impl App {
         // that has met everything costs a handful of bitset tests.
         // A CONSOLE USED run discovers and counts nothing: a spawned boss is
         // not a sighting.
-        if !self.console_cheat {
+        if !self.console_cheat && !self.tuning.changed {
             if let Some(w) = self.world.as_ref() {
                 let _p = crate::prof::scope(crate::prof::Stage::Survey);
                 self.scores.library.survey(w);
@@ -3667,7 +3670,7 @@ impl App {
         if ended {
             // Book the loss against the nearest body (the simulation keeps no
             // damage source; the card says so).
-            if !self.console_cheat {
+            if !self.console_cheat && !self.tuning.changed {
                 if let Some(w) = self.world.as_ref() {
                     // KILLED YOU: a death in a boss fight is the boss's, and a
                     // death beside a named miniboss is the miniboss's; anything
@@ -3736,14 +3739,14 @@ impl App {
                 // rat up; the loadout cannot see current HP, so the heal is
                 // applied here (`design §7`).
                 ChestReward::Gold(_) => {
-                    let heal = crate::game::loadout::CHEST_HEAL_FRAC * w.player.max_hp();
+                    let heal = w.tuning().loot.chest_heal_fraction * w.player.max_hp();
                     w.player.heal(heal);
                     self.sfx(Sfx::CacheOpen);
                 }
                 // An evolution gets its own fanfare (`Sfx::Evolve`), and the
                 // chest is where the player meets it.
                 ChestReward::Evolve { kind, .. } => {
-                    if !self.console_cheat {
+                    if !self.console_cheat && !self.tuning.changed {
                         self.scores.library.mark_seen(LibraryKey::Evolution(kind));
                     }
                     self.sfx(Sfx::Evolve);
@@ -3978,7 +3981,7 @@ impl App {
             // A CONSOLE USED run never banks a durable campaign record: the
             // cheats make the sector clear meaningless. The in-memory record
             // above still feeds the card and the victory breakdown.
-            if !self.console_cheat {
+            if !self.console_cheat && !self.tuning.changed {
                 self.scores.record_level(level, record.score, record.time);
             }
         }
@@ -3986,7 +3989,7 @@ impl App {
         // stage two) keep separate records, and the ride gets its own instead of
         // clobbering the final campaign sector's.
         // (A CONSOLE USED run records nothing durable.)
-        if !self.console_cheat {
+        if !self.console_cheat && !self.tuning.changed {
             self.scores.record_floor(theme, record.score, record.time);
         }
         // One card per owned weapon and per passive; counted without building
@@ -3995,7 +3998,7 @@ impl App {
         if campaign_won {
             self.victory_loadout = entries_for(&w.keepables());
         }
-        if self.persist && !self.console_cheat {
+        if self.persist && !self.console_cheat && !self.tuning.changed {
             // The clear (and the unlock it grants) is durable even if the
             // player quits right after it.
             self.scores.save();
@@ -4274,7 +4277,7 @@ impl App {
                 camp.choose_route(route);
             }
             if camp.complete_level(w, &chosen).is_ok() {
-                next = Some(camp.world());
+                next = Some(World::from_campaign_tuned(camp, self.tuning.clone()));
             }
         }
         match next {
@@ -4349,7 +4352,7 @@ impl App {
             self.levelup_choices = choices;
             for i in 0..self.levelup_choices.len() {
                 let up = self.levelup_choices[i].clone();
-                if !self.console_cheat {
+                if !self.console_cheat && !self.tuning.changed {
                     self.scores.library.note_offered(&up);
                 }
             }
@@ -4453,13 +4456,13 @@ impl App {
         let heal = w.player.loadout.apply(&up);
         w.player.heal(heal);
         // Never on a CONSOLE USED run, like every other Library counter.
-        if let (Some(key), false) = (taken, self.console_cheat) {
+        if let (Some(key), false) = (taken, self.console_cheat || self.tuning.changed) {
             self.scores
                 .library
                 .bump(key, library_index::Counter::Picked, 1);
         }
         if matches!(up, Upgrade::Purse) {
-            w.gold = w.gold.saturating_add(crate::game::loadout::PURSE_GOLD);
+            w.gold = w.gold.saturating_add(w.player.loadout.purse_gold());
         }
         w.pending_levelups = w.pending_levelups.saturating_sub(1);
         Some((label, icon))
@@ -4826,6 +4829,7 @@ impl App {
             // The nest's banking tally, already computed by `finalize`.
             nest: self.bank_tally,
             console_used: self.console_cheat,
+            tuned: self.tuning.changed,
         }
     }
 
@@ -4853,7 +4857,7 @@ impl App {
             // A CONSOLE USED run never reaches the score table or the campaign
             // records: the cheats make the score meaningless. The summary still
             // shows the numbers, labelled as tainted.
-            if self.console_cheat {
+            if self.console_cheat || self.tuning.changed {
                 self.new_best = false;
             } else {
                 // "New high score" means it beat the table's best, computed
@@ -4870,7 +4874,7 @@ impl App {
                     campaign_won,
                 });
             }
-            if self.persist && !self.console_cheat {
+            if self.persist && !self.console_cheat && !self.tuning.changed {
                 self.scores.save();
             }
         }
@@ -5679,6 +5683,12 @@ impl App {
             };
             self.hits.add(rect, target);
         }
+        if self.tuning.changed && area.width >= 7 && area.height > 0 {
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(" TUNED ").style(Style::default().fg(NEST_GOLD)),
+                Rect::new(area.right() - 7, area.y, 7, 1),
+            );
+        }
         // The haul and a way to spend it: the campaign plate is the art's own
         // fixed layout, so the nest strip is stamped on the screen's last row.
         if let Some(tally) = self.bank_tally {
@@ -5785,8 +5795,8 @@ impl App {
             hud::draw_bottom(frame, bottom, w, &mut self.hud);
             // Persistent CONSOLE USED tag in the top rail's right corner.
             let mut tag_right = top.right();
-            if self.console_cheat {
-                let label = " CONSOLE USED ";
+            if self.console_cheat || self.tuning.changed {
+                let label = if self.tuning.changed { " TUNED " } else { " CONSOLE USED " };
                 let lw = label.len() as u16;
                 if top.width > lw {
                     let bx = top.right().saturating_sub(lw);
@@ -7545,6 +7555,25 @@ mod tests {
         let w = h.app.world.as_ref().unwrap();
         assert_eq!(w.player.dash_active, 0.0);
         assert!(!w.player.dash_charging);
+    }
+
+    #[test]
+    fn a_tuned_run_uses_live_stats_and_voids_progress() {
+        let mut h = Harness::new(90, 32);
+        h.app.tuning = crate::tuning::RunTuning::new(
+            crate::tuning::Tuning::parse("[player]\nmax_hp = 88.0").unwrap(),
+        );
+        h.enter_playing();
+        let world = h.app.world.as_mut().unwrap();
+        assert_eq!(world.player.max_hp(), 88.0);
+        assert!(!h.app.scores.library.is_seen(LibraryKey::Floor(Theme::Sewer)));
+        world.gold = 130;
+        world.player.hp = -1.0;
+        h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        assert!(h.app.bank_tally.is_some_and(|tally| tally.voided && tally.banked == 0));
+        assert!(h.app.scores.entries.is_empty());
+        assert!(h.app.last_summary.as_ref().is_some_and(|s| s.tuned && !s.console_used));
     }
 
     /// A CONSOLE USED run banks nothing and enters no score, whether it ends

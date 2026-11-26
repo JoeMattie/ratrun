@@ -665,7 +665,7 @@ fn can_tick(
                     } else {
                         direct
                     };
-                    let speed = e.kind.speed() * e.speed_scale * e.slow_mult * speed_mult;
+                    let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
                     let before = e.pos;
                     e.pos += dir * (speed * dt);
                     e.vel = dir * speed;

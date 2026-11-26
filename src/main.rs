@@ -29,6 +29,7 @@ mod term;
 mod titleart;
 
 mod game;
+mod tuning;
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,13 +92,14 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<()> {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(tuning) = tuning::cli(&mut args)? else { return Ok(()) };
     // Headless self-playing batch mode (`--bot-batch N`, worker A).
-    if let Some(code) = autoplay::batch::maybe_run_cli() {
+    if let Some(code) = autoplay::batch::maybe_run_cli(&args, &tuning) {
         std::process::exit(code);
     }
     // Parse before touching the terminal, so a bad flag is a plain error
     // message rather than a screen that flickers into raw mode first.
-    let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Resolve what this terminal can be trusted with before anything is drawn:
     // colour depth, glyph set and multiplexer. `--caps` prints the answer and
@@ -183,8 +185,8 @@ fn main() -> Result<()> {
     match ai {
         // `ratrun --ai [N]`: the self-playing wall. No `AudioEngine` is ever
         // constructed on this path (spectate.rs has no audio code at all).
-        Some(opts) => spectate::run(&mut terminal, keys.kitty, opts),
-        None => run(&mut terminal, keys, testbed),
+        Some(opts) => spectate::run(&mut terminal, keys.kitty, opts, tuning.run),
+        None => run(&mut terminal, keys, testbed, tuning.run),
     }
 }
 
@@ -603,9 +605,11 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<FrameOut>>,
     keys: KeyboardMode,
     testbed: Option<game::level::Theme>,
+    tuning: tuning::RunTuning,
 ) -> Result<()> {
     let audio = audio::AudioEngine::new();
     let mut app = App::new(keys.kitty, audio);
+    app.tuning = tuning;
     app.set_lone_ctrl(keys.lone_ctrl);
     if let Some(theme) = testbed {
         app.start_testbed(theme);

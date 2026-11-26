@@ -900,6 +900,10 @@ pub struct AutoRun {
 impl AutoRun {
     /// A fresh, seeded run.
     pub fn new(run_seed: u64, opts: AutoOpts) -> AutoRun {
+        Self::with_tuning(run_seed, opts, crate::tuning::RunTuning::default())
+    }
+
+    pub fn with_tuning(run_seed: u64, opts: AutoOpts, tuning: crate::tuning::RunTuning) -> AutoRun {
         // Every campaign level is a level index now, the ride included, so the
         // clamp is the campaign's own length (there is no "practice sector"
         // one past it any more).
@@ -930,23 +934,17 @@ impl AutoRun {
             if let Some(theme) = route {
                 let _ = state.route.choose(campaign::theme_sector(theme), theme);
             }
-            let world = state.world();
+            let world = World::from_campaign_tuned(&state, tuning);
             (Some(state), world)
         } else {
             // A practice run: the picked floor alone (the ride is a campaign
             // level now, so its theme comes from `level_theme` when no route
             // was named).
             let seed = campaign::level_seed(run_seed, start_level);
-            let world = match route {
-                Some(theme) => World::new_level_with_theme(
-                    start_level,
-                    theme,
-                    seed,
-                    start_loadout,
-                    campaign::CampaignTotals::default(),
-                ),
-                None => World::new_level(start_level, seed, start_loadout),
-            };
+            let world = World::new_level_tuned(
+                start_level, route.unwrap_or_else(|| campaign::level_theme(start_level)),
+                seed, start_loadout, campaign::CampaignTotals::default(), tuning,
+            );
             // A practice run on the bare starting loadout plays the first
             // level's curve, exactly as the App's practice floors do
             // (`App::start_practice`): the later rows assume a carried build.
@@ -1198,11 +1196,10 @@ impl AutoRun {
         // The wallet belongs to the caller, not the loadout: without this a
         // Purse card was a wasted level-up for the bot.
         if matches!(choices[pick], crate::game::loadout::Upgrade::Purse) {
-            self.world.gold = self
-                .world
-                .gold
-                .saturating_add(crate::game::loadout::PURSE_GOLD);
-            self.level_stats().gold_purse += crate::game::loadout::PURSE_GOLD;
+            let gold = self.world.player.loadout.purse_gold();
+            self.world.gold = self.world.gold.saturating_add(gold);
+            let stats = self.level_stats();
+            stats.gold_purse = stats.gold_purse.saturating_add(gold);
         }
         self.level_stats().upgrades.push(title);
     }
@@ -1249,7 +1246,10 @@ impl AutoRun {
                         .as_ref()
                         .map(|c| c.totals)
                         .unwrap_or_default();
-                    let mut world = World::new_level(next, seed, loadout);
+                    let mut world = World::new_level_tuned(
+                        next, campaign::level_theme(next), seed, loadout, campaign::CampaignTotals::default(),
+                        self.world.tuning().clone(),
+                    );
                     if let Some(theme) = theme {
                         world.level.theme = theme;
                     }
@@ -1371,8 +1371,7 @@ impl AutoRun {
         let near = self.near_enemy;
         let kills = self.world.kills;
         let player_level = self.world.player.level;
-        let xp_total = crate::game::player::xp_to_reach(player_level)
-            .saturating_add(self.world.player.xp);
+        let xp_total = self.world.player.total_xp();
         let hp_frac = (self.world.player.hp / self.world.player.max_hp().max(1.0))
             .clamp(0.0, 1.0);
         let pos = self
@@ -2251,13 +2250,15 @@ fn open_directions(w: &World) -> usize {
 /// times its projectile count over its cooldown, with the passive multipliers.
 /// Comparable across runs because it ignores aiming and misses.
 pub fn analytic_dps(lo: &Loadout) -> f32 {
-    let mut dps = 0.0;
-    for weapon in &lo.weapons {
-        let cooldown = weapon.cooldown().max(0.05);
-        let shots = weapon.level_projectiles().max(1) as f32;
-        dps += weapon.damage() * shots / cooldown;
-    }
+    let dps = lo.weapons.iter().fold(0.0, |dps, weapon| dps + weapon_dps(lo, weapon));
     dps * lo.stats.damage_mult * lo.stats.fire_rate_mult
+        * lo.tuning.as_ref().map_or(1.0, |t| t.weapons.damage_mult)
+}
+
+fn weapon_dps(lo: &Loadout, weapon: &crate::game::weapon::Weapon) -> f32 {
+    let cooldown = (weapon.cooldown() * lo.weapon_cooldown_mult(weapon.kind)).max(0.05);
+    let shots = weapon.level_projectiles().max(1) as f32;
+    weapon.damage() * lo.weapon_damage_mult(weapon.kind) * shots / cooldown
 }
 
 /// Add this tick's boss damage to `stats.boss_dealt`, split by weapon.
@@ -2319,9 +2320,7 @@ fn boss_weapon_split(lo: &Loadout, a: WeaponKind, b: WeaponKind) -> [f32; 2] {
         lo.weapons
             .iter()
             .filter(|w| w.kind == kind)
-            .map(|w| {
-                w.damage() * w.level_projectiles().max(1) as f32 / w.cooldown().max(0.05)
-            })
+            .map(|weapon| weapon_dps(lo, weapon))
             .sum::<f32>()
             * lo.stats.damage_mult
             * lo.stats.fire_rate_mult

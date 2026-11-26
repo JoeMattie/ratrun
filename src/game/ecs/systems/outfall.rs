@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::collision::{cell_of, SizeClass, TileMap};
-use crate::game::director::{self, Director};
+use crate::game::director::Director;
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
     BossDue, DashTrack, DebugFlags, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, SfxQueue,
@@ -35,6 +35,7 @@ const RECOVERY_CELLS: i32 = 7;
 #[allow(clippy::too_many_arguments)]
 pub fn outfall_motion_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     mut level: ResMut<Level>,
     counters: Res<RunCounters>,
     input: Res<TickInput>,
@@ -147,8 +148,8 @@ pub fn outfall_motion_system(
                     lure_landing_clear(&level, trap.pos, at)
                         && at.dist_sq(player.pos) > clear_rat * clear_rat
                 }) {
-                    let hp = director::horde_hp_mult_for(difficulty.0, elapsed);
-                    let mods = director::enemy_mods_for(difficulty.0, elapsed);
+                    let hp = tuning.director.horde_hp_mult_for(difficulty.0, elapsed);
+                    let mods = tuning.director.enemy_mods_for(difficulty.0, elapsed);
                     let mut enemy = Enemy::spawn_with_phases(kind, at, hp, 1.5, 0.0, 0.0);
                     enemy.damage = kind.damage() * mods.damage;
                     enemy.speed_scale = mods.speed;

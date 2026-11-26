@@ -1096,7 +1096,7 @@ pub fn draw_pause_compact(
         let elapsed = world.elapsed as u32;
         format!("TESTBED · {:02}:{:02}", elapsed / 60, elapsed % 60)
     } else if world.boss_time_reached() {
-        let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
+        let fought = (world.elapsed - world.tuning().director.boss_time).max(0.0) as u32;
         format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
     } else {
         let rem = world.time_left().max(0.0) as u32;
@@ -1105,7 +1105,7 @@ pub fn draw_pause_compact(
             rem / 60,
             rem % 60,
             world.player.level,
-            crate::game::player::level_damage_percent(world.player.level)
+            world.player.level_damage_percent()
         )
     };
     center(f, r, 1, label(&clock_text, COAT));
@@ -1850,6 +1850,7 @@ pub struct RunSummary {
     pub nest: Option<crate::meta::BankTally>,
     /// The run used the admin console (no score or record was saved).
     pub console_used: bool,
+    pub tuned: bool,
 }
 
 /// `SECTOR 2/3`, plus a `PRACTICE` marker for single-sector runs.
@@ -2144,7 +2145,7 @@ pub fn draw_pause_with_run(
         let elapsed = world.elapsed as u32;
         format!("TESTBED · {:02}:{:02}", elapsed / 60, elapsed % 60)
     } else if world.boss_time_reached() {
-        let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
+        let fought = (world.elapsed - world.tuning().director.boss_time).max(0.0) as u32;
         format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
     } else {
         let rem = world.time_left().max(0.0) as u32;
@@ -2422,7 +2423,7 @@ pub fn draw_pause_with_run(
         // level's own share so the player can see what a level is worth.
         ("Damage", {
             let total = (world.player.damage_mult() * 100.0).round() as u32;
-            let level = crate::game::player::level_damage_percent(world.player.level);
+            let level = world.player.level_damage_percent();
             let long = format!("{total}% · Lv +{level}%");
             if long.chars().count() as u16 + 10 < right_w {
                 long
@@ -2636,10 +2637,10 @@ pub fn draw_end_summary(
             heavy(PLATE).bg(TRAIL_GOLD),
         ));
     }
-    if summary.console_used {
+    if summary.console_used || summary.tuned {
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
-            " CONSOLE USED ",
+            if summary.tuned { " TUNED " } else { " CONSOLE USED " },
             heavy(PLATE).bg(Color::Rgb(255, 120, 120)),
         ));
     }
@@ -3136,6 +3137,7 @@ mod tests {
             sector: 1,
             practice,
             console_used: tally.voided,
+            tuned: false,
             nest: Some(tally),
         }
     }
@@ -3543,6 +3545,7 @@ mod tests {
                 total: 900,
             }),
             console_used: false,
+            tuned: false,
         };
         let mut scores = ScoreTable::default();
         scores.insert(ScoreEntry {

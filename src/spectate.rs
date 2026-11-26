@@ -1012,6 +1012,10 @@ pub struct LiveWall {
 impl LiveWall {
     /// Start `games` workers, one `AutoRun` each.
     pub fn spawn(games: usize, opts: &AiOpts, base_seed: u64) -> LiveWall {
+        Self::spawn_with_tuning(games, opts, base_seed, crate::tuning::RunTuning::default())
+    }
+
+    fn spawn_with_tuning(games: usize, opts: &AiOpts, base_seed: u64, tuning: crate::tuning::RunTuning) -> LiveWall {
         let games = games.clamp(1, MAX_GAMES);
         let auto_opts = opts.auto_opts();
         let once = opts.once;
@@ -1022,9 +1026,10 @@ impl LiveWall {
             let base = tile_base(base_seed, i);
             let worker = {
                 let shared = Arc::clone(&shared);
+                let tuning = tuning.clone();
                 std::thread::Builder::new()
                     .name(format!("ratrun-ai-{i}"))
-                    .spawn(move || worker_loop(i, base, auto_opts, once, shared, tx))
+                    .spawn(move || worker_loop(i, base, auto_opts, once, shared, tx, tuning))
             };
             match worker {
                 Ok(handle) => workers.push(Worker {
@@ -1139,6 +1144,7 @@ fn worker_loop(
     once: bool,
     shared: Arc<WorkerShared>,
     tx: SyncSender<TileFrame>,
+    tuning: crate::tuning::RunTuning,
 ) {
     let mut run_index = 0u64;
     let mut seed = tile_seed(base, run_index);
@@ -1167,7 +1173,7 @@ fn worker_loop(
 
         // Build the run (the first thing that can fail: level generation).
         if run.is_none() && failure.is_none() {
-            match contained(|| AutoRun::new(seed, auto_opts)) {
+            match contained(|| AutoRun::with_tuning(seed, auto_opts, tuning.clone())) {
                 Ok(active) => {
                     run = Some(active);
                     acc = 0.0;
@@ -1528,10 +1534,11 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<crate::present::FrameOut>>,
     kitty: bool,
     opts: AiOpts,
+    tuning: crate::tuning::RunTuning,
 ) -> Result<()> {
     let games = opts.games.clamp(1, MAX_GAMES);
     let base_seed = opts.seed.unwrap_or_else(entropy_seed);
-    let mut wall = LiveWall::spawn(games, &opts, base_seed);
+    let mut wall = LiveWall::spawn_with_tuning(games, &opts, base_seed, tuning);
     // Same reader thread as normal play: dropping the guard stops and joins it
     // before the terminal is restored.
     let (_input_thread, rx) = crate::InputThread::spawn();
