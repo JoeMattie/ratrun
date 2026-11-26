@@ -1143,7 +1143,7 @@ pub fn coil_block_system(
             .tiles
             .circle_clear(want, PLAYER_RADIUS, SizeClass::Small)
         {
-            player.pos = want;
+            player.pos = player.clip_giant_displacement(player.pos, want, &level.tiles);
         }
     }
 }
@@ -1314,6 +1314,7 @@ mod tests {
             player_pos: w.player.pos,
             player_vel: Vec2::ZERO,
             player_radius: PLAYER_RADIUS,
+            player_hurt_radius: PLAYER_RADIUS,
             arena: arena_rect(w),
             level: &w.level,
             flow: &w.flow,

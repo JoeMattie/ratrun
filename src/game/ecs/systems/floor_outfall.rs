@@ -379,7 +379,7 @@ fn resolve_attack(e: &mut Enemy, level: &Level, player: &mut Player, sfx: &mut S
             if e.stun > 0.0 || !level.wet_at(e.pos) || !lane_clear(e, level, start, dir) {
                 cancel_attack(e);
             } else {
-                if attack_shape(e, start, dir).contains(player.pos, PLAYER_RADIUS) {
+                if attack_shape(e, start, dir).contains(player.pos, PLAYER_RADIUS + player.buffs.giant_hit_padding()) {
                     damage_rat(e, player, SKATER_SPLASH_DAMAGE, sfx);
                 }
                 e.outfall.attack = OutfallAttack::Splash { start, dir, spent: true };
@@ -391,7 +391,7 @@ fn resolve_attack(e: &mut Enemy, level: &Level, player: &mut Player, sfx: &mut S
                 cancel_attack(e);
                 return;
             }
-            if !hit && lunge_segment(e.radius, previous, e.pos).contains(player.pos, PLAYER_RADIUS) {
+            if !hit && lunge_segment(e.radius, previous, e.pos).contains(player.pos, PLAYER_RADIUS + player.buffs.giant_hit_padding()) {
                 damage_rat(e, player, LAMPFISH_LUNGE_DAMAGE, sfx);
                 hit = true;
             }

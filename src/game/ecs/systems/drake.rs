@@ -475,7 +475,7 @@ fn drake_tick(
                 probe.t = PECK_BACK_SECS;
                 let tip = art_duck::bill_tip(&drake_view(e, &probe));
                 sfx.0.push(Sfx::Peck);
-                if rat_alive && tip.dist(rat) <= PECK_HIT_RADIUS {
+                if rat_alive && tip.dist(rat) <= PECK_HIT_RADIUS + player.buffs.giant_hit_padding() {
                     // The level's horde damage scaling, as every other enemy
                     // attack carries it (`EnemyMods::damage`, baked in at
                     // spawn); then the ordinary player damage path (i-frames,

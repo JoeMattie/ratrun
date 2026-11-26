@@ -55,7 +55,7 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::collision::SizeClass;
-use crate::game::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
+use crate::game::ecs::constants::PLAYER_SUBSTEP;
 use crate::game::ecs::resources::{DashTrack, DebugFlags, RngRes, Shake, SfxQueue, TickInput};
 use crate::game::level::Level;
 use crate::game::particle::{vfx, Particles};
@@ -329,8 +329,8 @@ pub fn player_system(
     let steps = ((delta.len() / PLAYER_SUBSTEP).ceil() as i32).clamp(1, 64);
     let step = delta * (1.0 / steps as f32);
     let arena = level.arena;
-    let lo = Vec2::splat(PLAYER_RADIUS);
-    let hi = Vec2::new(arena.x - PLAYER_RADIUS, arena.y - PLAYER_RADIUS);
+    let giant = player.buffs.is_giant();
+    let (mut radius, mut class) = player.movement_body(&level.tiles);
     // `DashTrack::segs` is *this tick's* legs. Start it empty every tick: a
     // live dash tick does not clear it in `record`, so without this the legs of
     // every earlier tick of the same dash piled up (the weapon re-tested the
@@ -342,6 +342,13 @@ pub fn player_system(
         // really happened (a sub-step a wall pushes back on is no movement and
         // no leg).
         let leg_from = player.pos;
+        // While leaving an occupied hole, check each leg so a dash can grow
+        // clear of this opening without keeping its permission for the next.
+        if giant && class == SizeClass::Small {
+            (radius, class) = player.movement_body(&level.tiles);
+        }
+        let lo = Vec2::splat(radius);
+        let hi = Vec2::new(arena.x - radius, arena.y - radius);
         player.pos += step;
         player.pos = player.pos.clamp_box(lo, hi);
         // One tile-grid query per sub-step: the cells around the rat, never
@@ -350,9 +357,11 @@ pub fn player_system(
         // every enemy passes `None`.
         let vel = player.vel;
         if !debug.noclip {
-            player.pos = level
-                .tiles
-                .resolve_circle(player.pos, PLAYER_RADIUS, SizeClass::Small, Some(vel));
+            player.pos = if giant && class == SizeClass::Large {
+                level.tiles.resolve_circle_step(leg_from, player.pos, radius, class)
+            } else {
+                level.tiles.resolve_circle(player.pos, radius, class, Some(vel))
+            };
         }
         if dashing {
             dash_track.push_leg(leg_from, player.pos);

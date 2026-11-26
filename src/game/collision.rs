@@ -165,7 +165,7 @@ pub fn cell_of(p: Vec2) -> (i32, i32) {
 /// Brute (6.5) and every boss (14.0) are large and must route around.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SizeClass {
-    /// Fits a rat-hole. Also the player's class.
+    /// Fits a rat-hole. Also the player's ordinary class.
     Small,
     /// Does not fit a rat-hole.
     Large,
@@ -602,6 +602,30 @@ impl TileMap {
         class: SizeClass,
         player_vel: Option<Vec2>,
     ) -> Vec2 {
+        self.resolve_circle_at(pos, radius, class, player_vel)
+            .unwrap_or_else(|| self.resolve_buried(pos, radius, class, player_vel))
+    }
+
+    /// Slide a legal body during one short movement step. If opposing faces
+    /// leave no clear local result, keep the start of the step.
+    pub fn resolve_circle_step(
+        &self,
+        from: Vec2,
+        to: Vec2,
+        radius: f32,
+        class: SizeClass,
+    ) -> Vec2 {
+        self.resolve_circle_at(to, radius, class, None)
+            .unwrap_or(from)
+    }
+
+    fn resolve_circle_at(
+        &self,
+        pos: Vec2,
+        radius: f32,
+        class: SizeClass,
+        player_vel: Option<Vec2>,
+    ) -> Option<Vec2> {
         let m = radius + TILE_F;
         let area = Rectf::new(pos.x - m, pos.y - m, 2.0 * m, 2.0 * m);
         let mut p = pos;
@@ -622,13 +646,7 @@ impl TileMap {
         // No push means no collider in the window overlapped the circle (a
         // wall merely being nearby costs nothing), so only a circle that was
         // actually pushed needs the clearance re-check and the ejection.
-        if !pushed || self.circle_clear_with(p, radius, class, player_vel) {
-            return p;
-        }
-        // Centre the ejection search on the cell the circle *came from*: the
-        // per-collider pushes above may have dragged it a cell deeper into the
-        // block, and the nearest open floor is defined from where it was.
-        self.resolve_buried(pos, radius, class, player_vel)
+        (!pushed || self.circle_clear_with(p, radius, class, player_vel)).then_some(p)
     }
 
     /// Nearest passable cell centre to `p` (bounded search); used by spawn and

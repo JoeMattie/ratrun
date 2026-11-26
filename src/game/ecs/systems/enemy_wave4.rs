@@ -565,7 +565,7 @@ pub fn wave4_system(
             if e.w4.role == LILLI_ROLE_ROPE
                 && e.w4.phase == LILLI_PHASE_ACTION
                 && e.pos.dist_sq(player.pos)
-                    <= (ROPE_REACH + PLAYER_RADIUS) * (ROPE_REACH + PLAYER_RADIUS)
+                    <= (ROPE_REACH + PLAYER_RADIUS + player.buffs.giant_hit_padding()) * (ROPE_REACH + PLAYER_RADIUS + player.buffs.giant_hit_padding())
             {
                 tied += 1;
                 knot += e.pos;
@@ -577,11 +577,12 @@ pub fn wave4_system(
             knot = knot * (1.0 / tied as f32);
             player.vel = Vec2::ZERO;
             let drag = (knot - player.pos) * ROPE_DRAG;
-            player.pos += drag;
-            let class = SizeClass::Small;
-            player.pos = level
-                .tiles
-                .resolve_circle(player.pos, PLAYER_RADIUS, class, None);
+            let from = player.pos;
+            player.pos = if player.buffs.is_giant() {
+                player.clip_giant_displacement(from, from + drag, &level.tiles)
+            } else {
+                level.tiles.resolve_circle(from + drag, PLAYER_RADIUS, SizeClass::Small, None)
+            };
             sfx.0.push(Sfx::TrapGlueGrab);
         }
     }
@@ -835,7 +836,7 @@ fn snake_tick(
             } else {
                 perp
             };
-            player.pos = seg + n * min;
+            player.pos = player.clip_giant_displacement(player.pos, seg + n * min, &level.tiles);
         }
     }
 }

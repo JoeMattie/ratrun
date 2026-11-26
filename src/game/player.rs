@@ -3,9 +3,14 @@
 use crate::detmath::DetF64;
 use crate::math::Vec2;
 
+use super::collision::{SizeClass, TileMap};
 use super::ecs::{constants::PLAYER_RADIUS, systems::powerups};
 use super::loadout::Loadout;
 use super::weapon::WeaponKind;
+
+/// Brute clearance. A single 16 px doorway loses 1 px to each jamb, so
+/// a 13 px diameter still leaves 1 px of steering room.
+pub const GIANT_BODY_MAX_RADIUS: f32 = 6.5;
 
 /// Timed pickup effects.
 ///
@@ -85,8 +90,42 @@ impl Buffs {
 
     /// The radius for incoming hit tests. Movement still uses the body radius.
     pub fn hurt_radius(&self) -> f32 {
-        if self.tiny > 0.0 {
+        if let Some(scale) = powerups::giant_draw_scale(self.giant) {
+            PLAYER_RADIUS * scale
+        } else if self.tiny > 0.0 {
             powerups::SHRINK_HURT_RADIUS
+        } else {
+            PLAYER_RADIUS
+        }
+    }
+
+    /// Add growth to a hit test with a fixed baseline clearance.
+    pub fn giant_hit_padding(&self) -> f32 {
+        (self.hurt_radius() - PLAYER_RADIUS).max(0.0)
+    }
+
+    /// Legacy centre-only tests keep their usual footprint outside the serum.
+    pub fn point_hit_radius(&self) -> f32 {
+        if self.is_giant() {
+            self.hurt_radius()
+        } else {
+            0.0
+        }
+    }
+
+    /// Routing uses the giant class for the whole serum, even at either end
+    /// of the size animation.
+    pub fn size_class(&self) -> SizeClass {
+        if self.is_giant() {
+            SizeClass::Large
+        } else {
+            SizeClass::Small
+        }
+    }
+
+    pub fn desired_body_radius(&self) -> f32 {
+        if self.is_giant() {
+            self.hurt_radius().min(GIANT_BODY_MAX_RADIUS)
         } else {
             PLAYER_RADIUS
         }
@@ -298,6 +337,64 @@ pub fn xp_to_reach(level: u32) -> u32 {
 }
 
 impl Player {
+    /// Hold growth at the widest circle supported by the current position.
+    /// A rat already straddling a hole or gate can leave with ordinary
+    /// clearance. The large class takes over once its minimum body fits.
+    pub fn movement_body(&self, tiles: &TileMap) -> (f32, SizeClass) {
+        self.movement_body_at(self.pos, tiles)
+    }
+
+    fn movement_body_at(&self, pos: Vec2, tiles: &TileMap) -> (f32, SizeClass) {
+        if !self.buffs.is_giant() {
+            return (PLAYER_RADIUS, SizeClass::Small);
+        }
+        let class = SizeClass::Large;
+        let desired = self.buffs.desired_body_radius();
+        if tiles.circle_clear(pos, desired, class) {
+            return (desired, class);
+        }
+        if !tiles.circle_clear(pos, PLAYER_RADIUS, class) {
+            return (PLAYER_RADIUS, SizeClass::Small);
+        }
+        let mut lo = PLAYER_RADIUS;
+        let mut hi = desired;
+        for _ in 0..8 {
+            let mid = (lo + hi) * 0.5;
+            if tiles.circle_clear(pos, mid, class) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo, class)
+    }
+
+    /// Keep a forced movement on the same side of walls and gates as the
+    /// giant's ordinary movement. Callers keep their legacy small-rat motion.
+    pub fn clip_giant_displacement(&self, from: Vec2, to: Vec2, tiles: &TileMap) -> Vec2 {
+        if !self.buffs.is_giant() || from == to {
+            return to;
+        }
+        let delta = to - from;
+        let steps = (delta.len() / super::ecs::constants::PLAYER_SUBSTEP)
+            .ceil()
+            .max(1.0) as i32;
+        let step = delta * (1.0 / steps as f32);
+        let (mut radius, mut class) = self.movement_body_at(from, tiles);
+        let mut pos = from;
+        for _ in 0..steps {
+            if class == SizeClass::Small {
+                (radius, class) = self.movement_body_at(pos, tiles);
+            }
+            let next = pos + step;
+            if !tiles.circle_clear(next, radius, class) {
+                break;
+            }
+            pos = next;
+        }
+        pos
+    }
+
     pub fn new(pos: Vec2, start: WeaponKind) -> Self {
         let loadout = Loadout::new(start);
         Player {

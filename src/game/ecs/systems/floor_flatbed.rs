@@ -385,11 +385,10 @@ pub fn bungee_pull(kind: EnemyKind, hook: Vec2, level: &Level, player: &mut Play
     if kind != EnemyKind::LooseBungee {
         return 0.0;
     }
-    // The rat's own class (`player_system` resolves it as `Small`).
-    let class = SizeClass::Small;
+    let (radius, class) = player.movement_body(&level.tiles);
     let from = player.pos;
     let to = sweep_pull(from, hook, BUNGEE_PULL, |p| {
-        level.trailer.pit_at(p).is_none() && level.tiles.circle_clear(p, PLAYER_RADIUS, class)
+        level.trailer.pit_at(p).is_none() && level.tiles.circle_clear(p, radius, class)
     });
     player.pos = to;
     from.dist(to)

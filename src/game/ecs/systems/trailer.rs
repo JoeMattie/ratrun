@@ -138,7 +138,8 @@ pub fn trailer_system(
 
     // ---- the holes -------------------------------------------------------
     if player.alive() && deck.pit_at(player.pos).is_some() {
-        if let Some(safe) = nearest_plank(&level, player.pos, SizeClass::Small, 0) {
+        let (radius, class) = player.movement_body(&level.tiles);
+        if let Some(safe) = nearest_plank_for_body(&level, player.pos, radius, class, 0) {
             let fell = player.take_damage(FALL_PLAYER_DAMAGE);
             player.pos = safe;
             player.vel = Vec2::ZERO;
@@ -245,13 +246,13 @@ pub fn trailer_system(
             let radius = player.buffs.hurt_radius();
             if d.x.abs() <= slide.half.x + radius && d.y.abs() <= slide.half.y + radius {
                 if player.take_damage(SLIDE_DAMAGE) {
-                    let push = slide.dir * (slide.half.x + PLAYER_RADIUS + 2.0);
-                    player.pos = level.tiles.resolve_circle(
-                        centre + push,
-                        PLAYER_RADIUS,
-                        SizeClass::Small,
-                        None,
-                    );
+                    let (body, class) = player.movement_body(&level.tiles);
+                    let push = slide.dir * (slide.half.x + body + 2.0);
+                    player.pos = if player.buffs.is_giant() {
+                        player.clip_giant_displacement(player.pos, centre + push, &level.tiles)
+                    } else {
+                        level.tiles.resolve_circle(centre + push, body, class, None)
+                    };
                     player.vel = Vec2::ZERO;
                     vfx::emit_player_hurt(&mut particles, &mut rng.0, player.pos);
                     sfx.0.push(Sfx::Hurt);
@@ -428,6 +429,16 @@ pub fn nearest_plank(
     class: SizeClass,
     margin: i32,
 ) -> Option<Vec2> {
+    nearest_plank_for_body(level, from, PLAYER_RADIUS, class, margin)
+}
+
+fn nearest_plank_for_body(
+    level: &Level,
+    from: Vec2,
+    radius: f32,
+    class: SizeClass,
+    margin: i32,
+) -> Option<Vec2> {
     let (cx, cy) = (
         (from.x / crate::game::collision::TILE_F).floor() as i32,
         (from.y / crate::game::collision::TILE_F).floor() as i32,
@@ -449,7 +460,7 @@ pub fn nearest_plank(
                 if level.trailer.pit_at(centre).is_some() {
                     continue;
                 }
-                if !level.tiles.circle_clear(centre, PLAYER_RADIUS, class) {
+                if !level.tiles.circle_clear(centre, radius, class) {
                     continue;
                 }
                 if margin > 0 && near_hole(level, nx, ny, margin) {

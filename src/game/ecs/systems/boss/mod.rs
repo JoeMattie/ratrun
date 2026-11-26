@@ -2632,6 +2632,7 @@ pub struct BossContext<'a> {
     pub player_pos: Vec2,
     pub player_vel: Vec2,
     pub player_radius: f32,
+    pub player_hurt_radius: f32,
     pub arena: TileRect,
     pub level: &'a Level,
     pub flow: &'a FlowField,
@@ -3182,6 +3183,7 @@ pub fn move_boss(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) 
 /// when the player was hit.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_hazards(
+    level: &Level,
     boss: &mut Boss,
     dt: f32,
     player: &mut Player,
@@ -3200,8 +3202,10 @@ pub fn resolve_hazards(
         }
         let radius = if hazard.damage > 0.0 && hazard.player_radius == PLAYER_RADIUS {
             player.buffs.hurt_radius()
+        } else if hazard.player_radius == 0.0 {
+            player.buffs.point_hit_radius()
         } else {
-            hazard.player_radius
+            hazard.player_radius + player.buffs.giant_hit_padding()
         };
         if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, radius) {
             if hazard.damage <= 0.0 {
@@ -3212,6 +3216,7 @@ pub fn resolve_hazards(
                 // Nothing is "hit", so no damage, no i-frames and no hurt vfx
                 // are spent.
                 if hazard.knockback > 0.0 || hazard.drag.len_sq() > 0.0 || hazard.slow > 0.0 {
+                    let from = player.pos;
                     let dir = (player.pos - hazard.shape.center()).normalized();
                     if hazard.knockback > 0.0 {
                         player.pos += dir * hazard.knockback * dt;
@@ -3222,13 +3227,16 @@ pub fn resolve_hazards(
                         // slower, and the rat can always wade back out.
                         player.pos -= player.vel * dt * hazard.slow;
                     }
+                    player.pos = player.clip_giant_displacement(from, player.pos, &level.tiles);
                 }
             } else if player.take_damage(hazard.damage) {
                 player_hit = true;
                 hazard.fired = true;
                 if hazard.knockback > 0.0 {
                     let dir = (player.pos - hazard.shape.center()).normalized();
+                    let from = player.pos;
                     player.pos += dir * hazard.knockback * dt;
+                    player.pos = player.clip_giant_displacement(from, player.pos, &level.tiles);
                 }
                 vfx::emit_player_hurt(particles, rng, player.pos);
                 sfx.0.push(Sfx::Hurt);
@@ -4660,6 +4668,7 @@ pub fn boss_update_system(
                     player_pos: player.pos,
                     player_vel: player.vel,
                     player_radius: PLAYER_RADIUS,
+                    player_hurt_radius: PLAYER_RADIUS + player.buffs.giant_hit_padding(),
                     arena: boss.arena,
                     level: &level,
                     flow: &flow,
@@ -4680,6 +4689,7 @@ pub fn boss_update_system(
             );
             out.cues.clear();
             resolve_hazards(
+                &level,
                 &mut boss,
                 dt,
                 &mut player,
@@ -4866,6 +4876,7 @@ pub fn boss_update_system(
                 player_pos: player.pos,
                 player_vel: player.vel,
                 player_radius: PLAYER_RADIUS,
+                player_hurt_radius: PLAYER_RADIUS + player.buffs.giant_hit_padding(),
                 arena: boss.arena,
                 level: &level,
                 flow: &flow,
@@ -4883,6 +4894,7 @@ pub fn boss_update_system(
                 player_pos: player.pos,
                 player_vel: player.vel,
                 player_radius: PLAYER_RADIUS,
+                player_hurt_radius: PLAYER_RADIUS + player.buffs.giant_hit_padding(),
                 arena: boss.arena,
                 level: &level,
                 flow: &flow,
@@ -4921,6 +4933,7 @@ pub fn boss_update_system(
 
         // Hazards.
         resolve_hazards(
+            &level,
             &mut boss,
             dt,
             &mut player,

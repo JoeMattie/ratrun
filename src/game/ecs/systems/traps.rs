@@ -575,6 +575,27 @@ fn in_kill_rect(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
     )
 }
 
+/// Does the expanded part of the giant reach an oriented trap rectangle?
+fn giant_reaches_box(
+    player: &Player,
+    pos: Vec2,
+    facing: Vec2,
+    u_min: f32,
+    u_max: f32,
+    half_v: f32,
+) -> bool {
+    let padding = player.buffs.point_hit_radius();
+    if padding == 0.0 {
+        return false;
+    }
+    let f = safe_dir(facing);
+    let d = player.pos - pos;
+    let u = d.dot(f);
+    let v = d.dot(f.perp());
+    let outside = Vec2::new(u - u.clamp(u_min, u_max), v - v.clamp(-half_v, half_v));
+    outside.len_sq() <= padding * padding
+}
+
 /// The damage a snap deals to the rat.
 ///
 /// The bar's bite is a share of the rat's own pool
@@ -619,7 +640,11 @@ fn snap_window(
 ) {
     if player_alive && !*player_struck {
         let p = player.pos;
-        if in_kill_rect(pos, facing, p) {
+        if in_kill_rect(pos, facing, p)
+            || giant_reaches_box(
+                player, pos, facing, MOUSETRAP_KILL_U_MIN, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_HALF_V,
+            )
+        {
             let dmg = snap_player_damage(player, hair);
             if player.take_damage(dmg) {
                 *player_struck = true;
@@ -1057,7 +1082,11 @@ pub fn traps_system(
             && !player_dash_now
             && !player_socked
             && !slot.touches_player()
-            && on_pad(pos, facing, player_pos)
+            && (on_pad(pos, facing, player_pos)
+                || giant_reaches_box(
+                    &player, pos, facing, -STICKY_TRAP_PAD_HALF.x, STICKY_TRAP_PAD_HALF.x,
+                    STICKY_TRAP_PAD_HALF.y,
+                ))
             && STICKY_TRAP_RAT_UNITS <= STICKY_TRAP_CAPACITY.saturating_sub(slot.load)
             && STICKY_TRAP_RAT_UNITS <= slot.budget_left
         {
@@ -1185,7 +1214,9 @@ pub fn traps_system(
                 // the trap: the reward is collected the instant the rat's centre
                 // touches the plate, and the bar lands after the kind's
                 // reaction time (zero for a hair trigger).
-                let on_plate = player_alive && on_bait(view.pos, view.facing, player_pos);
+                let centre = view.pos + safe_dir(view.facing) * MOUSETRAP_TRIGGER_OFFSET_U;
+                let reach = MOUSETRAP_TRIGGER_RADIUS + player.buffs.point_hit_radius();
+                let on_plate = player_alive && player_pos.dist_sq(centre) <= reach * reach;
                 if on_plate && !view.bait_taken && near_bait(view.pos, view.facing, player_pos) {
                     view.bait_taken = true;
                     collect_bait(

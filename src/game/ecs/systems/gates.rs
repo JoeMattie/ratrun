@@ -303,6 +303,7 @@ pub fn passage_system(
         Vec2::ZERO
     };
     let player_vel = player.vel;
+    let (player_radius, player_class) = player.movement_body(&level.tiles);
 
     for i in 0..level.objects.rat_holes.len() {
         let (cell, view) = {
@@ -319,7 +320,9 @@ pub fn passage_system(
         // direction must not depend on the query's storage order.
         let mut smallest: Option<(u64, Vec2)> = None;
         if near {
-            if in_tunnel(player.pos, view.pos, f) {
+            if player_class == SizeClass::Large {
+                blocked = presses_cheeks(player.pos, view.pos, f, player_radius);
+            } else if in_tunnel(player.pos, view.pos, f) {
                 inside = true;
                 player_inside = true;
                 crossed.push(cell);
@@ -344,7 +347,9 @@ pub fn passage_system(
                     }
                 }
             }
-            centre_player(&mut player, &level.tiles, &view, intent, dt);
+            if player_class == SizeClass::Small {
+                centre_player(&mut player, &level.tiles, &view, intent, dt);
+            }
         }
 
         let was_inside = rt.holes[i].inside;
@@ -598,6 +603,7 @@ pub fn door_system(
         rng: &mut rng.0,
         accent: level.palette.accent,
     };
+    let (radius, class) = player.movement_body(&level.tiles);
 
     for i in 0..level.objects.one_way_doors.len() {
         // Doors and rewards are pushed in `mazes` order, so door `i` is the
@@ -608,6 +614,8 @@ pub fn door_system(
             &mut view,
             &mut rt.doors[i],
             player.pos,
+            radius,
+            class == SizeClass::Small,
             intent,
             claimed,
             dt,
@@ -680,6 +688,8 @@ fn update_door(
     view: &mut OneWayDoorView,
     rt: &mut DoorRuntime,
     player_pos: Vec2,
+    radius: f32,
+    can_open: bool,
     intent: Vec2,
     claimed_exit: bool,
     dt: f32,
@@ -692,7 +702,7 @@ fn update_door(
     let lateral = v.abs() <= ONE_WAY_DOOR_PASSAGE_HALF_V;
     // The rat's body overlaps the doorway: `|u| <= 8` (leaf half-thickness plus
     // the rat) and `|v| <= 9` (`ONE_WAY_DOOR_PASSAGE_HALF_V`), per the art doc.
-    let held = lateral && u.abs() <= ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS;
+    let held = can_open && lateral && u.abs() <= ONE_WAY_DOOR_HALF_U + radius;
     // Approach through the maze side: the art's `u in [-10, 0]` trigger, opened
     // out to the leaf plane so a rat that is already sliding through counts.
     //
@@ -703,12 +713,17 @@ fn update_door(
     // inclusive `..= 5.0` that resting spot was half inside the open zone: the
     // leaf swung open for a rat it was refusing and `armed` latched from the
     // outside.
-    let open_zone = lateral
+    let open_zone = can_open && lateral
         && (-ONE_WAY_DOOR_TRIGGER_DIST..=ONE_WAY_DOOR_HALF_U - OPEN_ZONE_BACKSTOP_MARGIN)
             .contains(&u);
     // Pushing into the backstop from the `+facing` side.
-    let wrong_zone = lateral && (-ONE_WAY_DOOR_HALF_U..=ONE_WAY_DOOR_TRIGGER_DIST).contains(&u);
-    let pressing_wrong = wrong_zone && intent.dot(f) < -0.3;
+    let pressing_wrong = if can_open {
+        lateral && (-ONE_WAY_DOOR_HALF_U..=ONE_WAY_DOOR_TRIGGER_DIST).contains(&u)
+            && intent.dot(f) < -0.3
+    } else {
+        lateral && u.abs() <= ONE_WAY_DOOR_HALF_U + radius + 0.01
+            && intent.dot(f) * u.signum() < -0.3
+    };
     if !pressing_wrong {
         rt.refused_latched = false;
     }
@@ -730,9 +745,9 @@ fn update_door(
     // only way from one side to the other is through the leaf; the step bound
     // keeps a teleport (a test, the console) from counting as a walk.
     let last_u = rt.last_u;
-    rt.last_u = lateral.then_some(u);
-    let crossed = lateral
-        && u >= ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS
+    rt.last_u = (can_open && lateral).then_some(u);
+    let crossed = can_open && lateral
+        && u >= ONE_WAY_DOOR_HALF_U + radius
         && last_u.is_some_and(|prev| {
             prev < ONE_WAY_DOOR_HALF_U - OPEN_ZONE_BACKSTOP_MARGIN
                 && u - prev <= MAX_CROSSING_STEP
@@ -742,9 +757,9 @@ fn update_door(
     // window is bounded (`u <= 8 + ONE_WAY_DOOR_TRIGGER_DIST`) so a rat that
     // walked around the outside of the maze never trips the slam.
     let cleared = crossed
-        || (lateral
-            && (ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS
-                ..=ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS + ONE_WAY_DOOR_TRIGGER_DIST)
+        || (can_open && lateral
+            && (ONE_WAY_DOOR_HALF_U + radius
+                ..=ONE_WAY_DOOR_HALF_U + radius + ONE_WAY_DOOR_TRIGGER_DIST)
                 .contains(&u));
 
     if claimed_exit && rt.armed && !rt.slammed && cleared {
@@ -773,7 +788,7 @@ fn update_door(
             if held {
                 // Held wide open while the body is in the doorway.
                 view.progress = 1.0;
-            } else if u > ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS
+            } else if !can_open || u > ONE_WAY_DOOR_HALF_U + radius
                 || u < -ONE_WAY_DOOR_TRIGGER_DIST
             {
                 view.state = OneWayDoorState::Closing;

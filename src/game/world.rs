@@ -708,7 +708,13 @@ impl World {
             }
             let d = self.player.pos.dist(hole.face());
             if best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, hole.face()));
+                let face = if self.player.buffs.is_giant() {
+                    let reach = super::ecs::systems::shop::TOUCH_REACH;
+                    hole.face() + hole.facing * (self.player.buffs.desired_body_radius() + reach) * 0.5
+                } else {
+                    hole.face()
+                };
+                best = Some((d, face));
             }
         }
         best.map(|(_, face)| face)
@@ -4328,33 +4334,7 @@ const RIPPLE_DRAW_MARGIN: f32 = 26.0;
 /// shared shoreline of merged puddles). A 2x view of the Sewer holds about 20.
 const PUDDLES_IN_VIEW: usize = 48;
 
-/// The scale the giant rat is drawn at, or `None` when the find is not running.
-///
-/// Three phases, all read straight off the buff clock so there is no render
-/// state to keep: the rat **grows** from 1x to [`powerups::GIANT_SCALE`] over
-/// [`powerups::GIANT_GROW_SECS`], holds, then **blinks** between 5x and 4.5x
-/// for the last [`powerups::GIANT_BLINK_SECS`] while it shrinks back over
-/// [`powerups::GIANT_SHRINK_SECS`]. Never below 1x, so the first and last frames
-/// of the find are exactly the rat the player always has.
-pub fn giant_draw_scale(buff_left: f32) -> Option<f32> {
-    use crate::game::ecs::systems::powerups as p;
-    if buff_left <= 0.0 {
-        return None;
-    }
-    let elapsed = (p::GROWTH_SECS - buff_left).max(0.0);
-    let grow = (elapsed / p::GIANT_GROW_SECS).clamp(0.0, 1.0);
-    let shrink = (buff_left / p::GIANT_SHRINK_SECS).clamp(0.0, 1.0);
-    let mut scale = p::GIANT_SCALE * grow.min(shrink).max(0.0);
-    // The warning blink: about three blinks a second over the last seconds, at
-    // the smaller of the two sizes so the picture never grows past its hold.
-    if buff_left <= p::GIANT_BLINK_SECS {
-        let blink = (buff_left * 6.0) as i32;
-        if blink % 2 == 0 {
-            scale = scale.min(p::GIANT_BLINK_SCALE);
-        }
-    }
-    Some(scale.max(1.0))
-}
+pub use crate::game::ecs::systems::powerups::giant_draw_scale;
 
 fn tiny_draw_scale(buff_left: f32) -> Option<f32> {
     use crate::game::ecs::systems::powerups as p;
