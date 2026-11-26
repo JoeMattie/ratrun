@@ -18,6 +18,9 @@
 //! and tile-size requests travel to the workers as atomics; frames travel back
 //! through a bounded channel (`try_send`, capacity 1), so a worker whose frame
 //! the main loop has not consumed yet simply drops it instead of queueing.
+//! A separate channel delivers each run's outcome even if its frames are dropped.
+//! At MAX, workers run fixed ticks continuously and draw at most once per
+//! display interval while running.
 //!
 //! ## Grid
 //!
@@ -45,6 +48,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 
+use crate::autoplay::batch::SKILL_CYCLE;
 use crate::autoplay::{AutoOpts, AutoRun, AutoStatus};
 use crate::game::bot::Skill;
 use crate::game::campaign;
@@ -62,14 +66,13 @@ pub const MIN_TILE_W: u16 = 16;
 pub const MIN_TILE_H: u16 = 5;
 /// The play field is `160 x 80` px = `80 x 40` half-block cells, i.e. 2:1.
 const TARGET_TILE_ASPECT: f32 = 2.0;
-/// Space for the summary strip, taken off the bottom when the terminal allows.
-pub const SUMMARY_ROWS: u16 = 1;
 /// Speed ladder, in simulation seconds per wall second.
-pub const SPEEDS: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+pub const SPEEDS: [f32; 7] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, f32::INFINITY];
 /// Default ladder position: 8x.
 pub const DEFAULT_SPEED_IDX: usize = 3;
 /// The simulation's fixed tick: speeding up runs more ticks, never longer ones.
 pub const SIM_DT: f32 = 1.0 / 60.0;
+const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// How long a finished run's outcome plate stays up before it restarts.
 pub const RESTART_DELAY_SECS: f32 = 3.0;
 
@@ -130,14 +133,19 @@ impl WallPlan {
 /// lay the games out in the grid [`plan_grid`] chooses.
 pub fn plan_wall(games: usize, area: Rect) -> WallPlan {
     let games = games.max(1);
-    let (grid_area, summary) = if area.height > SUMMARY_ROWS {
+    let summary_rows = if (57..144).contains(&area.width) && area.height >= 20 {
+        2
+    } else {
+        1
+    };
+    let (grid_area, summary) = if area.height > summary_rows {
         (
-            Rect::new(area.x, area.y, area.width, area.height - SUMMARY_ROWS),
+            Rect::new(area.x, area.y, area.width, area.height - summary_rows),
             Some(Rect::new(
                 area.x,
-                area.y + area.height - SUMMARY_ROWS,
+                area.y + area.height - summary_rows,
                 area.width,
-                SUMMARY_ROWS,
+                summary_rows,
             )),
         )
     } else {
@@ -423,63 +431,45 @@ pub struct TileFrame {
 
 // ---- Wall state ----------------------------------------------------------
 
-/// Cumulative results across every run the wall has shown.
+/// Cumulative results across every run the wall has played.
 #[derive(Clone, Debug, Default)]
 pub struct Tally {
     pub wins: u64,
     /// Runs discarded because a worker caught a panic.
     pub failures: u64,
-    /// Deaths on campaign levels 1, 2 and 3.
+    /// Deaths by campaign level.
     pub deaths: [u64; campaign::LEVEL_COUNT],
     pub survival_sum: f64,
     pub survival_n: u64,
-    /// Per game: the finished state already counted (`None` while running).
-    last: Vec<Option<u8>>,
 }
 
 impl Tally {
+    pub fn losses(&self) -> u64 {
+        self.deaths.iter().sum()
+    }
+
     pub fn runs(&self) -> u64 {
-        self.wins + self.deaths.iter().sum::<u64>()
+        self.wins + self.losses()
     }
 
     pub fn average_survival(&self) -> Option<f32> {
         (self.survival_n > 0).then(|| (self.survival_sum / self.survival_n as f64) as f32)
     }
 
-    /// Count a game's finished state exactly once (the worker keeps publishing
-    /// the plate for a few seconds, and the wall may see the same run many
-    /// times). A return to `Running` arms the next count.
-    fn observe(&mut self, index: usize, info: &TileInfo) {
-        if self.last.len() <= index {
-            self.last.resize(index + 1, None);
-        }
+    fn record(&mut self, info: &TileInfo) {
         let level = info.level.min(campaign::LEVEL_COUNT - 1);
         let secs = match &info.state {
-            TileState::Running => {
-                self.last[index] = None;
-                return;
-            }
+            TileState::Running => return,
             TileState::Died { at, .. } => {
-                if self.last[index] == Some(1) {
-                    return;
-                }
-                self.last[index] = Some(1);
                 self.deaths[level] += 1;
                 *at
             }
             TileState::Won { total_time } => {
-                if self.last[index] == Some(2) {
-                    return;
-                }
-                self.last[index] = Some(2);
                 self.wins += 1;
                 *total_time
             }
             TileState::Failed { .. } => {
-                if self.last[index] != Some(3) {
-                    self.last[index] = Some(3);
-                    self.failures += 1;
-                }
+                self.failures += 1;
                 return;
             }
         };
@@ -498,6 +488,8 @@ pub struct WallState {
     pub speed_idx: usize,
     pub paused: bool,
     pub tally: Tally,
+    skill: WallSkill,
+    by_skill: [Tally; SKILL_CYCLE.len()],
 }
 
 impl WallState {
@@ -510,6 +502,8 @@ impl WallState {
             speed_idx: DEFAULT_SPEED_IDX,
             paused: false,
             tally: Tally::default(),
+            skill: WallSkill::Fixed(Skill::Expert),
+            by_skill: Default::default(),
         }
     }
 
@@ -525,12 +519,20 @@ impl WallState {
         self.speed_idx = self.speed_idx.saturating_sub(1);
     }
 
-    /// Fold the latest frames into the cumulative tally.
-    pub fn observe(&mut self) {
-        for (i, frame) in self.frames.iter().enumerate() {
-            if let Some(frame) = frame {
-                self.tally.observe(i, &frame.info);
-            }
+    fn speed_caption(&self, achieved: f32) -> String {
+        if self.paused {
+            "PAUSED".to_string()
+        } else if self.speed().is_infinite() {
+            format!("MAX {achieved:.1} sim s/s")
+        } else {
+            format!("{:.0}x · {achieved:.1} sim s/s", self.speed())
+        }
+    }
+
+    fn record(&mut self, info: &TileInfo) {
+        self.tally.record(info);
+        if self.skill == WallSkill::Mixed {
+            self.by_skill[info.index % SKILL_CYCLE.len()].record(info);
         }
     }
 
@@ -583,8 +585,7 @@ fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
 
 // ---- Drawing -------------------------------------------------------------
 
-/// Draw the whole wall into `buf`. Read-only: the caller folds frames into the
-/// tally with [`WallState::observe`] before rendering.
+/// Draw the latest frames and tally into `buf`.
 pub fn render_wall(buf: &mut Buffer, area: Rect, wall: &WallState) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -678,9 +679,8 @@ fn draw_zoom(buf: &mut Buffer, area: Rect, wall: &WallState, i: usize) {
             false,
         );
         let second = format!(
-            "ESC/same key back to the wall · {}x · {:.1} sim s/s · {}",
-            wall.speed(),
-            frame.achieved,
+            "{} · Esc back · {}",
+            wall.speed_caption(frame.achieved),
             frame.info.state_text(),
         );
         draw_caption_row(
@@ -692,9 +692,8 @@ fn draw_zoom(buf: &mut Buffer, area: Rect, wall: &WallState, i: usize) {
     }
 }
 
-/// The summary strip: games running, wins, deaths per level, average survival,
-/// current speed and the achieved simulated time per wall second.
-pub fn summary_text(wall: &WallState, width: usize, hidden: usize) -> String {
+/// The summary strip: speed, cumulative results and deaths by level.
+fn summary_text(wall: &WallState, width: usize, hidden: usize, one_row: bool) -> String {
     let finished = wall
         .frames
         .iter()
@@ -707,43 +706,26 @@ pub fn summary_text(wall: &WallState, width: usize, hidden: usize) -> String {
         .average_survival()
         .map(clock)
         .unwrap_or_else(|| "--:--".to_string());
-    // The hidden count goes second: a tiny terminal must still say that games
-    // exist but are not on screen (the rest of the strip can be dropped).
-    let mut segs = vec![format!("AI {running}/{} running", wall.games)];
+    let mut segs = vec![format!(
+        "{} finished · {} wins · {} losses",
+        wall.tally.runs(),
+        wall.tally.wins,
+        wall.tally.losses()
+    )];
+    segs.push(wall.speed_caption(wall.achieved()));
     if hidden > 0 {
         segs.push(format!("{hidden} hidden"));
     }
-    segs.push(format!("{} wins", wall.tally.wins));
-    segs.push(
-        (0..campaign::LEVEL_COUNT)
-            .map(|l| format!("D{} {}", l + 1, wall.tally.deaths[l]))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    segs.push(format!("avg {avg}"));
-    segs.push(if wall.paused {
-        "PAUSED".to_string()
-    } else {
-        format!("{:.0}x", wall.speed())
-    });
-    segs.push(format!("{:.1} sim s/s", wall.achieved()));
+    if one_row {
+        segs.push(result_detail(wall, width));
+    }
     if wall.tally.failures > 0 {
         segs.push(format!("{} failed", wall.tally.failures));
     }
-    segs.push("space pause · +/- speed · 1-9 zoom · r restart · q quit".to_string());
+    segs.push(format!("AI {running}/{} running · avg {avg}", wall.games));
+    segs.push("Space pause · +/- speed · 1-9 zoom · R restart · Q quit".to_string());
 
-    let mut out = String::new();
-    for seg in segs {
-        let candidate = if out.is_empty() {
-            seg.clone()
-        } else {
-            format!("{out} · {seg}")
-        };
-        if candidate.chars().count() > width {
-            break;
-        }
-        out = candidate;
-    }
+    let mut out = fit_segments(segs, width);
     if hidden > 0 && !out.contains("hidden") {
         // The full strip did not fit. Compact it so the hidden count survives
         // (this is the one thing a small terminal cannot infer otherwise).
@@ -756,23 +738,55 @@ pub fn summary_text(wall: &WallState, width: usize, hidden: usize) -> String {
         };
     }
     if out.is_empty() {
-        // Narrower than the first segment: show a clipped version rather than
-        // an empty strip.
-        let first = format!("AI {running}/{} running", wall.games);
-        out = first.chars().take(width).collect();
+        out = wall.speed_caption(wall.achieved()).chars().take(width).collect();
+    }
+    out
+}
+
+fn result_detail(wall: &WallState, width: usize) -> String {
+    let levels = wall.tally.deaths.iter().enumerate()
+        .map(|(l, n)| format!("L{} {n}", l + 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut segs = vec![format!("Losses {levels}")];
+    if wall.skill == WallSkill::Mixed {
+        if width < 80 {
+            segs[0] = levels;
+            let skills = ["Exp", "Skl", "Cas"].into_iter()
+                .zip(&wall.by_skill)
+                .map(|(name, tally)| format!("{name} {}/{}", tally.wins, tally.losses()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            segs.push(format!("W/L {skills}"));
+        } else {
+            for (skill, tally) in SKILL_CYCLE.into_iter().zip(&wall.by_skill) {
+                segs.push(format!("{} {}W/{}L", skill.name(), tally.wins, tally.losses()));
+            }
+        }
+    }
+    fit_segments(segs, width)
+}
+
+fn fit_segments(segs: Vec<String>, width: usize) -> String {
+    let mut out = String::new();
+    for seg in segs {
+        let sep = if out.is_empty() { "" } else { " · " };
+        if !seg.is_empty() && out.chars().count() + sep.chars().count() + seg.chars().count() <= width {
+            out.push_str(sep);
+            out.push_str(&seg);
+        }
     }
     out
 }
 
 fn draw_summary(buf: &mut Buffer, strip: Rect, wall: &WallState, hidden: usize) {
     fill_rect(buf, strip, palette::PLATE);
-    let text = summary_text(wall, strip.width as usize, hidden);
-    buf.set_string(
-        strip.x,
-        strip.y,
-        text,
-        Style::default().fg(palette::MUTED).bg(palette::PLATE),
-    );
+    let width = strip.width as usize;
+    let style = Style::default().fg(palette::MUTED).bg(palette::PLATE);
+    buf.set_string(strip.x, strip.y, summary_text(wall, width, hidden, strip.height == 1), style);
+    if strip.height == 2 {
+        buf.set_string(strip.x, strip.y + 1, result_detail(wall, width), style);
+    }
 }
 
 fn draw_caption_row(buf: &mut Buffer, row: Rect, text: &str, dimmed: bool) {
@@ -902,6 +916,12 @@ pub const REFERENCE_VIEW_W: u16 = 160;
 const HIDDEN_W: u16 = 0;
 const HIDDEN_H: u16 = 0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallSkill {
+    Fixed(Skill),
+    Mixed,
+}
+
 /// `ratrun --ai ...` options. Parsed in `main.rs` (see `parse_spectate_args`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AiOpts {
@@ -910,9 +930,11 @@ pub struct AiOpts {
     /// `--seed S`: reproducible wall. Tile `i` derives its seeds from `S` and
     /// `i`, so the same wall replays.
     pub seed: Option<u64>,
-    /// `--skill expert|casual` (default expert).
-    pub skill: Option<Skill>,
-    /// `--level 1..3`: every tile plays that one level alone.
+    /// `--skill expert|skilled|casual|mixed` (default expert).
+    pub skill: WallSkill,
+    /// Initial rung of the speed ladder.
+    pub speed_idx: usize,
+    /// `--level 1..4`: every tile plays that one level alone.
     pub level: Option<usize>,
     /// `--once`: keep a finished run on its plate instead of restarting it.
     pub once: bool,
@@ -923,7 +945,8 @@ impl Default for AiOpts {
         AiOpts {
             games: DEFAULT_GAMES,
             seed: None,
-            skill: None,
+            skill: WallSkill::Fixed(Skill::Expert),
+            speed_idx: DEFAULT_SPEED_IDX,
             level: None,
             once: false,
         }
@@ -932,12 +955,27 @@ impl Default for AiOpts {
 
 impl AiOpts {
     /// Resolve the `--skill` string. `None` on an unknown name.
-    pub fn parse_skill(name: &str) -> Option<Skill> {
-        Skill::parse(name)
+    pub fn parse_skill(name: &str) -> Option<WallSkill> {
+        if name.eq_ignore_ascii_case("mixed") {
+            Some(WallSkill::Mixed)
+        } else {
+            Skill::parse(name).map(WallSkill::Fixed)
+        }
     }
 
-    fn auto_opts(&self) -> AutoOpts {
-        let skill = self.skill.unwrap_or(Skill::Expert);
+    pub fn parse_speed(name: &str) -> Option<usize> {
+        if name.eq_ignore_ascii_case("max") {
+            return Some(SPEEDS.len() - 1);
+        }
+        let speed: u32 = name.parse().ok()?;
+        SPEEDS.iter().position(|&rung| rung == speed as f32)
+    }
+
+    fn auto_opts(&self, index: usize) -> AutoOpts {
+        let skill = match self.skill {
+            WallSkill::Fixed(skill) => skill,
+            WallSkill::Mixed => SKILL_CYCLE[index % SKILL_CYCLE.len()],
+        };
         match self.level {
             Some(level) => AutoOpts::practice(level.clamp(1, campaign::LEVEL_COUNT) - 1, skill),
             None => AutoOpts::campaign(0, skill),
@@ -1005,6 +1043,7 @@ struct Worker {
 pub struct LiveWall {
     pub state: WallState,
     workers: Vec<Worker>,
+    outcomes: Receiver<TileInfo>,
     base_seed: u64,
     generation: u64,
 }
@@ -1013,18 +1052,21 @@ impl LiveWall {
     /// Start `games` workers, one `AutoRun` each.
     pub fn spawn(games: usize, opts: &AiOpts, base_seed: u64) -> LiveWall {
         let games = games.clamp(1, MAX_GAMES);
-        let auto_opts = opts.auto_opts();
         let once = opts.once;
         let mut workers = Vec::with_capacity(games);
+        let (outcome_tx, outcomes) = mpsc::channel();
+        let speed_idx = opts.speed_idx.min(SPEEDS.len() - 1);
         for i in 0..games {
-            let shared = WorkerShared::new(SPEEDS[DEFAULT_SPEED_IDX], HIDDEN_W, HIDDEN_H);
+            let shared = WorkerShared::new(SPEEDS[speed_idx], HIDDEN_W, HIDDEN_H);
             let (tx, rx) = mpsc::sync_channel(1);
+            let outcome_tx = outcome_tx.clone();
+            let auto_opts = opts.auto_opts(i);
             let base = tile_base(base_seed, i);
             let worker = {
                 let shared = Arc::clone(&shared);
                 std::thread::Builder::new()
                     .name(format!("ratrun-ai-{i}"))
-                    .spawn(move || worker_loop(i, base, auto_opts, once, shared, tx))
+                    .spawn(move || worker_loop(i, base, auto_opts, once, shared, tx, outcome_tx))
             };
             match worker {
                 Ok(handle) => workers.push(Worker {
@@ -1038,9 +1080,13 @@ impl LiveWall {
             }
         }
         let shown = workers.len().max(1);
+        let mut state = WallState::new(shown);
+        state.speed_idx = speed_idx;
+        state.skill = opts.skill;
         LiveWall {
-            state: WallState::new(shown),
+            state,
             workers,
+            outcomes,
             base_seed,
             generation: 0,
         }
@@ -1082,7 +1128,9 @@ impl LiveWall {
                 .paused
                 .store(paused, Ordering::Relaxed);
         }
-        self.state.observe();
+        for info in self.outcomes.try_iter() {
+            self.state.record(&info);
+        }
     }
 
     /// `R`: restart every game with a fresh seed generation.
@@ -1139,6 +1187,7 @@ fn worker_loop(
     once: bool,
     shared: Arc<WorkerShared>,
     tx: SyncSender<TileFrame>,
+    outcome_tx: mpsc::Sender<TileInfo>,
 ) {
     let mut run_index = 0u64;
     let mut seed = tile_seed(base, run_index);
@@ -1149,7 +1198,10 @@ fn worker_loop(
     let mut acc = 0.0f64;
     let mut achieved = 0.0f32;
     let mut finished_at: Option<Instant> = None;
+    let mut reported = false;
     let mut last = Instant::now();
+    let mut last_max_frame = None;
+    let mut max_ticks_since_frame = 0;
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
@@ -1163,6 +1215,7 @@ fn worker_loop(
             failure = None;
             acc = 0.0;
             finished_at = None;
+            reported = false;
         }
 
         // Build the run (the first thing that can fail: level generation).
@@ -1183,16 +1236,31 @@ fn worker_loop(
         last = now;
         let paused = shared.paused.load(Ordering::Relaxed);
         let speed = shared.speed();
+        let uncapped = speed.is_infinite();
         let mut ticks = 0u32;
 
+        if uncapped {
+            // Finite rungs can leave a backlog. A later return to them
+            // should start from the current clock.
+            acc = 0.0;
+        } else {
+            last_max_frame = None;
+            max_ticks_since_frame = 0;
+        }
         if let Some(active) = run.as_mut() {
             if !paused && finished_at.is_none() {
                 // Keep a bounded backlog: a game that fell behind catches up
                 // at most half a second of simulation, so no worker ever runs
                 // away.
-                acc = (acc + dt * speed as f64).min(speed as f64 * 0.5);
-                let max_ticks = ((speed as f64 * 0.05 * 60.0).ceil() as u32).clamp(1, 512);
                 let batch = contained(|| {
+                    if uncapped {
+                        // Check controls and the frame deadline after each
+                        // tick. There is no per-frame simulation budget.
+                        active.step(SIM_DT);
+                        return 1;
+                    }
+                    acc = (acc + dt * speed as f64).min(speed as f64 * 0.5);
+                    let max_ticks = ((speed as f64 * 0.05 * 60.0).ceil() as u32).clamp(1, 512);
                     let mut n = 0u32;
                     while acc >= SIM_DT as f64 && n < max_ticks {
                         active.step(SIM_DT);
@@ -1213,17 +1281,8 @@ fn worker_loop(
                 }
             }
         }
-        let instant = if dt > 0.0 {
-            ticks as f32 * SIM_DT / dt as f32
-        } else {
-            0.0
-        };
-        if !paused {
-            achieved = if achieved == 0.0 {
-                instant
-            } else {
-                achieved * 0.9 + instant * 0.1
-            };
+        if !paused && !uncapped {
+            achieved = smooth_rate(achieved, ticks, dt);
         }
 
         if let Some(active) = run.as_ref() {
@@ -1237,6 +1296,7 @@ fn worker_loop(
                     run = None;
                     acc = 0.0;
                     finished_at = None;
+                    reported = false;
                     // Rebuild at the top of the next iteration instead of
                     // publishing one blank "0 HP" frame between the plate and
                     // the new run.
@@ -1249,8 +1309,32 @@ fn worker_loop(
                 run_index += 1;
                 seed = tile_seed(base, run_index);
                 failure = None;
+                reported = false;
                 continue;
             }
+        }
+
+        let running_at_max = uncapped && !paused && finished_at.is_none() && failure.is_none();
+        if uncapped {
+            max_ticks_since_frame += ticks;
+            let frame_at = Instant::now();
+            let first_outcome = !reported && (finished_at.is_some() || failure.is_some());
+            if !first_outcome && !max_frame_due(last_max_frame, frame_at) {
+                if !running_at_max {
+                    std::thread::sleep(Duration::from_micros(16_667));
+                }
+                continue;
+            }
+            // Use the real wall time, including the previous frame's draw.
+            achieved = if running_at_max {
+                last_max_frame.map_or(0.0, |previous| {
+                    smooth_rate(achieved, max_ticks_since_frame, (frame_at - previous).as_secs_f64())
+                })
+            } else {
+                0.0
+            };
+            last_max_frame = Some(frame_at);
+            max_ticks_since_frame = 0;
         }
 
         // Render at an integer multiple of the tile, so every tile shows about
@@ -1298,18 +1382,42 @@ fn worker_loop(
             info = blank_info(index);
             info.state = TileState::Failed { reason };
         }
+        if !reported && info.state.is_finished() {
+            let _ = outcome_tx.send(info.clone());
+            reported = true;
+        }
         let _ = tx.try_send(TileFrame {
             buf,
             info,
             achieved,
         });
 
+        if running_at_max {
+            continue;
+        }
         // ~60 FPS with the render included; never sleep when behind.
         let spent = now.elapsed();
         let target = Duration::from_micros(16_667);
         if spent < target {
             std::thread::sleep(target - spent);
         }
+    }
+}
+
+fn max_frame_due(last_frame: Option<Instant>, now: Instant) -> bool {
+    last_frame.is_none_or(|at| now - at >= MAX_FRAME_INTERVAL)
+}
+
+fn smooth_rate(previous: f32, ticks: u32, wall_seconds: f64) -> f32 {
+    let instant = if wall_seconds > 0.0 {
+        ticks as f32 * SIM_DT / wall_seconds as f32
+    } else {
+        0.0
+    };
+    if previous == 0.0 {
+        instant
+    } else {
+        previous * 0.9 + instant * 0.1
     }
 }
 
@@ -1680,9 +1788,9 @@ mod tests {
         let tiny = plan_wall(16, Rect::new(0, 0, 20, 8));
         assert_eq!(tiny.grid.visible, 1, "20x8 fits exactly one tile: {tiny:?}");
         assert_eq!(tiny.grid.hidden, 15);
-        assert!(summary_text(&wall(16), 200, tiny.grid.hidden).contains("15 hidden"));
+        assert!(summary_text(&wall(16), 200, tiny.grid.hidden, true).contains("15 hidden"));
         // Even a 20-column strip has to report the hidden games.
-        let narrow = summary_text(&wall(16), 20, 15);
+        let narrow = summary_text(&wall(16), 20, 15, true);
         assert!(narrow.contains("15 hidden"), "{narrow:?}");
         assert!(narrow.chars().count() <= 20, "{narrow:?}");
     }
@@ -1822,12 +1930,10 @@ mod tests {
         render_wall(&mut buf, area, &state);
         let screen = text(&buf);
         assert!(screen.contains("FAILED"), "failed plate missing:\n{screen}");
-        state.observe();
+        state.record(&state.frames[0].as_ref().unwrap().info.clone());
         assert_eq!(state.tally.failures, 1);
-        state.observe();
-        assert_eq!(state.tally.failures, 1, "the same plate counts once");
         assert_eq!(state.tally.runs(), 0, "a crash is not a death or a win");
-        assert!(summary_text(&state, 240, 0).contains("1 failed"));
+        assert!(summary_text(&state, 240, 0, true).contains("1 failed"));
     }
 
     #[test]
@@ -1859,15 +1965,32 @@ mod tests {
         assert_eq!(state.speed(), 1.0, "bottom of the ladder");
         state.speed_down();
         assert_eq!(state.speed(), 1.0, "cannot go below 1x");
-        for _ in 0..20 {
+        for speed in [2.0, 4.0, 8.0, 16.0, 32.0] {
             state.speed_up();
+            assert_eq!(state.speed(), speed);
         }
-        assert_eq!(state.speed(), 32.0, "top of the ladder");
+        state.speed_up();
+        assert_eq!(state.speed(), f32::INFINITY);
+        state.speed_up();
+        assert_eq!(state.speed(), f32::INFINITY, "cannot go above MAX");
+        state.speed_down();
+        assert_eq!(state.speed(), 32.0);
     }
 
     #[test]
-    fn tally_counts_each_run_once() {
-        let mut tally = Tally::default();
+    fn uncapped_frames_are_due_independently_of_tick_count() {
+        let first = Instant::now();
+        assert!(max_frame_due(None, first));
+        assert!(!max_frame_due(Some(first), first));
+        assert!(!max_frame_due(Some(first), first + MAX_FRAME_INTERVAL - Duration::from_micros(1)));
+        assert!(max_frame_due(Some(first), first + MAX_FRAME_INTERVAL));
+        assert!(max_frame_due(Some(first), first + MAX_FRAME_INTERVAL * 10));
+    }
+
+    #[test]
+    fn tally_records_outcomes_by_level_and_skill() {
+        let mut state = WallState::new(4);
+        state.skill = WallSkill::Mixed;
         let died = TileInfo {
             state: TileState::Died {
                 at: 100.0,
@@ -1875,47 +1998,48 @@ mod tests {
             },
             ..info(0, 0, 100.0)
         };
-        tally.observe(0, &died);
-        tally.observe(0, &died); // the same plate seen again
-        assert_eq!(tally.deaths[0], 1);
-        assert_eq!(tally.runs(), 1);
-        assert_eq!(tally.average_survival(), Some(100.0));
+        state.record(&died);
+        assert_eq!(state.tally.deaths[0], 1);
+        assert_eq!(state.tally.runs(), 1);
+        assert_eq!(state.tally.average_survival(), Some(100.0));
 
-        tally.observe(0, &info(0, 0, 100.0));
-        tally.observe(
-            0,
-            &TileInfo {
-                state: TileState::Died {
-                    at: 200.0,
-                    cause: "the boss".into(),
-                },
-                ..info(0, 0, 200.0)
+        state.record(&TileInfo {
+            state: TileState::Died {
+                at: 200.0,
+                cause: "the boss".into(),
             },
-        );
-        assert_eq!(tally.deaths[0], 2);
-        assert_eq!(tally.average_survival(), Some(150.0));
+            ..info(2, 3, 200.0)
+        });
+        assert_eq!(state.tally.deaths[3], 1);
+        assert_eq!(state.tally.average_survival(), Some(150.0));
 
         let won = TileInfo {
             state: TileState::Won { total_time: 700.0 },
             ..info(1, 2, 700.0)
         };
-        tally.observe(1, &won);
-        tally.observe(1, &won);
-        assert_eq!(tally.wins, 1);
-        assert_eq!(tally.runs(), 3);
+        state.record(&won);
+        assert_eq!(state.tally.wins, 1);
+        assert_eq!(state.tally.runs(), 3);
+        let compact = result_detail(&state, 57);
+        assert!(compact.contains("L1 1 L2 0 L3 0 L4 1"));
+        assert!(compact.contains("W/L Exp 0/1 Skl 1/0 Cas 0/1"));
+        let opts = AiOpts { skill: WallSkill::Mixed, ..AiOpts::default() };
+        for (idx, expected) in SKILL_CYCLE.into_iter().cycle().take(6).enumerate() {
+            assert_eq!(opts.auto_opts(idx).skill, expected);
+        }
     }
 
     #[test]
     fn summary_reports_the_wall_and_fits_the_width() {
         let state = wall(16);
-        let line = summary_text(&state, 240, 0);
-        for field in ["AI 16/16 running", "0 wins", "D1 0", "D2 0", "D3 0", "avg", "8x", "sim s/s"] {
+        let line = summary_text(&state, 240, 0, true);
+        for field in ["AI 16/16 running", "0 finished", "0 wins", "0 losses", "Losses L1 0 L2 0 L3 0 L4 0", "avg", "8x", "sim s/s"] {
             assert!(line.contains(field), "{line:?} lacks {field:?}");
         }
         // A narrow strip degrades to a prefix instead of overflowing.
-        let narrow = summary_text(&state, 12, 0);
+        let narrow = summary_text(&state, 12, 0, true);
         assert!(narrow.chars().count() <= 12, "{narrow:?}");
-        assert!(narrow.starts_with("AI 16/16"), "{narrow:?}");
+        assert!(narrow.starts_with("8x"), "{narrow:?}");
     }
 
     fn step_and_capture(run: &mut AutoRun, index: usize, cells: (u16, u16)) -> TileFrame {
@@ -2078,7 +2202,8 @@ mod tests {
         let opts = AiOpts {
             games: 2,
             seed: Some(11),
-            skill: Some(Skill::Casual),
+            skill: WallSkill::Fixed(Skill::Casual),
+            speed_idx: DEFAULT_SPEED_IDX,
             level: Some(1),
             once: true,
         };
@@ -2126,6 +2251,46 @@ mod tests {
         wall.shutdown();
     }
 
+    #[test]
+    fn max_workers_publish_rates_and_respond_to_pause_and_zoom() {
+        let opts = AiOpts {
+            speed_idx: SPEEDS.len() - 1,
+            seed: Some(11),
+            ..AiOpts::default()
+        };
+        let mut wall = LiveWall::spawn(2, &opts, 11);
+        let area = Rect::new(0, 0, 120, 36);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            wall.pump(area);
+            if wall.state.frames.iter().all(|frame| {
+                frame.as_ref().is_some_and(|f| f.achieved > 0.0 && f.buf.area.width > 0)
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "MAX workers did not publish rates");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(summary_text(&wall.state, 120, 0, false).contains("MAX "));
+
+        wall.state.paused = true;
+        wall.state.toggle_zoom(1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            wall.pump(area);
+            if wall.state.frames[1].as_ref().is_some_and(|frame| {
+                frame.buf.area.width == area.width
+                    && frame.achieved == 0.0
+                    && matches!(frame.info.state, TileState::Running)
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "MAX worker did not pause and resize");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        wall.shutdown();
+    }
+
     /// Diagnostic, not part of the suite: `cargo test --release
     /// ai_wall_16_speed_report -- --ignored --nocapture` starts the real
     /// 16-game wall at 240x70 and reports each game's simulated seconds per
@@ -2136,7 +2301,8 @@ mod tests {
         let opts = AiOpts {
             games: 16,
             seed: Some(5),
-            skill: Some(Skill::Expert),
+            skill: WallSkill::Fixed(Skill::Expert),
+            speed_idx: DEFAULT_SPEED_IDX,
             level: None,
             once: false,
         };

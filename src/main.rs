@@ -205,7 +205,8 @@ fn parse_testbed_args(args: &[String]) -> Result<Option<game::level::Theme>> {
 }
 
 /// Parse the self-playing wall's flags: `--ai [N]`, `--seed S`,
-/// `--skill expert|casual`, `--level 1|2|3|4`, `--once`.
+/// `--skill expert|skilled|casual|mixed`, `--speed 1|2|4|8|16|32|max`,
+/// `--level 1|2|3|4`, `--once`.
 ///
 /// Returns `None` for normal play (no `--ai`), so the default no-argument
 /// behaviour — and any other mode's flags — stay exactly as they were. Unknown
@@ -251,11 +252,20 @@ fn parse_spectate_args(args: &[String]) -> Result<Option<spectate::AiOpts>> {
             "--skill" => {
                 let value = args
                     .get(i + 1)
-                    .with_context(|| "--skill needs expert or casual".to_string())?;
+                    .context("--skill needs expert, skilled, casual or mixed")?;
                 let skill = spectate::AiOpts::parse_skill(value).with_context(|| {
-                    format!("unknown --skill {value:?} (expected expert or casual)")
+                    format!("unknown --skill {value:?} (expected expert, skilled, casual or mixed)")
                 })?;
-                opts.skill = Some(skill);
+                opts.skill = skill;
+                i += 1;
+            }
+            "--speed" if args.iter().any(|arg| arg == "--ai") => {
+                let value = args
+                    .get(i + 1)
+                    .context("--speed needs 1, 2, 4, 8, 16, 32 or max")?;
+                opts.speed_idx = spectate::AiOpts::parse_speed(value).with_context(|| {
+                    format!("unknown --speed {value:?} (expected 1, 2, 4, 8, 16, 32 or max)")
+                })?;
                 i += 1;
             }
             "--level" => {
@@ -729,7 +739,8 @@ mod tests {
         assert_eq!(ai.games, spectate::DEFAULT_GAMES);
         assert_eq!(ai.games, 16);
         assert_eq!(ai.seed, None);
-        assert_eq!(ai.skill, None);
+        assert_eq!(ai.skill, spectate::WallSkill::Fixed(crate::game::bot::Skill::Expert));
+        assert_eq!(ai.speed_idx, spectate::DEFAULT_SPEED_IDX);
         assert_eq!(ai.level, None);
         assert!(!ai.once);
 
@@ -755,7 +766,7 @@ mod tests {
         .unwrap();
         assert_eq!(ai.games, 4);
         assert_eq!(ai.seed, Some(42));
-        assert_eq!(ai.skill, Some(crate::game::bot::Skill::Casual));
+        assert_eq!(ai.skill, spectate::WallSkill::Fixed(crate::game::bot::Skill::Casual));
         assert_eq!(ai.level, Some(2));
         assert!(ai.once);
 
@@ -774,6 +785,29 @@ mod tests {
         assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "0"])).is_err());
         assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "5"])).is_err());
         assert!(parse_spectate_args(&args(&["--ai", "2", "junk"])).is_err());
+    }
+
+    #[test]
+    fn ai_speed_flags_select_the_initial_rung() {
+        for (idx, flag) in ["1", "2", "4", "8", "16", "32", "max"].into_iter().enumerate() {
+            let ai = parse_spectate_args(&args(&["--speed", flag, "--ai", "24"]))
+                .unwrap()
+                .unwrap();
+            assert_eq!(ai.speed_idx, idx);
+        }
+        for invalid in ["0", "3", "64", "inf", "2.0", "--once"] {
+            assert!(parse_spectate_args(&args(&["--ai", "--speed", invalid])).is_err());
+        }
+        assert!(parse_spectate_args(&args(&["--ai", "--speed"])).is_err());
+        assert_eq!(parse_spectate_args(&args(&["--speed", "max"])).unwrap(), None);
+    }
+
+    #[test]
+    fn ai_accepts_mixed_and_skilled() {
+        let mixed = parse_spectate_args(&args(&["--ai", "--skill", "mixed"])).unwrap().unwrap();
+        assert_eq!(mixed.skill, spectate::WallSkill::Mixed);
+        let skilled = parse_spectate_args(&args(&["--ai", "--skill", "skilled"])).unwrap().unwrap();
+        assert_eq!(skilled.skill, spectate::WallSkill::Fixed(crate::game::bot::Skill::Skilled));
     }
 
     #[test]
