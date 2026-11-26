@@ -8210,13 +8210,15 @@ mod tests {
                 hh.app.tuning = capture_pressure_tuning();
                 hh.enter_playing();
                 let world = hh.app.world.as_mut().unwrap();
-                world.configure_testbed();
-                world.peace = false;
                 let tuning = &world.tuning().director;
-                world.elapsed = tuning.pressure_starts[0] - tuning.pressure_warning_lead - 0.005;
+                world.elapsed = tuning.pressure_starts[0] - tuning.pressure_warning_lead - 0.025;
+                hh.frame(&[]);
                 let text = hh.frame(&[]);
-                assert!(text.contains("MOVEMENT IN THE MAINS"));
+                assert!(text.contains("MOVEMENT IN THE MAINS"), "{text}");
                 if target == "pressure-active" {
+                    let world = hh.app.world.as_mut().unwrap();
+                    world.configure_testbed();
+                    world.peace = false;
                     for _ in 0..(30 * 60) {
                         hh.app.input.begin_frame();
                         hh.app.update(1.0 / 60.0);

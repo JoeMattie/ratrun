@@ -295,7 +295,14 @@ impl Default for PressureState {
 }
 
 impl PressureState {
-    pub(crate) fn tick(&mut self, tuning: &crate::tuning::Director, sector: usize, theme: Theme, elapsed: f32) {
+    pub(crate) fn tick(
+        &mut self,
+        tuning: &crate::tuning::Director,
+        sector: usize,
+        theme: Theme,
+        elapsed: f32,
+        boss_phase: bool,
+    ) {
         if !tuning.pressure_beats {
             return;
         }
@@ -304,7 +311,7 @@ impl PressureState {
         self.budget = 1.0;
         self.contact = 1.0;
         self.heal = 0.0;
-        if elapsed >= tuning.boss_time {
+        if boss_phase || elapsed >= tuning.boss_time {
             return;
         }
         if theme == Theme::Sewer && elapsed < tuning.pressure_sewer_opening_secs {
@@ -1880,26 +1887,30 @@ mod tests {
         let start = tuning.pressure_starts[0];
         let end = start + tuning.pressure_lengths[0];
         let recovery_end = end + tuning.pressure_recovery_lengths[0];
-        pressure.tick(&tuning, 1, Theme::Kitchen, start - 0.01);
+        pressure.tick(&tuning, 1, Theme::Kitchen, start - 0.01, false);
         assert_eq!(pressure.live_budget(72), 72);
         assert_eq!(pressure.cadence, 1.0);
-        pressure.tick(&tuning, 1, Theme::Kitchen, start);
+        pressure.tick(&tuning, 1, Theme::Kitchen, start, false);
         assert!(pressure.live_budget(72) > 72 && pressure.cadence > 1.0);
         assert!(pressure.contact > 1.0 && pressure.heal == 0.0);
-        pressure.tick(&tuning, 1, Theme::Kitchen, end);
+        pressure.tick(&tuning, 1, Theme::Kitchen, end, false);
         assert!(pressure.live_budget(72) < 72 && pressure.cadence < 1.0);
         assert!(pressure.heal > 0.0 && pressure.contact == 1.0);
         for at in [recovery_end, tuning.boss_time] {
-            pressure.tick(&tuning, 1, Theme::Kitchen, at);
+            pressure.tick(&tuning, 1, Theme::Kitchen, at, false);
             assert_eq!(pressure.live_budget(72), 72);
             assert_eq!(pressure.cadence, 1.0);
             assert_eq!(pressure.heal, 0.0);
         }
-        pressure.tick(&tuning, 0, Theme::Sewer, 0.0);
+        pressure.tick(&tuning, 0, Theme::Sewer, 0.0, false);
         assert!(pressure.contact < 1.0);
         assert_eq!(pressure.cadence, 1.0, "preserve the first cards' XP feed");
-        pressure.tick(&tuning, 0, Theme::Sewer, tuning.pressure_sewer_opening_secs);
+        pressure.tick(&tuning, 0, Theme::Sewer, tuning.pressure_sewer_opening_secs, false);
         assert_eq!(pressure.contact, 1.0);
+        pressure.tick(&tuning, 0, Theme::Sewer, start, true);
+        assert_eq!(pressure.cadence, 1.0, "a manually opened boss fight keeps cleanup pace");
+        assert_eq!(pressure.contact, 1.0);
+        assert_eq!(pressure.live_budget(72), 72);
     }
 
     #[test]
@@ -1918,7 +1929,7 @@ mod tests {
             let dt = 1.0 / 60.0;
             for frame in 1..=54_000 {
                 let elapsed = frame as f32 * dt;
-                pressure.tick(&tuning, sector, Theme::Kitchen, elapsed);
+                pressure.tick(&tuning, sector, Theme::Kitchen, elapsed, false);
                 let interval = tuning.horde_interval(sector, elapsed, false);
                 let pulse = tuning.horde_pulse(sector, elapsed, false);
                 baseline_timer -= dt;

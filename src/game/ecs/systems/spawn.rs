@@ -350,7 +350,8 @@ pub fn director_system(
     // used to: give the ones still outside the 1.0 view their approach speed back (no
     // rng, no spawn, no position) before anything else this tick.
     boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
-    director.pressure.tick(&tuning.director, difficulty.0, level.theme, elapsed);
+    let boss_phase = director.boss_spawned;
+    director.pressure.tick(&tuning.director, difficulty.0, level.theme, elapsed, boss_phase);
     director.pressure.warning &= !console.debug.peace;
     if director.pressure.warning {
         sfx.0.push(crate::audio::Sfx::Warn);
@@ -406,7 +407,6 @@ pub fn director_system(
         // cleanup pace (1 body/s, live budget 35); during the build-up it uses
         // the §1 curve. A miniboss arrival also halves the rate for 20 s, and
         // its death suppresses fresh spawns for 8 s.
-        let boss_phase = director.boss_spawned;
         let grace = schedule.spawn_interval_mult(elapsed);
         // `set spawn_rate N` scales the interval (higher = faster spawns).
         // A zero/negative rate would divide by zero, so clamp to a positive
@@ -2258,6 +2258,43 @@ mod tests {
             .run_system_cached(director_system)
             .expect("director system must run");
         w.end_tick();
+    }
+
+    #[test]
+    fn pressure_keeps_spawn_totals_and_xp_supply_close_with_room_to_spawn() {
+        let enabled = crate::tuning::RunTuning::new(
+            crate::tuning::Tuning::parse("[director]\npressure_beats = true").unwrap(),
+        );
+        for (sector, theme) in [Theme::Sewer, Theme::Kitchen, Theme::Lab, Theme::Trailer]
+            .into_iter().enumerate()
+        {
+            let measure = |tuning| {
+                let mut world = World::new_level_tuned(
+                    sector, theme, 61, Loadout::starting(), Default::default(), tuning,
+                );
+                let dt = 1.0 / 60.0;
+                let mut bodies = 0usize;
+                let mut xp = 0u32;
+                for frame in 1..54_000 {
+                    director_tick(&mut world, dt, frame as f32 * dt);
+                    if world.enemy_count() != 0 {
+                        let spawned = world.enemies();
+                        bodies += spawned.len();
+                        xp += spawned.iter().map(|e| world.tuning().enemies.kinds[&e.kind].xp).sum::<u32>();
+                        // Clear each pulse so both runs have the same space to
+                        // spawn. This isolates supply from fighting and pickups.
+                        world.clear_enemies();
+                    }
+                }
+                (bodies, xp as usize)
+            };
+            let (base_bodies, base_xp) = measure(crate::tuning::RunTuning::default());
+            let (beat_bodies, beat_xp) = measure(enabled.clone());
+            assert!(base_bodies.abs_diff(beat_bodies) <= base_bodies / 20,
+                "{theme:?} bodies: {base_bodies} → {beat_bodies}");
+            assert!(base_xp.abs_diff(beat_xp) <= base_xp / 20,
+                "{theme:?} potential XP: {base_xp} → {beat_xp}");
+        }
     }
 
     #[test]
