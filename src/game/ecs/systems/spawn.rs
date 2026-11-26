@@ -2821,16 +2821,21 @@ mod tests {
     /// The caps are the roster's: four shooters, eight heavies, and the big
     /// snake at two. A pulse that keeps rolling never exceeds them, and the
     /// capped share goes to fodder instead (no extra draw, no retry).
+    ///
+    /// Sampled where the caps are actually pressed: the late curve, whose pulse
+    /// is the biggest, for its last 60 s (300 director ticks). It used to walk
+    /// the whole 840 s of the curve at 5 Hz (4,200 director ticks) to reach the
+    /// same late slots, and every earlier pulse is smaller than one of these.
     #[test]
     fn the_pulse_respects_the_roster_caps() {
         use crate::game::roster;
         let mut w = World::new(Theme::Sewer, 71);
         let dt = 0.2;
-        let mut elapsed = 0.0;
+        let mut elapsed = director::RUN_SECONDS - 60.0;
         let mut peak_snake = 0usize;
         let mut peak_shooter = 0usize;
         let mut peak_heavy = 0usize;
-        for _ in 0..4200 {
+        for _ in 0..300 {
             elapsed += dt;
             director_tick(&mut w, dt, elapsed);
             let snapshot = w.enemies();
@@ -3224,42 +3229,68 @@ mod tests {
         assert!(hits > 0, "no room wave ever found a staging room");
     }
 
-    /// The pacing curve follows §1's live budget: the first minute stays under
-    /// its 18-body opening budget, the horde grows to the late 165-body budget
-    /// by the boss time, and the 600-body cap is never touched. Driven through
-    /// the real director only (nobody moves or dies), so it is exact and cheap.
+    /// The pacing curve follows §1's live budget: the opening holds its
+    /// 18-body budget, the horde grows to the late 185-body budget, and the
+    /// 600-body cap is never touched.
+    ///
+    /// The budget is a pure step table over the curve clock, so it is **sampled
+    /// at its knots** rather than walked: this used to drive the director over
+    /// the whole 900 s curve at 10 Hz (9,000 director ticks). Two short windows
+    /// then prove the director really fills what the table promises — the
+    /// opening minute, and the last 30 s before the boss — 900 director ticks
+    /// in total. The boss slot itself is pinned by
+    /// `a_late_tick_blocked_at_the_cap_still_hands_the_boss_over`, which asks
+    /// for it with one `director_tick` at `BOSS_TIME`.
     #[test]
-    fn the_pacing_curve_stays_on_the_live_budget() {
+    fn the_live_budget_curve_holds_its_shape() {
+        // Every knot of the table, plus the instant before the boss.
+        let mut prev = 0usize;
+        for t in [0.0, 60.0, 180.0, 360.0, 540.0, 720.0, director::RUN_SECONDS - 1.0] {
+            let b = director::live_budget_at(t);
+            assert!(b >= prev, "the budget shrank at {t:.0}s: {prev} -> {b}");
+            assert!(b < ENEMY_CAP, "the {t:.0}s budget touches the cap: {b}");
+            prev = b;
+        }
+        assert!(
+            director::live_budget_at(0.0) >= 12,
+            "the opening budget is {} bodies: the horde never builds",
+            director::live_budget_at(0.0)
+        );
+
+        // The opening minute: the director holds the opening budget, and fills
+        // it (nobody moves or dies, so this is exact).
         let mut w = World::new(Theme::Lab, 9);
         let dt = 0.1;
         let mut elapsed = 0.0;
-        let mut early_peak = 0usize;
-        let mut peak = 0usize;
-        while elapsed < director::RUN_SECONDS {
+        for _ in 0..600 {
             elapsed += dt;
             director_tick(&mut w, dt, elapsed);
-            let live = w.enemy_count();
-            if elapsed <= 60.0 {
-                early_peak = early_peak.max(live);
-            }
-            peak = peak.max(live);
+            assert!(
+                w.enemy_count() <= director::live_budget_at(elapsed),
+                "the opening exceeded its live budget at {elapsed:.1}s: {}",
+                w.enemy_count()
+            );
         }
-        assert!(
-            early_peak <= director::live_budget_at(59.9),
-            "the opening exceeded its live budget: {early_peak}"
-        );
-        assert!(
-            early_peak >= 12,
-            "only {early_peak} enemies before 60 s: the horde never builds"
-        );
+        let early = w.enemy_count();
+        assert!(early >= 12, "only {early} enemies before 60 s: the horde never builds");
+        assert!(w.director.pulses > 20, "too few opening pulses: {}", w.director.pulses);
+
+        // The last 30 s before the boss: the late budget is reached, not
+        // merely never breached, and the 600-body cap stays out of reach.
+        let mut w = World::new(Theme::Lab, 9);
         let top = director::live_budget_at(director::RUN_SECONDS - 1.0);
+        let mut elapsed = director::RUN_SECONDS - 30.0;
+        for _ in 0..300 {
+            elapsed += dt;
+            director_tick(&mut w, dt, elapsed);
+        }
+        let late = w.enemy_count();
         assert!(
-            (top * 3 / 4..=top).contains(&peak),
-            "the late horde did not reach its budget: peak {peak} of {top}"
+            late >= top * 3 / 4,
+            "the late horde did not reach its budget: {late} of {top}"
         );
-        assert!(peak < ENEMY_CAP, "the 600-body cap was touched: {peak}");
-        assert!(w.director.boss_spawned, "the boss slot never filled");
-        assert!(w.director.pulses > 100, "too few pulses: {}", w.director.pulses);
+        assert!(late <= top, "the late horde overshot its budget: {late} of {top}");
+        assert!(late < ENEMY_CAP, "the 600-body cap was touched: {late}");
     }
 
     /// A one-way gate is a **wall for the horde**: its leaf is a permanent
