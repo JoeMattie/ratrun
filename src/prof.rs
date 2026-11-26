@@ -4,7 +4,7 @@
 //! are *inclusive*; `profbench` subtracts children where it reports a parent.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use crate::clock::Instant;
 
 macro_rules! stages {
     ($($name:ident),* $(,)?) => {
@@ -13,6 +13,7 @@ macro_rules! stages {
         #[repr(usize)]
         pub enum Stage { $($name),* }
         pub const STAGE_NAMES: &[&str] = &[$(stringify!($name)),*];
+        pub const STAGES: &[Stage] = &[$(Stage::$name),*];
     };
 }
 

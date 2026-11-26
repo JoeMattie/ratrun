@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::audio;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::config;
 use crate::controls::{Controls, SavedControls, SavedScheme};
 use crate::game::campaign::{self, LEVEL_COUNT};
@@ -569,6 +570,7 @@ impl ScoreTable {
     /// nothing, whatever constructor the test called (`App::new` loads and
     /// persists; see its docs). A test that wants a real file sets
     /// `RATRUN_DATA_DIR` to a directory of its own and gets exactly that.
+    #[cfg(not(target_arch = "wasm32"))]
     fn store_path() -> Option<std::path::PathBuf> {
         #[cfg(test)]
         {
@@ -580,27 +582,7 @@ impl ScoreTable {
     }
 
     pub fn load() -> ScoreTable {
-        let Some(path) = Self::store_path() else {
-            return ScoreTable::default();
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(s) => {
-                // A file that is not a JSON object at all (truncated by a
-                // crash, a merge marker, an editor's mistake) loads as an
-                // empty table, and the first save would overwrite it for
-                // good: the scores, the unlocks and the nest's bank. Keep the
-                // unreadable bytes beside it first. Best effort, and never in
-                // tests (no test may write beside the real save file).
-                #[cfg(not(test))]
-                {
-                    if !s.trim().is_empty() && !Self::is_json_object(&s) {
-                        let _ = std::fs::copy(&path, path.with_extension("json.corrupt"));
-                    }
-                }
-                ScoreTable::parse(&s)
-            }
-            Err(_) => ScoreTable::default(),
-        }
+        ProfileStorage::read().map_or_else(Self::default, |json| Self::parse(&json))
     }
 
     /// Is `json` a JSON object (the only shape a save file has)?
@@ -685,23 +667,8 @@ impl ScoreTable {
     }
 
     pub fn save(&self) {
-        let Some(path) = Self::store_path() else {
-            return;
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            // Write beside the file and rename over it: a crash or a full disk
-            // mid-write then leaves the old save intact instead of a truncated
-            // one (which would load as an empty table). If the rename is
-            // refused, fall back to the plain write.
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-                return;
-            }
-            let _ = std::fs::remove_file(&tmp);
-            let _ = std::fs::write(&path, json);
+            ProfileStorage::write(&json);
         }
     }
 
@@ -823,6 +790,71 @@ impl ScoreTable {
     /// upgrade track, not a new save file).
     pub fn reset_nest(&mut self) {
         self.meta = crate::meta::MetaProfile::default();
+    }
+}
+
+trait ScoreStorage {
+    fn read() -> Option<String>;
+    fn write(json: &str);
+}
+
+struct ProfileStorage;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ScoreStorage for ProfileStorage {
+    fn read() -> Option<String> {
+        let path = ScoreTable::store_path()?;
+        let json = std::fs::read_to_string(&path).ok()?;
+        // Preserve bytes that would otherwise be overwritten by the next save.
+        #[cfg(not(test))]
+        if !json.trim().is_empty() && !ScoreTable::is_json_object(&json) {
+            let _ = std::fs::copy(&path, path.with_extension("json.corrupt"));
+        }
+        Some(json)
+    }
+
+    fn write(json: &str) {
+        let Some(path) = ScoreTable::store_path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Write beside the save and rename over it. Fall back to a direct
+        // write if the platform refuses the rename.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            return;
+        }
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+impl ProfileStorage {
+    const KEY: &str = "ratrun.scores.json";
+
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok().flatten()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+impl ScoreStorage for ProfileStorage {
+    fn read() -> Option<String> {
+        let storage = Self::storage()?;
+        let json = storage.get_item(Self::KEY).ok().flatten()?;
+        if !json.trim().is_empty() && !ScoreTable::is_json_object(&json) {
+            let _ = storage.set_item("ratrun.scores.json.corrupt", &json);
+        }
+        Some(json)
+    }
+
+    fn write(json: &str) {
+        if let Some(storage) = Self::storage() {
+            let _ = storage.set_item(Self::KEY, json);
+        }
     }
 }
 

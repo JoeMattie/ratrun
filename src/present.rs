@@ -16,16 +16,21 @@
 //! together, shared by `main::run` and the `--prof-bench` harness.
 
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::queue;
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
+#[cfg(not(target_arch = "wasm32"))]
+use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::{Buffer, Cell, CellDiffOption, CellWidth};
 use ratatui::style::{Color, Modifier};
 use ratatui::{Frame, Terminal};
 
 use crate::app::App;
+use crate::clock::Instant;
 use crate::prof::{self, Stage};
 
 /// Large enough for a whole 300×90 truecolor frame without growing.
@@ -87,6 +92,7 @@ impl<W: Write> Write for FrameOut<W> {
 /// the backend's own writer, in that order. The end marker is always issued
 /// and flushed, even when the draw fails, so the terminal is never left in a
 /// held update.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn synchronized_frame<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     draw: impl FnOnce(&mut Frame),
@@ -171,6 +177,11 @@ impl Default for Presenter {
 }
 
 impl Presenter {
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub(crate) fn last_buffer(&self) -> &Buffer {
+        &self.prev
+    }
+
     pub fn new() -> Self {
         Self::with_mode(PresentMode::from_env())
     }
@@ -201,18 +212,28 @@ impl Presenter {
 
     /// Does the terminal's frame no longer match what was last presented (it
     /// was resized)? Such a frame must be rendered now.
-    pub fn stale_for<W: Write>(&self, terminal: &mut Terminal<CrosstermBackend<W>>) -> bool {
+    pub fn stale_for<B: Backend>(&self, terminal: &mut Terminal<B>) -> bool {
         self.full || terminal.get_frame().area() != self.prev.area
     }
 
     /// Render one frame with `render` and send what changed, inside a
     /// synchronized update (DEC mode 2026) so it is presented atomically
     /// instead of tearing; terminals without support ignore the markers.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn frame<W: Write>(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<W>>,
         render: impl FnOnce(&mut Frame),
     ) -> io::Result<Presented> {
+        let cur = self.take_frame(terminal, render);
+        self.show(terminal.backend_mut(), cur)
+    }
+
+    fn take_frame<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        render: impl FnOnce(&mut Frame),
+    ) -> Buffer {
         let area = {
             let mut frame = terminal.get_frame();
             render(&mut frame);
@@ -223,20 +244,31 @@ impl Presenter {
         if self.spare.area != area {
             self.spare = Buffer::empty(area);
         }
-        let cur = std::mem::replace(
+        std::mem::replace(
             terminal.current_buffer_mut(),
             std::mem::take(&mut self.spare),
-        );
-        self.show(terminal.backend_mut(), cur)
+        )
     }
 
     /// Send a rendered frame: what changed since the last one, or everything
     /// (after a clear) when the size changed or [`Presenter::invalidate`] was
     /// called. Takes the buffer; it becomes the record of the screen.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn show<W: Write>(
         &mut self,
         backend: &mut CrosstermBackend<W>,
         cur: Buffer,
+    ) -> io::Result<Presented> {
+        self.show_with(cur, |presenter, cur, full| match presenter.mode {
+            PresentMode::Ratatui => presenter.send_ratatui(backend, cur, full),
+            PresentMode::Direct => presenter.send_direct(backend, cur, full),
+        })
+    }
+
+    fn show_with(
+        &mut self,
+        cur: Buffer,
+        send: impl FnOnce(&mut Self, &Buffer, bool) -> io::Result<Presented>,
     ) -> io::Result<Presented> {
         let _p = prof::scope(Stage::Present);
         if self.prev.area != cur.area {
@@ -247,10 +279,7 @@ impl Presenter {
         if full {
             self.prev.reset();
         }
-        let sent = match self.mode {
-            PresentMode::Ratatui => self.send_ratatui(backend, &cur, full),
-            PresentMode::Direct => self.send_direct(backend, &cur, full),
-        };
+        let sent = send(self, &cur, full);
         // Whatever happened, `cur` is the best record of the screen.
         let mut old = std::mem::replace(&mut self.prev, cur);
         if self.spare.area != old.area {
@@ -264,6 +293,7 @@ impl Presenter {
         sent
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn send_ratatui<W: Write>(
         &mut self,
         backend: &mut CrosstermBackend<W>,
@@ -292,7 +322,7 @@ impl Presenter {
 
     fn send_direct<W: Write>(
         &mut self,
-        backend: &mut CrosstermBackend<W>,
+        out: &mut W,
         cur: &Buffer,
         full: bool,
     ) -> io::Result<Presented> {
@@ -332,8 +362,8 @@ impl Presenter {
         self.bytes.extend_from_slice(SYNC_END);
         // One buffer, begin marker to end marker: either all of it reaches
         // the frame writer or (on an error) the writer drops it.
-        backend.write_all(&self.bytes)?;
-        Write::flush(backend)?;
+        out.write_all(&self.bytes)?;
+        out.flush()?;
         Ok(Presented { cells })
     }
 }
@@ -349,7 +379,7 @@ const CLEAR_ALL: &[u8] = b"\x1b[2J";
 /// Symbols for Legacy Computing) is `F0 9F AC..AF xx` and
 /// `U+1CD00..=U+1CEBF` (octants, the Supplement) is `F0 9C B4..BA xx`.
 #[inline(always)]
-fn narrow_symbol(symbol: &str) -> bool {
+pub(crate) fn narrow_symbol(symbol: &str) -> bool {
     let b = symbol.as_bytes();
     b.len() == 1
         || (b.len() == 3 && b[0] == 0xE2 && (0x94..=0x97).contains(&b[1]))
@@ -756,45 +786,69 @@ pub struct FrameLoop {
 
 impl FrameLoop {
     /// Returns `None` when the frame was skipped (nothing could have changed).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn present<W: Write>(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<W>>,
         app: &mut App,
         now: Instant,
     ) -> io::Result<Option<Presented>> {
-        if app.input.refocused {
-            // The terminal may have been drawn over while we were away.
-            self.presenter.invalidate();
-        }
         if self.size.due(now, app.input.resized) {
             // One size query; on a change ratatui resizes its buffers and
             // clears the screen (a no-op for the fixed viewports of tests and
             // the bench, which never touch a TTY).
             terminal.autoresize()?;
         }
+        if !self.render_due(terminal, app, now) {
+            return Ok(None);
+        }
+        let shown = self.presenter.frame(terminal, |f| render_app(app, f))?;
+        self.pacer.rendered(now, shown.cells > 0);
+        Ok(Some(shown))
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub fn present_web<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        app: &mut App,
+        now: Instant,
+        pack: impl FnOnce(&Buffer, &Buffer, bool) -> usize,
+    ) {
+        if self.render_due(terminal, app, now) {
+            let cur = self.presenter.take_frame(terminal, |f| render_app(app, f));
+            let shown = self.presenter.show_with(cur, |presenter, cur, full| {
+                Ok(Presented { cells: pack(&presenter.prev, cur, full) })
+            }).unwrap();
+            self.pacer.rendered(now, shown.cells > 0);
+        }
+    }
+
+    fn render_due<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        app: &App,
+        now: Instant,
+    ) -> bool {
+        if app.input.refocused {
+            self.presenter.invalidate();
+        }
         let demand = app.frame_demand();
         let urgent = match demand {
             Demand::AnimatedMenu => app.repaint_immediate(),
             _ => app.repaint_urgent(),
         } || self.presenter.stale_for(terminal);
-        if !self.pacer.should_render(now, demand, urgent) {
-            return Ok(None);
-        }
-        let shown = self.presenter.frame(terminal, |f| {
-            {
-                let _p = prof::scope(Stage::AppRender);
-                app.render(f);
-            }
-            // Fold the finished frame into what this terminal can draw: RGB →
-            // palette when truecolor is unavailable, and risky glyphs → safe
-            // ones when the terminal mis-sizes them. A no-op when the terminal
-            // supports everything (the default path).
-            let _p = prof::scope(Stage::Sanitize);
-            crate::term::sanitize(f.buffer_mut());
-        })?;
-        self.pacer.rendered(now, shown.cells > 0);
-        Ok(Some(shown))
+        self.pacer.should_render(now, demand, urgent)
     }
+}
+
+fn render_app(app: &mut App, frame: &mut Frame) {
+    {
+        let _p = prof::scope(Stage::AppRender);
+        app.render(frame);
+    }
+    let _p = prof::scope(Stage::Sanitize);
+    crate::term::sanitize(frame.buffer_mut());
 }
 
 #[cfg(test)]
@@ -1234,6 +1288,13 @@ mod tests {
         pen: Pen,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Wrap {
+        Pending,
+        Immediate,
+        Disabled,
+    }
+
     /// A small VT cell model: cursor addressing, SGR, clear, printing with
     /// wide glyphs. Strict where a real terminal is forgiving — printing
     /// while the cursor is past the last column (relying on autowrap) or
@@ -1250,6 +1311,8 @@ mod tests {
         held: bool,
         /// Cells printed (for the byte/cell statistics).
         printed: u64,
+        width: fn(char) -> usize,
+        wrap: Wrap,
     }
 
     impl Vt {
@@ -1267,6 +1330,8 @@ mod tests {
                 pen: DEFAULT_PEN,
                 held: false,
                 printed: 0,
+                width: |ch| ch.encode_utf8(&mut [0; 4]).cell_width() as usize,
+                wrap: Wrap::Pending,
             }
         }
 
@@ -1280,7 +1345,7 @@ mod tests {
         fn print(&mut self, ch: char) {
             let mut utf8 = [0u8; 4];
             let text: &str = ch.encode_utf8(&mut utf8);
-            let width = if ch.is_ascii() { 1 } else { text.cell_width() as usize };
+            let width = (self.width)(ch);
             if width == 0 {
                 // A combining mark or variation selector joins the glyph
                 // before the cursor.
@@ -1291,6 +1356,9 @@ mod tests {
                 }
                 self.cells[i].text.push(ch);
                 return;
+            }
+            if self.wrap == Wrap::Disabled && self.x == self.w {
+                self.x -= 1;
             }
             assert!(
                 self.y < self.h && self.x + width <= self.w,
@@ -1320,6 +1388,16 @@ mod tests {
                 };
             }
             self.x += width;
+            if self.wrap == Wrap::Immediate && self.x == self.w {
+                self.x = 0;
+                if self.y + 1 == self.h {
+                    self.cells.rotate_left(self.w);
+                    let start = self.cells.len() - self.w;
+                    self.cells[start..].fill(Glyph { text: " ".into(), pen: self.pen });
+                } else {
+                    self.y += 1;
+                }
+            }
             self.printed += 1;
         }
 
@@ -1382,6 +1460,7 @@ mod tests {
                 };
                 if let Some(mode) = body.strip_prefix('?') {
                     match (mode, end) {
+                        ("7", 'l') => self.wrap = Wrap::Disabled,
                         ("2026", 'h') => {
                             assert!(!self.held, "nested synchronized update");
                             self.held = true;
@@ -1515,7 +1594,10 @@ mod tests {
                 // A real resize leaves the old picture reflowed; the presenter
                 // must clear it and repaint everything (the model's fresh
                 // screen is the cleared one, the clear itself is asserted).
-                self.vt = Vt::new(buf.area.width, buf.area.height);
+                let mut resized = Vt::new(buf.area.width, buf.area.height);
+                resized.width = self.vt.width;
+                resized.wrap = self.vt.wrap;
+                self.vt = resized;
                 self.seen.clear();
                 let shown = self.presenter.show(&mut self.backend, buf.clone()).unwrap();
                 let bytes = self.seen.bytes();
@@ -1844,6 +1926,77 @@ mod tests {
         run!("leave library", 3, &[KeyCode::Esc]);
         run!("quit to title", 4, &[c('q')]);
         assert_eq!(app.prof_screen(), "Title");
+    }
+
+    #[test]
+    fn immediate_wrap_scrolls_a_diff_at_the_bottom_right() {
+        let mut rig = Rig::new(PresentMode::Direct);
+        let mut frame = Buffer::empty(Rect::new(0, 0, 8, 2));
+        frame[(0, 0)].set_symbol("A");
+        rig.show(&frame, "initial frame");
+        frame[(7, 1)].set_symbol("▀");
+        rig.show(&frame, "last column updated");
+
+        let mut immediate = Vt::new(8, 2);
+        immediate.cells[0] = Vt::expected(&frame[(0, 0)]);
+        immediate.wrap = Wrap::Immediate;
+        immediate.feed(&rig.seen.bytes());
+        assert_eq!(immediate.cells[0].text, " ", "the first row scrolled away");
+
+        let mut no_wrap = Vt::new(8, 2);
+        no_wrap.cells[0] = Vt::expected(&frame[(0, 0)]);
+        no_wrap.wrap = Wrap::Immediate;
+        let mut setup = String::new();
+        crossterm::Command::write_ansi(&crossterm::terminal::DisableLineWrap, &mut setup).unwrap();
+        no_wrap.feed(setup.as_bytes());
+        no_wrap.feed(&rig.seen.bytes());
+        no_wrap.assert_shows(&frame, "line wrap disabled");
+    }
+
+    // xterm.js 6.0.0's UnicodeV6 widths for the ranges used by the shipped
+    // text and block art. Fail on an unreviewed scalar instead of inheriting
+    // ratatui's answer for new characters.
+    fn xterm_v6_game_width(ch: char) -> usize {
+        match ch {
+            '\u{20}'..='\u{7e}'
+            | '\u{a0}'..='\u{02ff}'
+            | '\u{0370}'..='\u{0482}'
+            | '\u{2010}'..='\u{2029}'
+            | '\u{2030}'..='\u{205f}'
+            | '\u{2070}'..='\u{2328}'
+            | '\u{232b}'..='\u{2e7f}'
+            | '\u{1cd00}'..='\u{1cebf}'
+            | '\u{1fb00}'..='\u{1fbff}' => 1,
+            '\u{fe00}'..='\u{fe0f}' => 0,
+            _ => panic!("check xterm.js UnicodeV6 width of {ch:?}"),
+        }
+    }
+
+    #[test]
+    fn scripted_session_matches_xterm_v6_and_windows_console_with_wrap_disabled() {
+        let mut xterm = Rig::new(PresentMode::Direct);
+        let mut windows = Rig::new(PresentMode::Direct);
+        xterm.vt.width = xterm_v6_game_width;
+        for rig in [&mut xterm, &mut windows] {
+            rig.vt.feed(b"\x1b[?7l");
+        }
+        let mut checked = std::collections::HashSet::new();
+        scripted_session(None, |what, frame| {
+            for cell in &frame.content {
+                let symbol = cell.symbol();
+                if checked.insert(symbol.to_owned()) {
+                    assert_eq!(symbol.cell_width(), 1, "{what}: {symbol:?}");
+                    assert_eq!(symbol.chars().map(xterm_v6_game_width).sum::<usize>(), 1,
+                        "{what}: {symbol:?}");
+                }
+            }
+            xterm.show(frame, what);
+            // Windows Terminal's default width mode treats ambiguous
+            // characters as narrow, like ratatui. The wrap setting also
+            // protects the immediate-wrap case in the Console Host.
+            windows.show(frame, what);
+        });
+        assert!(checked.len() > 100);
     }
 
     #[test]

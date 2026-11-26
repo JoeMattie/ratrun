@@ -15,7 +15,9 @@ use std::f32::consts::{PI, TAU};
 use std::num::NonZero;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 use rodio::source::Source;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
@@ -12905,6 +12907,7 @@ impl AudioEngine {
     /// requested before the thread finishes are silently skipped (see
     /// [`Self::play_sfx_pitched`]). If the thread cannot be spawned (rare),
     /// fall back to building in place so audio still works.
+    #[cfg(not(target_arch = "wasm32"))]
     fn spawn_cache() -> Arc<OnceLock<SfxBank>> {
         let cache: Arc<OnceLock<SfxBank>> = Arc::new(OnceLock::new());
         let slot = Arc::clone(&cache);
@@ -12919,13 +12922,19 @@ impl AudioEngine {
         cache
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn spawn_cache() -> Arc<OnceLock<SfxBank>> {
+        // Browser audio starts in a user gesture on the main thread.
+        Arc::new(OnceLock::from(Self::build_cache()))
+    }
+
     /// The title and menu track: plays the selected floor's song in the 16-bit
     /// palette at the calm tier with a soft intro (`RATRUN_MUSIC=chip` selects
     /// the chip oscillator palette; `RATRUN_MUSIC=classic` keeps the pre-MIDI
     /// pattern synth everywhere, menus included).
     pub fn play_menu_music(&mut self, theme: Theme) {
         self.intensity.store(0, Ordering::Relaxed);
-        self.music.clear();
+        clear_player(&mut self.music, &self.stream);
         if Self::music_selection() == MusicSelection::Classic {
             self.music.append(MusicSynth::new(theme, self.intensity.clone()));
         } else {
@@ -12952,7 +12961,7 @@ impl AudioEngine {
 
     pub fn play_music(&mut self, theme: Theme, intensity: u32) {
         self.intensity.store(intensity, Ordering::Relaxed);
-        self.music.clear();
+        clear_player(&mut self.music, &self.stream);
         // The floor's song (generated from the owner's MIDI stems) is the
         // default track; `RATRUN_MUSIC=classic` keeps the pre-MIDI chiptune
         // synth, which stays untouched and fully tested behind this switch.
@@ -13092,7 +13101,7 @@ impl AudioEngine {
         {
             if prio > lowest.priority {
                 let slot = &mut voices[idx];
-                slot.player.clear();
+                clear_player(&mut slot.player, &self.stream);
                 slot.priority = prio;
                 slot.player.set_volume(vol);
                 slot.player.append(src);
@@ -13100,6 +13109,19 @@ impl AudioEngine {
             }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn clear_player(player: &mut Player, _stream: &MixerDeviceSink) {
+    player.clear();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_player(player: &mut Player, stream: &MixerDeviceSink) {
+    // Player::clear waits for the mixer to drain its queue. On Web Audio
+    // that callback runs on this same thread, so swap players without waiting.
+    player.stop();
+    *player = Player::connect_new(stream.mixer());
 }
 
 #[cfg(test)]

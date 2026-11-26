@@ -337,14 +337,14 @@ fn stick_from_gilrs(x: f32, y_up: f32, deadzone: f32) -> Vec2 {
 /// The gilrs-backed poller. With the `gamepad` feature off, this type is an
 /// empty no-op so the whole file still builds and every call site works.
 pub struct PadPoller {
-    #[cfg(feature = "gamepad")]
+    #[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
     gilrs: Option<gilrs::Gilrs>,
-    #[cfg(feature = "gamepad")]
+    #[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
     pad: Option<gilrs::GamepadId>,
-    #[cfg(feature = "gamepad")]
+    #[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
     was_connected: bool,
     /// One cached short rumble effect (rebuilt when the pad changes).
-    #[cfg(feature = "gamepad")]
+    #[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
     effect: Option<gilrs::ff::Effect>,
 }
 
@@ -355,7 +355,7 @@ impl Default for PadPoller {
 }
 
 impl PadPoller {
-    #[cfg(feature = "gamepad")]
+    #[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
     pub fn new() -> PadPoller {
         // A machine with no controller (or no permission to read it) is normal:
         // `Gilrs::new` failing is not an error, it is "no gamepad today".
@@ -367,7 +367,7 @@ impl PadPoller {
         }
     }
 
-    #[cfg(not(feature = "gamepad"))]
+    #[cfg(any(not(feature = "gamepad"), target_arch = "wasm32"))]
     pub fn new() -> PadPoller {
         PadPoller {}
     }
@@ -376,7 +376,7 @@ impl PadPoller {
     /// and refresh the analog sticks. Returns whether anything arrived.
     ///
     /// `state` must already have had `begin_frame` and `step` this frame.
-    #[cfg(feature = "gamepad")]
+    #[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
     pub fn poll(&mut self, state: &mut PadState, deadzone: f32) -> bool {
         use gilrs::{Axis, Button};
 
@@ -510,7 +510,7 @@ impl PadPoller {
         any
     }
 
-    #[cfg(not(feature = "gamepad"))]
+    #[cfg(any(not(feature = "gamepad"), target_arch = "wasm32"))]
     pub fn poll(&mut self, _state: &mut PadState, _deadzone: f32) -> bool {
         false
     }

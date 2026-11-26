@@ -39,6 +39,28 @@ cargo run --release -- --music-render sewer 60 /tmp/sewer.wav --intensity 3   # 
 
 **Headless without a TTY:** `cargo run` needs an attached terminal; piped input makes `enable_raw_mode` fail with `os error 6`, which the app handles cleanly (no panic, terminal restored). To drive the binary headlessly you must allocate a PTY *with* a window size (`script` leaves winsize 0×0 → empty render); prefer `TestBackend` for deterministic rendering tests.
 
+## Web build
+
+`src/web.rs` hosts the same App, simulation and frame pacer in Wasm.
+`web/game.js` supplies keyboard, pointer, focus and resize events through a
+60 Hz animation loop. Rust packs changed cells for the two canvas layers
+in `web/canvas.js`, which draw block art and text. The browser stores the save
+in local storage and starts Web Audio on a key press or click. The shipped
+web build uses default balance tuning and omits tuning files, native terminal
+setup, worker threads, the spectator wall, bot batch, gamepad and the console.
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings
+./web/build.sh
+python3 -m http.server 8000 --directory web/dist
+```
+
+Smoke-test a run with movement, zoom, resize and focus changes. For browser
+regression checks, append `?debug-frames` and use `window.ratrunDebugFrame` to
+compare the canvas with the intended cells. Collect frame timings with
+`?profile=full` and `window.ratrunProfile()`.
+
 ## Worker rules (this repo, all agents)
 
 - **No compiling and no running.** Feature workers do not build, test, clippy, fmt or run the game. The coordinator or a designated integration worker merges and verifies the batch in the integration checkout. Write the code and the tests you would have run, and report what is unverified.
@@ -46,11 +68,12 @@ cargo run --release -- --music-render sewer 60 /tmp/sewer.wav --intensity 3   # 
 
 ## Architecture
 
-`main.rs` (terminal + 60 FPS loop) → `app.rs` (state machine) → `game/world.rs` (facade) → `game/ecs/` (one chained schedule) → `render/` (pixels, HUD).
+`main.rs` selects the native or web host. Both drive `app.rs` (state machine) → `game/world.rs` (facade) → `game/ecs/` (one chained schedule) → `render/` (pixels, HUD).
 
 | path | owns |
 | --- | --- |
-| `main.rs` | terminal lifecycle, input thread, frame loop |
+| `main.rs`, `native.rs` | entry point, terminal lifecycle, input thread, native frame loop |
+| `web.rs`, `web/` | browser input, animation loop, canvas presentation |
 | `app.rs` | screen state machine, run/overlay state, audio bridge |
 | `present.rs` | the frame writer, the cell diff + escape encoder, frame pacing |
 | `term.rs` | capability detection, colour folding, glyph sanitising |
@@ -67,7 +90,7 @@ cargo run --release -- --music-render sewer 60 /tmp/sewer.wav --intensity 3   # 
 | `game/` (rest) | data + rules: `level`, `enemy`, `weapon`, `loadout`, `director`, `shop`, `campaign`, `library`, `bot`, `nav`, `collision`, `fog`, `hazards`, `particle`, `smoke`, `vfx`, `art_*` |
 | `render/` | framebuffer, lighting, HUD, menus, minimap, overlays, ink |
 
-- **`main.rs`** enables raw mode first (then arms a `TerminalGuard` drop guard), enters the alternate screen with mouse capture + focus reporting, asks the terminal for its keyboard protocol (`term::query_keyboard_enhancement`, a 300 ms budget; crossterm's own helper waits 2 s), pushes `REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES` when it answers, and re-queries to learn whether a **lone** Ctrl reports (that decides Ctrl-dash vs Space-dash). It reads crossterm events on a joined reader thread, coalesces mouse motion, caps work at `MAX_EVENTS_PER_FRAME`, computes `dt` (capped at 50 ms), calls `app.update(dt)` every iteration (60 Hz), and hands the frame to `present::FrameLoop`, which presents inside a DEC 2026 synchronized update. `FocusLost` releases every held key. Restore is idempotent and runs on every exit path including panics.
+- **`native.rs`** enables raw mode first (then arms a `TerminalGuard` drop guard), enters the alternate screen with mouse capture + focus reporting, asks the terminal for its keyboard protocol (`term::query_keyboard_enhancement`, a 300 ms budget; crossterm's own helper waits 2 s), pushes `REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES` when it answers, and re-queries to learn whether a **lone** Ctrl reports (that decides Ctrl-dash vs Space-dash). It reads crossterm events on a joined reader thread, coalesces mouse motion, caps work at `MAX_EVENTS_PER_FRAME`, computes `dt` (capped at 50 ms), calls `app.update(dt)` every iteration (60 Hz), and hands the frame to `present::FrameLoop`, which presents inside a DEC 2026 synchronized update. `FocusLost` releases every held key. Restore is idempotent and runs on every exit path including panics. On Windows, setup disables line wrap in the alternate screen so filling the bottom-right cell cannot scroll the frame. Restore re-enables wrap before leaving that screen.
 - **`present.rs`** owns everything between a rendered `Buffer` and the terminal:
   - `FrameOut` — the backend's writer. A frame is collected in memory and sent in **one** `write`; it never flushes on drop, so a panic mid-frame cannot spill cells onto the restored terminal. Setup and restore write straight to stdout.
   - `Presenter` — `Terminal::draw` taken apart. It owns the previous frame, so an unchanged frame sends **zero bytes**, and `invalidate()` (focus regained) or a new size clears and repaints everything. `PresentMode::Direct` (the default) diffs the two buffers in one pass and writes cursor moves, SGR and glyph bytes by hand — a run of adjacent cells in the same colours is one move and one SGR; `RATRUN_PRESENT=ratatui` (and `NO_COLOR`, which crossterm honours) selects ratatui's `Buffer::diff` + crossterm's `Backend::draw` instead. A frame holding a wide glyph or a cell with a diff option goes through ratatui's diff (its trailing-cell rules) with the direct encoder. The two paths are pinned equal by `present::tests::a_scripted_session_looks_the_same_through_both_paths_at_every_colour_depth`, which replays both byte streams into a small VT cell model across play, pause, level-up, map, options, console and resizes at truecolor, 256 and 16 colours. The presenter runs **after** `term::sanitize`, so colour folding stays in `term.rs`.

@@ -36,7 +36,7 @@
 //! strings, rebuilt only when a binding changes, so the render path never
 //! formats a binding.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton};
+use crate::input_event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton};
 
 use crate::math::Vec2;
 

@@ -259,6 +259,7 @@ pub struct Report {
 }
 
 impl Selection {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_path(path: Option<PathBuf>) -> Result<Self> {
         let Some(path) = path else { return Ok(Self::default()) };
         let source = std::fs::read_to_string(&path)
@@ -567,6 +568,7 @@ fn differences(defaults: &Table, current: &Table, prefix: &str, diff: &mut BTree
 }
 
 /// Strip the shared CLI flags before dispatching to each mode's parser.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn cli(args: &mut Vec<String>) -> Result<Option<Selection>> {
     let mut path = None;
     let mut dump = None;

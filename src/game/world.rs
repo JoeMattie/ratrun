@@ -2583,7 +2583,7 @@ impl World {
         self.draw_seabed_plants(pb, cam, viewport);
 
         _s = crate::prof::scope(crate::prof::Stage::SceneFixturesAmbience);
-        let ambience_started = std::time::Instant::now();
+        let ambience_started = crate::clock::Instant::now();
         let blackout = self.blackout();
         draw_fixtures(
             &mut self.light_map,
@@ -3709,7 +3709,7 @@ impl World {
             depth: self.lighting_depth,
             fx: self.lighting_fx,
         };
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         self.light_map.apply_scene(pb, &scene);
         // Tests never feed the wall clock to the tier controller: a loaded
         // test machine would drop a tier in one harness and not its twin, and
@@ -5677,7 +5677,7 @@ mod zoom_tests {
     #[ignore = "perf measurement (min-of-chunks at the enemy cap), not a pass/fail test"]
     fn zoom_frame_cost_at_the_enemy_cap() {
         use rand::SeedableRng;
-        use std::time::Instant;
+        use crate::clock::Instant;
         let mut w = World::new(Theme::Sewer, 21);
         let mut rng = StdRng::seed_from_u64(7);
         let p = w.player.pos;

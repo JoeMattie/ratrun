@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.2 (2026-11-26)
+
+- **Browser edition.** Play with a keyboard and mouse. The canvas renderer
+  targets 60 frames per second. Scores, settings and Nest progress stay in
+  browser storage. Music and effects use Web Audio.
+- **Windows terminal.** Filling the last cell no longer scrolls the
+  alternate screen in consoles that wrap immediately.
 - **Balance tuning file.** Load balance overrides with `--tuning`, or use
   `--tuning-dump` to export the shipped values. See [TUNING.md](TUNING.md).
 

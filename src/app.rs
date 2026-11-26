@@ -10,7 +10,7 @@
 // Not simulation: platform maths is fine in the capture scenes (see above).
 #![allow(clippy::disallowed_methods)]
 
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crate::input_event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
@@ -581,7 +581,7 @@ pub struct App {
     /// Expanded minimap (Tab / clicking the compact map) pauses the simulation.
     map_open: bool,
     /// Start of the player marker's render-only wall clock.
-    map_animation_start: std::time::Instant,
+    map_animation_start: crate::clock::Instant,
     /// Panel rects from the last frame, for pointer hit tests and tests.
     last_minimap: Rect,
     last_map: Rect,
@@ -808,7 +808,7 @@ impl App {
             prev_boss_alive: false,
             last_summary: None,
             map_open: false,
-            map_animation_start: std::time::Instant::now(),
+            map_animation_start: crate::clock::Instant::now(),
             last_minimap: Rect::new(0, 0, 0, 0),
             last_map: Rect::new(0, 0, 0, 0),
             minimap_scratch: minimap::MinimapScratch::new(),
@@ -1026,6 +1026,14 @@ impl App {
         }
     }
 
+    /// Open browser audio during the first key or pointer gesture.
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub fn start_web_audio(&mut self) {
+        self.audio = AudioEngine::new();
+        self.push_volumes();
+        self.menu_music();
+    }
+
     /// Start (or restart) the level's music at `intensity` and record it.
     fn play_music(&mut self, theme: Theme, intensity: u32) {
         self.music_intensity = intensity;
@@ -1131,11 +1139,7 @@ impl App {
             // Deterministic run: same seed sequence every launch.
             return base ^ jitter;
         }
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        nanos ^ jitter
+        crate::clock::seed_time() ^ jitter
     }
 
     /// Begin a **campaign** at level 1 (the title's START RUN, and sector 1 on
@@ -1634,7 +1638,7 @@ impl App {
                 return;
             }
             if self.console.open {
-                let keys: Vec<crossterm::event::KeyEvent> = self.input.pressed.clone();
+                let keys: Vec<crate::input_event::KeyEvent> = self.input.pressed.clone();
                 for key in keys {
                     self.handle_console_key(key);
                 }
@@ -2041,7 +2045,7 @@ impl App {
     }
 
     /// Route one key press to the console and run whatever it asks for.
-    fn handle_console_key(&mut self, key: crossterm::event::KeyEvent) {
+    fn handle_console_key(&mut self, key: crate::input_event::KeyEvent) {
         let rows = self.last_game.height.max(20) as usize;
         match self.console.handle_key(key, rows) {
             Some(crate::console::ConsoleAction::Close) => {
@@ -6037,7 +6041,7 @@ fn draw_map_legend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{
+    use crate::input_event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseEvent, MouseEventKind,
     };
 
@@ -8138,6 +8142,7 @@ mod tests {
         assert!(!text.contains("Enter equip"), "a stale Confirm key:\n{text}");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn dump_frame_ppm() {
@@ -10067,7 +10072,7 @@ mod tests {
                     fog.tick();
                 }
                 hh.app.map_animation_start =
-                    std::time::Instant::now() - std::time::Duration::from_millis(312);
+                    crate::clock::Instant::now() - std::time::Duration::from_millis(312);
                 hh.frame(&[]);
             }
             t if t.starts_with("cobra") => {
@@ -17611,7 +17616,7 @@ mod tests {
         // The pacer settles: an unchanged frame counts toward stillness, and
         // no urgent frame resets it.
         let mut pacer = crate::present::FramePacer::default();
-        let mut now = std::time::Instant::now();
+        let mut now = crate::clock::Instant::now();
         for _ in 0..180 {
             now += std::time::Duration::from_micros(16_667);
             if pacer.should_render(now, h.app.frame_demand(), h.app.repaint_urgent()) {
