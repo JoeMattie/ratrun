@@ -344,6 +344,16 @@ def confirmed_cohorts(campaigns):
     return cohorts
 
 
+def floor_clears(cohort):
+    counts = [[0, 0] for _ in FLOORS]
+    for run in cohort:
+        for floor in run["levels"]:
+            count = counts[floor["level"]]
+            count[0] += floor["cleared"]
+            count[1] += 1
+    return counts
+
+
 def profile_comparison(lines, cohorts, profiles):
     lines += ["## Same-seed controls and Nest ladder", "",
               "The half-HP experiment, mid Nest, and max Nest use the first 96 seeds of the fresh cohort. "
@@ -370,6 +380,14 @@ def profile_comparison(lines, cohorts, profiles):
                          f"{sum(t < 180 for t in early)}/{sum(180 <= t < 300 for t in early)} / {count} runs"))
     table(lines, ("Profile", "Skill", "Wins", "95% CI", "Mean first card (s)",
                   "Median second weapon (s)", "Second weapon on first card", "Sewer deaths before 3:00 / 3:00–5:00"), rows)
+    lines += ["Floor clear rates are conditional on reaching that floor."]
+    clears = {point: {skill: floor_clears(runs) for skill, runs in cohort.items()}
+              for point, cohort in cohorts.items()}
+    table(lines, ("Profile", "Skill", *FLOORS), [
+        (point, skill, *(f"{wins}/{reached} ({wins / reached:.1%})" if reached else "—"
+                         for wins, reached in counts))
+        for point, by_skill in clears.items() for skill, counts in by_skill.items()
+    ])
     rows = []
     for point, control in (("candidate", "round3"), ("candidate", "power-off"),
                            ("half-hp-double-enemy", "round3"),
@@ -391,7 +409,7 @@ def profile_comparison(lines, cohorts, profiles):
         (point, number(total, 3), *(number(scores[name], 3) for name in WEIGHTS))
         for point, total, scores in rows
     ])
-    return {point: {"total": total, **scores} for point, total, scores in rows}
+    return {point: {"total": total, **scores} for point, total, scores in rows}, clears
 
 
 def report(output, baselines=()):
@@ -422,7 +440,7 @@ def report(output, baselines=()):
         seed = 4000 + round_no * 1000
         lines += [f"Round {round_no} used `{prior['source_revision']}` and seeds {seed}–{seed + 299}.", ""]
     confirmation(lines, cohorts["candidate"], actual, result["candidate"], previous)
-    measured_scores = profile_comparison(lines, cohorts, profiles)
+    measured_scores, clears = profile_comparison(lines, cohorts, profiles)
     design_and_fit(lines, result)
     seconds = pilot_seconds + confirm_seconds + result["screen_seconds"]
     lines += ["## Determinism and spend", "",
@@ -451,6 +469,7 @@ def report(output, baselines=()):
         "skill_win_wilson95": {s: wilson(*actual[s]["win"]) for s in SKILLS},
         "observed_profiles": profiles,
         "measured_weighted_loss": measured_scores,
+        "floor_clear_counts": clears,
     }, indent=2))
     (output / "report.md").write_text("\n".join(lines))
     summary = ", ".join(f"{s} {actual[s]['win'][0]:.1%}" for s in SKILLS)
