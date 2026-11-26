@@ -8133,6 +8133,11 @@ mod tests {
             })
             .unwrap_or((env_size("RATRUN_DUMP_W", 120), env_size("RATRUN_DUMP_H", 46)));
         let mut hh = Harness::new(w, h);
+        if matches!(target.as_str(), "outfall-surge" | "outfall-surge-active") {
+            if let Ok(seed) = std::env::var("RATRUN_DUMP_SEED") {
+                hh.app.set_next_seed(seed.parse().expect("RATRUN_DUMP_SEED must be a u64"));
+            }
+        }
         if target.starts_with("outfall-") || target.starts_with("lantern-") {
             hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
         }
