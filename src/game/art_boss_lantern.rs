@@ -52,6 +52,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
+use crate::game::ecs::systems::boss::HazardShape;
 use crate::math::{lerp, Vec2};
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, Rgb};
@@ -338,14 +339,19 @@ pub struct LanternView {
     pub hp_frac: f32,
     /// Controller presentation phase (`1`, `2`, or `3`).
     pub phase: u8,
-    /// Locked world-space attack anchor (mouth, lunge origin, or leap start).
+    /// Locked world-space attack anchor (presentation: jaw/mouth pose).
     pub attack_origin: Vec2,
-    /// Locked world-space attack endpoint (leap end / target reference).
+    /// Locked world-space attack endpoint (presentation: jaw/mouth pose).
     pub attack_target: Vec2,
-    /// Locked unit attack facing direction (frozen at tell lock).
+    /// Locked unit attack facing direction (presentation: jaw/mouth angle).
     pub attack_facing: Vec2,
     /// `true` once the current tell has locked its geometry.
     pub attack_locked: bool,
+    /// Authoritative simulation footprint of the live/locked attack (`None` when none).
+    /// Tells, bot, and ink read this directly; art never reconstructs a footprint.
+    pub attack: Option<HazardShape>,
+    /// Authoritative simulation footprint of the Gape mouth stamp (`None` when none).
+    pub stamp: Option<HazardShape>,
     /// Real lure bulb snapshot (`None` if absent; `gain == 0.0` when extinguished).
     pub real_bulb: Option<LanternBulbView>,
     /// Phase 2 floating decoy bulb snapshot (`None` when no decoy is active).
@@ -490,9 +496,18 @@ pub fn is_frontal_armored(view: &LanternView, toward_attacker: Vec2) -> bool {
 }
 
 /// Oriented rectangle `(center, facing, half_along, half_perp)` for the
-/// `16×8` Phase 1/2 feint jaw crescent centred `12 px` behind the real bulb.
+/// `16×8` Phase 1/2 feint jaw crescent (reads `view.attack` directly when present).
 #[inline]
 pub fn jaw_crescent_rect(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
+    if let Some(HazardShape::Rect {
+        center,
+        facing,
+        half,
+        half_perp,
+    }) = view.attack
+    {
+        return (center, safe_unit(facing, unit_facing(view)), half, half_perp);
+    }
     let af = unit_attack_facing(view);
     let bulb_pos = view
         .real_bulb
@@ -503,9 +518,18 @@ pub fn jaw_crescent_rect(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
 }
 
 /// Oriented rectangle `(center, facing, half_along, half_perp)` for the
-/// Phase 2 `56×12` head-anchored `DarkLunge` trench.
+/// Phase 2 `56×12` head-anchored `DarkLunge` trench (reads `view.attack` when present).
 #[inline]
 pub fn dark_lunge_rect(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
+    if let Some(HazardShape::Rect {
+        center,
+        facing,
+        half,
+        half_perp,
+    }) = view.attack
+    {
+        return (center, safe_unit(facing, unit_facing(view)), half, half_perp);
+    }
     let af = unit_attack_facing(view);
     let origin = if view.attack_origin.len_sq() > 1e-3 {
         view.attack_origin
@@ -517,9 +541,19 @@ pub fn dark_lunge_rect(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
 }
 
 /// `(origin, facing, range, half_angle)` for the Phase 3 Gape pull cone
-/// (`90 px` range, `50°` total aperture anchored to the mouth).
+/// (reads `view.attack` directly when present).
 #[inline]
 pub fn gape_cone(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
+    if let Some(HazardShape::Arc {
+        center,
+        outer,
+        facing,
+        half_angle,
+        ..
+    }) = view.attack
+    {
+        return (center, safe_unit(facing, unit_facing(view)), outer, half_angle);
+    }
     let af = unit_attack_facing(view);
     let origin = if view.attack_origin.len_sq() > 1e-3 {
         view.attack_origin
@@ -530,23 +564,37 @@ pub fn gape_cone(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
 }
 
 /// Oriented rectangle `(center, facing, half_along, half_perp)` for the
-/// Phase 3 `24×24` mouth stamp box.
+/// Phase 3 `24×24` mouth stamp box (reads `view.stamp` directly when present).
 #[inline]
 pub fn gape_stamp_rect(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
+    if let Some(HazardShape::Rect {
+        center,
+        facing,
+        half,
+        half_perp,
+    }) = view.stamp
+    {
+        return (center, safe_unit(facing, unit_facing(view)), half, half_perp);
+    }
     let (origin, af, _, _) = gape_cone(view);
     let half = GAPE_STAMP_SIZE * 0.5;
-    (origin + af * half, af, half, half)
+    (origin, af, half, half)
 }
 
 /// Cosmetic surface flicker multiplier for one esca bulb.
-/// Decoys stay steady; real bulbs step sharply at `3 Hz` during `FeintTell`.
+/// Decoys stay steady; real bulbs follow the controller's radian `flicker`
+/// phase when non-zero (else step at `3 Hz` during `FeintTell`).
 #[inline]
 pub fn bulb_flicker_mult(bulb: &LanternBulbView, anim: f32, is_feint_tell: bool) -> f32 {
     if bulb.is_decoy || bulb.gain <= 0.0 {
         return bulb.gain.clamp(0.0, 1.5);
     }
     if is_feint_tell {
-        let wave = ((anim * LURE_FLICKER_HZ + bulb.flicker) * TAU).sin();
+        let wave = if bulb.flicker.abs() > 1e-4 {
+            bulb.flicker.sin()
+        } else {
+            (anim * LURE_FLICKER_HZ * TAU).sin()
+        };
         bulb.gain * if wave >= 0.0 { 1.22 } else { 0.58 }
     } else {
         bulb.gain * (0.94 + 0.08 * (anim * 3.2 + bulb.flicker).sin())
@@ -554,7 +602,7 @@ pub fn bulb_flicker_mult(bulb: &LanternBulbView, anim: f32, is_feint_tell: bool)
 }
 
 /// Screen-space culling test: returns `true` whenever the head, real bulb,
-/// decoy bulb, or locked attack footprint can contribute pixels to `pb`.
+/// decoy bulb, or authoritative attack/stamp footprint can contribute pixels to `pb`.
 pub fn in_view(pb: &PixelBuffer, view: &LanternView, cam: Vec2) -> bool {
     if pb.w == 0 || pb.h == 0 {
         return false;
@@ -575,13 +623,28 @@ pub fn in_view(pb: &PixelBuffer, view: &LanternView, cam: Vec2) -> bool {
     if view.decoy.is_some_and(|d| hit(d.pos, 32.0)) {
         return true;
     }
-    if view.attack_origin.len_sq() > 1e-3 && hit(view.attack_origin, GAPE_CONE_RANGE + 16.0) {
+    if view
+        .attack
+        .is_some_and(|shape| hit(shape.center(), GAPE_CONE_RANGE + 16.0))
+    {
         return true;
     }
-    if view.attack_target.len_sq() > 1e-3 && hit(view.attack_target, 32.0) {
+    if view
+        .stamp
+        .is_some_and(|shape| hit(shape.center(), GAPE_STAMP_SIZE + 16.0))
+    {
         return true;
     }
     false
+}
+
+#[inline]
+fn safe_unit(v: Vec2, fallback: Vec2) -> Vec2 {
+    if v.len_sq() > 1e-6 {
+        v.normalized()
+    } else {
+        fallback
+    }
 }
 
 // ============================================================================
@@ -888,17 +951,24 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent:
         }
     }
 
-    // Subtle seabed edge wash for Gape cone (interior kept open negative space).
-    if matches!(view.state, LanternState::GapeTell | LanternState::GapePull) {
-        let (m_w, af, range, half_ang) = gape_cone(view);
-        let ms = w2s(m_w, cam);
-        let base_ang = af.angle();
+    // Subtle seabed edge wash for the authoritative Gape cone (`view.attack`).
+    if let Some(HazardShape::Arc {
+        center,
+        inner,
+        outer,
+        facing,
+        half_angle,
+    }) = view.attack
+    {
+        let ms = w2s(center, cam);
+        let base_ang = safe_unit(facing, f).angle();
+        let r_start = inner.max(8.0);
         for sign in [-1.0_f32, 1.0_f32] {
-            let d = Vec2::from_angle(base_ang + sign * half_ang);
+            let d = Vec2::from_angle(base_ang + sign * half_angle);
             line_blend(
                 pb,
-                ms + d * 8.0,
-                ms + d * range,
+                ms + d * r_start,
+                ms + d * outer,
                 Stroke::solid((20, 82, 98), 0.42),
             );
         }
@@ -1530,12 +1600,78 @@ fn draw_jaw_crescent_outline(
     }
 }
 
+/// Generic fallback boundary draw for any `HazardShape` variant so art always
+/// honours the controller's exact simulation footprint.
+fn draw_hazard_outline(pb: &mut PixelBuffer, shape: HazardShape, cam: Vec2, stroke: Stroke) {
+    match shape {
+        HazardShape::Circle { center, radius } => {
+            ring_blend(pb, w2s(center, cam), radius, stroke);
+        }
+        HazardShape::Annulus {
+            center,
+            inner,
+            outer,
+        } => {
+            let cs = w2s(center, cam);
+            ring_blend(pb, cs, outer, stroke);
+            ring_blend(pb, cs, inner, stroke);
+        }
+        HazardShape::Arc {
+            center,
+            inner,
+            outer,
+            facing,
+            half_angle,
+        } => {
+            let cs = w2s(center, cam);
+            let base = safe_unit(facing, Vec2::new(1.0, 0.0)).angle();
+            for sign in [-1.0_f32, 1.0_f32] {
+                let d = Vec2::from_angle(base + sign * half_angle);
+                line_blend(pb, cs + d * inner, cs + d * outer, stroke);
+            }
+            let steps = 24usize;
+            let mut prev: Option<Vec2> = None;
+            for i in 0..=steps {
+                let a = base - half_angle + 2.0 * half_angle * (i as f32 / steps as f32);
+                let pt = cs + Vec2::from_angle(a) * outer;
+                if let Some(p_prev) = prev {
+                    line_blend(pb, p_prev, pt, stroke);
+                }
+                prev = Some(pt);
+            }
+        }
+        HazardShape::Rect {
+            center,
+            facing,
+            half,
+            half_perp,
+        } => {
+            let dir = safe_unit(facing, Vec2::new(1.0, 0.0));
+            draw_oriented_rect_outline(pb, w2s(center, cam), dir, half, half_perp, stroke);
+        }
+        HazardShape::Corridor {
+            from,
+            to,
+            half_width,
+        } => {
+            let a = w2s(from, cam);
+            let b = w2s(to, cam);
+            let dir = safe_unit(b - a, Vec2::new(1.0, 0.0));
+            let lp = dir.perp() * half_width;
+            line_blend(pb, a + lp, b + lp, stroke);
+            line_blend(pb, a - lp, b - lp, stroke);
+            line_blend(pb, a - lp, a + lp, Stroke::solid(stroke.col, stroke.alpha));
+            line_blend(pb, b - lp, b + lp, Stroke::solid(stroke.col, stroke.alpha));
+        }
+    }
+}
+
 /// Post-lighting, post-foreground hostile layer for **The Lantern**.
 ///
 /// Re-stamps self-lit bulb cores and dark-state teeth/eye glints, and draws
-/// bright fixed outlines for every attack footprint so the fight remains
-/// crystal-clear with lighting/FX disabled, through foreground kelp, and at
-/// reduced colour depth.
+/// bright fixed outlines directly from the authoritative simulation footprints
+/// (`view.attack` and `view.stamp`) so the fight remains crystal-clear with
+/// lighting/FX disabled, through foreground kelp, and at reduced colour depth.
 pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
     if !in_view(pb, view, cam) {
         return;
@@ -1611,81 +1747,150 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _a
         }
     }
 
-    // 3. Bright fixed attack outlines above foreground.
-    match view.state {
-        LanternState::FeintTell | LanternState::JawSnap => {
-            let (center_w, af, half_depth, half_span) = jaw_crescent_rect(view);
-            let cs = w2s(center_w, cam);
-            let live = matches!(view.state, LanternState::JawSnap);
-            let col = if live {
-                TELL_HOT
-            } else if view.attack_locked {
-                TELL_WHITE
-            } else {
-                TELL_AMBER
-            };
-            let tooth_col = if live { TELL_WHITE } else { TELL_CYAN };
-            let dashed = if live || view.attack_locked { 0 } else { 2 };
-            let stroke = Stroke::styled(col, 1.0, dashed, dash_phase);
-            draw_jaw_crescent_outline(pb, cs, af, (half_depth, half_span), stroke, tooth_col, live);
-        }
-        LanternState::DecoyLeapTell | LanternState::DecoyLeap => {
-            let start_s = w2s(view.attack_origin, cam);
-            let end_s = w2s(view.attack_target, cam);
-            let axis = end_s - start_s;
-            let len = axis.len();
-            if len > 2.0 {
-                let ld = axis.normalized();
+    // 3. Authoritative live/locked attack footprint (`view.attack`) — never reconstructed!
+    if let Some(shape) = view.attack {
+        match (view.state, shape) {
+            (
+                LanternState::FeintTell | LanternState::JawSnap,
+                HazardShape::Rect {
+                    center,
+                    facing,
+                    half,
+                    half_perp,
+                },
+            ) => {
+                let cs = w2s(center, cam);
+                let af = safe_unit(facing, f);
+                let live = matches!(view.state, LanternState::JawSnap);
+                let col = if live {
+                    TELL_HOT
+                } else if view.attack_locked {
+                    TELL_WHITE
+                } else {
+                    TELL_AMBER
+                };
+                let tooth_col = if live { TELL_WHITE } else { TELL_CYAN };
+                let dashed = if live || view.attack_locked { 0 } else { 2 };
+                let stroke = Stroke::styled(col, 1.0, dashed, dash_phase);
+                draw_jaw_crescent_outline(pb, cs, af, (half, half_perp), stroke, tooth_col, live);
+            }
+            (
+                LanternState::DecoyLeapTell | LanternState::DecoyLeap,
+                HazardShape::Rect {
+                    center,
+                    facing,
+                    half,
+                    half_perp,
+                },
+            ) => {
+                let ld = safe_unit(facing, f);
                 let lp = ld.perp();
-                let hw = DECOY_LEAP_WIDTH * 0.5;
-                let live = matches!(view.state, LanternState::DecoyLeap);
-                let col = if live { TELL_HOT } else { TELL_AMBER };
-                let rail = Stroke::styled(col, 1.0, if live { 0 } else { 2 }, dash_phase);
-                let cap = Stroke::solid(col, 1.0);
-                line_blend(pb, start_s + lp * hw, end_s + lp * hw, rail);
-                line_blend(pb, start_s - lp * hw, end_s - lp * hw, rail);
-                line_blend(pb, start_s - lp * hw, start_s + lp * hw, cap);
-                line_blend(pb, end_s - lp * hw, end_s + lp * hw, cap);
-                let chev = Stroke::solid(if live { TELL_WHITE } else { TELL_CYAN }, 0.90);
-                let mut d_cur = 10.0_f32;
-                while d_cur < len - 4.0 {
-                    let q = start_s + ld * d_cur;
-                    line_blend(pb, q - ld * 4.0 + lp * (hw - 1.5), q, chev);
-                    line_blend(pb, q - ld * 4.0 - lp * (hw - 1.5), q, chev);
-                    d_cur += 14.0;
+                let start_s = w2s(center - ld * half, cam);
+                let end_s = w2s(center + ld * half, cam);
+                let len = half * 2.0;
+                if len > 2.0 {
+                    let live = matches!(view.state, LanternState::DecoyLeap);
+                    let col = if live { TELL_HOT } else { TELL_AMBER };
+                    let rail = Stroke::styled(col, 1.0, if live { 0 } else { 2 }, dash_phase);
+                    let cap = Stroke::solid(col, 1.0);
+                    line_blend(pb, start_s + lp * half_perp, end_s + lp * half_perp, rail);
+                    line_blend(pb, start_s - lp * half_perp, end_s - lp * half_perp, rail);
+                    line_blend(pb, start_s - lp * half_perp, start_s + lp * half_perp, cap);
+                    line_blend(pb, end_s - lp * half_perp, end_s + lp * half_perp, cap);
+                    let chev = Stroke::solid(if live { TELL_WHITE } else { TELL_CYAN }, 0.90);
+                    let chev_hw = (half_perp - 1.5).max(1.5);
+                    let mut d_cur = 10.0_f32;
+                    while d_cur < len - 4.0 {
+                        let q = start_s + ld * d_cur;
+                        line_blend(pb, q - ld * 4.0 + lp * chev_hw, q, chev);
+                        line_blend(pb, q - ld * 4.0 - lp * chev_hw, q, chev);
+                        d_cur += 14.0;
+                    }
                 }
             }
-        }
-        LanternState::DarkTell | LanternState::DarkLunge => {
-            let (center_w, af, half_len, half_w) = dark_lunge_rect(view);
-            let origin_w = center_w - af * half_len;
-            let center_s = w2s(center_w, cam);
-            let origin_s = w2s(origin_w, cam);
-            let live = matches!(view.state, LanternState::DarkLunge);
-            let col = if live {
-                TELL_HOT
-            } else if view.attack_locked {
-                TELL_WHITE
-            } else {
-                TELL_AMBER
-            };
-            let dashed = if live || view.attack_locked { 0 } else { 2 };
-            let stroke = Stroke::styled(col, 1.0, dashed, dash_phase);
-            draw_oriented_rect_outline(pb, center_s, af, half_len, half_w, stroke);
-            let ap = af.perp();
-            let tick = Stroke::solid(col, 0.85);
-            for k in 1..5 {
-                let q = origin_s + af * (k as f32 * 11.0);
-                line_blend(pb, q + ap * 5.5, q + ap * 2.5, tick);
-                line_blend(pb, q - ap * 5.5, q - ap * 2.5, tick);
+            (
+                LanternState::DecoyLeapTell | LanternState::DecoyLeap,
+                HazardShape::Corridor {
+                    from,
+                    to,
+                    half_width,
+                },
+            ) => {
+                let start_s = w2s(from, cam);
+                let end_s = w2s(to, cam);
+                let axis = end_s - start_s;
+                let len = axis.len();
+                if len > 2.0 {
+                    let ld = axis.normalized();
+                    let lp = ld.perp();
+                    let live = matches!(view.state, LanternState::DecoyLeap);
+                    let col = if live { TELL_HOT } else { TELL_AMBER };
+                    let rail = Stroke::styled(col, 1.0, if live { 0 } else { 2 }, dash_phase);
+                    let cap = Stroke::solid(col, 1.0);
+                    line_blend(pb, start_s + lp * half_width, end_s + lp * half_width, rail);
+                    line_blend(pb, start_s - lp * half_width, end_s - lp * half_width, rail);
+                    line_blend(pb, start_s - lp * half_width, start_s + lp * half_width, cap);
+                    line_blend(pb, end_s - lp * half_width, end_s + lp * half_width, cap);
+                    let chev = Stroke::solid(if live { TELL_WHITE } else { TELL_CYAN }, 0.90);
+                    let chev_hw = (half_width - 1.5).max(1.5);
+                    let mut d_cur = 10.0_f32;
+                    while d_cur < len - 4.0 {
+                        let q = start_s + ld * d_cur;
+                        line_blend(pb, q - ld * 4.0 + lp * chev_hw, q, chev);
+                        line_blend(pb, q - ld * 4.0 - lp * chev_hw, q, chev);
+                        d_cur += 14.0;
+                    }
+                }
             }
-        }
-        LanternState::GapeTell | LanternState::GapePull | LanternState::GapeStamp => {
-            let (m_w, af, range, half_ang) = gape_cone(view);
-            let ms = w2s(m_w, cam);
-            let base_ang = af.angle();
-
-            if matches!(view.state, LanternState::GapeTell | LanternState::GapePull) {
+            (
+                LanternState::DarkTell | LanternState::DarkLunge,
+                HazardShape::Rect {
+                    center,
+                    facing,
+                    half,
+                    half_perp,
+                },
+            ) => {
+                let af = safe_unit(facing, f);
+                let center_s = w2s(center, cam);
+                let origin_s = w2s(center - af * half, cam);
+                let live = matches!(view.state, LanternState::DarkLunge);
+                let col = if live {
+                    TELL_HOT
+                } else if view.attack_locked {
+                    TELL_WHITE
+                } else {
+                    TELL_AMBER
+                };
+                let dashed = if live || view.attack_locked { 0 } else { 2 };
+                let stroke = Stroke::styled(col, 1.0, dashed, dash_phase);
+                draw_oriented_rect_outline(pb, center_s, af, half, half_perp, stroke);
+                let ap = af.perp();
+                let tick = Stroke::solid(col, 0.85);
+                let len = half * 2.0;
+                let outer_t = (half_perp - 0.5).max(1.0);
+                let inner_t = (half_perp - 3.5).max(0.5);
+                let mut dist = 11.0_f32;
+                while dist < len - 5.0 {
+                    let q = origin_s + af * dist;
+                    line_blend(pb, q + ap * outer_t, q + ap * inner_t, tick);
+                    line_blend(pb, q - ap * outer_t, q - ap * inner_t, tick);
+                    dist += 11.0;
+                }
+            }
+            (
+                LanternState::GapeTell | LanternState::GapePull,
+                HazardShape::Arc {
+                    center,
+                    inner,
+                    outer,
+                    facing,
+                    half_angle,
+                },
+            ) => {
+                let ms = w2s(center, cam);
+                let af = safe_unit(facing, f);
+                let base_ang = af.angle();
                 let pulling = matches!(view.state, LanternState::GapePull);
                 let edge_col = if pulling {
                     TELL_CYAN
@@ -1696,17 +1901,19 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _a
                 };
                 let dashed = if pulling || view.attack_locked { 0 } else { 2 };
                 let ray_stroke = Stroke::styled(edge_col, 1.0, dashed, dash_phase);
-                // Outer 50° cone rays (clean negative space inside!).
+                let r_start = inner.max(10.0).min(outer);
+                // Outer cone rays (clean negative space inside!).
                 for sign in [-1.0_f32, 1.0_f32] {
-                    let d = Vec2::from_angle(base_ang + sign * half_ang);
-                    line_blend(pb, ms + d * 10.0, ms + d * range, ray_stroke);
+                    let d = Vec2::from_angle(base_ang + sign * half_angle);
+                    line_blend(pb, ms + d * r_start, ms + d * outer, ray_stroke);
                 }
-                // Outer 90 px range arc.
+                // Outer range arc.
                 let arc_steps = 28usize;
                 let mut prev: Option<Vec2> = None;
                 for i in 0..=arc_steps {
-                    let a = base_ang - half_ang + 2.0 * half_ang * (i as f32 / arc_steps as f32);
-                    let pt = ms + Vec2::from_angle(a) * range;
+                    let a = base_ang - half_angle
+                        + 2.0 * half_angle * (i as f32 / arc_steps as f32);
+                    let pt = ms + Vec2::from_angle(a) * outer;
                     if let Some(p_prev) = prev {
                         let arc_s = Stroke::styled(edge_col, 0.95, dashed, dash_phase + i as i32);
                         line_blend(pb, p_prev, pt, arc_s);
@@ -1715,101 +1922,140 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _a
                 }
                 if pulling {
                     // Sparse inward suction current streaks (keeping negative space open).
+                    let r_lo = (inner + 24.0).min(outer);
+                    let r_hi = (outer - 6.0).max(r_lo);
                     for wave in 0..3 {
                         let frac = 1.0 - (view.anim * 1.4 + wave as f32 / 3.0).rem_euclid(1.0);
-                        let r_cur = lerp(24.0, 84.0, frac);
+                        let r_cur = lerp(r_lo, r_hi, frac);
                         let w_alpha = 0.78 * (frac * PI).sin();
                         let streak = Stroke::solid(TELL_CYAN, w_alpha);
                         for ray_idx in [-0.62_f32, 0.0, 0.62] {
-                            let d = Vec2::from_angle(base_ang + ray_idx * half_ang);
-                            let p0 = ms + d * (r_cur + 6.0);
+                            let d = Vec2::from_angle(base_ang + ray_idx * half_angle);
+                            let p0 = ms + d * (r_cur + 6.0).min(outer);
                             let p1 = ms + d * (r_cur - 3.0).max(18.0);
                             line_blend(pb, p0, p1, streak);
                         }
                     }
                 } else {
                     let tick = Stroke::solid(edge_col, 0.80);
-                    for r_tick in [48.0_f32, 72.0] {
+                    for r_tick in [outer * 0.53, outer * 0.80] {
                         for sign in [-1.0_f32, 1.0_f32] {
-                            let d = Vec2::from_angle(base_ang + sign * half_ang);
-                            let inward = Vec2::from_angle(base_ang + sign * (half_ang - 0.12));
+                            let d = Vec2::from_angle(base_ang + sign * half_angle);
+                            let inward = Vec2::from_angle(base_ang + sign * (half_angle - 0.12));
                             line_blend(pb, ms + d * r_tick, ms + inward * r_tick, tick);
                         }
                     }
                 }
             }
+            (_, other) => {
+                let live = view.state.is_active_strike();
+                let col = if live {
+                    TELL_HOT
+                } else if view.attack_locked {
+                    TELL_WHITE
+                } else {
+                    TELL_AMBER
+                };
+                let dashed = if live || view.attack_locked { 0 } else { 2 };
+                draw_hazard_outline(pb, other, cam, Stroke::styled(col, 1.0, dashed, dash_phase));
+            }
+        }
+    }
 
-            // 24×24 mouth stamp box.
-            let (stamp_w, stamp_f, sh, sw) = gape_stamp_rect(view);
-            let stamp_s = w2s(stamp_w, cam);
-            let stamp_live = matches!(view.state, LanternState::GapeStamp);
-            let stamp_pull = matches!(view.state, LanternState::GapePull);
-            let stamp_col = if stamp_live || stamp_pull {
-                TELL_HOT
-            } else {
-                TELL_AMBER
-            };
-            let stamp_dashed = if stamp_live || stamp_pull || view.attack_locked {
-                0
-            } else {
-                2
-            };
-            let box_stroke = Stroke::styled(stamp_col, 1.0, stamp_dashed, dash_phase);
-            draw_oriented_rect_outline(pb, stamp_s, stamp_f, sh, sw, box_stroke);
+    // 4. Authoritative Gape mouth stamp footprint (`view.stamp`) — never reconstructed!
+    if let Some(stamp_shape) = view.stamp {
+        let stamp_live = matches!(view.state, LanternState::GapeStamp);
+        let stamp_pull = matches!(view.state, LanternState::GapePull);
+        let stamp_col = if stamp_live || stamp_pull {
+            TELL_HOT
+        } else {
+            TELL_AMBER
+        };
+        let stamp_dashed = if stamp_live || stamp_pull || view.attack_locked {
+            0
+        } else {
+            2
+        };
+        let box_stroke = Stroke::styled(stamp_col, 1.0, stamp_dashed, dash_phase);
+
+        if let HazardShape::Rect {
+            center,
+            facing,
+            half,
+            half_perp,
+        } = stamp_shape
+        {
+            let stamp_s = w2s(center, cam);
+            let stamp_f = safe_unit(facing, f);
             let ap = stamp_f.perp();
+            draw_oriented_rect_outline(pb, stamp_s, stamp_f, half, half_perp, box_stroke);
             if stamp_live {
                 let fang = Stroke::solid(TELL_WHITE, 0.88);
-                for k in [-8.0_f32, -4.0, 0.0, 4.0, 8.0] {
+                let reach_u = (half - 1.5).max(2.0);
+                let gap_u = (half * 0.21).max(1.5);
+                let span_step = (half_perp * 0.33).max(2.0);
+                for idx in -2i32..=2 {
+                    let k = idx as f32 * span_step;
                     line_blend(
                         pb,
-                        stamp_s - stamp_f * 10.5 + ap * k,
-                        stamp_s - stamp_f * 2.5 + ap * k,
+                        stamp_s - stamp_f * reach_u + ap * k,
+                        stamp_s - stamp_f * gap_u + ap * k,
                         fang,
                     );
                     line_blend(
                         pb,
-                        stamp_s + stamp_f * 10.5 + ap * k,
-                        stamp_s + stamp_f * 2.5 + ap * k,
+                        stamp_s + stamp_f * reach_u + ap * k,
+                        stamp_s + stamp_f * gap_u + ap * k,
                         fang,
                     );
                 }
                 let cross = Stroke::solid(TELL_HOT, 0.65);
+                let cu = (half - 1.0).max(1.0);
+                let cv = (half_perp - 1.0).max(1.0);
                 line_blend(
                     pb,
-                    stamp_s - stamp_f * 11.0 - ap * 11.0,
-                    stamp_s + stamp_f * 11.0 + ap * 11.0,
+                    stamp_s - stamp_f * cu - ap * cv,
+                    stamp_s + stamp_f * cu + ap * cv,
                     cross,
                 );
                 line_blend(
                     pb,
-                    stamp_s - stamp_f * 11.0 + ap * 11.0,
-                    stamp_s + stamp_f * 11.0 - ap * 11.0,
+                    stamp_s - stamp_f * cu + ap * cv,
+                    stamp_s + stamp_f * cu - ap * cv,
                     cross,
                 );
-                disc_blend(pb, stamp_s, 7.5, TELL_HOT, 0.30);
+                disc_blend(pb, stamp_s, half.min(half_perp) * 0.62, TELL_HOT, 0.30);
             } else if stamp_pull {
                 let bracket = Stroke::solid(TELL_WHITE, 0.90);
+                let cu = (half - 1.0).max(1.0);
+                let cv = (half_perp - 1.0).max(1.0);
+                let leg = half.min(half_perp).min(4.0);
                 for su in [-1.0_f32, 1.0] {
                     for sv in [-1.0_f32, 1.0] {
-                        let corner = stamp_s + stamp_f * (su * 11.0) + ap * (sv * 11.0);
-                        line_blend(pb, corner, corner - stamp_f * (su * 4.0), bracket);
-                        line_blend(pb, corner, corner - ap * (sv * 4.0), bracket);
+                        let corner = stamp_s + stamp_f * (su * cu) + ap * (sv * cv);
+                        line_blend(pb, corner, corner - stamp_f * (su * leg), bracket);
+                        line_blend(pb, corner, corner - ap * (sv * leg), bracket);
                     }
                 }
             }
+        } else {
+            draw_hazard_outline(pb, stamp_shape, cam, box_stroke);
         }
-        LanternState::FeintRecover | LanternState::GapeRecover => {
-            // Subtle curved flank-punish chevrons beside the exposed cheeks.
-            let pulse = 0.5 + 0.5 * (view.anim * 8.0).sin();
-            let chev = Stroke::solid(FLANK_GOLD, 0.65 + 0.25 * pulse);
-            for sign in [-1.0_f32, 1.0] {
-                let flank = sc - f * 5.0 + d_up * (sign * (HEAD_RADIUS + 3.0));
-                let in_d = -(d_up * sign);
-                line_blend(pb, flank + f * 3.0 - in_d * 2.0, flank + in_d * 1.5, chev);
-                line_blend(pb, flank - f * 3.0 - in_d * 2.0, flank + in_d * 1.5, chev);
-            }
+    }
+
+    // 5. Exposed flank punish chevrons during recovery windows.
+    if matches!(
+        view.state,
+        LanternState::FeintRecover | LanternState::GapeRecover
+    ) {
+        let pulse = 0.5 + 0.5 * (view.anim * 8.0).sin();
+        let chev = Stroke::solid(FLANK_GOLD, 0.65 + 0.25 * pulse);
+        for sign in [-1.0_f32, 1.0] {
+            let flank = sc - f * 5.0 + d_up * (sign * (HEAD_RADIUS + 3.0));
+            let in_d = -(d_up * sign);
+            line_blend(pb, flank + f * 3.0 - in_d * 2.0, flank + in_d * 1.5, chev);
+            line_blend(pb, flank - f * 3.0 - in_d * 2.0, flank + in_d * 1.5, chev);
         }
-        _ => {}
     }
 }
 
@@ -1858,6 +2104,66 @@ mod tests {
                 | LanternState::Death
         );
         let extinguished = matches!(state, LanternState::DarkTell | LanternState::DarkLunge);
+        let bulb_pos = if planted {
+            pos + facing * 26.0 + Vec2::new(0.0, 18.0)
+        } else {
+            pos + facing * 28.0
+        };
+        let mouth = pos + facing * 14.0;
+        let (attack, stamp) = match state {
+            LanternState::FeintTell | LanternState::JawSnap => (
+                Some(HazardShape::Rect {
+                    center: bulb_pos - facing * JAW_CRESCENT_BACK,
+                    facing,
+                    half: JAW_CRESCENT_WIDTH * 0.5,
+                    half_perp: JAW_CRESCENT_LEN * 0.5,
+                }),
+                None,
+            ),
+            LanternState::DecoyLeapTell | LanternState::DecoyLeap => (
+                Some(HazardShape::Rect {
+                    center: pos + facing * 36.0,
+                    facing,
+                    half: 36.0,
+                    half_perp: DECOY_LEAP_WIDTH * 0.5,
+                }),
+                None,
+            ),
+            LanternState::DarkTell | LanternState::DarkLunge => (
+                Some(HazardShape::Rect {
+                    center: pos + facing * (DARK_LUNGE_LEN * 0.5),
+                    facing,
+                    half: DARK_LUNGE_LEN * 0.5,
+                    half_perp: DARK_LUNGE_WIDTH * 0.5,
+                }),
+                None,
+            ),
+            LanternState::GapeTell | LanternState::GapePull => (
+                Some(HazardShape::Arc {
+                    center: mouth,
+                    inner: 0.0,
+                    outer: GAPE_CONE_RANGE,
+                    facing,
+                    half_angle: GAPE_CONE_HALF_ANGLE,
+                }),
+                Some(HazardShape::Rect {
+                    center: mouth,
+                    facing,
+                    half: GAPE_STAMP_SIZE * 0.5,
+                    half_perp: GAPE_STAMP_SIZE * 0.5,
+                }),
+            ),
+            LanternState::GapeStamp => (
+                None,
+                Some(HazardShape::Rect {
+                    center: mouth,
+                    facing,
+                    half: GAPE_STAMP_SIZE * 0.5,
+                    half_perp: GAPE_STAMP_SIZE * 0.5,
+                }),
+            ),
+            _ => (None, None),
+        };
         LanternView {
             pos,
             facing,
@@ -1867,16 +2173,14 @@ mod tests {
             hit_flash: 0.0,
             hp_frac: 0.8,
             phase: if planted { 3 } else { 1 },
-            attack_origin: pos + facing * 14.0,
+            attack_origin: mouth,
             attack_target: pos + facing * 74.0,
             attack_facing: facing,
             attack_locked: progress >= 0.5,
+            attack,
+            stamp,
             real_bulb: Some(LanternBulbView {
-                pos: if planted {
-                    pos + facing * 26.0 + Vec2::new(0.0, 18.0)
-                } else {
-                    pos + facing * 28.0
-                },
+                pos: bulb_pos,
                 radius: if extinguished {
                     0.0
                 } else if planted {
@@ -2033,6 +2337,12 @@ mod tests {
         let mut view = sample_view(Vec2::new(106.0, 52.0), PI, LanternState::FeintTell, 0.75);
         view.phase = 2;
         view.attack_locked = true;
+        view.attack = Some(HazardShape::Rect {
+            center: Vec2::new(78.0, 52.0),
+            facing: Vec2::new(-1.0, 0.0),
+            half: JAW_CRESCENT_WIDTH * 0.5,
+            half_perp: JAW_CRESCENT_LEN * 0.5,
+        });
         view.real_bulb = Some(LanternBulbView {
             pos: real_pos,
             radius: BULB_LIGHT_RADIUS,
@@ -2124,15 +2434,16 @@ mod tests {
             "Gape cone interior must preserve readable negative space ({open}/{total} open)"
         );
 
-        // GapeStamp fills the 24x24 mouth box (x in 102..126, y in 48..72) with hot pixels.
+        // GapeStamp fills the 24x24 mouth box centred on mouth (126, 60) => x in [114..=138], y in [48..=72].
         let mut pb_stamp = PixelBuffer::new(180, 120);
         pb_stamp.clear(BG);
         let mut v_stamp = v_pull;
         v_stamp.state = LanternState::GapeStamp;
+        v_stamp.attack = None;
         draw_tell_overlay(&mut pb_stamp, &v_stamp, Vec2::ZERO, (94, 244, 255));
         let mut hot = 0usize;
         for y in 48..=72usize {
-            for x in 102..=126usize {
+            for x in 114..=138usize {
                 let (r, g, _) = pb_stamp.pixel_at(x, y);
                 if r >= 200 && r > g {
                     hot += 1;
@@ -2140,6 +2451,73 @@ mod tests {
             }
         }
         assert!(hot >= 80, "GapeStamp 24x24 box should be clearly marked hot ({hot})");
+    }
+
+    #[test]
+    fn tell_overlay_draws_exact_simulation_attack_and_stamp_without_reconstructing() {
+        const BG: Rgb = (6, 12, 18);
+        // 1. With attack = None and stamp = None, FeintTell must NOT reconstruct a jaw behind the bulb.
+        let mut pb_none = PixelBuffer::new(160, 100);
+        pb_none.clear(BG);
+        let mut v_none = sample_view(Vec2::new(110.0, 50.0), PI, LanternState::FeintTell, 0.75);
+        v_none.attack = None;
+        v_none.stamp = None;
+        v_none.real_bulb = Some(LanternBulbView {
+            pos: Vec2::new(66.0, 50.0),
+            radius: BULB_LIGHT_RADIUS,
+            gain: 1.0,
+            flicker: FRAC_PI_2,
+            is_decoy: false,
+            planted: false,
+        });
+        draw_tell_overlay(&mut pb_none, &v_none, Vec2::ZERO, (94, 244, 255));
+        let mut phantom = 0usize;
+        for dy in -6i32..=6 {
+            for dx in -3i32..=3 {
+                if pb_none.pixel_at((78 + dx) as usize, (50 + dy) as usize) != BG {
+                    phantom += 1;
+                }
+            }
+        }
+        assert_eq!(phantom, 0, "art must not reconstruct a jaw when view.attack is None");
+
+        // 2. Explicit simulation shapes draw at their exact coordinates (decoupled from view.pos).
+        let mut pb_exact = PixelBuffer::new(160, 100);
+        pb_exact.clear(BG);
+        let mut v_exact = sample_view(Vec2::new(140.0, 50.0), PI, LanternState::GapeTell, 0.8);
+        v_exact.attack_locked = true;
+        v_exact.real_bulb = None;
+        v_exact.attack = Some(HazardShape::Rect {
+            center: Vec2::new(36.0, 26.0),
+            facing: Vec2::new(1.0, 0.0),
+            half: 10.0,
+            half_perp: 6.0,
+        });
+        v_exact.stamp = Some(HazardShape::Rect {
+            center: Vec2::new(84.0, 74.0),
+            facing: Vec2::new(1.0, 0.0),
+            half: 12.0,
+            half_perp: 12.0,
+        });
+        draw_tell_overlay(&mut pb_exact, &v_exact, Vec2::ZERO, (94, 244, 255));
+        let mut at_attack = 0usize;
+        for y in 19..=33usize {
+            for x in 25..=47usize {
+                if pb_exact.pixel_at(x, y) != BG {
+                    at_attack += 1;
+                }
+            }
+        }
+        let mut at_stamp = 0usize;
+        for y in 61..=87usize {
+            for x in 71..=97usize {
+                if pb_exact.pixel_at(x, y) != BG {
+                    at_stamp += 1;
+                }
+            }
+        }
+        assert!(at_attack >= 24, "view.attack must draw at exact shape coords ({at_attack})");
+        assert!(at_stamp >= 32, "view.stamp must draw at exact shape coords ({at_stamp})");
     }
 
     #[test]
