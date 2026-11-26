@@ -99,3 +99,5 @@ pub mod art_seabed;
 pub mod art_crabpot;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod art_crab;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+pub mod art_laundry;

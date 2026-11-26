@@ -162,6 +162,7 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
         trailer: deck,
         puddles: Vec::new(),
         plants: Vec::new(),
+        clothes_piles: Vec::new(),
     }
 }
 

@@ -1352,6 +1352,7 @@ fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
         plants: Vec::new(),
+        clothes_piles: Vec::new(),
     }
 }
 
@@ -1408,6 +1409,7 @@ fn deck_patch() -> Level {
         },
         puddles: Vec::new(),
         plants: Vec::new(),
+        clothes_piles: Vec::new(),
     }
 }
 

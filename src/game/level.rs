@@ -1225,7 +1225,7 @@ pub enum PlantKind {
 /// One decorative aquatic plant on the Outfall seabed, in world pixels.
 ///
 /// Purely decorative: never a tile, never blocking, invisible to gameplay,
-/// the bot, fog and the minimap. Placed last by [`super::levelgen::seabed`]
+/// the bot, fog and the minimap. Placed by [`super::levelgen::seabed`]
 /// on its own salted rng so no earlier stage or other theme can move.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SeabedPlant {
@@ -1238,6 +1238,35 @@ pub struct SeabedPlant {
     /// Size variant (`0..=2`: small, medium, tall).
     pub size: u8,
     /// Deterministic visual variation seed (tone, lean, blade layout).
+    pub seed: u32,
+}
+
+/// What kind of decorative laundry heap sits on the Laundry floor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClothesPileKind {
+    /// Small loose scatter of a folded shirt and stray sock (~10 × 7 px).
+    SmallHeap,
+    /// Medium tumbled heap of mixed shirts, towels and socks (~15 × 10 px).
+    MediumHeap,
+    /// Large slumped mound with a draped bedsheet corner (~20 × 13 px).
+    LargeHeap,
+    /// Woven laundry basket overflowing with folded clothes (~14 × 13 px).
+    Basket,
+}
+
+/// One decorative pile of clothes or overflowing basket on the Laundry floor.
+///
+/// Purely decorative: never paints a tile, never blocks, slows or routes, and
+/// is invisible to gameplay, the bot, fog and the minimap. Placed by
+/// [`super::levelgen::laundry_piles`] on its own salted rng so the map pin
+/// cannot move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClothesPile {
+    /// Centre, world px. Always on an open floor cell.
+    pub pos: Vec2,
+    /// Heap size or overflowing basket.
+    pub kind: ClothesPileKind,
+    /// Deterministic colour and fold variation.
     pub seed: u32,
 }
 
@@ -1289,10 +1318,14 @@ pub struct Level {
     /// and the Flatbed.
     pub puddles: Vec<Puddle>,
     /// Decorative aquatic plants on the Outfall seabed. Render-only; placed
-    /// last by [`super::levelgen::seabed`] on its own salted rng so no earlier
+    /// by [`super::levelgen::seabed`] on its own salted rng so no earlier
     /// stage or other theme can move. Empty on every theme except
     /// [`Theme::Outfall`].
     pub plants: Vec<SeabedPlant>,
+    /// Decorative heaps of clothes and overflowing baskets (Laundry only).
+    /// Placed by [`super::levelgen::laundry_piles`] on its own salted rng,
+    /// so it cannot move the map pin. Empty on every other theme.
+    pub clothes_piles: Vec<ClothesPile>,
 }
 
 /// The fight furniture a boss arena used to carry (`DESIGN_REVIEW.md` §5).
@@ -1372,6 +1405,7 @@ impl Level {
             trailer: TrailerDeck::default(),
             puddles: Vec::new(),
             plants: Vec::new(),
+            clothes_piles: Vec::new(),
         }
     }
 

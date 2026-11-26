@@ -1489,20 +1489,9 @@ impl LightMap {
                         false,
                     ))
                 }
-                // Laundry washers: soft aqua-porcelain drum-door glow tumbling
-                // out of the twin glass portholes onto the wet tile floor.
-                // `occlude: false` so the prop's own solid tiles never carve a
-                // hard grid cutout across the washer face.
-                PropKind::Washer => {
-                    let tumble = 0.88 + 0.12 * (elapsed * 2.6 + (h & 31) as f32).sin();
-                    Some((
-                        46.0,
-                        (154, 224, 232),
-                        (134.0 * tumble) as u16,
-                        (34.0 * tumble) as u16,
-                        false,
-                    ))
-                }
+                // Laundry washer/dryer banks emit separate cool (washer) and
+                // warm (dryer) bay glows below so each half matches its unit.
+                PropKind::Washer => None,
                 // Printworks press islands: warm illuminated Press Clock pool
                 // over the press bed (twin cyan registration lamp added below).
                 // `occlude: false` so the press's own solid tiles never slice
@@ -1534,8 +1523,6 @@ impl LightMap {
 
             if let Some((radius, color, intensity, scatter, occlude)) = spec {
                 let (lx, ly) = match prop.kind {
-                    // Spill washer light slightly forward from the front porthole doors.
-                    PropKind::Washer => (sx, sy + 6.0),
                     // Center press-clock light over the upper press-bed dial.
                     PropKind::PressIsland => (sx - 2.0, sy - 6.0),
                     _ => (sx, sy),
@@ -1550,6 +1537,44 @@ impl LightMap {
                         scatter,
                         priority: 1,
                         occlude,
+                        hard: hard_pools,
+                    });
+                }
+            }
+
+            // Laundry washer/dryer banks: soft cool aqua glow from the washer
+            // porthole and soft warm amber glow from the dryer porthole.
+            if prop.kind == PropKind::Washer {
+                let px = prop.rect.x.round() as i32;
+                let py = prop.rect.y.round() as i32;
+                let units = crate::game::art_props::laundry_bank_units(px, py);
+                let ly = sy + 6.0;
+                let r = 38.0;
+                for (bay, &unit) in units.iter().enumerate() {
+                    let lx = prop.rect.x + prop.rect.w * if bay == 0 { 0.25 } else { 0.75 } - cam.x;
+                    if !in_range(lx, ly, r) {
+                        continue;
+                    }
+                    let phase = crate::game::art_props::laundry_unit_phase(px, py, bay);
+                    let (color, intensity, scatter) = match unit {
+                        crate::game::art_props::LaundryUnitKind::Washer => {
+                            let tumble = 0.88 + 0.12 * (elapsed * 3.0 + phase).sin();
+                            ((132, 214, 232), (118.0 * tumble) as u16, (30.0 * tumble) as u16)
+                        }
+                        crate::game::art_props::LaundryUnitKind::Dryer => {
+                            let hum = 0.92 + 0.08 * (elapsed * 5.2 + phase).sin();
+                            ((248, 178, 104), (122.0 * hum) as u16, (32.0 * hum) as u16)
+                        }
+                    };
+                    self.lights.push(PointLight {
+                        x: lx,
+                        y: ly,
+                        radius: r,
+                        color,
+                        intensity,
+                        scatter,
+                        priority: 1,
+                        occlude: false,
                         hard: hard_pools,
                     });
                 }

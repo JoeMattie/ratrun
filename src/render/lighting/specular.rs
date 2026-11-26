@@ -132,6 +132,16 @@ pub(crate) fn pool_pen() -> u8 {
     pen(MaterialKind::Water, false, 0)
 }
 
+/// The pen for a Laundry washer/dryer glass porthole door.
+pub(crate) fn washer_glass_pen() -> u8 {
+    pen(MaterialKind::Glass, false, 4)
+}
+
+/// The pen for matte cloth floor decorations (Laundry clothes piles).
+pub(crate) fn cloth_pen() -> u8 {
+    pen(MaterialKind::Cloth, false, 0)
+}
+
 /// What an ordinary enemy is made of. The materials are the contract's
 /// reading of `WAVE4_ROSTERS.md`: wet and shiny bodies are Slime, chitin and
 /// carapace are Shell, matte coats and wings are Fur (rim light only), keys,
