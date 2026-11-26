@@ -329,9 +329,8 @@ def edge_expansion(values, bounds):
         if value - low <= width * .02:
             expanded[i][0] = max(.25, low - width * .25)
             if i == XP_STEPS:
-                expanded[i][0] = max(.50, low - .25)
-            if expanded[i][0] < low:
-                edges.append(f"{KNOBS[i].name} lower")
+                expanded[i][0] = max(.25, low - .25)
+            edges.append(f"{KNOBS[i].name} lower")
         if high - value <= width * .02:
             expanded[i][1] = high + width * .25 if i != XP_STEPS else high + .25
             edges.append(f"{KNOBS[i].name} upper")

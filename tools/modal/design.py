@@ -74,7 +74,7 @@ def overlay(values, defaults):
             elif name == "live_budget":
                 value = [[at, round(count * v)] for at, count in base]
             elif name == "steps_per_level":
-                value = max(2, round(base * v))
+                value = max(1, round(base * v))
             elif name == "pickup_chances":
                 value = [*(round(min(1, p * v), 6) for p in base[:2]), base[2]]
             elif name == "heal_pickup_fraction":
