@@ -36,15 +36,16 @@
 - **Still water.** Puddle glints and reflections stay still at rest. Passing
   splash ripples brighten the water and bend reflections as they spread.
 - **Laser Eyes sweeps across the widest view.** Thin beams stop at walls,
-  light their path and reflect in puddles. Damage falls off with distance.
+  light their path and reflect in puddles. The live beams follow your eyes
+  throughout the sweep. Damage falls off with distance.
   Higher ranks deal full damage farther from the muzzle.
 - **Hantavirus droppings cast green light.** Higher ranks shine brighter,
   and the glow fades as they dry.
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
 - **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
-  circles, and Bell Diver leaves a crack where it will surface. The 24 earlier minibosses have
-  two attacks, with their own pace and a Library entry for both.
+  circles, and Bell Diver leaves a crack where it will surface. The 24 earlier
+  minibosses have two attacks each, with their own pace and Library entries.
 - Added an interactive testbed for trying every weapon, evolution, pickup,
   enemy, miniboss, and boss on any sector. Launch it with `--testbed` or the
   console's `testbed` command.
@@ -60,7 +61,6 @@
   Shed Bob.
 - **Hold Point.** Stand still to charge a knockback pulse. Pair it with Thick
   Hide for Clamp.
-- **Laser Eyes beams follow you throughout the sweep.**
 
 ## 0.3.0 (2026-11-25)
 

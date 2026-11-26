@@ -4118,7 +4118,9 @@ impl App {
     }
 
     /// The next stage's route chips in campaign order, when it offers a choice.
-    fn keep_route_chips(&self) -> [Option<campaign_ui::RouteChip<'static>>; campaign_ui::MAX_ROUTE_CHIPS] {
+    fn keep_route_chips(
+        &self,
+    ) -> [Option<campaign_ui::RouteChip<'static>>; campaign_ui::MAX_ROUTE_CHIPS] {
         let mut chips = [None; campaign_ui::MAX_ROUTE_CHIPS];
         let options = self.keep_route_options();
         if options.len() > 1 {
@@ -8363,7 +8365,17 @@ mod tests {
                             "outfall-lure-spent" => lure.phase = LurePhase::Spent,
                             _ => {}
                         }
-                        w.player.pos = lure.pos;
+                        let bulb = lure.pos;
+                        w.player.pos = [
+                            Vec2::new(-11.0, 0.0), Vec2::new(11.0, 0.0),
+                            Vec2::new(0.0, -11.0), Vec2::new(0.0, 11.0),
+                        ].into_iter().map(|offset| bulb + offset).find(|&p| {
+                            crate::game::hazards::outfall_sand_clear(
+                                &w.level, p, crate::game::ecs::constants::PLAYER_RADIUS,
+                                crate::game::collision::SizeClass::Small,
+                            )
+                        }).unwrap_or(bulb);
+                        w.cam_focus = Some((w.player.pos + bulb) * 0.5);
                     }
                 }
                 hh.app.picture_dirty = true;
@@ -8436,6 +8448,7 @@ mod tests {
                     aim
                 };
                 miniboss::lock_stamps(&mut mb);
+                w.cam_focus = Some((rat + pos) * 0.5);
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
@@ -8448,7 +8461,7 @@ mod tests {
                 w.configure_testbed();
                 w.player.loadout.weapons.clear();
                 let scene = &t["lantern-".len()..];
-                if !matches!(scene, "decoy" | "dark") {
+                if !matches!(scene, "decoy" | "dark" | "snuffed") {
                     // Isolate the lure's light for the arrival and reveal plates.
                     w.level.objects.lights.clear();
                 }
@@ -8459,7 +8472,7 @@ mod tests {
                     w.update(1.0 / 60.0, Vec2::ZERO, false);
                 }
                 let hp = match scene {
-                    "decoy" | "dark" => Some(0.60),
+                    "decoy" | "dark" | "snuffed" => Some(0.60),
                     "gape" | "stamp" => Some(0.30),
                     "death" => Some(0.0),
                     _ => None,
@@ -8478,6 +8491,7 @@ mod tests {
                             "feint" => view.state == LanternState::FeintTell && view.progress >= 0.7,
                             "dark" => view.state == LanternState::DarkTell && view.progress >= 0.55,
                             "decoy" => view.decoy.is_some() && view.real_bulb.is_some(),
+                            "snuffed" => w.level.objects.outfall_boss_snuff.is_some(),
                             "gape" => view.state == LanternState::GapePull && view.progress >= 0.25,
                             "stamp" => view.state == LanternState::GapeStamp,
                             "death" => body.dead && body.elapsed >= 0.25,
@@ -8490,7 +8504,18 @@ mod tests {
                     assert!(captured, "Lantern did not reach {scene}");
                 }
                 let body = w.ecs.get::<Boss>(boss).unwrap();
-                w.cam_focus = Some((w.player.pos + body.pos) * 0.5);
+                let view = body.lantern_view().unwrap();
+                w.cam_focus = Some(match scene {
+                    "decoy" => {
+                        // Keep the head and the false light in the compact frame.
+                        (view.pos + view.decoy.unwrap().pos) * 0.5
+                    }
+                    "snuffed" => {
+                        let mount = w.level.objects.outfall_boss_snuff.unwrap();
+                        w.level.objects.lights[mount].pos
+                    }
+                    _ => (w.player.pos + body.pos) * 0.5,
+                });
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
@@ -8775,8 +8800,9 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
-            "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet" => {
-                use crate::game::weapon::{LASER_ARC_DEG, LASER_SWEEP_SECS};
+            "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet"
+            | "laser-moving" => {
+                use crate::game::weapon::{LASER_ARC_DEG, LASER_EYE_OFFSET, LASER_SWEEP_SECS};
                 hh.enter_playing();
                 hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
                 let w = hh.app.world.as_mut().unwrap();
@@ -8812,13 +8838,21 @@ mod tests {
                 weapon.level = rank;
                 weapon.timer = 0.0;
                 weapon.evolved = evolved;
+                let moving = target == "laser-moving";
                 for tick in 0..ticks {
-                    let dir = if kind == WeaponKind::Hantavirus && tick >= 15 {
+                    let dir = if (kind == WeaponKind::Hantavirus && tick >= 15)
+                        || (moving && tick > 0)
+                    {
                         Vec2::new(1.0, 0.0)
                     } else {
                         Vec2::ZERO
                     };
                     w.update_with_aim(1.0 / 60.0, dir, false, false, Some(aim));
+                }
+                if moving {
+                    let eye = w.player.pos + w.player.face * LASER_EYE_OFFSET;
+                    assert!(w.player.pos.dist(pos) > LASER_EYE_OFFSET);
+                    assert!(w.laser_visual().is_some_and(|beam| beam.origin.dist(eye) < 0.01));
                 }
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
