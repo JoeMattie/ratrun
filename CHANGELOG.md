@@ -2,70 +2,91 @@
 
 ## Unreleased
 
-- **The Outfall.** The storm gate opens a third Sector 2 route after the
-  Sewer. Cross sandy ripples and seabed plants under blue-green light,
-  caustics and marine snow. Wear a diving suit and swim above your shadow.
-- **Outfall encounters.** Eight ordinary enemies, the Shore Crab and four
-  named encounters guard the culvert. Fish swim above the seabed while
-  crabs scuttle along it. Crab pots replace glue boards and mousetraps.
-- **Outfall surge.** Rippling crests warn of a stronger current that can
-  push you up to 64 px. Lure traps still release Congers.
-- **The Lantern.** The anglerfish is three times larger and seen from above
-  at every heading. It floats over the seabed, swings a longer lure, snuffs
-  sconces and submerges between phases for a longer fight.
-- **Return Current.** The Outfall score has a 40-bar loop at 100 BPM with
-  walking bass, electric piano and a flute melody.
-- **Smoother cast shadows.** Diagonal shadow edges follow the geometry at
-  every lighting quality when Light Effects is on.
-- **Longer dashes.** Every dash covers twice the distance. A fully charged
-  Super Dash crosses roughly 119 px on open ground.
-- **Growth Serum.** The giant’s larger body can squeeze through corridors
-  and is too wide for rat-holes. Incoming hits reach farther into its outline.
-- **The Laundry.** Washer and dryer pairs tumble behind lit portholes.
-  Clothes heaps and overflowing baskets gather beside the bays.
-- **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
-  facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
+## 0.4.0 (2026-11-26)
+
+### New
+
+- **The Outfall.** Take the storm gate after clearing the Sewers to reach a
+  third Sector 2 route and unlock it for practice. Swim in a diving suit
+  above a sandy seabed with aquatic plants. Blue-green light, rippling
+  caustics, depth haze and drifting particles mark the flooded culvert.
+- **Outfall hazards.** Avoid tidal drops and lure traps that release Congers.
+  Wave crests streak downstream as a surge pushes you up to 64 px. Crab
+  pots replace glue boards and mousetraps here. They can cage you or smaller
+  enemies, and an empty snap can release a Shore Crab. Dash to break free.
+- **Outfall encounters.** Eight enemies and four named minibosses join the
+  Library. Fish swim above their shadows. Shore Crabs arrive in groups,
+  scuttle along the seabed and pause before pinching.
+- **The Lantern.** A 264 px anglerfish guards the Outfall. Seen from above
+  at every turn, it sweeps a long lure, snuffs wall lamps and leaves a
+  decoy light. It submerges between phases and can pull you toward its jaws.
+  Aim for the head.
+- **Return Current.** The Outfall's 40-bar loop runs at 100 BPM with walking
+  bass, electric piano, flute, harp and soft strings.
+- **Lava Breath.** Molten globs arc out and splash into pools that burn
+  enemies. Pair it with Long Fuse to evolve Caldera.
+- **Glass Bead.** Shots bounce off walls. Pair it with Lens Cap to evolve
+  Last Bounce.
+- **Plumb Bob.** A weight accelerates through its swing and its chain trails
+  at each turn. Pair it with Counterweight to evolve Shed Bob.
+- **Hold Point.** Stand still to charge a knockback pulse. Pair it with
+  Thick Hide to evolve Clamp.
 - **Shrink Draught.** A short-lived dose makes you smaller and quicker.
 - **White Coat.** Blocks incoming damage and suspends your weapons for 5s.
 - **The Collar.** Doubles gem XP while elites and the miniboss close in faster.
-- Removed the Daily run
 - **Blackouts.** Indoor lamps go out for 8s at 5:00 and 11:00. The Lab's
   second outage moves to 7:30 and lasts 18s. Enemy glints, shots and attack
   warnings stay visible.
-- **Sewer opening.** Two curled Pillbugs arrive off-screen from 0:22, a Drip
-  Shaft marks its splash tile, and a Bottle Cap appears outside the start room
-  at 1:30. Corkscrew's trench stays wet for 25 seconds.
-- **Graphics shortcuts and defaults.** Press `G` in play or pause to open
-  Graphics and `S` there to cycle smoothing. Smoothing defaults to Off. Older saves retain their other graphics settings.
-- **Still water.** Puddle glints and reflections stay still at rest. Passing
-  splash ripples brighten the water and bend reflections as they spread.
-- **Laser Eyes sweeps across the widest view.** Thin beams stop at walls,
-  light their path and reflect in puddles. The live beams follow your eyes
-  throughout the sweep. Damage falls off with distance.
-  Higher ranks deal full damage farther from the muzzle.
+- **Combat testbed.** Try weapons, Evolutions, pickups and encounters on any
+  sector. Launch with `--testbed` or enter `testbed` in the console.
+
+### Changed
+
+- **Sewer opening.** Two curled Pillbugs arrive off-screen from 0:22. A Drip
+  Shaft marks its splash tile, and a Bottle Cap appears outside the start
+  room at 1:30. Corkscrew's trench stays wet for 25s.
+- **Named minibosses.** The 24 returning minibosses each have two attacks
+  with distinct shapes, movement and timing. Corkscrew signals a lunge,
+  Bobbin circles, and Bell Diver cracks the ground where it will surface.
+- **Five XP gem tiers.** Distant gems merge into larger drops and keep their
+  combined XP. The Field Guide lists each tier's colour and value.
+- **Longer dashes.** Ordinary and charged dashes travel twice as far. A
+  fully charged Super Dash crosses about 119 px on open ground.
+- **Growth Serum.** The giant fits through corridors but is too wide for
+  rat-holes. More of its body can take a hit.
+- **Tail Whip.** The swipe cuts a 160° arc behind your facing or aim.
+  Ratchet Tail throws a struck foe forward into the crowd.
+- **Laser Eyes.** Beams sweep to the edge of the widest view, stop at walls,
+  light their path and reflect in puddles. They follow your eyes during the
+  sweep. Damage falls off with distance, and higher ranks keep full damage
+  farther out.
 - **Hantavirus droppings.** Dark pellets cast a wider green glow. Higher
   ranks shine brighter, and the glow fades as the pellets dry.
-- **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
-  glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
-- **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
-  circles, and Bell Diver leaves a crack where it will surface. The 24 earlier
-  minibosses have two attacks each, with their own pace and Library entries.
-- Added an interactive testbed for trying every weapon, evolution, pickup,
-  enemy, miniboss, and boss on any sector. Launch it with `--testbed` or the
-  console's `testbed` command.
-- **Pulsing rat marker.** A bright halo helps locate you on the minimap and Tab map.
-- **Clearer map boundaries.** Known walls are solid warm grey and unexplored
-  edges are dotted. The Tab map footer explains both marks.
-- **Foreground.** A few soft-focus bands cross each sector, with angled
-  kelp and bubble trails in the Outfall. Foreground is On by default and
-  can be switched off in Graphics.
-- **Five XP gem tiers.** Distant gems combine into larger drops that carry
-  their combined XP. The Field Guide lists each tier's colour and value.
-- **Glass Bead.** Shots bounce off walls. Pair it with Lens Cap for Last Bounce.
-- **Plumb Bob.** A weight accelerates through its swing and the chain
-  trails at each turn. Pair it with Counterweight for Shed Bob.
-- **Hold Point.** Stand still to charge a knockback pulse. Pair it with Thick
-  Hide for Clamp.
+- **The Laundry.** Washers and dryers tumble behind lit portholes. Clothes
+  piles and overflowing baskets sit beside the machines.
+- **Still water.** Puddle glints and reflections stay still at rest. Passing
+  splash ripples brighten the water and bend reflections as they spread.
+- **Map and Minimap.** Known walls have solid grey outlines and unexplored
+  edges are dotted. The full Map labels both marks. Your position pulses
+  on both.
+- **Foreground and Graphics.** A few blurred bands cross each sector, with
+  angled kelp and bubble trails in the Outfall. Foreground defaults to On
+  and smoothing to Off. Older saves adopt those defaults and keep their
+  other graphics preferences. The default key to open Graphics in play or
+  pause is `G`. Press `S` in Graphics to cycle smoothing.
+
+### Fixed
+
+- **Cast shadows.** Diagonal edges follow the geometry at every lighting
+  quality when Light Effects is on.
+- **Windows console.** `exec` preserves backslashes in ordinary Windows
+  paths.
+- **Cross-platform runs.** Simulation maths gives the same results for
+  the same inputs and seed on macOS, Linux and Windows.
+
+### Removed
+
+- The Daily run.
 
 ## 0.3.0 (2026-11-25)
 
