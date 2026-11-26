@@ -1109,9 +1109,8 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
         ),
         MinibossKind::MilkCarton => (
             "Kitchen · 3:00 — named miniboss",
-            "Three weeks past instructions. It tilts on its printed corners and spills \
-             one long rectangle out of the spout. Circle around the folded seam while \
-             the puddle decides where it lives.",
+            "Three weeks past instructions. The carton tips forward and sprays a fan of \
+             milk. Step outside the marked cone or put a wall between you and the spout.",
         ),
         MinibossKind::ValveWidow => (
             "Sewer · 9:00 — named miniboss",

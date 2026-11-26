@@ -2510,6 +2510,12 @@ impl World {
 
         // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
         self.particles.draw_stains(pb, cam);
+        let schedule = self.ecs.resource::<super::ecs::systems::miniboss::MinibossSchedule>();
+        for splash in &schedule.milk_splashes {
+            if on_screen(self.w2s(splash.pos, cam), 6.0, viewport) {
+                art_miniboss::draw_milk_splash(pb, splash, cam, self.elapsed);
+            }
+        }
 
         // Standing water: the puddles, then the ripples the feet left in them.
         // Right after the stains and before the boss ground layer, so a
@@ -3388,6 +3394,9 @@ impl World {
             use super::ecs::systems::miniboss::{Miniboss, MinibossShape};
             let mut query = self.ecs.query::<(&SpawnId, &Enemy, &Miniboss)>();
             for (_, e, mb) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if e.alive() && mb.signature().shape == super::ecs::systems::miniboss::SignatureShape::MilkSpray {
+                    art_miniboss::draw_milk_spray(pb, mb, cam);
+                }
                 let Some((MinibossShape::Trench { a, b, half }, _, live)) =
                     mb.manoeuvre.charge_lane(e.pos, e.radius)
                 else {
@@ -3745,6 +3754,13 @@ impl World {
         // A card plate with no rat (`World::hide_rat`): the simulation still
         // has one, the picture does not.
         if self.hide_rat {
+            if self.living_miniboss().is_some_and(|(_, mb)| {
+                mb.preview && mb.kind == super::ecs::systems::miniboss::MinibossKind::MilkCarton
+            }) {
+                crate::render::library::scene::draw_world_practice_dummy(
+                    pb, self.w2s(self.player.pos, cam),
+                );
+            }
             return;
         }
         // Super Dash charge: the lane preview under the rat. Faint blue-white
@@ -3999,7 +4015,9 @@ impl World {
             {
                 continue;
             }
-            art_miniboss::draw_telegraph(pb, mb, cam, accent);
+            if mb.signature().shape != super::ecs::systems::miniboss::SignatureShape::MilkSpray {
+                art_miniboss::draw_telegraph(pb, mb, cam, accent);
+            }
         }
     }
 
