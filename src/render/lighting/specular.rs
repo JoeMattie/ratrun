@@ -149,6 +149,12 @@ pub(crate) fn dropping_pen() -> u8 {
     pen(MaterialKind::Fur, false, 0)
 }
 
+/// The matte, rough stone floor pen (`MaterialKind::Stone`, height 0): zero
+/// specular highlight and zero water reflection, with full stone bump relief.
+pub(crate) fn stone_pen() -> u8 {
+    pen(MaterialKind::Stone, false, 0)
+}
+
 /// What an ordinary enemy is made of. The materials are the contract's
 /// reading of `WAVE4_ROSTERS.md`: wet and shiny bodies are Slime, chitin and
 /// carapace are Shell, matte coats and wings are Fur (rim light only), keys,

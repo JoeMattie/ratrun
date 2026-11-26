@@ -1157,10 +1157,16 @@ impl LightMap {
                 }
                 if !fx::skip("motes") {
                     motes::draw(&self.grid, &mut canvas, &frame, scene.elapsed);
-                    if theme == Theme::Outfall
-                        && !matches!(scene.mode, LightingMode::Full | LightingMode::Hard)
-                    {
-                        underwater::apply_cheap_caustics(&self.grid, &mut canvas, &frame, scene.elapsed);
+                    if theme == Theme::Outfall {
+                        if !matches!(scene.mode, LightingMode::Full | LightingMode::Hard) {
+                            underwater::apply_cheap_caustics(
+                                &self.grid,
+                                &mut canvas,
+                                &frame,
+                                scene.elapsed,
+                            );
+                        }
+                        motes::draw_outfall_ambient(&self.grid, &mut canvas, &frame, scene.elapsed);
                     }
                 }
             } else {
@@ -1183,6 +1189,7 @@ impl LightMap {
                     let mut canvas = Canvas { w, h, px, mat };
                     underwater::grade_grid(&self.grid, &mut canvas);
                     underwater::apply_cheap_caustics(&self.grid, &mut canvas, &frame, scene.elapsed);
+                    motes::draw_outfall_ambient(&self.grid, &mut canvas, &frame, scene.elapsed);
                 }
             }
         }

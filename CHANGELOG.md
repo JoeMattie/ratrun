@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The Outfall.** Seabed gravel, shell grit, pebbles, silt and shingle patches
+  replace standing puddles on the ocean floor, and pale drifting motes float
+  through the water in both dim and lit areas.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP
