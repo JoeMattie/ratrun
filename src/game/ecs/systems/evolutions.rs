@@ -30,12 +30,11 @@
 //!   use) so the order is the legacy `SpawnId` order.
 //! - **An unevolved run draws no extra rng**: these systems iterate empty
 //!   queries and emit nothing, and `open_chest` makes no draw at all.
-//! - **Walls.** Only what §3 says stops does: the Milk Teeth dart plants on the
-//!   first wall of its outbound flight (its return thread is pulled through
-//!   cover — "they always come back in"), the Drain Cleaner channel stops at
-//!   masonry, the Fondue string is anchored between two points that were
-//!   already wall-clamped, and the Fairy Ring is a circle in the air around a
-//!   point that was on open floor.
+//! - **Walls.** Milk Teeth lobs over cover and settles on open floor. Its
+//!   return thread pulls through cover and only bites in the open. The Drain
+//!   Cleaner channel stops at masonry, the Fondue string is anchored between
+//!   two wall-clamped points, and the Fairy Ring is a circle in the air around
+//!   a point on open floor.
 //! - **Heavy bodies.** Only the Ratchet Tail names them ("heavy targets take
 //!   the whip hit only"), so the hook and the swing skip elites, Brutes and
 //!   boss bodies. The other evolutions hit whatever their geometry covers.
@@ -80,6 +79,7 @@
 
 use bevy_ecs::prelude::*;
 
+use crate::audio::Sfx;
 use crate::game::bullet::Faction;
 use crate::game::ecs::components::{
     CheeseString, CorrosiveChannel, DeadLetterPacket, FairyRing, FondueCast, FondueTine, Infection,
@@ -87,10 +87,10 @@ use crate::game::ecs::components::{
     SpawnId,
 };
 use crate::game::ecs::resources::{
-    ActiveFx, DamageLedger, DashTrack, EnemyIndex, NextSpawnId, RngRes, TickInput, FLYWHEEL_CAP,
-    RIPCORD_SECS,
+    ActiveFx, DamageLedger, DashTrack, EnemyIndex, NextSpawnId, RngRes, SfxQueue, TickInput,
+    FLYWHEEL_CAP, RIPCORD_SECS,
 };
-use crate::game::collision::SpatialGrid;
+use crate::game::collision::{circles_overlap, SpatialGrid};
 use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::systems::boss::{Boss, BossHitShapes};
 use crate::game::ecs::systems::projectiles::los_clear;
@@ -112,14 +112,12 @@ pub const MILK_LODGE_SECS: f32 = 1.0;
 pub const MILK_SPEED: f32 = 120.0;
 /// Speed of the return thread (a little faster than the throw).
 pub const MILK_RETURN_SPEED: f32 = 170.0;
-/// How far the dart flies before it lodges in the air and comes home.
-///
-/// The lead dart's flight is the whole Gnaw dart flight (`Bullet::new`'s 2.5 s
-/// of life at 120 px/s = 300 px), not a short lob: an evolved Gnaw keeps the
-/// targeting range its base form had (the aim picks a body up to
-/// `target_range` away, so a shorter reach would fire into empty floor).
+/// Maximum throw distance before Lens Cap. Matches the old dart's
+/// 2.5 s lifetime at 120 px/s.
 pub const MILK_REACH: f32 = 300.0;
-/// Collision radius of the dart (the Gnaw dart's body).
+/// Radius of the landing bite.
+const MILK_LANDING_RADIUS: f32 = 9.0;
+/// Collision radius of the return thread.
 pub const MILK_RADIUS: f32 = 2.0;
 /// A return thread disappears this close to the rat.
 pub const MILK_HOME_RADIUS: f32 = 5.0;
@@ -343,50 +341,26 @@ fn wall_or(level: &Level, from: Vec2, to: Vec2, radius: f32) -> (Vec2, bool) {
     }
 }
 
-/// One Milk Teeth hit on the full boss: the dart's segment against the boss's
-/// damageable hit shapes, with the boss's own damage multiplier and the ledger
-/// column of its base weapon. Returns the boss position when the hit landed.
-///
-/// Identical to the path `boss_damage_system` uses for player bullets, so a
-/// chest that turns Gnaw into Milk Teeth cannot turn a boss-capable build into
-/// a zero-damage one.
-#[allow(clippy::too_many_arguments)]
+/// Apply the tooth's damage and impact feedback after a grounded boss shape
+/// overlaps the landing or return sweep.
 fn bite_boss(
     boss: &mut Boss,
-    from: Vec2,
-    to: Vec2,
     damage: f32,
     ledger: &mut DamageLedger,
     damage_numbers: &mut DamageNumbers,
     rng: &mut rand::rngs::StdRng,
     particles: &mut Particles,
-) -> Option<Vec2> {
-    let shapes = boss.hit_shapes();
-    if shapes.iter().next().is_none() || !shapes.segment_hits_grounded(from, to, MILK_RADIUS) {
-        return None;
+) -> bool {
+    if !damage_boss(boss, damage, WeaponKind::Gnaw, DamageSource::Normal, ledger, damage_numbers) {
+        return false;
     }
-    let amount = damage * boss.damage_mult;
-    if !boss.take_damage(amount) {
-        return None;
-    }
-    ledger.add_boss(WeaponKind::Gnaw, amount);
-    let killed = boss.hp <= 0.0;
-    vfx::emit_milk_teeth_bite(particles, rng, boss.pos, killed);
-    damage_numbers.record(
-        boss.id,
-        boss.pos,
-        boss.kind.body_radius(),
-        amount,
-        killed,
-        DamageSource::Normal,
-    );
-    Some(boss.pos)
+    vfx::emit_milk_teeth_bite(particles, rng, boss.pos, boss.hp <= 0.0);
+    true
 }
 
 // ---- Milk Teeth -----------------------------------------------------------
 
-/// Fly a **Milk Teeth** dart, lodge it, then pull it home biting whatever it
-/// crosses on the way.
+/// Lob a tooth onto its landing spot, then pull it home through nearby bodies.
 pub fn milk_teeth_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -396,6 +370,7 @@ pub fn milk_teeth_system(
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut damage_numbers: ResMut<DamageNumbers>,
+    mut sfx: ResMut<SfxQueue>,
     mut ledger: ResMut<DamageLedger>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut bosses: Query<&mut Boss>,
@@ -420,88 +395,73 @@ pub fn milk_teeth_system(
         };
         match dart.phase {
             MilkPhase::Out => {
-                dart.age += dt;
-                let from = dart.pos;
-                let to = from + dart.vel * dt;
-                let (end, stopped) = wall_or(&level, from, to, MILK_RADIUS);
-                // First body the release crosses (legacy order, first match).
-                let mut bit: Option<(usize, f32)> = None;
-                for (slot, &enemy) in order.iter().enumerate() {
-                    let Ok((_, _, e)) = enemies.get(enemy) else {
-                        continue;
-                    };
-                    if !e.alive() {
-                        continue;
-                    }
-                    if crate::game::collision::segment_circle_hit(from, end, MILK_RADIUS, e.pos, e.radius)
-                    {
-                        bit = Some((slot, 0.0));
-                        break;
-                    }
-                }
-                // The boss is not an `Enemy`: its hit shapes are the target,
-                // exactly as `boss_damage_system` reaches it for a dart, so an
-                // evolved Gnaw never stops being a boss weapon.
-                let mut boss_bite: Option<Vec2> = None;
-                if bit.is_none() {
-                    for mut boss in bosses.iter_mut() {
-                        if boss.dead {
+                dart.age = (dart.age + dt).min(dart.flight);
+                let u = dart.flight_progress();
+                dart.pos = dart.origin + (dart.landing - dart.origin) * u;
+                if dart.age >= dart.flight {
+                    let at = dart.landing;
+                    dart.pos = at;
+                    dart.phase = MilkPhase::Lodged;
+                    dart.age = 0.0;
+                    sfx.0.push(Sfx::Hit);
+
+                    // A tooth bites just one body on touchdown. Keep SpawnId
+                    // priority even if several bodies overlap the landing.
+                    let mut bit = false;
+                    for &enemy in order {
+                        let Ok((_, _, mut e)) = enemies.get_mut(enemy) else {
+                            continue;
+                        };
+                        if !e.alive()
+                            || !circles_overlap(at, MILK_LANDING_RADIUS, e.pos, e.radius)
+                            || !los_clear(&level, at, e.pos, 0.0)
+                        {
                             continue;
                         }
-                        boss_bite = bite_boss(
-                            &mut boss,
-                            from,
-                            end,
+                        let killed = hit_body(
+                            &mut e,
                             dart.damage,
+                            dart.origin,
+                            kind,
                             &mut ledger,
                             &mut damage_numbers,
-                            &mut rng.0,
-                            &mut particles,
+                            DamageSource::Normal,
                         );
+                        vfx::emit_milk_teeth_bite(&mut particles, &mut rng.0, at, killed);
+                        bit = true;
                         break;
                     }
-                }
-                if let Some((slot, _)) = bit {
-                    let enemy = order[slot];
-                    if let Ok((_, _, mut e)) = enemies.get_mut(enemy) {
-                        if e.alive() {
-                            let pos = e.pos;
-                            let killed = hit_body(
-                                &mut e,
+                    if !bit {
+                        for mut boss in &mut bosses {
+                            let overlaps = boss.hit_shapes().iter().any(|shape| {
+                                shape.grounded()
+                                    && shape.overlaps_circle(at, MILK_LANDING_RADIUS)
+                                    && los_clear(&level, at, shape.center(), 0.0)
+                            });
+                            if boss.dead || !overlaps {
+                                continue;
+                            }
+                            bite_boss(
+                                &mut boss,
                                 dart.damage,
-                                from,
-                                kind,
                                 &mut ledger,
                                 &mut damage_numbers,
-                                DamageSource::Normal,
+                                &mut rng.0,
+                                &mut particles,
                             );
-                            vfx::emit_milk_teeth_bite(&mut particles, &mut rng.0, pos, killed);
-                            dart.pos = pos;
+                            break;
                         }
                     }
-                    dart.phase = MilkPhase::Lodged;
-                    dart.age = 0.0;
-                    dart.vel = Vec2::ZERO;
-                } else if let Some(bpos) = boss_bite {
-                    // The lead dart lodges in the boss's hit shape and comes
-                    // home from there.
-                    dart.pos = bpos;
-                    dart.phase = MilkPhase::Lodged;
-                    dart.age = 0.0;
-                    dart.vel = Vec2::ZERO;
-                } else if stopped || dart.age * MILK_SPEED >= dart.reach {
-                    dart.pos = end;
-                    dart.phase = MilkPhase::Lodged;
-                    dart.age = 0.0;
-                    dart.vel = Vec2::ZERO;
-                } else {
-                    dart.pos = end;
                 }
-                vfx::emit_milk_teeth_dart(&mut particles, &mut rng.0, dart.pos, dart.phase, false);
+                vfx::emit_milk_teeth_dart(
+                    &mut particles, &mut rng.0, dart.body_pos(), dart.phase, false,
+                );
             }
             MilkPhase::Lodged => {
                 dart.age += dt;
-                vfx::emit_milk_teeth_dart(&mut particles, &mut rng.0, dart.pos, dart.phase, false);
+                vfx::emit_milk_teeth_dart(
+                    &mut particles, &mut rng.0, dart.body_pos(), dart.phase, false,
+                );
                 if dart.age >= MILK_LODGE_SECS {
                     dart.phase = MilkPhase::Back;
                     dart.age = 0.0;
@@ -570,17 +530,15 @@ pub fn milk_teeth_system(
                         if boss.dead {
                             continue;
                         }
-                        if bite_boss(
-                            &mut boss,
-                            from,
-                            to,
-                            dart.damage,
-                            &mut ledger,
-                            &mut damage_numbers,
-                            &mut rng.0,
-                            &mut particles,
-                        )
-                        .is_some()
+                        if boss.hit_shapes().segment_hits_grounded(from, to, MILK_RADIUS)
+                            && bite_boss(
+                                &mut boss,
+                                dart.damage,
+                                &mut ledger,
+                                &mut damage_numbers,
+                                &mut rng.0,
+                                &mut particles,
+                            )
                         {
                             dart.boss_bitten = true;
                         }
@@ -1862,15 +1820,56 @@ mod tests {
         w.end_tick();
     }
 
-    /// Milk Teeth: the dart bites on the way out, lodges for a second, then the
-    /// return thread bites a body that was never on the outbound line.
+    #[test]
+    fn milk_teeth_height_peaks_at_midflight() {
+        let mut tooth = MilkTooth::new(Vec2::ZERO, Vec2::new(60.0, 0.0), 3.0);
+        assert_eq!(tooth.height(), 0.0);
+        tooth.age = tooth.flight * 0.25;
+        let rising = tooth.height();
+        tooth.age = tooth.flight * 0.5;
+        assert_eq!(tooth.height(), tooth.apex);
+        assert!(rising > 0.0 && rising < tooth.height());
+        tooth.age = tooth.flight * 0.75;
+        assert_eq!(tooth.height(), rising);
+        tooth.age = tooth.flight;
+        assert_eq!(tooth.height(), 0.0);
+    }
+
+    #[test]
+    fn milk_teeth_bites_one_body_at_its_landing_only() {
+        let mut w = evolved_world(WeaponKind::Gnaw);
+        let origin = w.player.pos;
+        let target = origin + Vec2::new(60.0, 0.0);
+        let under_arc = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(30.0, 0.0), 400.0);
+        let first = w.spawn_enemy(EnemyKind::Brute, target + Vec2::new(0.0, 8.0), 400.0);
+        let second = w.spawn_enemy(EnemyKind::Brute, target, 400.0);
+        let before = [under_arc, first, second].map(|body| hp_of(&w, body));
+        let tooth = spawn_with_id(&mut w.ecs, MilkTooth::new(origin, target, 3.0));
+
+        for _ in 0..27 {
+            run(&mut w, milk_teeth_system);
+        }
+        assert_eq!(w.ecs.get::<MilkTooth>(tooth).unwrap().phase, MilkPhase::Out);
+        assert_eq!([under_arc, first, second].map(|body| hp_of(&w, body)), before);
+        for _ in 0..4 {
+            run(&mut w, milk_teeth_system);
+        }
+        let tooth = w.ecs.get::<MilkTooth>(tooth).unwrap();
+        assert_eq!(tooth.phase, MilkPhase::Lodged);
+        assert_eq!(tooth.pos, target);
+        assert_eq!(hp_of(&w, under_arc), before[0]);
+        assert_eq!(hp_of(&w, first), before[1] - 3.0);
+        assert_eq!(hp_of(&w, second), before[2]);
+    }
+
+    /// After lodging, the tooth returns to the rat's current position and
+    /// bites a body that was never on the outward line.
     #[test]
     fn milk_teeth_lodges_and_returns_biting_on_the_way_back() {
         use crate::game::ecs::systems::weapons;
         let mut w = evolved_world(WeaponKind::Gnaw);
         let origin = w.player.pos;
         let front = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(24.0, 0.0), 40.0);
-        let front_hp = hp_of(&w, front);
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
 
@@ -1881,11 +1880,11 @@ mod tests {
             1,
             "the evolved Gnaw fires one dart entity"
         );
-        // Outbound: the body in front takes the bite.
+        let hp_after_gnaw = hp_of(&w, front);
         for _ in 0..20 {
             run(&mut w, milk_teeth_system);
         }
-        assert!(hp_of(&w, front) < front_hp, "the outbound dart bites the first body");
+        assert!(hp_of(&w, front) < hp_after_gnaw, "the tooth bites on landing");
 
         // A body that was never on the outbound line walks in while the dart is
         // lodged, and the rat moves: the thread comes back to the rat's
@@ -1893,7 +1892,11 @@ mod tests {
         let behind = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(12.0, 10.0), 40.0);
         let behind_hp = hp_of(&w, behind);
         w.player.pos = origin + Vec2::new(0.0, 20.0);
-        for _ in 0..110 {
+        for _ in 0..50 {
+            run(&mut w, milk_teeth_system);
+        }
+        assert_eq!(hp_of(&w, behind), behind_hp, "the tooth was still lodged");
+        for _ in 0..60 {
             run(&mut w, milk_teeth_system);
         }
         assert!(
@@ -2149,7 +2152,8 @@ mod tests {
         let y = 80.0 * 16.0 + 8.0;
         w.player.pos = Vec2::new(99.0 * 16.0 + 2.0, y);
         wall_column(&mut w, 100, 80);
-        let mut dart = MilkTooth::new(Vec2::new(102.0 * 16.0 + 8.0, y), Vec2::ZERO, 5.0, MILK_REACH);
+        let at = Vec2::new(102.0 * 16.0 + 8.0, y);
+        let mut dart = MilkTooth::new(at, at, 5.0);
         dart.phase = MilkPhase::Back;
         spawn_with_id(&mut w.ecs, dart);
         // One body in the middle of the masonry (a test fixture: nothing can
@@ -2447,12 +2451,8 @@ mod tests {
             .collect();
         let before: Vec<f32> = bodies.iter().map(|&e| hp_of(&w, e)).collect();
         {
-            let mut dart = MilkTooth::new(
-                origin + Vec2::new(30.0, 0.0),
-                Vec2::ZERO,
-                3.0,
-                MILK_REACH,
-            );
+            let at = origin + Vec2::new(30.0, 0.0);
+            let mut dart = MilkTooth::new(at, at, 3.0);
             dart.phase = MilkPhase::Back;
             spawn_with_id(&mut w.ecs, dart);
         }
@@ -2626,19 +2626,12 @@ mod tests {
         let mut w = evolved_world(WeaponKind::Gnaw);
         let boss = spawn_grounded_boss(&mut w, BossKind::Cat);
         let hp0 = w.ecs.get::<Boss>(boss).unwrap().hp;
-        let boss_pos = w.ecs.get::<Boss>(boss).unwrap().pos;
-        let origin = w.player.pos;
-        let to = boss_pos - origin;
-        spawn_with_id(
-            &mut w.ecs,
-            MilkTooth::new(origin, to.normalized() * MILK_SPEED, 3.0, MILK_REACH),
-        );
-        // Fly out, lodge, come home.
-        for _ in 0..120 {
+        let body = w.ecs.get::<Boss>(boss).unwrap();
+        let at = body.hit_shapes().iter().find(|shape| shape.grounded()).unwrap().center();
+        let origin = at - Vec2::new(40.0, 0.0);
+        spawn_with_id(&mut w.ecs, MilkTooth::new(origin, at, 3.0));
+        for _ in 0..24 {
             run(&mut w, milk_teeth_system);
-            if w.ecs.get::<Boss>(boss).map(|b| b.hp < hp0).unwrap_or(false) {
-                break;
-            }
         }
         let hp1 = w.ecs.get::<Boss>(boss).unwrap().hp;
         assert!(hp1 < hp0, "the evolved Gnaw never touched the boss ({hp0} -> {hp1})");
@@ -2722,7 +2715,7 @@ mod tests {
                 w.player.pos = origin;
                 spawn_with_id(
                     &mut w.ecs,
-                    MilkTooth::new(origin, Vec2::new(MILK_SPEED, 0.0), 3.0, MILK_REACH),
+                    MilkTooth::new(origin, aim, 3.0),
                 );
                 for _ in 0..240 {
                     run(&mut w, milk_teeth_system);
@@ -3306,19 +3299,24 @@ mod tests {
             }
         };
 
-        // Milk Teeth: the dart's flight is the base reach under Lens Cap.
+        // Milk Teeth: Lens Cap stretches the maximum landing distance.
         for lens in [false, true] {
             let mut w = evolved_world(WeaponKind::Gnaw);
             if lens {
                 stack(&mut w, PassiveKind::LensCap);
             }
             let want = w.player.loadout.stats.ranged_reach(MILK_REACH);
-            w.spawn_enemy(EnemyKind::Brute, w.player.pos + Vec2::new(20.0, 0.0), 400.0);
+            let origin = w.player.pos;
+            w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(20.0, 0.0), 400.0);
             w.player.loadout.weapons[0].timer = 0.0;
-            run(&mut w, weapons::fire_weapons_system);
+            let aim = Some(origin + Vec2::new(600.0, 0.0));
+            w.begin_tick_with_aim(DT, Vec2::ZERO, false, false, aim);
+            w.ecs.run_system_cached(weapons::fire_weapons_system).unwrap();
+            w.end_tick();
             let mut q = w.ecs.query::<&MilkTooth>();
-            let dart = q.iter(&w.ecs).next().expect("the evolved Gnaw throws one dart");
-            assert!((dart.reach - want).abs() < 1e-5, "milk reach {lens}: {}", dart.reach);
+            let tooth = q.iter(&w.ecs).next().expect("the evolved Gnaw throws one tooth");
+            let reach = tooth.landing.dist(origin);
+            assert!((reach - want).abs() < 1e-4, "milk reach {lens}: {reach}");
             assert_eq!(lens, want > MILK_REACH, "only Lens Cap stretches it");
         }
 
@@ -3543,7 +3541,7 @@ mod tests {
     /// horde.
     #[test]
     fn evolution_histories_are_bounded() {
-        let mut dart = MilkTooth::new(Vec2::ZERO, Vec2::ZERO, 1.0, MILK_REACH);
+        let mut dart = MilkTooth::new(Vec2::ZERO, Vec2::ZERO, 1.0);
         for id in 0..(MILK_BITE_CAP as u64 + 8) {
             dart.remember_bite(id);
         }

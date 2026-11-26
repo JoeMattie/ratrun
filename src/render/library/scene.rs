@@ -2237,6 +2237,10 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         // A bite reaches 24 px at most: its targets stand in the jaw.
         script.cue = Some(arsenal_bite_cue);
         script.lean = Vec2::new(BITE_RING * 0.5, 0.0);
+        if evolved {
+            script.cue = Some(arsenal_milk_teeth_cue);
+            script.lean = Vec2::new(BITE_RING * 0.5, -5.0);
+        }
     }
     if kind == WeaponKind::Hantavirus {
         // The weapon is deployed by **droppings**: the rat leaves one where it
@@ -2356,7 +2360,7 @@ fn arsenal_hold_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
     arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 
-/// Gnaw's and Milk Teeth's plate: the targets stand inside the bite's reach
+/// Gnaw's plate: the targets stand inside the bite's reach
 /// (closer than the radius that hides hit digits: a jaw cannot be shown at
 /// arm's length).
 fn arsenal_bite_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
@@ -2367,6 +2371,14 @@ fn arsenal_bite_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
         let a = (i as f32 - 1.0) * 0.66;
         *home = rat + Vec2::from_angle(a) * BITE_RING;
     }
+    arsenal_dummies(world, &homes, ARSENAL_HP);
+}
+
+/// Keep a clear horizontal throw with enough room to see its apex.
+fn arsenal_milk_teeth_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    let rat = world.player.pos;
+    let homes = [Vec2::new(26.0, 0.0), Vec2::new(30.0, -8.0), Vec2::new(31.0, 10.0)]
+        .map(|offset| rat + offset);
     arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 

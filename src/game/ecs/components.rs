@@ -322,7 +322,7 @@ pub struct EvolvedShot {
 /// Phase of a lodged **Milk Teeth** dart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MilkPhase {
-    /// Flying out toward the aim point, biting the first body it crosses.
+    /// Lobbed toward the landing point. It bites only on touchdown.
     Out,
     /// Lodged: hanging still for [`crate::game::ecs::systems::evolutions::MILK_LODGE_SECS`].
     Lodged,
@@ -330,19 +330,20 @@ pub enum MilkPhase {
     Back,
 }
 
-/// A **Milk Teeth** dart: out, lodge 1 s, then home back to the rat.
+/// A **Milk Teeth** lob: out, lodge 1 s, then home back to the rat.
 #[derive(Component, Clone, Debug)]
 pub struct MilkTooth {
+    /// Ground position. The airborne sprite and its light use `body_pos()`.
     pub pos: Vec2,
-    pub vel: Vec2,
+    pub origin: Vec2,
+    pub landing: Vec2,
+    pub flight: f32,
+    pub apex: f32,
     pub phase: MilkPhase,
     /// Seconds in the current phase.
     pub age: f32,
     /// Per-hit damage (the weapon's L5 hit after stats).
     pub damage: f32,
-    /// How far the dart flies before it lodges (Lens Cap stretches it, exactly
-    /// as it stretches the base dart's projectile life).
-    pub reach: f32,
     /// Bodies bitten on the way back, in bite order.
     pub bitten: [Option<u64>; MILK_BITE_CAP],
     pub bitten_n: u8,
@@ -352,18 +353,41 @@ pub struct MilkTooth {
 }
 
 impl MilkTooth {
-    pub fn new(pos: Vec2, vel: Vec2, damage: f32, reach: f32) -> Self {
+    pub fn new(origin: Vec2, landing: Vec2, damage: f32) -> Self {
+        use crate::game::ecs::systems::evolutions::MILK_SPEED;
+        let span = origin.dist(landing);
         Self {
-            pos,
-            vel,
+            pos: origin,
+            origin,
+            landing,
+            flight: (span / MILK_SPEED).max(0.28),
+            apex: (8.0 + span * 0.20).min(24.0),
             phase: MilkPhase::Out,
             age: 0.0,
             damage,
-            reach,
             bitten: [None; MILK_BITE_CAP],
             bitten_n: 0,
             boss_bitten: false,
         }
+    }
+
+    pub fn flight_progress(&self) -> f32 {
+        (self.age / self.flight).clamp(0.0, 1.0)
+    }
+
+    pub const BOUNCE_SECS: f32 = 0.12;
+
+    pub fn height(&self) -> f32 {
+        let (u, apex) = match self.phase {
+            MilkPhase::Out => (self.flight_progress(), self.apex),
+            MilkPhase::Lodged => ((self.age / Self::BOUNCE_SECS).min(1.0), 2.5),
+            MilkPhase::Back => return 0.0,
+        };
+        4.0 * u * (1.0 - u) * apex
+    }
+
+    pub fn body_pos(&self) -> Vec2 {
+        self.pos - Vec2::new(0.0, self.height())
     }
 
     #[inline]

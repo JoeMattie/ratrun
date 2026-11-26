@@ -2541,6 +2541,14 @@ impl World {
         // Boss ground layer: floor telegraphs and drop shadows, after the
         // stains and before props/entities (the art's "Ground" layer).
         self.draw_boss_ground(pb, cam);
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &MilkTooth)>();
+            for (_, tooth) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if on_screen(self.w2s(tooth.pos, cam), 10.0, viewport) {
+                    art_wave3a::draw_milk_tooth_shadow(pb, tooth, cam);
+                }
+            }
+        }
         // Wall ground layer: contact shadows and floor thresholds, under
         // everything that stands on the floor.
         self.draw_wall_layer(pb, cam, WallLayer::Ground);
@@ -2972,8 +2980,7 @@ impl World {
             }
         }
 
-        // Fondue Fork strings & Milk Teeth darts (drawn over enemies so the
-        // yellow posts, sagging cheese line, ivory hook & dotted thread stay crisp).
+        // Fondue Fork's posts and sagging cheese line stay readable over enemies.
         {
             let mut query = self.ecs.query::<(&SpawnId, &CheeseString)>();
             for (_, line) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
@@ -2985,21 +2992,22 @@ impl World {
                 }
             }
         }
+        // Player rat.
+        self.draw_player(pb, cam, bob_lean);
+
+        // The lifted tooth is drawn over the bodies, with its shadow below.
         {
             let ppos = self.player.pos;
             let mut query = self.ecs.query::<(&SpawnId, &MilkTooth)>();
-            for (_, dart) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                let s = self.w2s(dart.pos, cam);
-                let ps = self.w2s(ppos, cam);
+            let ps = self.w2s(ppos, cam);
+            for (_, tooth) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(tooth.body_pos(), cam);
                 if on_screen(s, 10.0, viewport) || on_screen(ps, 10.0, viewport) {
-                    art_wave3a::draw_milk_tooth(pb, dart, ppos, cam);
+                    art_wave3a::draw_milk_tooth(pb, tooth, ppos, cam);
                     self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 2, 2);
                 }
             }
         }
-
-        // Player rat.
-        self.draw_player(pb, cam, bob_lean);
 
         // Instant melee weapon visuals anchored to the rat: Gnaw's closing white
         // tooth crescents (`BiteSnap`) and Tail Whip's frontal pink half-circle

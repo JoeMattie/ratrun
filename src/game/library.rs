@@ -1429,9 +1429,8 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
     match k {
         WeaponKind::Gnaw => (
             "Chest · Gnaw L5 + Sharp Teeth",
-            "The bite spits a tooth that lodges, waits a beat, and then pulls back to \
-             wherever the rat has got to, biting on the way home. Nothing is wasted; \
-             everything comes back in.",
+            "The bite lobs a tooth that catches one foe where it lands. It lodges for \
+             1s, then pulls back to you and bites foes along the way. Everything comes back in.",
         ),
         WeaponKind::CheeseSpray => (
             "Chest · Cheese Spray L5 + Fat Reserves",
