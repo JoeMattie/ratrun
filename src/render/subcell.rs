@@ -35,7 +35,8 @@
 //! rule) are what keep it from touching a pellet, a whisker or a soft
 //! gradient; see `smooth_into`.
 //!
-//! That EPX pass is [`Smooth::Epx`]. The default is [`Smooth::Xbr`]
+//! That EPX pass is [`Smooth::Epx`]. Smoothing defaults to [`Smooth::Off`].
+//! [`Smooth::Xbr`]
 //! (`subcell/xbr.rs`): an xBR 2× upscale of the same picture, whose edge
 //! detection reads a radius-two neighbourhood, fitted in two colours (which
 //! may be blends) to the quadrant, sextant or octant pattern nearest it.
@@ -121,15 +122,15 @@ impl Choice {
 /// How the 1× (and zoomed-in) picture's edges are treated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Smooth {
-    /// Plain half blocks: the frame every earlier build drew, byte for byte.
+    /// Plain half blocks.
+    #[default]
     Off,
     /// The EPX / Scale2x corner rounding (`smooth_into`).
     Epx,
     /// Antialiasing with part-cell glyphs (`antialias`).
     Strong,
     /// An xBR 2× upscale fitted to quadrants, sextants or octants in two
-    /// colours that may be blends (`subcell/xbr.rs`). The default.
-    #[default]
+    /// colours that may be blends (`subcell/xbr.rs`).
     Xbr,
     /// [`Smooth::Strong`] plus the wedge and triangle glyphs, and diagonal
     /// one-pixel strokes drawn as a band. Needs sextants or better; on a
@@ -198,7 +199,7 @@ impl Smooth {
 /// The 1× edge treatment for the session: `RATRUN_SMOOTH=0` pins plain half
 /// blocks, `1` the EPX rounding, `2` the antialiasing, `3` the xBR fit, `4` the
 /// antialiasing with wedges, `5` the crisp xBR fit; unset or unreadable
-/// leaves the default ([`Smooth::Xbr`]). The console `smooth` command and the
+/// leaves the default ([`Smooth::Off`]). The console `smooth` command and the
 /// Graphics page are the live setting; this is the session pin, and it is
 /// reported as an `Option` so the app can tell a pin from a saved preference
 /// (a pinned session is never written back over the save).
@@ -206,7 +207,7 @@ pub fn smooth_env() -> Option<Smooth> {
     std::env::var("RATRUN_SMOOTH").ok().and_then(|v| Smooth::parse(&v))
 }
 
-/// [`smooth_env`], with the default standing in for "not pinned".
+/// [`smooth_env`], falling back to [`Smooth::Off`] when unpinned.
 pub fn smooth_from_env() -> Smooth {
     smooth_env().unwrap_or_default()
 }
@@ -1823,8 +1824,8 @@ mod tests {
     }
 
     #[test]
-    fn the_smoothing_level_reads_as_a_number_or_a_word_and_defaults_to_xbr() {
-        assert_eq!(Smooth::default(), Smooth::Xbr);
+    fn the_smoothing_level_reads_as_a_number_or_a_word_and_defaults_to_off() {
+        assert_eq!(Smooth::default(), Smooth::Off);
         for (text, want) in [
             ("0", Smooth::Off),
             ("off", Smooth::Off),

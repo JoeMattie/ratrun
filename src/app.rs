@@ -438,19 +438,18 @@ pub struct App {
     /// `RATRUN_SUBCELL`, read once at startup: pins the glyph set for the
     /// session (there is no saved option any more).
     subcell_env: Option<crate::render::subcell::Choice>,
-    /// Edge treatment of the 1x (and zoomed-in) picture: antialiasing by
-    /// default. The Graphics page's SMOOTHING row sets it (persisted as
-    /// `scores.graphics`); `RATRUN_SMOOTH=0|1|2` still pins it for a session,
-    /// and the console `smooth` command switches it live. Render-only: it never
-    /// reaches the simulation.
+    /// Edge treatment of the 1x (and zoomed-in) picture, off by default.
+    /// The Graphics page's SMOOTHING row saves it in `scores.graphics`.
+    /// `RATRUN_SMOOTH` pins it for a session and the console `smooth` command
+    /// switches it live. Render-only.
     smooth: crate::render::subcell::Smooth,
     /// The `RATRUN_SMOOTH` session pin, if the environment carried a readable
     /// one. A pinned row is never written back over the save; changing the row
     /// drops the pin (see [`App::set_smooth_level`]).
     smooth_env: Option<crate::render::subcell::Smooth>,
-    /// The parallax foreground layer (overhead pipes, lines, proofs). On by
+    /// The parallax foreground layer (overhead pipes, lines, proofs). Off by
     /// default; the Graphics page's FOREGROUND row and the console `foreground`
-    /// command A/B it live (`RATRUN_FOREGROUND=0` pins it off for a session).
+    /// command A/B it live (`RATRUN_FOREGROUND=1` pins it on for a session).
     /// Render-only, like `smooth`.
     foreground: bool,
     /// The `RATRUN_FOREGROUND` session pin (see `smooth_env`).
@@ -480,6 +479,8 @@ pub struct App {
     options_row: usize,
     /// Graphics page: the selected row (`0..graphics::ROW_COUNT`).
     graphics_row: usize,
+    /// Where Back on the Graphics page returns.
+    graphics_return: Screen,
     /// Where Esc/Back on the options screen returns to (`Title` or `Paused`).
     options_return: Screen,
     /// Cooldown before another effects-volume preview blip may play.
@@ -709,6 +710,7 @@ impl App {
             shake_scale,
             options_row: options::MUSIC_ROW,
             graphics_row: graphics::LIGHTING_ROW,
+            graphics_return: Screen::Options,
             options_return: Screen::Title,
             preview_cd: 0.0,
             previews: 0,
@@ -2594,24 +2596,28 @@ impl App {
 
     // ---- The Graphics page -----------------------------------------------
 
-    /// Open the Graphics page from the Options plate's GRAPHICS row (the way
-    /// CONTROLS opens the Controls screen). `options_return` is untouched, so
-    /// Back here lands on Options and Options' Back on whatever opened *it*.
+    /// Open Graphics from play, pause or Options.
     fn open_graphics(&mut self) {
         self.graphics_row = graphics::LIGHTING_ROW;
+        self.graphics_return = self.screen;
         self.screen = Screen::Graphics;
         self.sfx(Sfx::UiSelect);
     }
 
-    /// Leave the Graphics page for Options.
+    /// Leave Graphics for the screen that opened it.
     fn close_graphics(&mut self) {
-        self.screen = Screen::Options;
+        self.screen = self.graphics_return;
         self.sfx(Sfx::UiSelect);
+    }
+
+    fn graphics_over_field(&self) -> bool {
+        matches!(self.graphics_return, Screen::Playing | Screen::Paused)
+            || (self.graphics_return == Screen::Options && self.options_return == Screen::Paused)
     }
 
     /// One frame of the Graphics page: Up/Down choose a row, Left/Right cycle
     /// its value, Enter activates (BACK leaves; a value row steps forward), a
-    /// click selects and steps, and Esc / a right click goes back to Options.
+    /// click selects and steps, and S cycles smoothing from any row.
     fn update_graphics(&mut self, click: Option<Target>) {
         let row = self.graphics_row.min(graphics::ROW_COUNT - 1);
         let mut chosen = false;
@@ -2626,8 +2632,12 @@ impl App {
             }
             _ => {}
         }
-        if self.input.back_pressed() {
+        if self.input.back_pressed() || self.input.action_pressed(Action::Graphics) {
             self.close_graphics();
+            return;
+        }
+        if self.input.pressed_unmodified_char('s') {
+            self.adjust_graphics(graphics::SMOOTH_ROW, 1);
             return;
         }
         if self.input.nav_pressed(0, -1) {
@@ -3217,6 +3227,11 @@ impl App {
         {
             self.map_open = false;
             self.screen = Screen::Paused;
+            return;
+        }
+        if self.input.action_pressed(Action::Graphics) {
+            self.map_open = false;
+            self.open_graphics();
             return;
         }
         // The full map is a pause: the world holds still while it is open, so
@@ -4303,12 +4318,12 @@ impl App {
         self.picture_dirty = true;
     }
 
-    /// Turn the 1x edge smoothing off, or on at its default level (the
-    /// xBR fit). Render-only: no run state, no save, no golden can see it.
+    /// Toggle the xBR fit in render tests.
+    #[cfg(test)]
     pub(crate) fn set_smooth(&mut self, on: bool) {
         use crate::render::subcell::Smooth;
         if on != self.smooth_enabled() {
-            self.set_smooth_level(if on { Smooth::default() } else { Smooth::Off });
+            self.set_smooth_level(if on { Smooth::Xbr } else { Smooth::Off });
         }
     }
 
@@ -4453,9 +4468,10 @@ impl App {
                 true
             }
             // These plates can open over a paused run and keep its field.
-            Screen::Options | Screen::Controls | Screen::Graphics => {
+            Screen::Options | Screen::Controls => {
                 self.options_return == Screen::Paused
             }
+            Screen::Graphics => self.graphics_over_field(),
             Screen::Nest => self.nest_return == Screen::Paused,
             _ => false,
         }
@@ -4485,6 +4501,10 @@ impl App {
     }
 
     fn update_paused(&mut self, click: Option<Target>) {
+        if self.input.action_pressed(Action::Graphics) {
+            self.open_graphics();
+            return;
+        }
         // The Options key itself is handled once, globally, in `update` (it
         // reads the live binding); only the pointer needs this screen.
         if click == Some(Target::Options) {
@@ -4969,10 +4989,7 @@ impl App {
                 self.draw_controls(frame, area);
             }
             Screen::Graphics => {
-                // The page sits over whatever opened Options, exactly like the
-                // Options plate itself: the frozen play field behind the pause
-                // overlay, or the title.
-                if self.options_return == Screen::Paused {
+                if self.graphics_over_field() {
                     self.draw_game(frame, area);
                 } else {
                     self.ensure_rat_art(area);
@@ -5156,9 +5173,7 @@ impl App {
         render_controls::draw(frame, area, &view, &mut self.hits);
     }
 
-    /// Draw the Graphics plate (`render::graphics`) over whatever opened
-    /// Options. It fills its view from the app's live state, so the row the
-    /// player just changed shows its new value on the same frame.
+    /// Fill the Graphics plate from the app's live settings and bindings.
     fn draw_graphics(&mut self, frame: &mut Frame, area: Rect) {
         let view = graphics::GraphicsView {
             lighting: self.lighting_mode(),
@@ -5169,6 +5184,8 @@ impl App {
             shake_scale: self.shake_scale,
             row: self.graphics_row,
             accent: options::accent_from(menu::material(self.theme())),
+            graphics_key: self.input.controls.action_label(Action::Graphics),
+            back_key: self.input.controls.action_label(Action::Back),
         };
         graphics::draw(frame, area, &view, &mut self.hits);
     }
@@ -10396,7 +10413,7 @@ mod tests {
         h.app.world.as_mut().unwrap().smoke_enabled = false;
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 3, "the smoke toggle must redraw");
-        h.app.set_foreground(false);
+        h.app.set_foreground(true);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 4, "the foreground toggle must redraw");
         // The Graphics page's SCREEN SHAKE row moves the camera the frozen
@@ -14195,6 +14212,101 @@ mod tests {
         assert_eq!(h.app.screen.name_for_test(), "Playing");
     }
 
+    #[test]
+    fn the_graphics_key_freezes_play_and_returns_to_its_opening_screen() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.frame(&[]);
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+
+        let text = h.frame(&[KeyCode::Char('g')]);
+        assert!(matches!(h.app.screen, Screen::Graphics));
+        assert!(text.contains("S smoothing · G or Esc back"));
+        for row in [graphics::SMOOTH_ROW, graphics::FOREGROUND_ROW] {
+            let rect = h.app.hits.rect_for(Target::GraphicsRow(row)).unwrap();
+            let buffer = h.terminal.backend().buffer();
+            let line: String = (rect.x..rect.right()).map(|x| buffer[(x, rect.y)].symbol()).collect();
+            assert!(line.contains("‹ OFF ›"), "{line}");
+        }
+        h.frame(&[]);
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        h.frame(&[]);
+        assert!(h.app.world.as_ref().unwrap().elapsed > elapsed);
+
+        h.frame(&[KeyCode::Esc]);
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+        h.frame(&[KeyCode::Char('g')]);
+        assert!(matches!(h.app.screen, Screen::Graphics));
+        h.frame(&[KeyCode::Char('g')]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        h.frame(&[KeyCode::Char('g')]);
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Right), (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+
+        h.app
+            .input
+            .controls
+            .bind_active_kbm(Action::Graphics, Binding::Key(KeyBind::Char('v')));
+        h.frame(&[KeyCode::Char('g')]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        let text = h.frame(&[KeyCode::Char('v')]);
+        assert!(matches!(h.app.screen, Screen::Graphics));
+        assert!(text.contains("S smoothing · V or Esc back"));
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+    }
+
+    #[test]
+    fn the_smoothing_shortcut_cycles_and_redraws_the_frozen_field() {
+        use crate::render::subcell::{Choice, Smooth, SubcellSet};
+        let mut h = Harness::new(120, 40);
+        h.app.set_subcell_override(Some(Choice::Force(SubcellSet::Sextant)));
+        h.app.set_smooth_level(Smooth::Off);
+        h.app.set_glyphfx(false);
+        h.app.set_minimap_size(minimap::MinimapSize::Hidden);
+        h.enter_playing();
+        h.app.world.as_mut().unwrap().set_zoom_instant(1.0);
+        for _ in 0..30 {
+            h.frame(&[KeyCode::Right]);
+        }
+        h.frame(&[KeyCode::Char('g')]);
+        assert!(matches!(h.app.screen, Screen::Graphics));
+        h.app.graphics_row = graphics::BACK_ROW;
+        h.frame(&[]);
+
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+        let before = h.terminal.backend().buffer().clone();
+        let panel = graphics::layout(before.area).panel;
+        let field = h.app.last_game;
+
+        for &level in Smooth::ALL.iter().skip(1).chain(&Smooth::ALL[..1]) {
+            let text = h.frame(&[KeyCode::Char('s')]);
+            assert!(matches!(h.app.screen, Screen::Graphics));
+            assert_eq!(h.app.graphics_row, graphics::BACK_ROW, "S keeps the selection");
+            assert_eq!(h.app.world.as_ref().unwrap().smooth, level);
+            assert_eq!(h.app.scores.graphics.smooth(), level);
+            assert!(text.contains(&format!("‹ {} ›", level.label())));
+            if level == Smooth::Xbr {
+                let after = h.terminal.backend().buffer();
+                assert!(
+                    (field.top()..field.bottom()).any(|y| {
+                        (field.left()..field.right()).any(|x| {
+                            let in_panel = (panel.left()..panel.right()).contains(&x)
+                                && (panel.top()..panel.bottom()).contains(&y);
+                            !in_panel && before[(x, y)].symbol() != after[(x, y)].symbol()
+                        })
+                    }),
+                    "smoothing should change playfield cells outside the plate"
+                );
+            }
+        }
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+        assert!(!h.app.console_cheat);
+    }
+
     /// Every row steps its setting with Left/Right — the same `App` method the
     /// console command calls, so the world and the save both follow — and none
     /// of it flags the run as cheated.
@@ -14240,20 +14352,19 @@ mod tests {
         assert_eq!(h.app.smooth_level(), Smooth::default());
         h.app.graphics_row = graphics::SMOOTH_ROW;
         h.frame(&[KeyCode::Right]);
-        // The default (the xBR fit) is followed by the wedge level in `Smooth::ALL`.
-        assert_eq!(h.app.smooth_level(), Smooth::Wedge, "right walks down the list");
-        assert_eq!(h.app.world.as_ref().unwrap().smooth, Smooth::Wedge);
-        assert_eq!(h.app.scores.graphics.smooth(), Smooth::Wedge);
+        assert_eq!(h.app.smooth_level(), Smooth::Epx, "right walks down the list");
+        assert_eq!(h.app.world.as_ref().unwrap().smooth, Smooth::Epx);
+        assert_eq!(h.app.scores.graphics.smooth(), Smooth::Epx);
         h.frame(&[KeyCode::Left]);
         assert_eq!(h.app.smooth_level(), Smooth::default());
 
         // FOREGROUND: the parallax layer.
-        assert!(h.app.foreground_enabled());
+        assert!(!h.app.foreground_enabled());
         h.app.graphics_row = graphics::FOREGROUND_ROW;
         h.frame(&[KeyCode::Right]);
-        assert!(!h.app.foreground_enabled());
-        assert!(!h.app.world.as_ref().unwrap().foreground);
-        assert!(!h.app.scores.graphics.foreground);
+        assert!(h.app.foreground_enabled());
+        assert!(h.app.world.as_ref().unwrap().foreground);
+        assert!(h.app.scores.graphics.foreground);
 
         // GLYPH PARTICLES: the particle layer (never in the picture key).
         assert!(h.app.glyphfx_enabled());
@@ -14355,23 +14466,23 @@ mod tests {
         use crate::render::subcell::Smooth;
         let mut table = ScoreTable::default();
         table.graphics.set_lighting(LightingMode::Coarse);
-        table.graphics.set_smooth(Smooth::Off);
+        table.graphics.set_smooth(Smooth::Xbr);
         table.graphics.fx = false;
-        table.graphics.foreground = false;
+        table.graphics.foreground = true;
         table.graphics.glyphfx = false;
         table.graphics.set_shake(1.0);
 
         let reloaded = ScoreTable::parse(&table.to_json());
         assert_eq!(reloaded.graphics, table.graphics);
         assert_eq!(reloaded.graphics.lighting_mode(), Some(LightingMode::Coarse));
-        assert_eq!(reloaded.graphics.smooth(), Smooth::Off);
+        assert_eq!(reloaded.graphics.smooth(), Smooth::Xbr);
         assert_eq!(reloaded.graphics.shake(), 1.0);
 
         let app = App::with_options(false, None, reloaded, false, Some(TEST_SEED));
         assert_eq!(app.lighting_mode(), LightingMode::Coarse);
-        assert_eq!(app.smooth_level(), Smooth::Off);
+        assert_eq!(app.smooth_level(), Smooth::Xbr);
         assert!(!app.fx_enabled());
-        assert!(!app.foreground_enabled());
+        assert!(app.foreground_enabled());
         assert!(!app.glyphfx_enabled());
         assert_eq!(app.shake_scale(), 1.0);
 
@@ -14395,7 +14506,8 @@ mod tests {
         assert_eq!(table.graphics, crate::scores::GraphicsFile::default());
         assert_eq!(table.graphics.lighting_mode(), None, "no lighting choice yet");
         assert_eq!(table.graphics.smooth(), Smooth::default());
-        assert!(table.graphics.foreground && table.graphics.fx && table.graphics.glyphfx);
+        assert!(!table.graphics.foreground);
+        assert!(table.graphics.fx && table.graphics.glyphfx);
         assert_eq!(table.graphics.shake(), crate::game::world::SHAKE_SCALE);
 
         // A partial object keeps the defaults for the fields it omits.
@@ -14405,7 +14517,8 @@ mod tests {
 
         // A hand-edited value this build cannot read is dropped, not carried.
         let table = ScoreTable::parse(
-            r#"{"graphics": {"lighting": "moonlight", "smooth": "bogus", "shake_scale": 9}}"#,
+            r#"{"graphics": {"graphics_version": 2, "lighting": "moonlight",
+                             "smooth": "bogus", "shake_scale": 9}}"#,
         );
         assert_eq!(table.graphics.lighting_mode(), None);
         assert_eq!(table.graphics.smooth(), Smooth::default());
@@ -15242,6 +15355,7 @@ mod tests {
             let mut flat = Harness::new(120, 40);
             plain.app.subcell_env = None;
             forced.app.subcell_env = Some(Choice::Force(set));
+            forced.app.set_smooth(true);
             flat.app.subcell_env = Some(Choice::Force(set));
             for h in [&mut plain, &mut forced, &mut flat] {
                 h.enter_playing();
@@ -15297,13 +15411,14 @@ mod tests {
         }
     }
 
-    /// The only live control over the sub-cell path is the render-only
-    /// `smooth` toggle: it redraws the frozen picture, never ticks the
-    /// simulation, and a forced glyph set is a different picture key.
+    /// Smoothing redraws the frozen picture without ticking the simulation,
+    /// and a forced glyph set also changes the picture key.
     #[test]
     fn the_smooth_toggle_is_render_only_and_redraws() {
         use crate::render::subcell::{Choice, SubcellSet};
         let mut h = paused_harness();
+        h.app.set_smooth(true);
+        h.frame(&[]);
         let drawn = h.app.world_draws;
         let ticks = h.app.world.as_ref().unwrap().ticks;
         h.app.set_smooth(false);
@@ -15335,8 +15450,8 @@ mod tests {
         let mut h = paused_harness();
         let drawn = h.app.world_draws;
         let ticks = h.app.world.as_ref().unwrap().ticks;
-        assert!(h.app.foreground_enabled(), "on by default");
-        h.app.set_foreground(false);
+        assert!(!h.app.foreground_enabled(), "off by default");
+        h.app.set_foreground(true);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "a foreground change redraws the field");
         assert_eq!(
@@ -15344,10 +15459,10 @@ mod tests {
             ticks,
             "the foreground layer is render-only: no tick"
         );
-        assert!(!h.app.world.as_ref().unwrap().foreground, "the world was not told");
+        assert!(h.app.world.as_ref().unwrap().foreground, "the world was not told");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "and then the picture is cached again");
-        h.app.set_foreground(true);
+        h.app.set_foreground(false);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 2);
     }

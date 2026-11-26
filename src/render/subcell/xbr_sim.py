@@ -284,7 +284,7 @@ def split(px):
 
 
 def cell_blend(p, cx, cy, glyph_set):
-    """One cell of the default pass: xBR's blended block, fitted in two colours."""
+    """One cell of xBR's blended block, fitted in two colours."""
     w = p.w
     top, bot = p.px[cy * 2 * w + cx], p.px[(cy * 2 + 1) * w + cx]
     plain = (PLAIN, top, bot)

@@ -239,6 +239,8 @@ Movement, menus and preferences are the same in all three schemes:
 | `[` / `]` | music volume down / up |
 | `-` / `=` | effects volume down / up |
 | `O` | options |
+| `G` | open or close Graphics during play or from pause |
+| `S` (on Graphics) | cycle smoothing |
 | `U` | toggle auto-pick level-ups |
 | `L` | story crawl on the title, Library in a run |
 | `Enter` | confirm · `Esc` or right click back in any menu |
@@ -326,8 +328,8 @@ keyboard-protocol query. `--color truecolor|256|16` and
 | `RATRUN_CONSOLE` | `RATRUN_CONSOLE=0` disables the admin console in a build that has it. |
 | `RATRUN_CURSOR` | force the cheese cursor on/off for the session. |
 | `RATRUN_MUSIC` | `chip` plays the floor songs on the old chip oscillators, `classic` the original chiptune; the default is the 16-bit palette. |
-| `RATRUN_SMOOTH` | Edge treatment at 1× zoom: `0` plain half blocks, `1` corner smoothing, `2` antialiasing, `3` (default) xBR, `4` antialiasing with wedge glyphs, `5` xBR in exact colours. |
-| `RATRUN_FOREGROUND` | `0` hides the overhead parallax layer (pipes, lines, hanging things). |
+| `RATRUN_SMOOTH` | Edge treatment at 1× zoom: `0` (default) plain half blocks, `1` corner smoothing, `2` antialiasing, `3` xBR, `4` antialiasing with wedge glyphs, `5` xBR in exact colours. |
+| `RATRUN_FOREGROUND` | `1` draws the overhead parallax layer (pipes, lines, hanging things). Defaults to Off. |
 | `RATRUN_MUSIC_VOLUME`, `RATRUN_SFX_VOLUME` | pin a volume (0–100, `%` optional) for the session without writing it to your preferences. |
 
 (Development-only switches — the screenshot dumper and the capture harnesses —

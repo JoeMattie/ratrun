@@ -267,11 +267,9 @@ pub struct World {
     /// terminal's capabilities and the `RATRUN_SUBCELL` pin. There is no
     /// setting: zoomed out it is always on.
     pub subcell: crate::render::subcell::SubcellSet,
-    /// Edge treatment of the 1x (and zoomed-in) picture: off, the EPX corner
-    /// rounding, or (the default) antialiasing with part-cell glyphs — the
-    /// sub-cell frame that [`World::detail`] hands back at those zooms.
-    /// Render-only; the App sets it from `RATRUN_SMOOTH` and the console's
-    /// `smooth` command.
+    /// Edge treatment of the 1x (and zoomed-in) picture, off by default.
+    /// Render-only. The App applies the Graphics setting or the session's
+    /// `RATRUN_SMOOTH` override.
     pub smooth: crate::render::subcell::Smooth,
     /// The zoomed-out picture at sub-cell resolution, when the last `draw`
     /// produced one (see [`World::detail`]). Held for the run like `world_buf`.
@@ -285,8 +283,8 @@ pub struct World {
     /// item list is built from the finished level once per level and kept here
     /// as **render state** — never a resource, never in the determinism trace.
     pub foreground_layer: crate::render::foreground::ForeLayer,
-    /// Whether the foreground layer draws. Render-only, on by default
-    /// (`RATRUN_FOREGROUND=0` pins it off for a session; the console's
+    /// Whether the foreground layer draws. Render-only, off by default
+    /// (`RATRUN_FOREGROUND=1` pins it on for a session; the console's
     /// read-only `foreground on|off` is the in-run switch).
     pub foreground: bool,
     /// The batch-13 lighting effects (`render::lighting::fx`). Render-only,
@@ -2129,7 +2127,7 @@ impl World {
                         let wedges = self.smooth == Smooth::Wedge;
                         self.detail.antialias_with(self.subcell, wedges, sw, sh / 2, src, pb)
                     }
-                    // The xBR fit (the default, and its crisp reading) reads
+                    // The blended and crisp xBR fits read
                     // the screen picture itself at every zoom; `grid` is the
                     // grid it fits to.
                     Smooth::Xbr | Smooth::XbrCrisp => {

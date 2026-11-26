@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- 1× smoothing defaults to Off.
+- The foreground layer defaults to Off. Older saves reset smoothing and foreground and retain their other graphics settings.
+- Press `G` during play or pause to open Graphics, then `S` to cycle smoothing over the frozen field.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

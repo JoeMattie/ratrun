@@ -639,16 +639,15 @@ fn is_wire_span(item: &ForeItem) -> bool {
     item.kind == ForeKind::PowerLine && item.attach == Attach::Sky && item.len > 0.0
 }
 
-/// Is the layer on by default? `RATRUN_FOREGROUND=0` (or `off`/`false`/`no`)
-/// pins it off for a session; the console's read-only `foreground on|off` is
-/// the in-run switch.
+/// The foreground layer defaults to off. `RATRUN_FOREGROUND=1` enables it
+/// for a session, and `0` (or `off`/`false`/`no`) pins it off.
 pub fn enabled_from_env() -> bool {
     match std::env::var("RATRUN_FOREGROUND") {
         Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "0" | "off" | "false" | "no"
         ),
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 

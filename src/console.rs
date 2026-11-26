@@ -2285,9 +2285,9 @@ fn cmd_smooth(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     // so it must not flag the run as cheated.
     use crate::render::subcell::Smooth;
     let level = match args.first() {
-        // No argument flips it: off, or back on at the default (xbr).
+        // No argument toggles between smoothing off and the xBR fit.
         None if app.smooth_enabled() => Smooth::Off,
-        None => Smooth::default(),
+        None => Smooth::Xbr,
         Some(word) => Smooth::parse(word)
             .ok_or_else(|| {
                 format!("expected off, on, strong, xbr, wedge or crisp, got `{word}`")
@@ -2881,7 +2881,7 @@ mod tests {
     #[test]
     fn the_smooth_command_a_bs_the_picture_without_flagging() {
         let mut app = fresh_app();
-        assert!(app.smooth_enabled(), "on by default");
+        assert!(!app.smooth_enabled(), "off by default");
         run_command(&mut app, "smooth off").expect("smooth off");
         assert!(!app.smooth_enabled());
         assert!(!app.console_cheat, "a render-only toggle must not flag the run");
@@ -2891,7 +2891,7 @@ mod tests {
         assert!(!app.smooth_enabled(), "no argument flips it");
         assert!(scrollback(&app).contains("smooth off"));
         // The levels: off, on (the EPX rounding), strong (antialiasing), xbr
-        // (the default, and what a bare `smooth` turns back on), wedge and
+        // (what a bare `smooth` turns back on), wedge and
         // crisp.
         use crate::render::subcell::Smooth;
         run_command(&mut app, "smooth on").expect("smooth on");
@@ -2909,7 +2909,7 @@ mod tests {
         assert_eq!(app.smooth_level(), Smooth::Xbr);
         run_command(&mut app, "smooth 0").expect("smooth 0");
         run_command(&mut app, "smooth").expect("smooth flips back on");
-        assert_eq!(app.smooth_level(), Smooth::Xbr, "the default is the xBR fit");
+        assert_eq!(app.smooth_level(), Smooth::Xbr, "the toggle enables the xBR fit");
         assert!(run_command(&mut app, "smooth lots").is_err());
         assert!(!app.console_cheat, "no level flags the run");
     }
@@ -2919,6 +2919,7 @@ mod tests {
     #[test]
     fn the_foreground_command_a_bs_the_layer_without_flagging() {
         let mut app = fresh_app();
+        assert!(!app.foreground_enabled(), "off by default");
         run_command(&mut app, "foreground off").expect("foreground off");
         assert!(!app.foreground_enabled());
         assert!(!app.console_cheat, "a render-only toggle must not flag the run");

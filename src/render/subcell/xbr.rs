@@ -1,4 +1,4 @@
-//! The 1× edge treatments [`Smooth::Xbr`](super::Smooth::Xbr) (the default)
+//! The 1× edge treatments [`Smooth::Xbr`](super::Smooth::Xbr)
 //! and [`Smooth::XbrCrisp`](super::Smooth::XbrCrisp): an xBR 2× upscale of the
 //! half-block picture, reduced to one glyph and two colours a cell.
 //!
@@ -725,7 +725,7 @@ mod tests {
         pass(src, grid, true)
     }
 
-    /// The blended fit (`Smooth::Xbr`, the default).
+    /// The blended fit (`Smooth::Xbr`).
     fn blended(src: &PixelBuffer, grid: Grid) -> Vec<Encoded> {
         pass(src, grid, false)
     }

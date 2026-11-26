@@ -271,11 +271,14 @@ pub struct SavedSchemeFile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphicsFile {
+    /// Version 2 starts smoothing and foreground off for older saves.
+    #[serde(default)]
+    pub graphics_version: u32,
     /// `full` | `hard` | `coarse` | `compact` — the lighting quality the console's
     /// `lights` command sets. Absent means "whatever this terminal's colour
     /// depth defaults to" (the only correct answer before the player picks).
     pub lighting: Option<String>,
-    /// `off` | `on` | `strong` — the words `smooth` accepts.
+    /// `off` | `on` | `strong` | `xbr` | `wedge` | `crisp`.
     pub smooth: String,
     /// The parallax overhead layer (`render::foreground`).
     pub foreground: bool,
@@ -288,15 +291,17 @@ pub struct GraphicsFile {
     pub shake_scale: f32,
 }
 
+const GRAPHICS_VERSION: u32 = 2;
+
 impl Default for GraphicsFile {
-    /// Today's defaults, exactly what a build before the page ran: the
-    /// terminal's own lighting tier (no stored mode), the antialiased picture,
-    /// every layer on, and the 65 % shake every effect already had.
+    /// The terminal's own lighting tier, smoothing and foreground off, light
+    /// effects and glyph particles on, and 65 % shake.
     fn default() -> Self {
         GraphicsFile {
+            graphics_version: GRAPHICS_VERSION,
             lighting: None,
             smooth: crate::render::subcell::Smooth::default().as_str().to_string(),
-            foreground: true,
+            foreground: false,
             fx: true,
             glyphfx: true,
             shake_scale: crate::game::world::SHAKE_SCALE,
@@ -357,7 +362,16 @@ impl GraphicsFile {
         if self.lighting_mode().is_none() {
             self.lighting = None;
         }
-        self.set_smooth(self.smooth());
+        // Earlier builds saved smoothing and foreground with every other row,
+        // so either could have carried the old default along with another edit.
+        let smooth = if self.graphics_version < GRAPHICS_VERSION {
+            self.graphics_version = GRAPHICS_VERSION;
+            self.foreground = false;
+            crate::render::subcell::Smooth::Off
+        } else {
+            self.smooth()
+        };
+        self.set_smooth(smooth);
         self.set_shake(self.shake());
     }
 }
@@ -902,6 +916,39 @@ mod tests {
         assert_eq!(t.meta.level(crate::meta::Track::MoveSpeed), 3);
         assert!(t.floor_cleared(Theme::Sewer), "the unlock survives");
         assert_eq!(t.music_volume, 100);
+    }
+
+    #[test]
+    fn older_graphics_saves_reset_only_smoothing_and_foreground() {
+        use crate::render::subcell::Smooth;
+        let table = ScoreTable::parse(
+            r#"{"graphics":{"lighting":"coarse","smooth":"xbr","foreground":true,
+                 "fx":false,"glyphfx":false,"shake_scale":0.5}}"#,
+        );
+        let graphics = table.graphics;
+        assert_eq!(graphics.graphics_version, 2);
+        assert_eq!(graphics.smooth(), Smooth::Off);
+        assert_eq!(graphics.lighting.as_deref(), Some("coarse"));
+        assert!(!graphics.foreground && !graphics.fx && !graphics.glyphfx);
+        assert_eq!(graphics.shake(), 0.5);
+
+        let table = ScoreTable::parse(r#"{"graphics":{"graphics_version":1,"smooth":"wedge"}}"#);
+        assert_eq!(table.graphics.graphics_version, 2);
+        assert_eq!(table.graphics.smooth(), Smooth::Off);
+    }
+
+    #[test]
+    fn version_two_graphics_saves_keep_chosen_smoothing_and_foreground() {
+        use crate::render::subcell::Smooth;
+        let mut table = ScoreTable::default();
+        table.graphics.set_smooth(Smooth::Xbr);
+        table.graphics.foreground = true;
+        let json = table.to_json();
+        let saved: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(saved["graphics"]["graphics_version"].as_u64(), Some(2));
+        let loaded = ScoreTable::parse(&json);
+        assert_eq!(loaded.graphics.smooth(), Smooth::Xbr);
+        assert!(loaded.graphics.foreground);
     }
 
     #[test]
