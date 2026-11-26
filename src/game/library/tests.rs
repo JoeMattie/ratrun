@@ -872,7 +872,7 @@ fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
             format!("{pool:.0}")
         };
         assert_eq!(hp.value, expected, "{kind:?}");
-        assert!(pool >= 2_500.0, "{kind:?}: {pool} is not a boss pool");
+        assert!(pool.is_finite() && pool > 0.0, "{kind:?}: invalid HP pool {pool}");
         assert!((0.0..=1.0).contains(&hp.bar), "{kind:?}: bar {}", hp.bar);
     }
 }

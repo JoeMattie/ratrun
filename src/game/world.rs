@@ -471,6 +471,11 @@ impl World {
             .meta
             .revives
             .saturating_sub(carried_totals.revives_used);
+        let pending_levelups = if tuning.campaign.carry {
+            0
+        } else {
+            u32::from(carried.meta.carry_bonus)
+        };
         let mut flow = FlowField::new(&level.tiles);
         flow.update(&level.tiles, center, NavBudget::FULL);
         let flow_spare = FlowField::new(&level.tiles);
@@ -591,7 +596,7 @@ impl World {
             shop: ShopBook::default(),
             shake: 0.0,
             shake_ofs: Vec2::ZERO,
-            pending_levelups: 0,
+            pending_levelups,
             game_over: false,
             won: false,
             level_index,
@@ -1693,7 +1698,7 @@ impl World {
         use super::ecs::systems::miniboss::Miniboss;
         let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, 1.0, &mut self.rng);
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
-        enemy.hp = self.tuning().minibosses.hp[difficulty.min(3)][appointment.min(3)];
+        enemy.hp = self.tuning().miniboss_hp(difficulty, appointment);
         enemy.max_hp = enemy.hp;
         enemy.radius = kind.body_radius();
         enemy.damage = self.tuning().minibosses.contact_damage;

@@ -339,13 +339,14 @@ impl Default for PressureState {
 impl PressureState {
     pub(crate) fn tick(
         &mut self,
-        tuning: &crate::tuning::Director,
+        tuning: &crate::tuning::Tuning,
         sector: usize,
         theme: Theme,
         elapsed: f32,
         boss_phase: bool,
     ) {
-        if !tuning.pressure_beats {
+        let director = &tuning.director;
+        if !director.pressure_beats {
             return;
         }
         self.warning = false;
@@ -353,34 +354,34 @@ impl PressureState {
         self.budget = 1.0;
         self.contact = 1.0;
         self.heal = 0.0;
-        if boss_phase || elapsed >= tuning.boss_time {
+        if boss_phase || elapsed >= director.boss_time {
             return;
         }
-        if theme == Theme::Sewer && elapsed < tuning.pressure_sewer_opening_secs {
-            self.contact = 1.0 - tuning.pressure_sewer_opening_cut;
+        if theme == Theme::Sewer && elapsed < director.pressure_sewer_opening_secs {
+            self.contact = 1.0 - director.pressure_sewer_opening_cut;
         }
-        let scale = tuning.pressure_sector_scale[level_slot(sector)];
+        let scale = tuning.pressure_scale_for(sector);
         if scale == 0.0 {
             return;
         }
         for i in 0..2 {
-            let start = tuning.pressure_starts[i];
-            let surge_end = start + tuning.pressure_lengths[i];
-            let recovery_end = surge_end + tuning.pressure_recovery_lengths[i];
-            if elapsed >= start - tuning.pressure_warning_lead && elapsed < start && !self.warned[i] {
+            let start = director.pressure_starts[i];
+            let surge_end = start + director.pressure_lengths[i];
+            let recovery_end = surge_end + director.pressure_recovery_lengths[i];
+            if elapsed >= start - director.pressure_warning_lead && elapsed < start && !self.warned[i] {
                 self.warned[i] = true;
                 self.warning = true;
             }
             if elapsed >= start && elapsed < recovery_end {
-                let rates = self.rates.get_or_insert_with(|| tuning.pressure_rates(sector, scale));
+                let rates = self.rates.get_or_insert_with(|| director.pressure_rates(sector, scale));
                 if elapsed < surge_end {
                     self.cadence = rates[i].0;
-                    self.budget = 1.0 + tuning.pressure_budget_bonus * scale;
-                    self.contact *= 1.0 + tuning.pressure_contact_bonus * scale;
+                    self.budget = 1.0 + director.pressure_budget_bonus * scale;
+                    self.contact *= 1.0 + director.pressure_contact_bonus * scale;
                 } else {
                     self.cadence = rates[i].1;
-                    self.budget = (1.0 - tuning.pressure_recovery_budget_cut * scale).max(0.0);
-                    self.heal = (tuning.pressure_recovery_heal * scale).min(1.0);
+                    self.budget = (1.0 - director.pressure_recovery_budget_cut * scale).max(0.0);
+                    self.heal = (director.pressure_recovery_heal * scale).min(1.0);
                 }
                 break;
             }
@@ -961,6 +962,39 @@ pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMo
     }
 }
 
+impl crate::tuning::Tuning {
+    fn fresh_sector_slot(&self, level: usize) -> Option<usize> {
+        level_slot(level).checked_sub(1).filter(|_| !self.campaign.carry)
+    }
+
+    pub(crate) fn pressure_scale_for(&self, level: usize) -> f32 {
+        match self.fresh_sector_slot(level) {
+            Some(i) => self.director.fresh_pressure_sector_scale[i],
+            None => self.director.pressure_sector_scale[level_slot(level)],
+        }
+    }
+
+    pub fn horde_hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
+        let slot = level_slot(level);
+        let d = &self.director;
+        let (build, extra) = match self.fresh_sector_slot(level) {
+            Some(i) => (d.fresh_build_hp_level[i], d.fresh_level_hp_extra[i]),
+            None => (d.build_hp_level[slot], d.level_hp_extra[slot]),
+        };
+        d.horde_hp_mult_for(level, elapsed, build, extra)
+    }
+
+    pub fn boss_hp_mult_for(&self, level: usize) -> f32 {
+        let slot = level_slot(level);
+        let d = &self.director;
+        let (build, boss) = match self.fresh_sector_slot(level) {
+            Some(i) => (d.fresh_build_hp_level[i], self.bosses.fresh_build_level[i]),
+            None => (d.build_hp_level[slot], self.bosses.build_level[slot]),
+        };
+        d.hp_mult_for(level, d.boss_time, build) * BOSS_POOL_SCALE * boss
+    }
+}
+
 impl crate::tuning::Director {
     pub fn curve_clock(&self, level: usize, elapsed: f32) -> f32 {
         elapsed.min(self.boss_time) * self.curve_speed + LEVEL_CLOCK_OFFSET[level_slot(level)]
@@ -971,16 +1005,15 @@ impl crate::tuning::Director {
             / (self.horde_speed_ramp_end / (self.horde_speed_top - 1.0)) + 1.0
     }
 
-    fn hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
+    fn hp_mult_for(&self, level: usize, elapsed: f32, build_mult: f32) -> f32 {
         let curve = self.curve_clock(level, elapsed);
         (1.0 + curve / RUN_SECONDS)
             * lerp_table(&self.level_bonus_hp, curve)
             * lerp_table(&self.build_hp, curve)
-            * self.build_hp_level[level_slot(level)]
+            * build_mult
     }
 
-    pub fn horde_hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
-        let top = self.level_hp_extra[level_slot(level)];
+    fn horde_hp_mult_for(&self, level: usize, elapsed: f32, build_mult: f32, top: f32) -> f32 {
         let grace = self.level_hp_extra_after;
         let span = self.boss_time - grace;
         let progress = if span > 0.0 {
@@ -988,11 +1021,7 @@ impl crate::tuning::Director {
         } else {
             0.0
         };
-        self.hp_mult_for(level, elapsed) * (1.0 + (top.max(1.0) - 1.0) * progress)
-    }
-
-    pub fn boss_hp_mult_for(&self, level: usize, build_level: &[f32; 4]) -> f32 {
-        self.hp_mult_for(level, self.boss_time) * BOSS_POOL_SCALE * build_level[level_slot(level)]
+        self.hp_mult_for(level, elapsed, build_mult) * (1.0 + (top.max(1.0) - 1.0) * progress)
     }
 
     pub fn enemy_mods_for(&self, level: usize, elapsed: f32) -> crate::game::enemy::EnemyMods {
@@ -1926,11 +1955,12 @@ mod tests {
 
     #[test]
     fn pressure_changes_only_the_surge_and_recovery_windows() {
-        let tuning = crate::tuning::Tuning::parse("[director]\npressure_beats = true").unwrap().director;
+        let tuning = crate::tuning::Tuning::parse("[director]\npressure_beats = true").unwrap();
+        let director = &tuning.director;
         let mut pressure = PressureState::default();
-        let start = tuning.pressure_starts[0];
-        let end = start + tuning.pressure_lengths[0];
-        let recovery_end = end + tuning.pressure_recovery_lengths[0];
+        let start = director.pressure_starts[0];
+        let end = start + director.pressure_lengths[0];
+        let recovery_end = end + director.pressure_recovery_lengths[0];
         pressure.tick(&tuning, 1, Theme::Kitchen, start - 0.01, false);
         assert_eq!(pressure.live_budget(72), 72);
         assert_eq!(pressure.cadence, 1.0);
@@ -1940,7 +1970,7 @@ mod tests {
         pressure.tick(&tuning, 1, Theme::Kitchen, end, false);
         assert!(pressure.live_budget(72) < 72 && pressure.cadence < 1.0);
         assert!(pressure.heal > 0.0 && pressure.contact == 1.0);
-        for at in [recovery_end, tuning.boss_time] {
+        for at in [recovery_end, director.boss_time] {
             pressure.tick(&tuning, 1, Theme::Kitchen, at, false);
             assert_eq!(pressure.live_budget(72), 72);
             assert_eq!(pressure.cadence, 1.0);
@@ -1949,7 +1979,7 @@ mod tests {
         pressure.tick(&tuning, 0, Theme::Sewer, 0.0, false);
         assert!(pressure.contact < 1.0);
         assert_eq!(pressure.cadence, 1.0, "preserve the first cards' XP feed");
-        pressure.tick(&tuning, 0, Theme::Sewer, tuning.pressure_sewer_opening_secs, false);
+        pressure.tick(&tuning, 0, Theme::Sewer, director.pressure_sewer_opening_secs, false);
         assert_eq!(pressure.contact, 1.0);
         pressure.tick(&tuning, 0, Theme::Sewer, start, true);
         assert_eq!(pressure.cadence, 1.0, "a manually opened boss fight keeps cleanup pace");
@@ -1963,7 +1993,8 @@ mod tests {
             "[director]\npressure_beats = true\npressure_rate_bonus = 0.85\n\
             [director.sectors.2]\nspawn_interval = [[0, 1.5], [60, 1.4], [180, 1.3], \
             [360, 1.2], [540, 1.0], [720, 0.9], [900, 0.8]]",
-        ).unwrap().director;
+        ).unwrap();
+        let director = &tuning.director;
         for sector in 0..4 {
             let mut pressure = PressureState::default();
             let mut baseline = 0;
@@ -1974,8 +2005,8 @@ mod tests {
             for frame in 1..=54_000 {
                 let elapsed = frame as f32 * dt;
                 pressure.tick(&tuning, sector, Theme::Kitchen, elapsed, false);
-                let interval = tuning.horde_interval(sector, elapsed, false);
-                let pulse = tuning.horde_pulse(sector, elapsed, false);
+                let interval = director.horde_interval(sector, elapsed, false);
+                let pulse = director.horde_pulse(sector, elapsed, false);
                 baseline_timer -= dt;
                 if baseline_timer <= 0.0 {
                     baseline += pulse;

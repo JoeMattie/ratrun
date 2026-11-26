@@ -1359,7 +1359,7 @@ impl App {
         // rat carried *in*. Silent for a fresh profile.
         let (nest_line, miniboss_alive) = match self.world.as_ref() {
             Some(w) => (
-                w.player.loadout.meta.summary(),
+                w.player.loadout.meta.summary(self.tuning.campaign.carry),
                 w.miniboss_hp().is_some(),
             ),
             None => (String::new(), false),
@@ -1371,7 +1371,7 @@ impl App {
         self.prev_miniboss_alive = miniboss_alive;
         self.intro_timer = 4.0;
         self.carried_entries = match self.campaign.as_ref() {
-            Some(c) if level > 0 => entries_for(&campaign::keepables(&c.loadout)),
+            Some(c) if level > 0 && self.tuning.campaign.carry => entries_for(&campaign::keepables(&c.loadout)),
             _ => Vec::new(),
         };
         self.screen = if via_story {
@@ -3156,7 +3156,7 @@ impl App {
             || self.input.confirm_pressed()
             || self.input.just_pressed(KeyCode::Char(' '))
         {
-            self.screen = Screen::Playing;
+            self.resume_or_open_reward();
         }
     }
 
@@ -3167,7 +3167,7 @@ impl App {
             || self.input.just_pressed(KeyCode::Char(' '))
         {
             self.sfx(Sfx::UiMove);
-            self.screen = Screen::Playing;
+            self.resume_or_open_reward();
         }
     }
 
@@ -3714,7 +3714,9 @@ impl App {
             None => return,
         };
         if pending > 0 {
-            if !auto {
+            // Opening cards all resolve before the first simulation tick.
+            // Auto-pick still uses the card screen and its usual reveal delay.
+            if !auto || self.world.as_ref().is_some_and(|w| w.elapsed == 0.0) {
                 self.open_levelup();
                 return;
             }
@@ -4019,7 +4021,11 @@ impl App {
             // tick (`loot` / `boss::announce`), so the fanfare follows it a
             // beat later instead of stacking on top of it.
             self.queue_sting(Sfx::LevelComplete, FANFARE_DELAY_SECS);
-            self.screen = Screen::LevelComplete;
+            if self.campaign.is_some() && !self.tuning.campaign.carry {
+                self.open_keep_three();
+            } else {
+                self.screen = Screen::LevelComplete;
+            }
         }
     }
 
@@ -4044,10 +4050,11 @@ impl App {
     /// Build the keep-three manifest from what the finished level owns.
     fn open_keep_three(&mut self) {
         let items = match self.world.as_ref() {
-            Some(w) => w.keepables(),
+            Some(w) if self.tuning.campaign.carry => w.keepables(),
+            Some(_) => Vec::new(),
             None => return,
         };
-        if items.is_empty() {
+        if items.is_empty() && self.tuning.campaign.carry {
             // Nothing to pack (unreachable: the starting weapon is always
             // owned), so advance with an empty pack rather than dead-ending.
             self.keep_items.clear();
@@ -4057,16 +4064,10 @@ impl App {
             return;
         }
         self.keep_entries = entries_for(&items);
-        self.keep_splices = match self.world.as_ref() {
-            Some(w) => w
-                .player
-                .loadout
-                .splices
-                .iter()
-                .map(|kind| kind.name())
-                .collect(),
-            None => Vec::new(),
-        };
+        self.keep_splices.clear();
+        if let Some(w) = self.world.as_ref().filter(|_| self.tuning.campaign.carry) {
+            self.keep_splices.extend(w.player.loadout.splices.iter().map(|kind| kind.name()));
+        }
         self.keep_items = items;
         self.keep_selected = vec![false; self.keep_items.len()];
         self.keep_cursor = 0;
@@ -4236,12 +4237,20 @@ impl App {
 
         // Tab and the rendered hit areas both index the next stage's options.
         let options = self.keep_route_options();
+        let step = if self.input.just_pressed(KeyCode::Tab)
+            || (!self.tuning.campaign.carry && self.input.nav_pressed(1, 0))
+        {
+            1
+        } else if !self.tuning.campaign.carry && self.input.nav_pressed(-1, 0) {
+            options.len().saturating_sub(1)
+        } else {
+            0
+        };
         let route_pick = match click {
             Some(Target::RouteOption(i)) => Some(i),
-            _ if self.input.just_pressed(KeyCode::Tab) && options.len() > 1 => {
-                let next = options.iter().position(|&theme| self.keep_route == Some(theme))
-                    .map_or(0, |i| (i + 1) % options.len());
-                Some(next)
+            _ if step > 0 && options.len() > 1 => {
+                let current = options.iter().position(|&theme| self.keep_route == Some(theme));
+                Some(current.map_or(0, |i| (i + step) % options.len()))
             }
             _ => None,
         };
@@ -5077,6 +5086,7 @@ impl App {
                     self.scores.meta.clone()
                 };
                 let accent = options::accent_from(menu::material(self.theme()));
+                self.nest_ui.carry = self.tuning.campaign.carry;
                 self.nest_shape = nest_ui::draw(
                     frame,
                     area,
@@ -5504,32 +5514,36 @@ impl App {
         }
     }
 
+    fn sector_summary_for(&self, w: &World) -> campaign_ui::LevelCompleteView<'_> {
+        campaign_ui::LevelCompleteView {
+            // The plate names the floor actually played, so a side
+            // route reads THE LAUNDRY / THE PRINTWORKS here.
+            level: campaign_ui::CampaignLevel::from_theme(w.level.theme),
+            // The flatbed has no campaign plate: its own stamp comes
+            // from the theme (the Magpie, not the Lab's mower).
+            theme: Some(w.level.theme),
+            time_secs: w.elapsed,
+            kills: w.kills,
+            score_so_far: w.total_score(),
+            gold: w.gold,
+            level_score: w.score,
+            player_level: w.player.level,
+            owned_upgrades: self.owned_upgrades,
+            // The route's next floor, not the original route's stage:
+            // a run packing for the Printworks says so here.
+            next: self.next_level_plate(),
+            custom_triumph: None,
+            hovered: (self.hits.hovered == Some(Target::Continue))
+                .then_some(campaign_ui::LevelCompleteAction::Continue),
+        }
+    }
+
     /// The cleared-sector plate for the boss the level ended on.
     fn draw_level_complete(&mut self, frame: &mut Frame, area: Rect) {
         draw_backdrop(frame, area);
         let list = match self.world.as_ref() {
             Some(w) => {
-                let view = campaign_ui::LevelCompleteView {
-                    // The plate names the floor actually played, so a side
-                    // route reads THE LAUNDRY / THE PRINTWORKS here.
-                    level: campaign_ui::CampaignLevel::from_theme(w.level.theme),
-                    // The flatbed has no campaign plate: its own stamp comes
-                    // from the theme (the Magpie, not the Lab's mower).
-                    theme: Some(w.level.theme),
-                    time_secs: w.elapsed,
-                    kills: w.kills,
-                    score_so_far: w.total_score(),
-                    gold: w.gold,
-                    level_score: w.score,
-                    player_level: w.player.level,
-                    owned_upgrades: self.owned_upgrades,
-                    // The route's next floor, not the original route's stage:
-                    // a run packing for the Printworks says so here.
-                    next: self.next_level_plate(),
-                    custom_triumph: None,
-                    hovered: (self.hits.hovered == Some(Target::Continue))
-                        .then_some(campaign_ui::LevelCompleteAction::Continue),
-                };
+                let view = self.sector_summary_for(w);
                 // The boss that actually died here; a floor completed without
                 // one (a test hook) falls back to the floor's seeded pick, the
                 // same expression the spawner uses.
@@ -5561,6 +5575,7 @@ impl App {
                     level: campaign_ui::CampaignLevel::from_theme(w.level.theme),
                     flavor: practice.then_some(PRACTICE_BLURB),
                     carried: &self.carried_entries,
+                    fresh_start: !self.tuning.campaign.carry,
                     gold: w.gold,
                     score_so_far: w.total_score(),
                     hovered: (self.hits.hovered == Some(Target::Begin))
@@ -5581,7 +5596,19 @@ impl App {
     fn draw_keep_three(&mut self, frame: &mut Frame, area: Rect) {
         draw_backdrop(frame, area);
 
-        let list = {
+        let list = if !self.tuning.campaign.carry {
+            let Some(w) = self.world.as_ref() else { return };
+            let summary = self.sector_summary_for(w);
+            let hovered = match self.hits.hovered {
+                Some(Target::RouteOption(i)) => Some(campaign_ui::KeepThreeAction::Route(i as u8)),
+                Some(Target::KeepConfirm) => Some(campaign_ui::KeepThreeAction::Confirm),
+                _ => None,
+            };
+            campaign_ui::draw_sector_transfer(
+                frame, area, &summary, self.keep_next_level(), &self.keep_route_chips(),
+                hovered, &self.plate_keys(),
+            )
+        } else {
             let view = campaign_ui::KeepThreeView {
                 from_level: campaign_ui::CampaignLevel::from_theme(self.live_theme()),
                 next_level: self.keep_next_level(),
@@ -6081,6 +6108,12 @@ mod tests {
     impl Harness {
         fn new(w: u16, h: u16) -> Self {
             Harness::with_app(test_app(), w, h)
+        }
+
+        fn enable_legacy_carry(&mut self) {
+            // Exercise the legacy route while allowing this test to inspect
+            // the scores and unlocks a normal campaign would write.
+            std::sync::Arc::make_mut(&mut self.app.tuning.values).campaign.carry = true;
         }
 
         fn with_app(app: App, w: u16, h: u16) -> Self {
@@ -7337,6 +7370,7 @@ mod tests {
     #[test]
     fn a_campaign_hop_goes_card_keep_route_intro_and_plays_on() {
         let mut h = Harness::new(100, 32);
+        h.enable_legacy_carry();
         h.enter_playing();
         h.grant_keepables();
         h.finish_level();
@@ -8043,7 +8077,7 @@ mod tests {
                 assert!(!spawned.is_empty(), "sector {sector}: nothing spawned at {t} s");
                 let now = w.elapsed;
                 let director = &w.tuning().director;
-                let hp0 = director.horde_hp_mult_for(0, now);
+                let hp0 = w.tuning().horde_hp_mult_for(0, now);
                 let mods0 = director.enemy_mods_for(0, now);
                 // The sector's own curve is measurably different.
                 assert!((director.enemy_mods_for(sector, now).damage - mods0.damage).abs() > 0.005);
@@ -8220,6 +8254,23 @@ mod tests {
         hh.frame(&[]);
 
         match target.as_str() {
+            "sector-transfer" => {
+                hh.enter_playing();
+                let world = hh.app.world.as_mut().unwrap();
+                world.elapsed = 954.0;
+                world.score = 12_680;
+                world.kills = 2_014;
+                world.gold = 318;
+                hh.finish_level();
+                hh.frame(&[KeyCode::Right]);
+            }
+            "nest-head-start" => {
+                hh.app.scores.meta.bank = 6_000;
+                hh.app.scores.meta.set_level(meta::Track::CarryOver, 1);
+                hh.app.open_nest(Screen::Title);
+                hh.app.nest_ui.select(meta::Track::CarryOver);
+                hh.frame(&[]);
+            }
             "pressure-warning" | "pressure-active" => {
                 hh.enter_playing();
                 let world = hh.app.world.as_mut().unwrap();
@@ -8252,6 +8303,7 @@ mod tests {
                 }
             }
             "outfall-route" | "outfall-route-lab" | "outfall-route-printworks" => {
+                hh.enable_legacy_carry();
                 hh.enter_playing();
                 hh.finish_level();
                 hh.frame(&[KeyCode::Enter]);
@@ -10036,6 +10088,9 @@ mod tests {
                 let app = App::with_options(false, None, table, false, Some(TEST_SEED));
                 hh = Harness::with_app(app, w, h);
                 hh.enter_playing();
+                for _ in 0..2 {
+                    hh.frame(&[KeyCode::Enter]);
+                }
                 hh.app.world.as_mut().unwrap().gold = 37;
                 hh.frame(&[KeyCode::Esc]);
                 hh.frame(&[KeyCode::Char('b')]);
@@ -12534,11 +12589,13 @@ mod tests {
                         hh.frame(&[KeyCode::Esc]);
                     }
                     "LevelComplete" => {
+                        hh.enable_legacy_carry();
                         hh.enter_playing();
                         hh.grant_keepables();
                         hh.finish_level();
                     }
                     "KeepThree" => {
+                        hh.enable_legacy_carry();
                         hh.enter_playing();
                         hh.grant_keepables();
                         hh.finish_level();
@@ -12770,6 +12827,7 @@ mod tests {
                 hh.app.keep_scroll = 0;
                 hh.app.keep_route = None;
             }
+            hh.enable_legacy_carry();
             hh.app.screen = Screen::KeepThree;
             hh.frame(&[]);
             dump_term(&hh.terminal, w, h, &dir, "full8-keep");
@@ -13929,6 +13987,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_sector_transfer_resets_the_build_and_drafts_head_start_at_zero() {
+        let mut h = Harness::new(57, 20);
+        h.app.scores.meta = serde_json::from_str(
+            r#"{"levels":{"carry_over":2,"damage":1}}"#,
+        ).expect("the legacy Nest save loads");
+        assert_eq!(h.app.scores.meta.level(meta::Track::CarryOver), 2);
+        h.app.scores.auto_pick = false;
+        h.enter_playing();
+        assert_eq!(h.app.screen.name_for_test(), "LevelUp");
+        for pending in [2, 1] {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.elapsed, 0.0);
+            assert_eq!(w.pending_levelups, pending);
+            h.frame(&[KeyCode::Enter]);
+        }
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.grant_keepables();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player.level = 18;
+            w.player.loadout.weapons[0].level = 5;
+            w.score = 123;
+            w.gold = 61;
+        }
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        let loaded = ScoreTable::parse(&h.app.scores.to_json());
+        assert!(loaded.floor_cleared(Theme::Sewer));
+        assert_eq!(loaded.meta.level(meta::Track::CarryOver), 2);
+        let text = h.screen_text();
+        assert!(text.contains("SECTOR CLEARED") && text.contains("123 SCORE"), "{text}");
+        assert!(h.app.keep_items.is_empty());
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.keep_route, Some(Theme::Laundry));
+        #[cfg(feature = "gamepad")]
+        {
+            use crate::controls::PadBind;
+            use crate::gamepad::PadEvent;
+            h.app.input.pad_event(PadEvent::Connected);
+            h.app.input.pad_event(PadEvent::Button(PadBind::DPadLeft, true));
+            h.frame(&[]);
+            assert_eq!(h.app.keep_route, Some(Theme::Kitchen));
+            h.app.input.pad_event(PadEvent::Button(PadBind::DPadLeft, false));
+        }
+        h.click("Outfall");
+        assert_eq!(h.app.keep_route, Some(Theme::Outfall));
+        h.click("PROCEED");
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        assert!(h.app.carried_entries.is_empty());
+        assert!(h.screen_text().contains("Gnaw Lv1"));
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.level.theme, Theme::Outfall);
+        assert_eq!(w.carried.score, 123);
+        assert_eq!(w.gold, 61);
+        assert_eq!(w.player.level, 1);
+        assert_eq!(w.player.loadout.weapons.len(), 1);
+        assert_eq!(w.player.loadout.weapons[0].kind, Loadout::START_WEAPON);
+        assert_eq!(w.player.loadout.weapons[0].level, 1);
+        assert!(w.player.loadout.passives.is_empty());
+        assert_eq!(w.player.loadout.meta, h.app.run_modifiers());
+        assert_eq!(w.pending_levelups, 2);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelUp");
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, 0.0);
+    }
+
     /// Pack the first three manifest cards with the keyboard.
     fn pack_three(h: &mut Harness) {
         for key in [
@@ -13978,6 +14103,7 @@ mod tests {
     #[test]
     fn full_campaign_reaches_the_victory_plate_with_carried_upgrades() {
         let mut h = Harness::new(120, 40);
+        h.enable_legacy_carry();
         h.enter_playing();
         assert_eq!(h.app.world.as_ref().unwrap().level_index, 0);
 
@@ -14125,6 +14251,7 @@ mod tests {
     #[test]
     fn keep_three_keyboard_refuses_confirm_below_the_required_count() {
         let mut h = Harness::new(120, 40);
+        h.enable_legacy_carry();
         h.enter_playing();
         h.grant_keepables();
         h.finish_level();
@@ -14163,6 +14290,7 @@ mod tests {
     fn keep_screen_route_choice_is_keyboard_mouse_and_carried() {
         for size in [(120, 40), (80, 24), (57, 20)] {
             let mut h = Harness::new(size.0, size.1);
+            h.enable_legacy_carry();
             h.enter_playing();
             h.grant_keepables();
             h.finish_level();
@@ -14208,6 +14336,7 @@ mod tests {
     #[test]
     fn the_last_keep_screen_offers_the_printworks() {
         let mut h = Harness::new(120, 40);
+        h.enable_legacy_carry();
         h.enter_playing();
         // Jump to stage two, played on the Laundry, and clear it.
         {
@@ -14235,6 +14364,7 @@ mod tests {
     fn keep_three_mouse_toggles_and_confirms() {
         let left = MouseEventKind::Down(MouseButton::Left);
         let mut h = Harness::new(120, 40);
+        h.enable_legacy_carry();
         h.enter_playing();
         h.grant_keepables();
         h.finish_level();
@@ -14274,6 +14404,7 @@ mod tests {
     #[test]
     fn death_on_level_two_records_the_level_and_totals() {
         let mut h = Harness::new(100, 40);
+        h.enable_legacy_carry();
         h.enter_playing();
         {
             let w = h.app.world.as_mut().unwrap();
@@ -14560,6 +14691,7 @@ mod tests {
             }
             let app = App::with_options(false, None, table, false, Some(TEST_SEED));
             let mut h = Harness::with_app(app, 100, 32);
+            h.enable_legacy_carry();
             h.app.screen = Screen::SectorSelect;
             h.app.select_idx = index;
             h.frame(&[]);
@@ -14697,6 +14829,7 @@ mod tests {
             ];
             for (screen, needle) in cases {
                 let mut h = Harness::new(w, height);
+                h.enable_legacy_carry();
                 h.frame(&[]);
                 match screen {
                     "SectorSelect" => h.app.screen = Screen::SectorSelect,
@@ -14737,7 +14870,7 @@ mod tests {
         h.enter_playing();
         assert_eq!(h.app.pending_sting(), None);
         h.finish_level();
-        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
         assert_eq!(
             h.app.pending_sting(),
             Some(Sfx::LevelComplete),
@@ -14752,7 +14885,7 @@ mod tests {
             h.frame(&[]);
         }
         assert_eq!(h.app.pending_sting(), None, "the fanfare must come due");
-        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
     }
 
     /// Beating the Lab queues the campaign fanfare; a practice clear keeps the
@@ -15115,11 +15248,13 @@ mod tests {
                     h.frame(&[KeyCode::Char('p')]);
                 }
                 "LevelComplete" => {
+                    h.enable_legacy_carry();
                     h.enter_playing();
                     h.grant_keepables();
                     h.finish_level();
                 }
                 "KeepThree" => {
+                    h.enable_legacy_carry();
                     h.enter_playing();
                     h.grant_keepables();
                     h.finish_level();

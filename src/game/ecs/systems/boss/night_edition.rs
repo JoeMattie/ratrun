@@ -1073,14 +1073,11 @@ mod tests {
             boss.max_hp,
             expected
         );
-        assert!(
-            // 14,880 after the batch-seven `hp_scale` retune (0.85 -> 0.62),
-            // then batch twelve's build correction for the smaller racks
-            // (`director::BUILD_HP`, `BUILD_HP_LEVEL`, `BOSS_BUILD_LEVEL`).
-            boss.max_hp > 6_000.0,
-            "the final floor's fight must be a real pool, got {:.0}",
-            boss.max_hp
-        );
+        let mut legacy = crate::tuning::Tuning::default();
+        legacy.campaign.carry = true;
+        let carried_pool = BossKind::NightEdition.encounter_hp(2, &[], &legacy);
+        assert!(carried_pool > 6_000.0, "legacy pool {carried_pool}");
+        assert!(boss.max_hp < carried_pool, "fresh pool {}", boss.max_hp);
     }
 
     // ---- phases ----------------------------------------------------------

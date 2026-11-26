@@ -388,7 +388,7 @@ impl BossKind {
         let row = &tuning.bosses.kinds[&self];
         let scale = if difficulty == 0 { row.first_sector_hp_scale } else { row.hp_scale };
         let hp = row.base_hp * scale
-            * tuning.director.boss_hp_mult_for(difficulty, &tuning.bosses.build_level)
+            * tuning.boss_hp_mult_for(difficulty)
             * tuning.bosses.hp_mult;
         if self == BossKind::Lantern && difficulty > 0
             && weapons.iter().filter(|w| {

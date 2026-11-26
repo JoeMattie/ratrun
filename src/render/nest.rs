@@ -72,6 +72,8 @@ pub enum Pending {
 /// The screen's own state (the app owns one of these).
 #[derive(Clone, Debug, Default)]
 pub struct NestUi {
+    /// Show the legacy track benefits when campaign carry is enabled.
+    pub carry: bool,
     /// Selected track, as an index into [`Track::ALL`].
     pub cursor: usize,
     /// First visible track (the windowed list's top).
@@ -282,16 +284,16 @@ pub fn draw(
         let line = match next {
             Some(price) => format!(
                 "{} → {}   ({}¢)",
-                track.value_text(level),
-                track.value_text(level + 1),
+                track.value_text(level, ui.carry),
+                track.value_text(level + 1, ui.carry),
                 price
             ),
-            None => format!("{}   MAXED", track.value_text(level)),
+            None => format!("{}   MAXED", track.value_text(level, ui.carry)),
         };
         let style = if next.is_none() { heavy(MAXED) } else { ink(COAT) };
         put(f, inner.x + 1, desc_y, inner.width.saturating_sub(2), &line, style);
         if inner.height >= 18 {
-            let flavour = format!("\u{201c}{}\u{201d}", track.flavor());
+            let flavour = format!("\u{201c}{}\u{201d}", track.display_flavor(ui.carry));
             put(
                 f,
                 inner.x + 1,
@@ -322,11 +324,11 @@ pub fn draw(
                 (
                     format!(
                         " BUY {} LV{level} FOR {price}¢?  {confirm_key} confirm · {back_key} cancel ",
-                        t.name()
+                        t.display_name(ui.carry)
                     ),
                     format!(
                         " {} LV{level} · {price}¢?  {confirm_key} buy · {back_key} no",
-                        t.name()
+                        t.display_name(ui.carry)
                     ),
                 )
             }
@@ -478,17 +480,17 @@ fn draw_track_row(
         ink(COAT)
     };
     let name_w = pip_x.saturating_sub(text_x + 1).max(6);
-    put(f, text_x, y, name_w, track.name(), name_style);
+    put(f, text_x, y, name_w, track.display_name(ui.carry), name_style);
 
     if row_h >= 2 {
         // What the next level buys, in the row's second line.
         let next = match price {
             Some(_) => format!(
                 "{} → {}",
-                track.value_text(level),
-                track.value_text(level + 1)
+                track.value_text(level, ui.carry),
+                track.value_text(level + 1, ui.carry)
             ),
-            None => format!("{}  ·  complete", track.value_text(level)),
+            None => format!("{}  ·  complete", track.value_text(level, ui.carry)),
         };
         let style = if maxed {
             ink(MUTED)

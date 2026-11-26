@@ -1028,7 +1028,7 @@ pub fn traps_system(
                 let mouth = POT_HALF + DOOR_DEPTH;
                 if let Some(mut enemy) = [mouth, mouth + 4.0, mouth + 8.0].into_iter().find_map(|offset| {
                     crab::release_pot_crab_with(
-                        &level, pos + facing * offset, player.pos, difficulty.0, elapsed, live, blocked, &tuning.director,
+                        &level, pos + facing * offset, player.pos, difficulty.0, elapsed, live, blocked, &tuning,
                     )
                 }) {
                     enemy.id = next_enemy_id.take();

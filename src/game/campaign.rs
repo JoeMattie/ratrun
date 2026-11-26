@@ -1,11 +1,11 @@
-//! The campaign: four themed levels on a branching route, the carry-over
-//! between them and
-//! the deterministic seeds that make a run reproducible.
+//! Four levels on a branching route with deterministic map seeds. Each
+//! sector starts on rank-one Gnaw with the Nest's permanent upgrades.
+
 //!
 //! ## Run structure (owner's decision)
 //!
 //! Sewer → (Kitchen | Laundry | Outfall) → (Lab | Printworks) → the Flatbed: the player
-//! picks each branching stage's floor on the keep plate, and the **ride is
+//! picks each branching stage's floor on the sector transfer plate, and the **ride is
 //! always the finale** (batch twelve: the owner decided the Flatbed joins the
 //! campaign). A level is **complete when its boss dies**; killing the fourth
 //! level's boss — the Flatbed's Magpie or Redtail — wins the run. The clock is
@@ -26,11 +26,10 @@
 //! 1. [`CampaignState::new`] — pick the run seed; the app owns the state.
 //! 2. [`CampaignState::world`] — build the `World` for the current level.
 //! 3. Play until the boss dies (`world.level_complete()`).
-//! 4. [`keepables`] — list what the player may take through, in a stable order
-//!    with display strings (the keep screen: up to [`keep_limit`] of N).
-//! 5. [`CampaignState::complete_level`] — validate the choice (≤ [`keep_limit`], no
-//!    duplicates), fold the level's score/kills/time into the totals, carry
-//!    the chosen powerups and advance the level index.
+//! 4. Choose the next sector where the route branches. With `campaign.carry`
+//!    enabled, show [`keepables`] and let the player pack up to [`keep_limit`].
+//! 5. [`CampaignState::complete_level`] — bank the counters, rebuild the
+//!    starting loadout (or validate and apply the legacy pack), and advance.
 //! 6. [`CampaignState::world`] again for the next level, or stop when
 //!    [`CampaignState::is_complete`] and the run is won.
 //!
@@ -607,12 +606,11 @@ impl CampaignState {
         World::from_campaign(self)
     }
 
-    /// Bank the finished level's counters, carry the chosen powerups and move to
-    /// the next level.
+    /// Bank the finished level's counters and rebuild the next sector's loadout.
     ///
     /// Only call this for a level the player actually completed (the App checks
     /// `world.level_complete()`); the current level's **loadout** is the source
-    /// of truth, so `chosen` must be a subset of `world.keepables()`.
+    /// of truth, so with carry enabled `chosen` must be a subset of `world.keepables()`.
     ///
     /// Returns [`KeepError`] and leaves the state untouched when the selection
     /// is invalid.
@@ -630,9 +628,16 @@ impl CampaignState {
             "complete_level called with a world from another level"
         );
         // Build first: a rejected selection must not bank anything.
-        let carried = next_loadout(&world.player.loadout, chosen)?;
+        let previous = &world.player.loadout;
+        let next = if world.tuning().campaign.carry {
+            next_loadout(previous, chosen)?
+        } else {
+            let mut mods = previous.meta;
+            mods.caps = previous.caps;
+            Loadout::with_modifiers(STARTING_WEAPON, mods)
+        };
         self.totals.absorb(world);
-        self.loadout = carried;
+        self.loadout = next;
         self.level += 1;
         Ok(())
     }
@@ -643,6 +648,12 @@ mod tests {
     use super::*;
     use crate::game::loadout::Upgrade;
     use crate::game::weapon::WeaponKind;
+
+    fn carry_world(campaign: &CampaignState) -> World {
+        let mut tuning = crate::tuning::RunTuning::default();
+        std::sync::Arc::make_mut(&mut tuning.values).campaign.carry = true;
+        World::from_campaign_tuned(campaign, tuning)
+    }
 
     /// A loadout with three weapons at different levels and two passives.
     fn rich_loadout() -> Loadout {
@@ -982,7 +993,7 @@ mod tests {
         let mut campaign = CampaignState::with_modifiers(11, mods);
         assert_eq!(campaign.loadout.meta, mods, "floor one starts on the nest");
         assert_eq!(campaign.loadout.caps.weapons, 8, "the slot tracks are the racks");
-        let mut world = campaign.world();
+        let mut world = carry_world(&campaign);
         assert_eq!(world.player.loadout.meta, mods);
         assert_eq!(world.player.loadout.stats.armor, 2.0);
         assert_eq!(world.revives_left, 1, "the Ninth Life is armed");
@@ -1023,7 +1034,7 @@ mod tests {
 
         world.mark_level_complete();
         campaign.complete_level(&world, &keep[..5]).expect("five fit");
-        let carried = campaign.world();
+        let carried = carry_world(&campaign);
         assert_eq!(carried.player.loadout.meta, mods, "the nest rides along");
         assert_eq!(carried.player.loadout.caps.weapons, 8);
         assert_eq!(
@@ -1045,7 +1056,7 @@ mod tests {
     #[test]
     fn wave3_a_kept_evolution_works_without_its_partner() {
         let mut campaign = CampaignState::new(11);
-        let mut sewer = campaign.world();
+        let mut sewer = carry_world(&campaign);
         {
             let loadout = &mut sewer.player.loadout;
             loadout.weapons[0].level = WeaponKind::Gnaw.max_level();
@@ -1058,7 +1069,7 @@ mod tests {
         sewer.mark_level_complete();
         campaign.complete_level(&sewer, &keep[..1]).unwrap();
 
-        let kitchen = campaign.world();
+        let kitchen = carry_world(&campaign);
         let loadout = &kitchen.player.loadout;
         let weapon = &loadout.weapons[0];
         assert!(weapon.evolved, "the evolved flag is carried");
@@ -1078,7 +1089,7 @@ mod tests {
     #[test]
     fn wave3_campaign_carries_remaining_gold_and_evolved_weapons() {
         let mut campaign = CampaignState::new(42);
-        let mut sewer = campaign.world();
+        let mut sewer = carry_world(&campaign);
         sewer.gold = 37;
         assert!(!sewer.spend_gold(38));
         assert!(sewer.spend_gold(7));
@@ -1089,13 +1100,13 @@ mod tests {
         let keep = sewer.keepables();
         sewer.mark_level_complete();
         campaign.complete_level(&sewer, &keep[..1]).unwrap();
-        let mut kitchen = campaign.world();
+        let mut kitchen = carry_world(&campaign);
         assert_eq!(kitchen.gold, 30);
         assert!(kitchen.player.loadout.weapons[0].evolved);
         assert!(kitchen.spend_gold(30));
         kitchen.mark_level_complete();
         campaign.complete_level(&kitchen, &[]).unwrap();
-        assert_eq!(campaign.world().gold, 0);
+        assert_eq!(carry_world(&campaign).gold, 0);
     }
 
     #[test]
@@ -1219,7 +1230,7 @@ mod tests {
     fn splices_reset_on_every_floor() {
         use crate::game::shop::SpliceKind;
         let mut campaign = CampaignState::new(67);
-        let mut world = campaign.world();
+        let mut world = carry_world(&campaign);
         let mut rich = rich_loadout();
         // Two splices, filling both sockets on this floor: Glass Incisors
         // (+22 % damage, -18 % max HP) and Long Fingers (-10 % max HP), so
@@ -1239,7 +1250,7 @@ mod tests {
         ];
         world.mark_level_complete();
         campaign.complete_level(&world, &chosen).expect("valid keep");
-        let next = campaign.world();
+        let next = carry_world(&campaign);
         let lo = &next.player.loadout;
 
         // No splice comes through, so both sockets are open again.
@@ -1279,7 +1290,7 @@ mod tests {
     #[test]
     fn carrying_over_starts_the_next_level_with_the_chosen_powerups() {
         let mut campaign = CampaignState::new(31);
-        let mut world = campaign.world();
+        let mut world = carry_world(&campaign);
         let rich = rich_loadout();
         world.player.loadout = rich.clone();
 
@@ -1295,7 +1306,7 @@ mod tests {
         assert_eq!(campaign.level, 1);
         assert!(!campaign.is_complete());
 
-        let next = campaign.world();
+        let next = carry_world(&campaign);
         assert_eq!(next.level_index(), 1);
         assert!(!next.is_final_level());
         let lo = &next.player.loadout;
@@ -1318,7 +1329,7 @@ mod tests {
     #[test]
     fn a_rejected_selection_does_not_advance_the_campaign() {
         let mut campaign = CampaignState::new(37);
-        let mut world = campaign.world();
+        let mut world = carry_world(&campaign);
         world.mark_level_complete();
         let before = campaign.totals;
         let bad = vec![
@@ -1518,7 +1529,8 @@ mod tests {
     fn keep_three_happens_before_the_flatbed() {
         let mut camp = CampaignState::new(71);
         camp.level = LEVEL_COUNT - 2;
-        let mut printworks = campaign_on_theme(&mut camp, Theme::Printworks);
+        camp.route = camp.route.with(camp.level, Theme::Printworks);
+        let mut printworks = carry_world(&camp);
         let rich = rich_loadout();
         printworks.player.loadout = rich.clone();
         let chosen = vec![
@@ -1528,7 +1540,7 @@ mod tests {
         printworks.mark_level_complete();
         camp.complete_level(&printworks, &chosen).expect("valid keep");
         assert_eq!(camp.level, LEVEL_COUNT - 1);
-        let ride = camp.world();
+        let ride = carry_world(&camp);
         assert_eq!(ride.level.theme, Theme::Trailer);
         assert_eq!(ride.player.loadout.weapons[0].kind, WeaponKind::TailWhip);
         assert_eq!(ride.player.loadout.stacks(PassiveKind::MaxHp), 2);
@@ -1536,7 +1548,8 @@ mod tests {
         // built and the campaign does not advance.
         let mut camp = CampaignState::new(71);
         camp.level = LEVEL_COUNT - 2;
-        let mut printworks = campaign_on_theme(&mut camp, Theme::Printworks);
+        camp.route = camp.route.with(camp.level, Theme::Printworks);
+        let mut printworks = carry_world(&camp);
         let alien = Keepable {
             kind: KeepKind::Weapon(WeaponKind::SqueakNova),
             level: 1,
@@ -1547,12 +1560,6 @@ mod tests {
         printworks.mark_level_complete();
         assert!(camp.complete_level(&printworks, &[alien]).is_err());
         assert_eq!(camp.level, LEVEL_COUNT - 2);
-    }
-
-    /// A campaign parked on stage three's side floor, built for that floor.
-    fn campaign_on_theme(camp: &mut CampaignState, theme: Theme) -> World {
-        camp.route = camp.route.with(theme_sector(theme), theme);
-        camp.world()
     }
 
     #[test]

@@ -357,7 +357,7 @@ pub fn director_system(
     // rng, no spawn, no position) before anything else this tick.
     boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
     let boss_phase = director.boss_spawned;
-    director.pressure.tick(&tuning.director, difficulty.0, level.theme, elapsed, boss_phase);
+    director.pressure.tick(&tuning, difficulty.0, level.theme, elapsed, boss_phase);
     director.pressure.warning &= !console.debug.peace;
     if director.pressure.warning {
         sfx.0.push(crate::audio::Sfx::Warn);
@@ -371,7 +371,7 @@ pub fn director_system(
     let curve = tuning.director.curve_clock(difficulty.0, elapsed);
     // Keep the last buildup estimate during cleanup, when target supply drops.
     if tuning.director.power_scaling && !boss_phase && elapsed < tuning.director.boss_time {
-        director.power.tick(&tuning.director, difficulty.0, elapsed, dt, damage.dealt.iter().sum());
+        director.power.tick(&tuning, difficulty.0, elapsed, dt, damage.dealt.iter().sum());
     }
     // The level's own horde modifiers: damage and speed ramp over the level
     // (`tuning.director.enemy_mods_for`); level 1 is exactly `EnemyMods::NONE`.
@@ -455,7 +455,7 @@ pub fn director_system(
         }
         // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
         // pool stays on `hp_mult_for`, so this cannot stretch a boss fight).
-        let mult = tuning.director.horde_hp_mult_for(difficulty.0, elapsed)
+        let mult = tuning.horde_hp_mult_for(difficulty.0, elapsed)
             * director.power.hp(&tuning.director);
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
@@ -649,7 +649,7 @@ pub fn director_system(
             }) {
                 #[cfg(test)]
                 log_spawn(pos, player.pos, 2);
-                let mult = tuning.director.horde_hp_mult_for(difficulty.0, elapsed) * 1.6
+                let mult = tuning.horde_hp_mult_for(difficulty.0, elapsed) * 1.6
                     * director.power.hp(&tuning.director);
                 // The elite wears the floor's own heavy (the roster's H slot):
                 // its elite is that body with the double stripe and the
@@ -707,7 +707,7 @@ pub fn director_system(
             boss_phase: director.boss_spawned || boss_due.due || boss_due.claimed,
             miniboss_alive: schedule.active > 0,
             live_drakes,
-            hp_mult: tuning.director.horde_hp_mult_for(difficulty.0, elapsed),
+            hp_mult: tuning.horde_hp_mult_for(difficulty.0, elapsed),
             mods,
             spawner: &mut ids.guest,
             scratch: &mut scratch,
@@ -2704,7 +2704,7 @@ mod tests {
             .base_hp()
             // The horde's own curve: the shared ramp times level one's
             // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate).
-            * w.tuning().director.horde_hp_mult_for(0, open)
+            * w.tuning().horde_hp_mult_for(0, open)
             * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
     }
@@ -2894,7 +2894,7 @@ mod tests {
         );
         // The scalars are level 0's: hp is the kind's own pool times the level-0
         // curve at spawn, with no per-stage extra.
-        let expected_mult = w.tuning().director.horde_hp_mult_for(0, spawned_at);
+        let expected_mult = w.tuning().horde_hp_mult_for(0, spawned_at);
         let spawned = w.enemies();
         for e in spawned.iter() {
             assert!(
@@ -2930,7 +2930,7 @@ mod tests {
             let elites: Vec<&Enemy> = snapshot.iter().filter(|e| e.elite).collect();
             assert_eq!(elites.len(), 1, "{theme:?}: no elite arrived");
             assert_eq!(elites[0].kind, heavy, "{theme:?}: the wrong elite body");
-            let expected = heavy.base_hp() * w.tuning().director.horde_hp_mult_for(0, open) * 1.6;
+            let expected = heavy.base_hp() * w.tuning().horde_hp_mult_for(0, open) * 1.6;
             assert!(
                 (elites[0].max_hp - expected).abs() < 1e-3,
                 "{theme:?}: elite hp {} is not the 1.6x pool {expected}",
@@ -3932,7 +3932,7 @@ mod tests {
             director_tick(&mut w, 0.1, 300.0);
             let enemies = w.enemies();
             assert!(!enemies.is_empty(), "level {level} spawned nothing");
-            let expected = w.tuning().director.horde_hp_mult_for(level, 300.0);
+            let expected = w.tuning().horde_hp_mult_for(level, 300.0);
             for e in enemies.iter().filter(|e| !e.elite) {
                 // (The elite branch stacks its own 1.6x on top of the curve.)
                 let base = e.max_hp / expected;
