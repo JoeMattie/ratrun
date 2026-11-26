@@ -1,7 +1,7 @@
-//! The wave 3 side routes' floor hazards: steam grates and ink pads.
+//! Walkable floor hazards: steam grates, ink pads and the Sewer's drip shaft.
 //!
-//! Both are **walkable** floor hazards (they never paint a solid cell), placed
-//! by `levelgen::hazards` into the Laundry and Printworks maps and driven by
+//! These are **walkable** floor hazards (they never paint a solid cell), placed
+//! by `levelgen::hazards` into the Sewer, Laundry and Printworks and driven by
 //! `ecs::systems::hazards`. The structs here are the one copy of the hazard
 //! state: the generator builds them, the system mutates them and the floor art
 //! reads them, so the drawn plume and the damaging plume cannot drift.
@@ -211,6 +211,92 @@ impl InkPad {
     pub fn covers(&self, p: Vec2, radius: f32) -> bool {
         (p.x - self.pos.x).abs() <= self.half.x + radius
             && (p.y - self.pos.y).abs() <= self.half.y + radius
+    }
+}
+
+/// The authored encounters in the first Sewer sector. Candidate spawn points
+/// are ordered by distance to the second room's centre.
+#[derive(Clone, Debug)]
+pub struct SewerOpening {
+    pub pillbug_cells: Vec<Vec2>,
+    pub bottle_cap: Vec2,
+    pub drip_shaft: DripShaft,
+}
+
+pub const DRIP_ARM_PX: f32 = 48.0;
+pub const DRIP_WARN_SECS: f32 = 0.5;
+pub const DRIP_SPLASH_SECS: f32 = 0.3;
+pub const DRIP_REST_SECS: f32 = 2.5;
+pub const DRIP_DAMAGE: f32 = 6.0;
+pub const DRIP_HALF: f32 = TILE_F * 0.5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DripPhase {
+    Idle,
+    Warning,
+    Splash,
+    Resting,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DripShaft {
+    pub cell: (i32, i32),
+    pub pos: Vec2,
+    pub phase: DripPhase,
+    /// Seconds elapsed in the current phase.
+    pub timer: f32,
+    pub player_struck: bool,
+}
+
+impl DripShaft {
+    pub fn new(cell: (i32, i32)) -> Self {
+        Self {
+            cell,
+            pos: crate::game::collision::TileMap::tile_rect(cell.0, cell.1).center(),
+            phase: DripPhase::Idle,
+            timer: 0.0,
+            player_struck: false,
+        }
+    }
+
+    /// Finish an armed cycle even if the rat leaves. Start a fresh one only
+    /// when the rat is in range, with a full warning on the first arming tick.
+    pub fn tick(&mut self, dt: f32, rat_near: bool) {
+        if dt <= 0.0 {
+            return;
+        }
+        if self.phase == DripPhase::Idle {
+            if rat_near {
+                self.phase = DripPhase::Warning;
+            }
+            return;
+        }
+        self.timer += dt;
+        loop {
+            let span = match self.phase {
+                DripPhase::Idle => return,
+                DripPhase::Warning => DRIP_WARN_SECS,
+                DripPhase::Splash => DRIP_SPLASH_SECS,
+                DripPhase::Resting => DRIP_REST_SECS,
+            };
+            if self.timer < span {
+                return;
+            }
+            self.timer -= span;
+            self.phase = match self.phase {
+                DripPhase::Idle => unreachable!(),
+                DripPhase::Warning => {
+                    self.player_struck = false;
+                    DripPhase::Splash
+                }
+                DripPhase::Splash => DripPhase::Resting,
+                DripPhase::Resting if rat_near => DripPhase::Warning,
+                DripPhase::Resting => {
+                    self.timer = 0.0;
+                    DripPhase::Idle
+                }
+            };
+        }
     }
 }
 

@@ -245,8 +245,8 @@ fn generate_stages(
     // threshold. The shops are placed after the traps and draw no rng, so the
     // prune can only ever remove a trap.
     placement::drop_traps_crowding_shops(&mut traps, &shop_holes);
-    // The side routes' floor hazards (steam grates, ink pads). Every other
-    // theme returns immediately without drawing an rng number. After the shop
+    // The floor hazards (steam grates, ink pads and the Sewer drip shaft).
+    // Kitchen and Lab return immediately without drawing. After the shop
     // holes, so a hazard is never placed on (or within two cells of) a shop
     // threshold: the shops draw no rng, so their order against this stage
     // cannot move a map.
@@ -349,6 +349,7 @@ pub(super) fn objects_from(
     let mut objects = LevelObjects {
         steam_grates: floor_hazards.steam.clone(),
         ink_pads: floor_hazards.ink.clone(),
+        sewer_opening: floor_hazards.sewer_opening.clone(),
         ..LevelObjects::default()
     };
 
@@ -706,6 +707,15 @@ mod tests {
         for reward in &objects.rewards {
             trace.vec2(reward.pos);
             trace.vec2(reward.facing);
+        }
+        // The Sewer opening intentionally extends the pinned map output.
+        if let Some(opening) = &objects.sewer_opening {
+            trace.cell(opening.drip_shaft.cell);
+            trace.vec2(opening.bottle_cap);
+            trace.u32(opening.pillbug_cells.len() as u32);
+            for &pos in &opening.pillbug_cells {
+                trace.vec2(pos);
+            }
         }
         trace.0
     }

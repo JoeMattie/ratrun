@@ -82,7 +82,7 @@ use crate::game::ecs::systems::spawn::{spawn_point_reachable, SpawnScratch};
 use crate::game::director::BOSS_TIME;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Gold;
-use crate::game::level::{Level, Theme};
+use crate::game::level::{Level, Puddle, Theme, TrenchPuddle};
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::math::Vec2;
@@ -132,6 +132,7 @@ pub const CONE_LEN: f32 = 36.0;
 pub const TRENCH_LEN: f32 = 48.0;
 /// Half-width of the trench (10 px across).
 pub const TRENCH_HALF: f32 = 5.0;
+const TRENCH_WET_SECS: f32 = 25.0;
 /// Length of the swinging cord: the design's "44 px cord to a fixed spool".
 pub const CORD_LEN: f32 = 44.0;
 /// Half-thickness of the cord.
@@ -1347,7 +1348,7 @@ pub fn miniboss_system(
     input: Res<TickInput>,
     counters: ResMut<RunCounters>,
     mut schedule: ResMut<MinibossSchedule>,
-    level: Res<Level>,
+    mut level: ResMut<Level>,
     viewport: Res<Viewport>,
     mut player: ResMut<Player>,
     mut rng: ResMut<RngRes>,
@@ -1463,6 +1464,22 @@ pub fn miniboss_system(
                     }
                 }
                 if mb.timer >= mb.kind.active_duration() {
+                    if mb.kind == MinibossKind::Corkscrew && level.objects.sewer_opening.is_some() {
+                        if let MinibossShape::Trench { a, b, half } = mb.kind.telegraph(&mb) {
+                            // Overlapping patches draw and splash as one wet band.
+                            let radius = half + 1.0;
+                            let patches = std::array::from_fn(|i| Puddle {
+                                pos: a + (b - a) * (i as f32 / 6.0),
+                                rx: radius,
+                                ry: radius,
+                                seed: e.id.wrapping_add(i as u32),
+                            });
+                            level.objects.trench_puddles.push(TrenchPuddle {
+                                patches,
+                                expires_at: elapsed + TRENCH_WET_SECS,
+                            });
+                        }
+                    }
                     mb.state = MinibossState::Recover;
                     mb.timer = 0.0;
                 }
@@ -2149,6 +2166,54 @@ mod tests {
         m.state = MinibossState::Active;
         m.timer = 0.25;
         assert!(m.active_shape().is_some());
+    }
+
+    #[test]
+    fn corkscrews_trench_leaves_splashable_water_for_25_seconds() {
+        use crate::game::ecs::systems::puddles::puddle_steps_system;
+        use crate::game::world::World;
+        let mut w = World::new(Theme::Sewer, 7);
+        w.level.puddles.clear();
+        let origin = w.level.start;
+        let aim = Vec2::new(1.0, 0.0);
+        let entity = w.spawn_miniboss(MinibossKind::Corkscrew, 0, origin);
+        w.elapsed = MINIBOSS_TIMES[0];
+        w.ecs.resource_mut::<MinibossSchedule>().next = 1;
+        w.player.god = true;
+        {
+            let mut mb = w.ecs.get_mut::<Miniboss>(entity).unwrap();
+            mb.announced = true;
+            mb.state = MinibossState::Active;
+            mb.origin = origin;
+            mb.aim = aim;
+            mb.timer = mb.kind.active_duration() - 0.125;
+        }
+        w.begin_tick(0.125, Vec2::ZERO, false);
+        w.ecs.run_system_cached(miniboss_system).unwrap();
+        w.end_tick();
+
+        assert_eq!(w.level.objects.trench_puddles.len(), 1);
+        let expires_at = w.elapsed + TRENCH_WET_SECS;
+        assert_eq!(w.level.objects.trench_puddles[0].expires_at, expires_at);
+        assert_eq!(w.level.standing_water().count(), 7);
+        let on_cut = origin + aim * (TRENCH_LEN - 4.0);
+        assert!(w.level.wet_at(on_cut));
+        assert!(!w.level.wet_at(on_cut + Vec2::new(0.0, 8.0)));
+
+        w.player.pos = on_cut;
+        w.elapsed = expires_at - 0.125;
+        w.begin_tick(0.125, Vec2::ZERO, false);
+        w.ecs.run_system_cached(puddle_steps_system).unwrap();
+        w.end_tick();
+        assert!(w.level.wet_at(on_cut));
+        assert!(w.sfx.contains(&Sfx::Splash));
+
+        w.elapsed = expires_at;
+        w.begin_tick(0.125, Vec2::ZERO, false);
+        w.ecs.run_system_cached(puddle_steps_system).unwrap();
+        w.end_tick();
+        assert!(w.level.objects.trench_puddles.is_empty());
+        assert!(!w.level.wet_at(on_cut));
     }
 
     /// Run the reap (and the Nuke's re-reap) once, as the schedule does.

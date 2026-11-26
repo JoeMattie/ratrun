@@ -97,7 +97,7 @@ ONE `Schedule`, one thread, `multi_threaded` off. `chain()` inserts `ApplyDeferr
 ```text
 powerups → traps → hazards → floor_sewer_slow → player → puddles → fog::reveal
   → [gates: passage, cache, door, shop::threshold]
-  → flow_refresh → director → miniboss → boss_spawn → boss::megarat::boss_summon
+  → flow_refresh → director → sewer_opening → miniboss → boss_spawn → boss::megarat::boss_summon
   → enemy_steering → enemy_fire → grid_build → separation → wall_resolve
   → grid_refresh → fire_weapons → active_weapons
   → [spiked_tail] → [laser_eyes, super_dash, melee_nudge]
@@ -214,6 +214,12 @@ A level is a **200 × 160** lattice of 16 px tiles (3200 × 2560 world px) plus 
   **Control and pursuit (batch 13, `boss/mod.rs`).** A player weapon can never take a boss out of its fight. A stagger is *control* and is paid from a shared budget: `Boss::grant_control(secs)` grants at most `CONTROL_BUDGET_SECS` 0.30 s per `CONTROL_WINDOW_SECS` 4 s (nothing under `CONTROL_MIN_SECS` 0.12), and **never inside a committed beat** (`Boss::committed`: any state that is not the kind's neutral, stagger or death state), so a wind-up always fires. `Boss::shove` moves a neutral boss at most `SHOVE_PER_HIT_PX` 4 a hit and `SHOVE_PER_SEC_PX` 12 a second and refuses a committed one. `pursue` runs before the controller: `Boss::out_of_reach` counts every second the rat is beyond `BossKind::engage_range()` (in any state; only a rat back in range resets it), and from `OUT_OF_REACH_SECS` 3.0 a neutral boss leaps (`LEAP_SPEED` 300 px/s for `LEAP_SECS` 0.30, `LEAP_COOLDOWN` 3 s, a body-passable straight line only) or sprints the flow field at `PURSUIT_SPEED` 132. The Jaguar closes with its own pounce instead (`own_gap_closer`; `CLOSING_POUNCE_MAX` 220 px), and the mower's lidar locks a rat it has *seen* during the scan even if it has backed out of `SCAN_CONE_RANGE` 72 by the snap (patrol band 45–64 px, a pursuit leap goes straight to the scan). No rng is drawn by any of it. `boss::tests`' scripted fights (`ScriptedFight`, one per weapon script) pin that every kind starts and completes attacks under the heaviest build.
 
   `BossController::tick` owns only transitions; `Boss`, `BossOutput`, `BossHazard`, `BossProjectile`, `move_boss`, `BossContext` (player state, arena, `TileMap` queries, large-class flow field) and the index-window rules are in `boss/mod.rs` — read it before touching a boss.
+
+### Level one's opening
+
+The Sewer opening runs on campaign index 0 and in Sewer practice. The hazard placement stage picks a reachable room nearest the start and draws one Drip Shaft tile with a dry route around it. The shaft arms within 48 px, outlines its tile and drops for 0.5 s, splashes for 0.3 s and deals 6 damage once to the rat on that tile, then rests for 2.5 s. Two Pillbugs are due at 0:22 in the same room. If both cannot spawn outside the widest view, the pair waits for a clear tick. They stay curled until approached. A Bottle Cap appears at 1:30, 24 px beyond the start-room doorway nearest the map centre with a clear landing. A completed Corkscrew trench leaves 25 s of standing water that reflects light and splashes underfoot.
+
+The scripted placements draw no simulation rng. The map pin includes the generated opening layout. Rare enemy pickup rolls start after the guaranteed Bottle Cap is placed. The Sewer gameplay goldens are expected to move from the early drop-roll gate, the Pillbugs and any Drip Shaft hits. The Bottle Cap entity and Corkscrew are beyond their 60 s window.
 
 ## Progression
 

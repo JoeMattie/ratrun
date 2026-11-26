@@ -866,6 +866,8 @@ pub struct W3 {
     pub bar_dir: Vec2,
     /// The crossbar has already taken its one bite out of the rat.
     pub bar_spent: bool,
+    /// The Sewer's two opening Pillbugs hold their first curl until approached.
+    pub opening_curl: bool,
 }
 
 impl Default for W3 {
@@ -889,6 +891,7 @@ impl Default for W3 {
             bar_pos: Vec2::ZERO,
             bar_dir: Vec2::ZERO,
             bar_spent: false,
+            opening_curl: false,
         }
     }
 }
@@ -1092,6 +1095,15 @@ pub struct Enemy {
 
 impl Enemy {
     pub fn spawn(kind: EnemyKind, pos: Vec2, hp_mult: f32, rng: &mut impl Rng) -> Self {
+        let mut enemy = Self::spawn_fixed(kind, pos, hp_mult);
+        enemy.fire_cd = rng.random_range(1.0..2.5);
+        enemy.wander = rng.random_range(0.0..std::f32::consts::TAU);
+        enemy.anim = rng.random_range(0.0..std::f32::consts::TAU);
+        enemy
+    }
+
+    /// An authored body with fixed initial gait and firing phases.
+    pub(crate) fn spawn_fixed(kind: EnemyKind, pos: Vec2, hp_mult: f32) -> Self {
         let hp = kind.base_hp() * hp_mult;
         Enemy {
             id: 0,
@@ -1105,11 +1117,11 @@ impl Enemy {
             radius: kind.radius(),
             damage: kind.damage(),
             flash: 0.0,
-            fire_cd: rng.random_range(1.0..2.5),
-            wander: rng.random_range(0.0..std::f32::consts::TAU),
+            fire_cd: 1.0,
+            wander: 0.0,
             contact_cd: 0.0,
             speed_scale: 1.0,
-            anim: rng.random_range(0.0..std::f32::consts::TAU),
+            anim: 0.0,
             facing: Vec2::new(1.0, 0.0),
             // No extra rng draws: a freshly spawned body is neither stunned nor
             // slowed, so adding these fields cannot move the rng stream.

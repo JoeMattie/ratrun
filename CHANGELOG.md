@@ -15,6 +15,9 @@ first time.
   an experimental wedge-glyph mode. Costs about 0.4 ms a frame at 120x40.
 - **Standing water.** The Sewers are very wet, the Laundry and Kitchen have
   puddles, and the rat splashes through them. Lamps reflect in the water.
+- **Sewer opening.** Two curled Pillbugs arrive off-screen from 0:22, a Drip
+  Shaft marks its splash tile, and a Bottle Cap appears outside the start room
+  at 1:30. Corkscrew's trench stays wet for 25 seconds.
 - **Round-glyph particles.** Dust motes in lit rooms, sparks off hits, and
   bubbles and steam from pipes and grates, drawn with small round glyphs.
 - **Hantavirus is deployed by droppings.** The rat leaves one behind it every

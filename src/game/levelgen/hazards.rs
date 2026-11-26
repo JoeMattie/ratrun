@@ -1,4 +1,4 @@
-//! Stage F — the wave 3 floor hazards: steam grates and ink pads.
+//! Stage F — walkable floor hazards and the Sewer opening placements.
 //!
 //! `WAVE3_DESIGN.md` §11 gives each side route one hazard:
 //!
@@ -23,15 +23,19 @@
 //! * the only randomness is the one level `StdRng`, in call order, and the
 //!   candidate list is sorted (distance, then cell) before any draw, so no
 //!   hash-map or query order can reach the result;
-//! * a theme without hazards draws **no** rng: the Sewer, Kitchen and Lab maps
-//!   are byte-for-byte what they were (`levelgen::tests::map_trace_pin`).
+//! * the Sewer opening draws only its drip tile here, after shops and traps.
+//!   Kitchen and Lab still draw no rng in this stage.
 
 use rand::rngs::StdRng;
 use rand::RngExt;
 
-use crate::game::collision::TileMap;
-use crate::game::hazards::{InkPad, SteamGrate};
+use crate::game::art_walls::{WallAxis, WallKind};
+use crate::game::collision::{SizeClass, TILE_F, TileKind, TileMap};
+use crate::game::ecs::constants::PLAYER_RADIUS;
+use crate::game::enemy::EnemyKind;
+use crate::game::hazards::{DripShaft, InkPad, SewerOpening, SteamGrate};
 use crate::game::level::{MazeSection, RoomKind, Theme, TileRect};
+use crate::math::Vec2;
 
 use super::layout::Layout;
 use super::placement::{ShopHolePlacement, TrapPlacement};
@@ -53,16 +57,117 @@ pub const DRY_ROUTE_CELLS: i32 = 2;
 pub struct HazardPlacement {
     pub steam: Vec<SteamGrate>,
     pub ink: Vec<InkPad>,
+    pub sewer_opening: Option<SewerOpening>,
 }
 
 impl HazardPlacement {
     pub fn len(&self) -> usize {
-        self.steam.len() + self.ink.len()
+        self.steam.len() + self.ink.len() + usize::from(self.sewer_opening.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+fn place_sewer_opening(
+    tiles: &TileMap,
+    layout: &Layout,
+    avoid: &[TileRect],
+    rng: &mut StdRng,
+) -> Option<SewerOpening> {
+    let start = ((layout.start.x / TILE_F) as i32, (layout.start.y / TILE_F) as i32);
+    // Use large-body reachability, with the maze and threshold reservations
+    // below, so the Pillbugs stand on public floor the horde can reach.
+    let reached = validate::reachable(tiles, start, SizeClass::Large);
+    let bottle_cap = opening_bottle_cap(tiles, layout.start_room, &reached)?;
+    let mut rooms: Vec<_> = layout
+        .rooms
+        .iter()
+        .filter(|room| matches!(room.kind, RoomKind::Hall | RoomKind::Room))
+        .collect();
+    rooms.sort_by(|a, b| {
+        a.center()
+            .dist_sq(layout.start)
+            .total_cmp(&b.center().dist_sq(layout.start))
+    });
+
+    for room in rooms {
+        let center = room.center();
+        let mut cells: Vec<_> = room
+            .rect
+            .cells()
+            .filter(|&(x, y)| {
+                tiles.get(x, y).is_open()
+                    && validate::is_reached(&reached, tiles, (x, y))
+                    && !avoid.iter().any(|r| r.contains(x, y))
+            })
+            .map(|cell| (cell, TileMap::tile_rect(cell.0, cell.1).center()))
+            .filter(|&(_, p)| tiles.circle_clear(p, EnemyKind::Pillbug.radius(), SizeClass::Large))
+            .collect();
+        cells.sort_by(|a, b| a.1.dist_sq(center).total_cmp(&b.1.dist_sq(center)));
+
+        // Leave the two closest cells for the pair. Restrict the draw to
+        // nearby roomy tiles, so the splash always has space to go around.
+        let drip_cells: Vec<_> = cells
+            .iter()
+            .skip(2)
+            .filter(|&&(cell, _)| {
+                dry_route(tiles, cell)
+                    && !threshold_near(tiles, TileRect::new(cell.0, cell.1, 1, 1))
+            })
+            .take(8)
+            .collect();
+        if !drip_cells.is_empty() {
+            let &(cell, _) = drip_cells[rng.random_range(0..drip_cells.len())];
+            return Some(SewerOpening {
+                pillbug_cells: cells
+                    .into_iter()
+                    .filter_map(|(c, pos)| (c != cell).then_some(pos))
+                    .collect(),
+                bottle_cap,
+                drip_shaft: DripShaft::new(cell),
+            });
+        }
+    }
+    None
+}
+
+/// Take the public doorway closest to the map centre with a clear landing
+/// 24 px past it. Open cuts made by connectivity repair are a fallback.
+fn opening_bottle_cap(tiles: &TileMap, start: TileRect, reached: &[bool]) -> Option<Vec2> {
+    let map_center = tiles.world_size() * 0.5;
+    let edge = start.inflate(1);
+    let mut best = None;
+    for (x, y) in edge.cells().filter(|&(x, y)| !start.contains(x, y)) {
+        for (dx, dy, axis) in [
+            (0, -1, WallAxis::Horizontal),
+            (0, 1, WallAxis::Horizontal),
+            (-1, 0, WallAxis::Vertical),
+            (1, 0, WallAxis::Vertical),
+        ] {
+            if !start.contains(x - dx, y - dy) || !tiles.get(x - dx, y - dy).is_open() {
+                continue;
+            }
+            let open_cut = match tiles.get(x, y) {
+                TileKind::Wall(WallKind::Doorway { axis: door_axis }) if door_axis == axis => false,
+                TileKind::Open => true,
+                _ => continue,
+            };
+            let exit = TileMap::tile_rect(x, y).center();
+            let pos = exit + Vec2::new(dx as f32, dy as f32) * 24.0;
+            let cell = ((pos.x / TILE_F) as i32, (pos.y / TILE_F) as i32);
+            let key = (open_cut, exit.dist_sq(map_center));
+            if tiles.get_at(pos).is_open()
+                && tiles.circle_clear(pos, PLAYER_RADIUS, SizeClass::Large)
+                && validate::is_reached(reached, tiles, cell)
+                && best.is_none_or(|(nearest, _)| key < nearest)
+            {
+                best = Some((key, pos));
+            }
+        }
+    }
+    best.map(|(_, pos)| pos)
 }
 
 /// Is there a dry route at least two cells wide past `cell`?
@@ -175,6 +280,13 @@ pub fn place_hazards(
 ) -> HazardPlacement {
     let kinds_ink = theme == Theme::Printworks;
     let kinds_steam = theme == Theme::Laundry;
+    if theme == Theme::Sewer {
+        let avoid = avoided(layout, mazes, traps, shops);
+        return HazardPlacement {
+            sewer_opening: place_sewer_opening(tiles, layout, &avoid, rng),
+            ..HazardPlacement::default()
+        };
+    }
     if !kinds_ink && !kinds_steam {
         return HazardPlacement::default();
     }
@@ -570,15 +682,60 @@ mod tests {
         }
     }
 
-    /// The stage draws no rng and places nothing on the original three themes,
+    #[test]
+    fn sewer_opening_rooms_hold_two_reachable_pillbugs_and_one_drip_shaft() {
+        for seed in 0..20 {
+            let level = Level::generate(Theme::Sewer, seed);
+            let opening = level.objects.sewer_opening.as_ref().unwrap();
+            let room = level.rooms.iter()
+                .filter(|r| matches!(r.kind, RoomKind::Hall | RoomKind::Room))
+                .min_by(|a, b| {
+                    a.center()
+                        .dist_sq(level.start)
+                        .total_cmp(&b.center().dist_sq(level.start))
+                })
+                .unwrap();
+            let reached = validate::reachable(&level.tiles, start_cell(&level), SizeClass::Large);
+            assert!(room.rect.contains_world(opening.drip_shaft.pos), "seed {seed}");
+            assert!(dry_route(&level.tiles, opening.drip_shaft.cell));
+            assert!(opening.pillbug_cells.len() >= 2);
+            for &pos in &opening.pillbug_cells {
+                let cell = ((pos.x / TILE_F) as i32, (pos.y / TILE_F) as i32);
+                assert!(room.rect.contains_world(pos));
+                assert!(level.tiles.get_at(pos).is_open());
+                assert!(validate::is_reached(&reached, &level.tiles, cell));
+                assert_ne!(pos, opening.drip_shaft.pos);
+            }
+            assert!(level.tiles.get_at(opening.bottle_cap).is_open());
+            assert!(!level.start_room().unwrap().rect.contains_world(opening.bottle_cap));
+        }
+    }
+
+    #[test]
+    fn sewer_opening_bottle_cap_uses_the_nearest_public_doorway() {
+        let mut tiles = TileMap::new(20, 20, Theme::Sewer, 0);
+        let start = TileRect::new(6, 6, 8, 8);
+        let doorway = TileKind::Wall(WallKind::Doorway { axis: WallAxis::Horizontal });
+        tiles.set(10, 5, doorway);
+        tiles.set(7, 5, doorway);
+        let reached = validate::reachable(&tiles, (10, 10), SizeClass::Large);
+        let door_center = TileMap::tile_rect(10, 5).center();
+        assert_eq!(
+            opening_bottle_cap(&tiles, start, &reached),
+            Some(door_center - Vec2::new(0.0, 24.0)),
+        );
+    }
+
+    /// The stage draws no rng and places nothing in the Kitchen and Lab,
     /// which is why their pinned maps do not move.
     #[test]
-    fn original_themes_get_no_hazards_and_no_extra_draws() {
-        for theme in [Theme::Sewer, Theme::Kitchen, Theme::Lab] {
+    fn kitchen_and_lab_get_no_hazards_and_no_extra_draws() {
+        for theme in [Theme::Kitchen, Theme::Lab] {
             let a = crate::game::levelgen::generate_once(theme, 11, 0);
             let b = crate::game::levelgen::generate_once(theme, 11, 0);
             assert!(a.objects.steam_grates.is_empty());
             assert!(a.objects.ink_pads.is_empty());
+            assert!(a.objects.sewer_opening.is_none());
             // Same map twice, and no rng consumed by this stage: `level_seed`
             // drives both runs, so an extra draw would change the trap/hole
             // placement and this comparison would fail.

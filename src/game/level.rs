@@ -776,6 +776,10 @@ pub struct LevelObjects {
     pub lights: Vec<LightFixture>,
     pub light_zones: Vec<LightZone>,
     pub emitters: Vec<AmbientEmitter>,
+    /// Level one's scripted Sewer encounters, authored by levelgen.
+    pub sewer_opening: Option<super::hazards::SewerOpening>,
+    /// Wet bands left by completed Corkscrew strikes.
+    pub trench_puddles: Vec<TrenchPuddle>,
 }
 
 impl LevelObjects {
@@ -851,6 +855,7 @@ impl LevelObjects {
             + self.ink_pads.len()
             + self.lights.len()
             + self.emitters.len()
+            + usize::from(self.sewer_opening.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1090,6 +1095,13 @@ pub struct Puddle {
     pub ry: f32,
     /// Shape variation (the rim's lobes).
     pub seed: u32,
+}
+
+/// Seven overlapping puddles laid along a single trench.
+#[derive(Clone, Debug)]
+pub struct TrenchPuddle {
+    pub patches: [Puddle; 7],
+    pub expires_at: f32,
 }
 
 impl Puddle {
@@ -1374,10 +1386,16 @@ impl Level {
     /// a blob's rim may spill over a wall face (the wall layer is drawn over it)
     /// and that is not water the rat can step in.
     pub fn wet_at(&self, p: Vec2) -> bool {
-        if self.puddles.is_empty() || !self.tiles.get_at(p).is_open() {
+        if self.puddles.is_empty() && self.objects.trench_puddles.is_empty() {
             return false;
         }
-        self.puddles.iter().any(|puddle| puddle.contains(p))
+        self.tiles.get_at(p).is_open() && self.standing_water().any(|puddle| puddle.contains(p))
+    }
+
+    pub fn standing_water(&self) -> impl Iterator<Item = &Puddle> {
+        self.puddles
+            .iter()
+            .chain(self.objects.trench_puddles.iter().flat_map(|scar| &scar.patches))
     }
 }
 
