@@ -55,6 +55,9 @@
   presses what it lands on, a swipe scrolls a list and a pinch steps the
   zoom. They appear on the first touch and leave on any key or mouse move,
   so a desktop run is exactly as it was.
+- **Touch controls and app icon.** On-screen translucent floating stick and
+  Dash, Active, Pause, Back and Map plates drawn directly in the terminal
+  grid, plus pixel-art PWA home-screen icons based on the title rat plate.
 
 ## 0.4.4 (2026-11-26, playtest build)
 
