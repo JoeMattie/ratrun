@@ -43,4 +43,8 @@ earlier studies' measured results.
 
 Supply `--resume-screen` to the study only after the screen manifest already
 exists. Completed shards have a checksummed receipt and are skipped on
-retry. Use a new output directory for a new simulator revision or design.
+retry. The runner gives each campaign up to 7,200 simulation seconds to
+reach an outcome. The fit excludes a screening setting if any of its
+campaigns are still running at that cap. Confirmation requires every
+campaign to finish.
+Use a new output directory for a new simulator revision or design.

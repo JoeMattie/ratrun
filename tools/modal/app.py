@@ -13,6 +13,7 @@ import modal
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT = ROOT / ".review" / "model3"
 TIMEOUT = 1_500
+SIM_SECONDS = 7_200
 MAX_SHARDS = 700
 CPU = 0.5
 MEMORY_MIB = 256
@@ -48,6 +49,7 @@ def run_command(binary, job):
         command = [
             str(binary), "--bot-batch", str(job["runs"]), "--seed", str(job["seed"]),
             "--seed-exact", "--skill", job["skill"], "--threads", "1",
+            "--max-sim-seconds", str(SIM_SECONDS),
             "--tuning", str(tuning), "--json",
         ]
         if job.get("practice"):
@@ -62,7 +64,7 @@ def run_command(binary, job):
             raise ValueError("unexpected simulation seeds")
         if any(row["skill"] != job["skill"] for row in rows):
             raise ValueError("unexpected simulation skill")
-        if any(not row["won"] and row["death"] is None for row in rows):
+        if not job.get("allow_censored") and any(not row["won"] and row["death"] is None for row in rows):
             raise ValueError("at least one campaign hit the simulation time cap")
         return job["id"], raw, time.monotonic() - started
 
@@ -121,7 +123,8 @@ def main(manifest: str, output: str = str(OUTPUT)):
         raise ValueError("existing results were produced by a different manifest or revision")
     atomic_write(recorded_manifest, record)
 
-    pending = [j for j in spec["jobs"] if not (directory / f"{j['id']}.receipt").exists()]
+    pending = [dict(job, allow_censored=spec["name"] == "screen")
+               for job in spec["jobs"] if not (directory / f"{job['id']}.receipt").exists()]
     print(f"{len(pending)} shards pending, timeout-priced ceiling ${len(pending) * 2 * TIMEOUT * RATE:.2f}")
     for attempt in range(2):
         if not pending:
@@ -137,7 +140,7 @@ def main(manifest: str, output: str = str(OUTPUT)):
             atomic_write(directory / f"{key}.json", raw)
             receipt = {
                 "sha256": hashlib.sha256(raw).hexdigest(),
-                "seconds": elapsed, "attempt": attempt + 1,
+                "seconds": elapsed, "attempt": attempt + 1, "max_sim_seconds": SIM_SECONDS,
             }
             atomic_write(directory / f"{key}.receipt", json.dumps(receipt).encode())
             del remaining[key]

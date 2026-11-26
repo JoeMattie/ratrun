@@ -158,7 +158,12 @@ def confirmation(lines, cohort, actual, prediction, previous):
         if not profile[key][1]:
             return "—"
         idx = keys.index(key)
-        label = f"{3 * idx}:00–{3 * (idx + 1)}:00" if window else FLOORS[idx]
+        if not window:
+            label = FLOORS[idx]
+        elif idx == len(keys) - 1:
+            label = f"{3 * idx}:00+"
+        else:
+            label = f"{3 * idx}:00–{3 * (idx + 1)}:00"
         return f"{label}, {share(profile[key])}"
 
     change = " → ".join([*(f"Round {round_no}" for round_no, _ in previous), "Round 3"])
@@ -232,7 +237,7 @@ def design_and_fit(lines, result):
     lines += ["## Design and fit", "",
               f"The design used {SCREEN_POINTS - 1} randomized Latin hypercube settings optimized for "
               f"low discrepancy, plus shipped defaults. Each point used the same eight seeds ({SCREEN_SEED}–{SCREEN_SEED + 7}) "
-              f"for each skill, for {SCREEN_POINTS * 24:,} full campaigns. "
+              f"for each skill, for {SCREEN_POINTS * 24:,} campaign runs. "
               "Later floors inherited the actual keep choices.", "",
               f"The fit had {len(result['train'])} training settings and {len(result['holdout'])} untouched holdout settings. "
               "Four-fold validation within training chose regularization and linear or quadratic features by "
@@ -242,6 +247,13 @@ def design_and_fit(lines, result):
               "damage and card metrics by floor using the number of observed campaign records as weights.", "",
               "The holdout tests new tuning settings on common seeds. Fresh confirmation tests the "
               "candidate on independent seeds. Small late-floor cohorts can make predictions noisy."]
+    if result["excluded"]:
+        lines += ["", "The fit excluded every setting with a campaign still running at the simulation cap. "
+                  "Those runs are recorded in the raw shards and do not count as deaths."]
+        table(lines, ("Setting", "Skill", "Seed", "Floor", "Boss", "Simulated seconds"), [
+            (point, row["skill"], row["seed"], row["floor"], row["boss"], number(row["seconds"], 0))
+            for point, rows in result["excluded"].items() for row in rows
+        ])
     rows = []
     for skill in SKILLS:
         v = result["validation"][skill]["win"]
@@ -293,7 +305,7 @@ def design_and_fit(lines, result):
             for knob, edge in edges.items()
         ])
     lines += ["Sensitivity is the average modeled change for a +0.10 multiplier, +0.10 s of "
-              "immunity or +10 starting HP. Rates use percentage points, and durations use seconds. "
+              "immunity, +10 s of phase timing, or +10 starting HP. Rates use percentage points, and durations use seconds. "
               "The CSV includes every modeled outcome."]
     for skill in SKILLS:
         rows = []

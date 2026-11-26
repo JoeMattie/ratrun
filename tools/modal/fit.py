@@ -25,7 +25,7 @@ WIN_BANDS = np.array([(0.75, 0.85), (0.40, 0.55), (0.10, 0.20)])
 WEIGHTS = {"wins": 35, "death_spread": 20, "hp_tension": 20,
            "level_ups": 10, "bosses": 10, "close_calls": 5}
 FLOOR_DEATH = [f"death_floor_{f}" for f in range(1, 5)]
-# The batch caps total simulated time at 4,800 s.
+# The final bin also covers outliers after 78:00 on the floor clock.
 WINDOW_DEATH = [f"death_window_{w}" for w in range(1, 28)]
 BINARY = [["win", "loss"], ["close_win", "no_close_win"]]
 BINARY += [[f"clear_{b}", f"fall_{b}"] for b in BOSSES]
@@ -85,7 +85,8 @@ def observe(runs):
         else:
             death = run["death"]
             category(FLOOR_DEATH, f"death_floor_{death['level'] + 1}")
-            category(WINDOW_DEATH, f"death_window_{int(death['at'] // 180) + 1}")
+            window = min(int(death["at"] // 180), len(WINDOW_DEATH) - 1)
+            category(WINDOW_DEATH, WINDOW_DEATH[window])
 
         for floor in run["levels"]:
             f = floor["level"] + 1
@@ -349,7 +350,16 @@ def clean(value):
 
 def fit(output, defaults):
     screen, data, seconds = load_stage(output, "screen")
-    ids = list(screen["points"])
+    # Fit whole settings on the common cohort. A stall is neither a death nor
+    # a win and must not quietly remove just one of that setting's eight seeds.
+    excluded = {
+        point: [{"seed": run["seed"], "skill": run["skill"], "floor": run["floor_reached"],
+                 "boss": run["levels"][-1]["boss"], "seconds": run["total_time"]}
+                for run in runs if not run["won"] and run["death"] is None]
+        for point, runs in data.items()
+    }
+    excluded = {point: rows for point, rows in excluded.items() if rows}
+    ids = [point for point in screen["points"] if point not in excluded]
     train, test = train_test_split(ids, test_size=.20, random_state=23)
     values = screen["points"]
     bounds = BOUNDS
@@ -361,7 +371,7 @@ def fit(output, defaults):
 
     profiles = {skill: {
         point: observe([run for run in runs if run["skill"] == skill])
-        for point, runs in data.items()
+        for point, runs in data.items() if point not in excluded
     } for skill in SKILLS}
     models, scores, choices, heldout_wins = [], {}, {}, {}
     for skill in SKILLS:
@@ -399,7 +409,7 @@ def fit(output, defaults):
         "revision": screen["source_revision"], "values": candidate, "loss": loss,
         "loss_by_target": target_loss,
         "bounds": bounds, "edges": edges,
-        "train": train, "holdout": test, "validation": scores, "choices": choices,
+        "train": train, "holdout": test, "excluded": excluded, "validation": scores, "choices": choices,
         "heldout_wins": heldout_wins,
         "candidate": prediction, "sensitivity": sensitivity, "screen_seconds": seconds,
         "training_profiles": profiles, "defaults_overlay": overlay(candidate, defaults),
