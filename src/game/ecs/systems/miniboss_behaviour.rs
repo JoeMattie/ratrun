@@ -17,7 +17,8 @@ use crate::game::collision::{cell_of, SizeClass};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{DebugFlags, NextEnemyId, NextSpawnId};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::Level;
+use crate::game::hazards::{clamp_outfall_displacement, outfall_sand_clear};
+use crate::game::level::{Level, Theme};
 use crate::game::levelgen::validate::{is_reached, reachable};
 use crate::game::nav::FlowField;
 use crate::game::particle::{Particle, Particles, Ramp, Shape, Stain, StainKind};
@@ -172,6 +173,20 @@ impl MinibossKind {
             RoadAtlas => (Anchor, 32.0, 3.15, 0.5,
                 attack(0.9, stamps(7.0, StampLayout::V { forward: 16.0, across: 14.0 })),
                 attack(1.05, umbra(92.0, 64.0))),
+            // Outfall uses the same walk speed and strike-end gap for each
+            // appointment. Distinct movement styles set up the four warnings.
+            Gasket => (Stalk, 48.0, 2.6, 0.5,
+                attack(0.7, S::Annulus { inner: 8.0, outer: 18.0 }),
+                attack(0.8, S::Spill { len: 36.0, half_w: 8.0 })),
+            Swell => (Orbit, 48.0, 2.6, 0.5,
+                attack(1.0, S::Tide { len: 64.0, half: 3.0, gap: 16.0, travel: 48.0 }),
+                attack(0.85, S::Overlap { radius: 20.0, sep: 20.0 })),
+            Shade => (Burrow, 48.0, 2.6, 0.65,
+                attack(0.55, umbra(46.0, 50.0)),
+                attack(0.9, stamps(6.0, StampLayout::AroundRat { across: 14.0 }))),
+            FalseBulb => (Charge, 48.0, 2.6, 0.5,
+                attack(0.20, S::False { forward: 22.0, across: 14.0, len: 18.0, half: 3.0 }),
+                attack(0.85, S::Shear { len: 40.0, half: 2.0, channel: 22.0 })),
         };
         (Temperament { style, speed, gap, second_from_hp }, [primary, secondary])
     }
@@ -202,6 +217,7 @@ impl SignatureShape {
             Wake { .. } => "Live trail",
             Drip { .. } => "Falling drops",
             Umbra { .. } => "Shadow cone",
+            False { .. } => "False jaws",
         }
     }
 }
@@ -270,13 +286,24 @@ fn orbit_direction(body: Vec2, rat: Vec2, range: f32, side: f32) -> Vec2 {
     (inward.perp() * side + inward * correction).normalized()
 }
 
-fn clear(level: &Level, at: Vec2, radius: f32, class: SizeClass) -> bool {
-    level.tiles.circle_clear(at, radius, class)
-        && level.trailer.pit_avoid(at, radius).is_none()
+pub(super) fn clear(level: &Level, at: Vec2, radius: f32, class: SizeClass) -> bool {
+    if level.theme == Theme::Outfall {
+        outfall_sand_clear(level, at, radius, class)
+    } else {
+        level.tiles.circle_clear(at, radius, class) && level.trailer.pit_avoid(at, radius).is_none()
+    }
 }
 
 fn open_step(level: &Level, from: Vec2, to: Vec2, radius: f32) -> bool {
-    clear(level, to, radius, LARGE) && los_clear(level, from, to, radius)
+    clear(level, to, radius, LARGE) && if level.theme == Theme::Outfall {
+        outfall_step(level, from, to, radius).dist_sq(to) < 1e-4
+    } else {
+        los_clear(level, from, to, radius)
+    }
+}
+
+fn outfall_step(level: &Level, from: Vec2, to: Vec2, radius: f32) -> Vec2 {
+    clamp_outfall_displacement(level, from, to - from, radius, LARGE)
 }
 
 fn landing(
@@ -365,6 +392,9 @@ impl MovementParams<'_, '_> {
             let before = body.pos;
             body.steer(before + dir * 32.0, dir, dt, glue * ink * chase_mult);
             body.pos = level.tiles.resolve_circle(body.pos, body.radius, LARGE, None);
+            if level.theme == Theme::Outfall && clear(level, before, body.radius, LARGE) {
+                body.pos = outfall_step(level, before, body.pos, body.radius);
+            }
         };
         let toward = if open_step(level, body.pos, rat, body.radius) || chase == Vec2::ZERO {
             direct
@@ -634,8 +664,10 @@ mod tests {
                 assert!((1.6..=3.4).contains(&t.gap), "{kind:?}");
                 for other in &appearances {
                     assert_ne!(other.style, t.style, "{theme:?}");
-                    assert_ne!(other.speed, t.speed, "{theme:?}");
-                    assert_ne!(other.gap, t.gap, "{theme:?}");
+                    if theme != Theme::Outfall {
+                        assert_ne!(other.speed, t.speed, "{theme:?}");
+                        assert_ne!(other.gap, t.gap, "{theme:?}");
+                    }
                 }
                 appearances.push(t);
                 let [a, b] = kind.signatures().map(|sig| sig.shape.name());
@@ -651,7 +683,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(totals.values().sum::<usize>(), 48);
+        assert_eq!(totals.values().sum::<usize>(), 56);
         assert!(totals.values().all(|&count| count <= 6));
         for shape in [
             "Hollow ring", "Sweeping bar", "Returning cord", "Overlapping disks", "Slotted bar",
