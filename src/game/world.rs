@@ -2882,6 +2882,18 @@ impl World {
         // Boss bodies in the entity pass (airborne ones go over the player).
         self.draw_boss_body(pb, cam, BossBodyLayer::Ground);
 
+        // The rat and its own weapon fire. The giant's five-times sprite would
+        // hide the projectiles and orbiters that spawn on its own body, so while
+        // giant the rat goes down first and the weapon layer (bullets, beads,
+        // the Plumb Bob's chain, the melee crescents) over it; an ordinary rat
+        // keeps the old order (weapons under the rat, the melee crescents and
+        // long effects above it). The Plumb Bob's lean is an ordinary-size
+        // flourish, so the giant stands steady under its own weight.
+        let giant = self.player.buffs.is_giant();
+        if giant {
+            self.draw_player(pb, cam, Vec2::ZERO);
+        }
+
         // Friendly bullets (the rat's own). Hostile pellets are *not* drawn
         // here: they are the thing that can kill the player, so they belong to
         // the hostile layer at the very end of the frame (see
@@ -2966,6 +2978,9 @@ impl World {
             }
         }
 
+        // Glass beads in flight and the Plumb Bob's swinging weight. Both sit in
+        // the weapon layer over the rat, and the bob also hands back the lean it
+        // puts on the ordinary rat's drawn body.
         let bob_lean = {
             use super::ecs::systems::weapons_wave5::{GlassBead, PlumbBob};
             let mut beads = self.ecs.query::<(&SpawnId, &GlassBead)>();
@@ -3019,8 +3034,10 @@ impl World {
                 }
             }
         }
-        // Player rat.
-        self.draw_player(pb, cam, bob_lean);
+        // Player rat, on the ordinary draw order (after its own weapon layer).
+        if !giant {
+            self.draw_player(pb, cam, bob_lean);
+        }
 
         // The lifted tooth is drawn over the bodies, with its shadow below.
         {
@@ -3043,7 +3060,11 @@ impl World {
         {
             let mut query = self.ecs.query::<&BiteSnap>();
             for snap in query.iter(&self.ecs) {
-                let s = self.w2s(snap.pos + snap.dir * 4.5, cam);
+                // The emissive mark follows the same scaled jaw the art draws.
+                let s = self.w2s(
+                    snap.pos + snap.dir * crate::game::weapon::GNAW_JAW_OFFSET * snap.scale.max(1.0),
+                    cam,
+                );
                 if on_screen(s, 12.0, viewport) {
                     art_rat::draw_gnaw_bite(pb, snap, cam);
                     self.light_map.mark_emissive_highlights(pb, s, 6);
@@ -3951,7 +3972,7 @@ impl World {
             crate::render::lighting::rat_pen()
         });
         if self.player.buffs.is_giant() || self.player.buffs.tiny > 0.0 {
-            self.draw_scaled_rat(pb, cam, scale, flash, bob_lean, outfit);
+            self.draw_scaled_rat(pb, cam, scale, flash, bob_lean, outfit, lash);
         } else {
             art_rat::draw_rat_with_outfit(
                 pb,
@@ -4027,11 +4048,14 @@ impl World {
     ///
     /// Calls [`art_rat_giant::draw_giant_rat_with_outfit`] into the scene buffer so
     /// the giant rat renders at full detail rather than as a nearest-neighbour
-    /// upscale of the 1× sprite. The long weapon effects (Laser Eyes' beam, the
-    /// Spiked Tail's live whip and its impact star, and the Tail Thrash arc)
-    /// keep their ordinary size from the same rat centre.
+    /// upscale of the 1× sprite. The long weapon effects keep their own geometry
+    /// from the same rat centre: the Laser Eyes' beam and the Tail Thrash arc
+    /// are drawn by the frame's long-effect layers, and the Spiked Tail's live
+    /// whip and impact star are stamped here, at the sim's own (giant-scaled)
+    /// reach and burst radius.
     ///
     /// Reads the player, frame clock, gait and whip chain to paint the sprite.
+    #[allow(clippy::too_many_arguments)]
     fn draw_scaled_rat(
         &self,
         pb: &mut PixelBuffer,
@@ -4040,6 +4064,7 @@ impl World {
         tail_flash: f32,
         lean: Vec2,
         outfit: art_rat::RatOutfit,
+        lash: Option<art_rat::LashVisual>,
     ) {
         art_rat_giant::draw_giant_rat_with_outfit(
             pb,
@@ -4061,6 +4086,12 @@ impl World {
                 tail_flash,
                 &self.whip_chain,
             );
+        }
+        // The lash's hit feedback: the giant's body art cannot take a
+        // `LashVisual`, so its impact star is stamped here at the same geometry
+        // the ordinary rat's `draw_tail` uses.
+        if let Some(lash) = lash {
+            art_rat::draw_lash_impact_star(pb, &lash, cam);
         }
     }
 

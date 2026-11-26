@@ -1151,6 +1151,48 @@ pub fn draw_rat_with_outfit(
     draw_dash_charge(pb, player, elapsed, cam);
 }
 
+/// The Spiked Tail's impact star alone: six hot spikes and a dashed ring at the
+/// burst radius, where the tail landed.
+///
+/// Split out of [`draw_tail`] so the Growth Serum's giant, whose body is drawn
+/// by `art_rat_giant` and cannot take a [`LashVisual`], can stamp the same hit
+/// feedback from [`World::draw_scaled_rat`](crate::game::world::World). Reads
+/// only the `LashVisual` the sim's `Lash` clock produced, so the ordinary rat
+/// and the giant draw the same geometry. Render-only.
+pub fn draw_lash_impact_star(pb: &mut PixelBuffer, l: &LashVisual, cam: Vec2) {
+    if l.star <= 0.0 || l.radius <= 0.5 {
+        return;
+    }
+    let g = l.star.clamp(0.0, 1.0);
+    let c = w2s(l.point, cam);
+    let r = l.radius.max(1.5);
+    for i in 0..6 {
+        let ang = i as f32 * std::f32::consts::TAU / 6.0 + 0.26;
+        for (k, fade) in [(1.0f32, 1.0f32), (0.62, 0.5)] {
+            let reach = r * k;
+            plot_add(
+                pb,
+                c.0 + (ang.cos() * reach).round() as i32,
+                c.1 + (ang.sin() * reach).round() as i32,
+                scale(SPIKE_HOT, g * fade * 0.9),
+            );
+        }
+    }
+    let dashes = ((r * 1.4) as i32).max(6);
+    for i in 0..dashes {
+        if i % 2 == 1 {
+            continue;
+        }
+        let ang = i as f32 / dashes as f32 * std::f32::consts::TAU + 0.12;
+        plot_add(
+            pb,
+            c.0 + (ang.cos() * r).round() as i32,
+            c.1 + (ang.sin() * r).round() as i32,
+            scale(SPIKE_STEEL, g * 0.8),
+        );
+    }
+}
+
 /// The live Spiked Tail chain alone, at its ordinary size: the Growth Serum's
 /// giant draws its body through a small offscreen window the 120 px lash
 /// cannot live in, so `World::draw_giant_rat` draws the lash with this.
@@ -1473,9 +1515,13 @@ pub fn draw_laser_muzzle(pb: &mut PixelBuffer, player: &Player, muzzle: f32, cam
     };
     let hot = crate::game::particle::vfx::LASER_CORE;
     let glow = crate::game::particle::vfx::LASER_GLOW;
-    let center = player.pos + face * crate::game::weapon::LASER_EYE_OFFSET;
+    // Growth Serum: the dots sit on the giant's own eyes, so the offset and the
+    // gap between them follow the drawn pose exactly as the simulation's origin
+    // does (`weapons_wave3b::laser_eyes_system`).
+    let pose = player.weapon_pose_scale();
+    let center = player.pos + face * crate::game::weapon::LASER_EYE_OFFSET * pose;
     for side in [-0.85, 0.85] {
-        let (x, y) = w2s(center + face.perp() * side, cam);
+        let (x, y) = w2s(center + face.perp() * (side * pose), cam);
         pb.plot(x, y, mix(glow, hot, 0.45 + 0.55 * muzzle));
         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             plot_add(pb, x + dx, y + dy, scale(glow, 0.35 * muzzle));
@@ -1647,13 +1693,17 @@ pub fn draw_gnaw_bite(pb: &mut PixelBuffer, snap: &BiteSnap, cam: Vec2) {
         Vec2::new(1.0, 0.0)
     };
     let perp = dir.perp();
+    // Growth Serum: the jaw grows with the giant (`BiteSnap::scale` is 1.0 on an
+    // ordinary rat), so a giant's bite reads as a giant's mouth and its reach
+    // matches the scaled hit cone.
+    let jaw = snap.scale.max(1.0);
     // Mouth centre sits just in front of the rat's snout.
-    let center = snap.pos + dir * 4.5;
+    let center = snap.pos + dir * crate::game::weapon::GNAW_JAW_OFFSET * jaw;
 
     // Jaw closes briskly from open (`5.2 px` half-gap) to shut (`0.4 px`) by t=0.52.
     let close = (progress / 0.52).clamp(0.0, 1.0);
     let ease = close * close;
-    let gap = 5.2 * (1.0 - ease) + 0.4;
+    let gap = (5.2 * (1.0 - ease) + 0.4) * jaw;
 
     let white: Rgb = (255, 255, 250);
     let bone: Rgb = (238, 224, 192);
@@ -1662,14 +1712,14 @@ pub fn draw_gnaw_bite(pb: &mut PixelBuffer, snap: &BiteSnap, cam: Vec2) {
     // Two opposing curved tooth crescents (upper `+perp`, lower `-perp`).
     for side in [-1.0f32, 1.0] {
         for step in -3..=3i32 {
-            let u = step as f32 * 1.25;
+            let u = step as f32 * 1.25 * jaw;
             // Crescent curves outward at the corners (`step = ±3`) and closes inward at centre.
-            let arch = (step.abs() as f32 / 3.0).powi(2) * 1.9;
+            let arch = (step.abs() as f32 / 3.0).powi(2) * 1.9 * jaw;
             let v = side * (gap + arch);
             let p = center + dir * u + perp * v;
             let s = w2s(p, cam);
             // Dark outer rim behind the crescent so white teeth pop on bright floors.
-            let rim = w2s(p + perp * (side * 1.2), cam);
+            let rim = w2s(p + perp * (side * 1.2 * jaw), cam);
             if rim != s {
                 blend(pb, rim.0, rim.1, outline, 0.65 * fade);
             }
@@ -1677,7 +1727,7 @@ pub fn draw_gnaw_bite(pb: &mut PixelBuffer, snap: &BiteSnap, cam: Vec2) {
             blend(pb, s.0, s.1, col, (0.96 * fade).clamp(0.0, 1.0));
             // Three sharp inward-pointing white fangs on each jaw (`step = -2, 0, +2`).
             if step % 2 == 0 {
-                let fang = w2s(p - perp * (side * 1.35), cam);
+                let fang = w2s(p - perp * (side * 1.35 * jaw), cam);
                 blend(pb, fang.0, fang.1, white, (0.98 * fade).clamp(0.0, 1.0));
             }
         }
@@ -1686,7 +1736,7 @@ pub fn draw_gnaw_bite(pb: &mut PixelBuffer, snap: &BiteSnap, cam: Vec2) {
     // Crisp tiny bone-white clack spark at the bite seam when the jaws snap shut.
     if (0.42..=0.88).contains(&progress) {
         let spark = (1.0 - ((progress - 0.56).abs() / 0.32)).clamp(0.0, 1.0);
-        let sc = w2s(center + dir * 0.5, cam);
+        let sc = w2s(center + dir * 0.5 * jaw, cam);
         pb.plot(sc.0, sc.1, white);
         for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
             plot_add(pb, sc.0 + dx, sc.1 + dy, scale(white, 0.85 * spark));
@@ -2074,36 +2124,7 @@ fn draw_tail(
         // The impact star: six spikes and a dashed ring at the burst radius, so
         // the small AoE is legible in the one frame the tail lands in. It stays
         // where the tail landed while the chain recoils.
-        if l.star > 0.0 && l.radius > 0.5 {
-            let g = l.star.clamp(0.0, 1.0);
-            let c = w2s(l.point, cam);
-            let r = l.radius.max(1.5);
-            for i in 0..6 {
-                let ang = i as f32 * std::f32::consts::TAU / 6.0 + 0.26;
-                for (k, fade) in [(1.0f32, 1.0f32), (0.62, 0.5)] {
-                    let reach = r * k;
-                    plot_add(
-                        pb,
-                        c.0 + (ang.cos() * reach).round() as i32,
-                        c.1 + (ang.sin() * reach).round() as i32,
-                        scale(SPIKE_HOT, g * fade * 0.9),
-                    );
-                }
-            }
-            let dashes = ((r * 1.4) as i32).max(6);
-            for i in 0..dashes {
-                if i % 2 == 1 {
-                    continue;
-                }
-                let ang = i as f32 / dashes as f32 * std::f32::consts::TAU + 0.12;
-                plot_add(
-                    pb,
-                    c.0 + (ang.cos() * r).round() as i32,
-                    c.1 + (ang.sin() * r).round() as i32,
-                    scale(SPIKE_STEEL, g * 0.8),
-                );
-            }
-        }
+        draw_lash_impact_star(pb, l, cam);
     }
 
     // Ready halo: a soft additive spill *around* the tail, drawn after the
@@ -3841,6 +3862,7 @@ mod tests {
             dir: Vec2::new(1.0, 0.0),
             t: 0.055,
             total: 0.11,
+            scale: 1.0,
         };
         draw_gnaw_bite(&mut pb, &snap, Vec2::ZERO);
         assert!(count_lit(&pb) >= 16, "gnaw bite should draw closing tooth crescents");

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Weapons on the Growth Serum.** Every weapon still fires while you are
+  giant, and its effects now read at giant size. The mouth, eye and tail
+  origins follow the giant's pose, so bites, sprays, lobs, beads and the
+  laser leave the giant's own face. Melee, cone, ring and orbit weapons
+  reach twice as far (`GIANT_WEAPON_SCALE`), so a bite or a whip still
+  lands past the stomp ring; the Spiked Tail's burst and its impact star
+  grow with them. The weapon effects draw over the giant body instead of
+  under it. Damage is unchanged.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP

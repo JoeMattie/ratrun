@@ -93,6 +93,13 @@ pub const GNAW_BITE_REACH: [f32; 5] = [34.0, 35.5, 37.0, 38.5, 40.0];
 pub const GNAW_BITE_HALF: f32 = 0.837_758;
 /// Seconds the drawn snap lives (`components::BiteSnap`).
 pub const BITE_SECS: f32 = 0.11;
+/// Where the bite's snap anchor sits in front of the rat's centre, in px.
+/// Multiplied by the rat's [`crate::game::player::Player::weapon_pose_scale`]
+/// so a giant's jaw snaps at its own snout; the art reads the same anchor.
+pub const GNAW_MOUTH_OFFSET: f32 = 4.0;
+/// Where the drawn jaw sits in front of the snap anchor, in px (art and the
+/// render pass's emissive mark share it; the snap's own reach does not).
+pub const GNAW_JAW_OFFSET: f32 = 4.5;
 
 // ---- Cheese Spray: the slowing wedges (batch 12) ------------------------
 //

@@ -130,11 +130,15 @@ pub(super) fn fire_lava(
     damage: f32,
     cycle: f32,
     evolved: bool,
+    // Growth Serum: the mouth's distance from the rat's centre follows the
+    // drawn pose (`Player::weapon_pose_scale`), so the art and the globs start
+    // at the same point. `1.0` for an ordinary rat.
+    pose_scale: f32,
 ) {
     let rank = usize::from(rank.clamp(1, 5) - 1);
     let aim = input.aim.map(|at| at - pos).filter(|dir| dir.len_sq() > 1e-6);
     let dir = aim.unwrap_or(face).normalized();
-    let from = pos + dir * LAVA_MOUTH_OFFSET;
+    let from = pos + dir * LAVA_MOUTH_OFFSET * pose_scale;
     let dps = LAVA_DPS[rank] * (damage / LAVA_SPLASH_DAMAGE[rank]);
     let landings = LAVA_LANDINGS[rank];
     for (slot, &distance) in landings.iter().enumerate() {

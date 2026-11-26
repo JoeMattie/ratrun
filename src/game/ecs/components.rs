@@ -916,6 +916,10 @@ pub struct BiteSnap {
     pub t: f32,
     /// The bite's whole life in seconds.
     pub total: f32,
+    /// Size multiplier for the drawn jaw: the rat's
+    /// [`crate::game::player::Player::weapon_reach_scale`] when the bite fired
+    /// (`1.0` ordinary, `GIANT_WEAPON_SCALE` while giant).
+    pub scale: f32,
 }
 
 /// One **Tail Whip** swipe: a 160° crescent opposite the aim or facing.
