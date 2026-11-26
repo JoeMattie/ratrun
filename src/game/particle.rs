@@ -26,12 +26,14 @@ pub const SHOCKWAVE_CAP: usize = 48;
 /// Cap on simultaneous floor stains (O(1) eviction ring).
 pub const STAIN_CAP: usize = 220;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Shape {
     /// Crisp 1×1 pixel.
     Dot,
     /// Velocity-aligned 2..4 px streak with bright head and fading tail.
     Streak,
+    /// A dash streak with its tail length scaled along with its velocity.
+    ScaledStreak(f32),
     /// 3×3 `+` sparkle with bright core that collapses to a dot as it ages.
     Cross,
     /// Chunky 2×2 cluster with top-left highlight that shrinks to 1×1 as it cools.
@@ -369,6 +371,10 @@ impl Particles {
         shape: Shape,
         drag: f32,
     ) {
+        let jitter_scale = match shape {
+            Shape::ScaledStreak(scale) => scale,
+            _ => 1.0,
+        };
         for _ in 0..n {
             let a = rng.random_range(0.0..std::f32::consts::TAU);
             let s = speed * rng.random_range(0.3..1.0);
@@ -382,7 +388,7 @@ impl Particles {
                 Vec2::ZERO
             };
             self.push(Particle {
-                pos: pos + jitter,
+                pos: pos + jitter * jitter_scale,
                 vel: Vec2::from_angle(a) * s,
                 life: l,
                 max_life: l,
@@ -589,7 +595,12 @@ impl Particles {
         for p in &self.items {
             let x = (p.pos.x - cam.x).round() as i32;
             let y = (p.pos.y - cam.y).round() as i32;
-            if x < -6 || y < -6 || x >= bw + 6 || y >= bh + 6 {
+            let scale = match p.shape {
+                Shape::ScaledStreak(scale) => scale,
+                _ => 1.0,
+            };
+            let margin = (3.0 * scale).ceil().max(6.0) as i32;
+            if x < -margin || y < -margin || x >= bw + margin || y >= bh + margin {
                 continue;
             }
             let t = 1.0 - (p.life / p.max_life.max(1e-4)).clamp(0.0, 1.0);
@@ -599,19 +610,28 @@ impl Particles {
                 Shape::Dot => {
                     plot_mode(pb, x, y, c, p.additive);
                 }
-                Shape::Streak => {
+                Shape::Streak | Shape::ScaledStreak(_) => {
                     plot_mode(pb, x, y, c, p.additive);
                     let sp = p.vel.len();
-                    if sp > 14.0 {
+                    let base_speed = sp / scale;
+                    if base_speed > 14.0 {
                         let back = p.vel * (-1.0 / sp);
-                        let steps = if sp > 75.0 { 3 } else if sp > 38.0 { 2 } else { 1 };
+                        let steps = if base_speed > 75.0 {
+                            3.0
+                        } else if base_speed > 38.0 {
+                            2.0
+                        } else {
+                            1.0
+                        };
+                        let length = steps * scale;
                         let mut prev = (x, y);
-                        for s in 1..=steps {
+                        for s in 1..=length.ceil() as i32 {
                             let tx = (p.pos.x + back.x * s as f32 - cam.x).round() as i32;
                             let ty = (p.pos.y + back.y * s as f32 - cam.y).round() as i32;
                             if (tx, ty) != prev {
-                                let fall = 1.0 - s as f32 / (steps as f32 + 1.0);
-                                let atten = fall * fall;
+                                let fall = 1.0 - s as f32 / (length + 1.0);
+                                let cover = (length + 1.0 - s as f32).min(1.0);
+                                let atten = fall * fall * cover;
                                 plot_mode(pb, tx, ty, palette::scale(c, atten * 0.85), p.additive);
                                 prev = (tx, ty);
                             }

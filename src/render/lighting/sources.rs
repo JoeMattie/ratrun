@@ -273,6 +273,7 @@ impl LightMap {
             });
         }
 
+        let dash_scale = scene.player.buffs.draw_scale();
         // Dash cyan-white burst light.
         if scene.player.dash_active > 0.0 {
             let k = (scene.player.dash_active / crate::game::ecs::systems::player::DASH_SECS)
@@ -280,7 +281,7 @@ impl LightMap {
             self.lights.push(PointLight {
                 x: px,
                 y: py,
-                radius: 36.0,
+                radius: 36.0 * dash_scale,
                 color: (165, 224, 255),
                 intensity: (170.0 * k) as u16,
                 scatter: (42.0 * k) as u16,
@@ -434,6 +435,7 @@ impl LightMap {
                     (mid, (44, 134, 255), 28.0, 178.0, 38.0),
                     (far, (148, 212, 255), 22.0, 155.0, 32.0),
                 ] {
+                    let r = r * dash_scale;
                     let sx = p.x - cam.x;
                     let sy = p.y - cam.y;
                     if in_range(sx, sy, r) {
@@ -1785,7 +1787,7 @@ impl LightMap {
         // The Lantern owns its darkness: skip the generic 168 px presence aura
         // so Arrival, DarkTell and Death stay abyssal around the cyan lure.
         if let Some(view) = boss.lantern_view() {
-            self.gather_lantern_lights(&view.floating_body(), boss, cam, vw, vh, elapsed);
+            self.gather_lantern_lights(&view, boss, cam, vw, vh, elapsed);
             return;
         }
 

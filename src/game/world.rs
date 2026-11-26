@@ -2076,13 +2076,7 @@ impl World {
         if self.ecs.iter_entities().any(|e| e.contains::<Boss>()) {
             return false;
         }
-        let large = crate::game::collision::SizeClass::Large;
         let arena = self.boss_arena_around(self.player.pos);
-        let dock = self
-            .level
-            .tiles
-            .nearest_open_center(arena.center_world(), large, 16)
-            .unwrap_or_else(|| arena.center_world());
         let landing = if kind == BossKind::Lantern {
             super::ecs::systems::boss::lantern_arrival_beside(&self.level, self.player.pos)
         } else {
@@ -2096,6 +2090,7 @@ impl World {
         } else {
             arena
         };
+        let dock = super::ecs::systems::boss::boss_dock(&self.level, kind, arena);
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
         let id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
@@ -2118,6 +2113,7 @@ impl World {
                     seed: self.level.seed,
                 },
                 &tuning,
+                &self.player.loadout.weapons,
             );
             // The arrival's burst draws from the boss's own stream, exactly as
             // the scheduled spawn's does, so it never perturbs the run rng.
@@ -2850,7 +2846,7 @@ impl World {
 
         _s = crate::prof::scope(crate::prof::Stage::SceneActors);
         // Boss bodies in the entity pass (airborne ones go over the player).
-        self.draw_boss_body(pb, cam, false);
+        self.draw_boss_body(pb, cam, BossBodyLayer::Ground);
 
         // Friendly bullets (the rat's own). Hostile pellets are *not* drawn
         // here: they are the thing that can kill the player, so they belong to
@@ -3042,7 +3038,7 @@ impl World {
         }
 
         // The cat's airborne pounce passes visibly overhead.
-        self.draw_boss_body(pb, cam, true);
+        self.draw_boss_body(pb, cam, BossBodyLayer::Airborne);
 
         // Overhang layer: lintels over rat-holes, doorways and one-way doors,
         // so the rat is visibly ducking *under* them; then the foreground half
@@ -3052,6 +3048,7 @@ impl World {
         self.draw_wall_layer(pb, cam, WallLayer::Overhang);
         self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
+        self.draw_boss_body(pb, cam, BossBodyLayer::AboveWalls);
 
         _s = crate::prof::scope(crate::prof::Stage::SceneSmoke);
         // Brief smoke from combat and moving machinery, under bright sparks.
@@ -3060,6 +3057,32 @@ impl World {
         }
 
         _s = crate::prof::scope(crate::prof::Stage::SceneParticles);
+        let dash_scale = self.player.buffs.draw_scale();
+        let dash_track = self.ecs.resource::<DashTrack>();
+        let dash_weapon = self.player.loadout.weapons.iter().find(|w| {
+            w.kind == WeaponKind::SuperDash && !self.player.buffs.weapons_suspended()
+        });
+        let dash_sweep = dash_weapon.map(|w| {
+            let radius = super::ecs::systems::weapons_wave3b::super_dash_radius(
+                w.dash_radius(),
+                dash_track.charge,
+                dash_scale,
+            );
+            (radius, w.evolved)
+        });
+        if let Some((radius, true)) = dash_sweep {
+            if dash_track.route_life > 0.0 {
+                let life = (dash_track.route_life / super::ecs::resources::RIPCORD_SECS)
+                    .clamp(0.0, 1.0);
+                art_wave3a::draw_ripcord_lane(
+                    pb,
+                    dash_track.route(),
+                    radius,
+                    life,
+                    cam,
+                );
+            }
+        }
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
 
@@ -3099,14 +3122,8 @@ impl World {
         // Super Dash blue-white kinetic comb over the swept corridor (above
         // enemy hit-flashes so the comb teeth visibly cut through crossed bodies).
         if self.player.dash_active > 0.0 {
-            if let Some(w) = self
-                .player
-                .loadout
-                .weapons
-                .iter()
-                .find(|w| w.kind == WeaponKind::SuperDash)
-            {
-                let track = self.ecs.resource::<DashTrack>();
+            if let Some((radius, _)) = dash_sweep {
+                let track = dash_track;
                 let dir = if let Some((from, to)) = track.segment {
                     let seg = to - from;
                     if seg.len_sq() > 1e-4 {
@@ -3131,7 +3148,8 @@ impl World {
                     self.player.pos,
                     dir,
                     comb_len,
-                    w.dash_radius(),
+                    radius,
+                    dash_scale,
                     dash_frac,
                     cam,
                 );
@@ -3592,7 +3610,7 @@ impl World {
                     }
                     BossArtView::Lantern(v) => {
                         art_boss_lantern::draw_tell_overlay(
-                            pb, &v.floating_body(), cam, self.level.palette.accent,
+                            pb, &v, cam, self.level.palette.accent,
                         );
                     }
                     _ => {}
@@ -3806,16 +3824,16 @@ impl World {
         );
         // The giant is lit as a body five times the size (a slow dome), not as
         // the small rat's.
-        let scale = giant_draw_scale(self.player.buffs.giant)
-            .or_else(|| tiny_draw_scale(self.player.buffs.tiny));
-        let pen = pb.set_pen(if scale.is_some_and(|s| s > 1.5) {
+        let scale = self.player.buffs.draw_scale();
+        let pen = pb.set_pen(if scale > 1.5 {
             crate::render::lighting::giant_rat_pen()
         } else {
             crate::render::lighting::rat_pen()
         });
-        match scale {
-            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash, bob_lean, outfit),
-            None => art_rat::draw_rat_with_outfit(
+        if self.player.buffs.is_giant() || self.player.buffs.tiny > 0.0 {
+            self.draw_scaled_rat(pb, cam, scale, flash, bob_lean, outfit);
+        } else {
+            art_rat::draw_rat_with_outfit(
                 pb,
                 &self.player,
                 self.elapsed,
@@ -3824,11 +3842,11 @@ impl World {
                 lash,
                 Some(&self.whip_chain),
                 outfit,
-            ),
+            );
         }
         if self.player.buffs.collar > 0.0 {
             let face = self.player.face.normalized();
-            let neck = self.player.pos + bob_lean + face * (2.0 * scale.unwrap_or(1.0));
+            let neck = self.player.pos + bob_lean + face * (2.0 * scale);
             let (x, y) = self.w2s(neck, cam);
             let glint = if (self.elapsed * 6.0) as i32 % 3 == 0 {
                 (255, 240, 180)
@@ -3865,7 +3883,7 @@ impl World {
             if let Some((_, _, muzzle)) = newest {
                 let t = (muzzle.cycle - weapon.timer).max(0.0);
                 if t < LAVA_MUZZLE_SECS {
-                    let mouth = self.player.pos + muzzle.dir * (LAVA_MOUTH_OFFSET * scale.unwrap_or(1.0));
+                    let mouth = self.player.pos + muzzle.dir * (LAVA_MOUTH_OFFSET * scale);
                     super::art_lava::draw_breath(pb, mouth, muzzle.dir, cam, t);
                     self.light_map.mark_emissive_highlights(pb, self.w2s(mouth, cam), 8);
                 }
@@ -3878,9 +3896,8 @@ impl World {
     /// Calls [`art_rat_giant::draw_giant_rat`] directly into the scene buffer so
     /// the giant rat renders at full detail rather than as a nearest-neighbour
     /// upscale of the 1× sprite. The long weapon effects (Laser Eyes' beam, the
-    /// Spiked Tail's live whip and its impact star, the Tail Thrash arc and the
-    /// dash preview) keep their ordinary size at their own call sites, from the
-    /// same rat centre: a weapon effect is not the body.
+    /// Spiked Tail's live whip and its impact star, and the Tail Thrash arc)
+    /// keep their ordinary size from the same rat centre.
     ///
     /// Render-only: it reads the player, the frame clock and the render-only
     /// whip chain, and writes pixels.
@@ -3987,13 +4004,18 @@ impl World {
         }
     }
 
-    /// Boss entity layer. `airborne_only` selects the cat's leaping pass, which
-    /// the art draws after the player so it visibly passes overhead.
-    fn draw_boss_body(&mut self, pb: &mut PixelBuffer, cam: Vec2, airborne_only: bool) {
+    fn draw_boss_body(&mut self, pb: &mut PixelBuffer, cam: Vec2, layer: BossBodyLayer) {
         let accent = self.level.palette.accent;
         let mut query = self.ecs.query::<&Boss>();
         for boss in query.iter(&self.ecs) {
-            if boss.is_airborne() != airborne_only {
+            let body_layer = if boss.kind == BossKind::Lantern {
+                BossBodyLayer::AboveWalls
+            } else if boss.is_airborne() {
+                BossBodyLayer::Airborne
+            } else {
+                BossBodyLayer::Ground
+            };
+            if body_layer != layer {
                 continue;
             }
             if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), self.render_viewport) {
@@ -4015,7 +4037,7 @@ impl World {
                 BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
                 BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
                 BossArtView::Lantern(v) => {
-                    art_boss_lantern::draw(pb, &v.floating_body(), cam, accent);
+                    art_boss_lantern::draw(pb, &v, cam, accent);
                 }
             }
             pb.set_pen(pen);
@@ -4083,7 +4105,7 @@ impl World {
         // none.
         if let Some(steps) = self.ecs.get_resource::<PuddleSteps>() {
             for ripple in steps.ripples.iter().filter(|r| r.live) {
-                if !on_screen(self.w2s(ripple.pos, cam), RIPPLE_DRAW_MARGIN, viewport) {
+                if !on_screen(self.w2s(ripple.pos, cam), RIPPLE_DRAW_MARGIN * ripple.scale, viewport) {
                     continue;
                 }
                 art_puddle::draw_ripple(
@@ -4091,6 +4113,7 @@ impl World {
                     self.w2s(ripple.pos, cam),
                     ripple.age,
                     ripple.big,
+                    ripple.scale,
                 );
             }
         }
@@ -4475,6 +4498,13 @@ fn carried_player(center: Vec2, carried: Loadout) -> Player {
     player
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BossBodyLayer {
+    Ground,
+    Airborne,
+    AboveWalls,
+}
+
 /// Which layer of the wall art [`World::draw_wall_layer`] is drawing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WallLayer {
@@ -4503,20 +4533,6 @@ const RIPPLE_DRAW_MARGIN: f32 = 26.0;
 /// How many on-screen puddles `draw_puddles` lets each other know about (the
 /// shared shoreline of merged puddles). A 2x view of the Sewer holds about 20.
 const PUDDLES_IN_VIEW: usize = 48;
-
-pub use crate::game::ecs::systems::powerups::giant_draw_scale;
-
-fn tiny_draw_scale(buff_left: f32) -> Option<f32> {
-    use crate::game::ecs::systems::powerups as p;
-    if buff_left <= 0.0 {
-        return None;
-    }
-    let elapsed = (p::SHRINK_SECS - buff_left).max(0.0);
-    let ramp = elapsed.min(buff_left).min(p::SHRINK_RAMP_SECS) / p::SHRINK_RAMP_SECS;
-    let blink = buff_left <= p::SHRINK_BLINK_SECS && (buff_left * 6.0) as i32 % 2 == 0;
-    let target = if blink { p::SHRINK_BLINK_SCALE } else { p::SHRINK_SCALE };
-    Some(1.0 - (1.0 - target) * ramp)
-}
 
 /// Fraction of max HP a nest revive (`meta::Track::Revive`) stands the rat back
 /// up with. Half a bar is enough to run, not enough to ignore the mistake.
@@ -5361,6 +5377,7 @@ mod zoom_tests {
     #[test]
     fn the_giant_grows_holds_blinks_and_never_exceeds_five() {
         use crate::game::ecs::systems::powerups as p;
+        use crate::game::ecs::systems::powerups::giant_draw_scale;
         assert_eq!(giant_draw_scale(0.0), None, "no serum, no giant");
         assert_eq!(giant_draw_scale(p::GROWTH_SECS), Some(1.0), "it starts at life size");
         // The clock is f32, so the phase boundaries land within a rounding error
@@ -5400,8 +5417,14 @@ mod zoom_tests {
     #[test]
     fn shrink_draught_draw_scale_eases_and_blinks() {
         use crate::game::ecs::systems::powerups as p;
-        let scale = |left| tiny_draw_scale(left).unwrap();
-        assert_eq!(tiny_draw_scale(0.0), None);
+        let scale = |tiny| {
+            crate::game::player::Buffs {
+                tiny,
+                ..Default::default()
+            }
+            .draw_scale()
+        };
+        assert_eq!(scale(0.0), 1.0);
         assert_eq!(scale(p::SHRINK_SECS), 1.0);
         let halfway = scale(p::SHRINK_SECS - p::SHRINK_RAMP_SECS * 0.5);
         assert!((halfway - (1.0 + p::SHRINK_SCALE) * 0.5).abs() < 1e-5);

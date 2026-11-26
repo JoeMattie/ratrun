@@ -183,7 +183,7 @@ use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::game::particle::vfx;
-use crate::game::weapon::WeaponKind;
+use crate::game::weapon::{Weapon, WeaponKind};
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
@@ -381,6 +381,25 @@ impl BossKind {
 
     pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
         self.base_hp() * self.hp_scale_for(difficulty) * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
+    }
+
+    #[cfg(test)]
+    fn encounter_hp(self, difficulty: usize, weapons: &[Weapon]) -> f32 {
+        self.scale_encounter_hp(difficulty, weapons, self.hp_pool(difficulty))
+    }
+
+    fn scale_encounter_hp(self, difficulty: usize, weapons: &[Weapon], hp: f32) -> f32 {
+        if self == BossKind::Lantern && difficulty > 0
+            && weapons.iter().filter(|w| {
+                w.is_max() && matches!(
+                    w.kind, WeaponKind::SqueakNova | WeaponKind::SporeOrbit | WeaponKind::AcidRain
+                )
+            }).count() >= art_boss_lantern::BOSS_AREA_KIT_WEAPONS
+        {
+            hp * art_boss_lantern::BOSS_AREA_KIT_HP_MULT
+        } else {
+            hp
+        }
     }
 
     /// Single-circle collision radius used for movement and contact.
@@ -1922,12 +1941,13 @@ impl Boss {
         }
         let radius = self.kind.body_radius();
         let next = self.pos + step;
-        let fits = if self.kind == BossKind::Lantern {
-            lantern::head_path_fits(level, self.pos, next)
-        } else {
-            level.tiles.circle_clear(next, radius, SizeClass::Large)
-        };
-        if fits {
+        if self.kind == BossKind::Lantern {
+            let end = lantern::clamp_to_map(level, next, radius);
+            let moved = self.pos.dist(end);
+            self.pos = end;
+            return moved;
+        }
+        if level.tiles.circle_clear(next, radius, SizeClass::Large) {
             self.pos += step;
             granted
         } else {
@@ -2730,7 +2750,7 @@ impl<'a> BossContext<'a> {
         } else {
             Vec2::ZERO
         };
-        if self.los_clear(boss.pos, self.player_pos, radius) {
+        if boss.kind == BossKind::Lantern || self.los_clear(boss.pos, self.player_pos, radius) {
             return direct;
         }
         let dir = self.flow_dir(boss.pos);
@@ -3155,8 +3175,9 @@ pub trait BossController: Send + Sync {
 // Shared movement / hazard resolution
 // ============================================================================
 
-/// Move a large body toward `dir` at `speed`, sliding along walls. Returns
-/// true when the full step fit.
+/// Move a large body toward `dir` at `speed`, sliding along walls.
+/// The Lantern floats and clips its step to the map perimeter.
+/// Returns true for a full step or a floating step that made progress.
 pub fn move_boss(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) -> bool {
     // The Sonic Squeak's brief slow: every controller moves through here, so one
     // multiplier covers the cat's stalk, the broom's steps and the mower's
@@ -3166,26 +3187,25 @@ pub fn move_boss(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) 
         return false;
     }
     let radius = boss.kind.body_radius();
-    let fits = |from, to| {
-        if boss.kind == BossKind::Lantern {
-            lantern::head_path_fits(ctx.level, from, to)
-        } else {
-            ctx.footprint_fits(to, radius)
-        }
-    };
     let next = boss.pos + step;
-    if fits(boss.pos, next) {
+    if boss.kind == BossKind::Lantern {
+        let end = lantern::clamp_to_map(ctx.level, next, radius);
+        let moved = end != boss.pos;
+        boss.pos = end;
+        return moved;
+    }
+    if ctx.footprint_fits(next, radius) {
         boss.pos = next;
         return true;
     }
     // Axis slide: try x then y so a body grazes a wall instead of sticking.
     let try_x = Vec2::new(step.x, 0.0);
-    if try_x.len_sq() > 0.0 && fits(boss.pos, boss.pos + try_x) {
+    if try_x.len_sq() > 0.0 && ctx.footprint_fits(boss.pos + try_x, radius) {
         boss.pos += try_x;
         return false;
     }
     let try_y = Vec2::new(0.0, step.y);
-    if try_y.len_sq() > 0.0 && fits(boss.pos, boss.pos + try_y) {
+    if try_y.len_sq() > 0.0 && ctx.footprint_fits(boss.pos + try_y, radius) {
         boss.pos += try_y;
         return false;
     }
@@ -3715,7 +3735,7 @@ fn emit_cues(
                 );
             }
             BossCue::MegaRatDash => {
-                vfx::emit_dash_start(particles, rng, boss.pos, boss.facing);
+                vfx::emit_dash_start(particles, rng, boss.pos, boss.facing, 1.0);
             }
             BossCue::MegaRatCall => {
                 vfx::emit_boss_spawn(particles, rng, boss.pos, level_blood());
@@ -3913,14 +3933,23 @@ pub(crate) struct Arrival {
 /// ([`boss_spawn_system`]) and the console's `boss <kind> here`
 /// (`World::force_boss_here`), so the two cannot drift apart. The caller picks
 /// the place, emits the arrival burst from `fight.rng`, and spawns the body.
-pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival, tuning: &crate::tuning::Tuning) -> Boss {
+pub(crate) fn open_fight(
+    fight: &mut BossFight,
+    a: Arrival,
+    tuning: &crate::tuning::Tuning,
+    weapons: &[Weapon],
+) -> Boss {
     let hunting = !a.arena.contains_world(a.rat);
-    // The director's curve freezes at BOSS_TIME; the boss spawns then.
     let row = &tuning.bosses.kinds[&a.kind];
-    let scale = if a.difficulty == 0 { row.first_sector_hp_scale } else { row.hp_scale };
+    let scale = if a.difficulty == 0 {
+        row.first_sector_hp_scale
+    } else {
+        row.hp_scale
+    };
     let hp = row.base_hp * scale
         * tuning.director.boss_hp_mult_for(a.difficulty, &tuning.bosses.build_level)
         * tuning.bosses.hp_mult;
+    let hp = a.kind.scale_encounter_hp(a.difficulty, weapons, hp);
     let mut boss = Boss::new(a.kind, a.pos, hp, a.arena, a.dock, hunting);
     boss.id = a.id;
     boss.facing = (a.rat - a.pos).normalized();
@@ -3989,12 +4018,6 @@ pub fn boss_spawn_system(
     // The fight happens where the rat is, and it is a rectangle rather than a
     // room: the nominal fight size, clamped to the map and centred on the rat.
     let arena = level.fight_rect_around(player.pos);
-    // The dock (the mower's charging pad) sits at the rectangle's centre, on
-    // the nearest cell a large body fits in.
-    let dock = level
-        .tiles
-        .nearest_open_center(arena.center_world(), SizeClass::Large, 16)
-        .unwrap_or_else(|| arena.center_world());
     // Out of sight, the way the horde arrives: outside the widest view and on
     // the horde's connected map. The draw comes from the boss's own stream
     // (`BossRng::for_run`, the same stream `open_fight` installs), so the run's
@@ -4006,7 +4029,7 @@ pub fn boss_spawn_system(
     let mut scratch = SpawnScratch::default();
     let spawn_point_reachable = crate::game::ecs::systems::spawn::spawn_point_reachable;
     let pos = if kind == BossKind::Lantern {
-        let Some(pos) = lantern_scheduled_landing(&mut boss_rng, &level, &player, viewport.0, &mut scratch) else {
+        let Some(pos) = lantern_scheduled_landing(&mut boss_rng, &level, &player, viewport.0) else {
             // Retry when the rat moves rather than materialising in view.
             due.claimed = false;
             override_kind.0 = Some(kind);
@@ -4024,6 +4047,7 @@ pub fn boss_spawn_system(
     } else {
         arena
     };
+    let dock = boss_dock(&level, kind, arena);
     let boss = open_fight(
         &mut fight,
         Arrival {
@@ -4037,12 +4061,21 @@ pub fn boss_spawn_system(
             seed: level.seed,
         },
         &tuning,
+        &player.loadout.weapons,
     );
     let accent = level.palette.accent;
     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
     shake.amount = shake.amount.max(14.0);
     sfx.0.push(Sfx::Boss);
     commands.spawn((boss, next_spawn_id.take()));
+}
+
+pub(crate) fn boss_dock(level: &Level, kind: BossKind, arena: TileRect) -> Vec2 {
+    let center = arena.center_world();
+    if kind == BossKind::Lantern {
+        return center;
+    }
+    level.tiles.nearest_open_center(center, SizeClass::Large, 16).unwrap_or(center)
 }
 
 /// Where a boss arrives when the horde's out-of-sight placement found no ring
@@ -4101,56 +4134,36 @@ fn lantern_scheduled_landing(
     level: &Level,
     player: &Player,
     viewport: Vec2,
-    scratch: &mut SpawnScratch,
 ) -> Option<Vec2> {
-    use crate::game::ecs::systems::spawn::spawn_point_reachable;
-    let margin = Vec2::new(LANTERN_ARRIVAL_MARGIN, LANTERN_ARRIVAL_MARGIN);
-    let hidden = |p| lantern_arrival_hidden(level, player.pos, viewport, p);
-    for _ in 0..8 {
-        if let Some(pos) = spawn_point_reachable(rng, level, player, viewport + margin, scratch)
-            .filter(|&pos| hidden(pos) && lantern::arrival_body_fits(level, pos, (player.pos - pos).normalized()))
-        {
-            return Some(pos);
-        }
-    }
-    lantern_room_landing(level, player.pos, hidden)
-}
-
-/// Closest legal room cell to the rat. A large-class tile alone does not
-/// guarantee that the head or the trailing body fits the room.
-fn lantern_room_landing(level: &Level, rat: Vec2, allowed: impl Fn(Vec2) -> bool) -> Option<Vec2> {
-    let mut best = None;
-    let mut best_dist = f32::INFINITY;
-    let clearance = art_boss_lantern::HEAD_RADIUS + PLAYER_RADIUS;
-    for room in &level.rooms {
-        for (x, y) in room.rect.cells() {
-            let pos = collision::TileMap::tile_rect(x, y).center();
-            let dist = pos.dist_sq(rat);
-            if dist >= best_dist || dist < clearance * clearance
-                || !allowed(pos) || !lantern::arrival_body_fits(level, pos, (rat - pos).normalized())
+    use crate::game::ecs::systems::spawn::ring_radius;
+    let radius = ring_radius(viewport + Vec2::splat(LANTERN_ARRIVAL_MARGIN));
+    let angle = rng.random_range(0.0..std::f32::consts::TAU);
+    for distance in [radius, radius * 1.45, radius * 2.0] {
+        for spoke in 0..24 {
+            let dir = Vec2::from_angle(angle + spoke as f32 * std::f32::consts::TAU / 24.0);
+            let pos = player.pos + dir * distance;
+            if lantern_arrival_hidden(level, player.pos, viewport, pos)
+                && lantern::arrival_body_fits(level, pos, -dir)
             {
-                continue;
+                return Some(pos);
             }
-            best_dist = dist;
-            best = Some(pos);
         }
     }
-    best
+    None
 }
 
-/// Place a manual Lantern on sand with room for its full silhouette.
+/// Place a manual Lantern beside the rat, respecting the map perimeter.
 pub(crate) fn lantern_arrival_beside(level: &Level, rat: Vec2) -> Option<Vec2> {
-    for distance in [48.0, 44.0, 52.0, 40.0, 56.0, 60.0] {
+    for distance in [144.0, 100.0, 64.0] {
         for i in 0..16 {
             let dir = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0);
-            let p = rat + dir * (distance * art_boss_lantern::BODY_SCALE);
+            let p = rat + dir * distance;
             if lantern::arrival_body_fits(level, p, -dir) {
                 return Some(p);
             }
         }
     }
-    lantern_room_landing(level, rat, |_| true)
-        .or_else(|| nearest_body_clear(level, rat, art_boss_lantern::HEAD_RADIUS, SizeClass::Large, 24, true))
+    None
 }
 
 /// Apply player damage to the boss through its art-defined hit shapes.
@@ -4442,20 +4455,15 @@ fn rat_left_the_fight(arena: TileRect, rat: Vec2) -> bool {
 /// of that test matter: the boss and the rat can be 50 px apart on opposite
 /// sides of a wall (the stalemate this exists to break), and a line through a
 /// rat-hole is not a walk. Falls back to the closest clear cell to the rat.
-fn rejoin_spot(level: &Level, player: Vec2, radius: f32, lantern: bool) -> Option<Vec2> {
+fn rejoin_spot(level: &Level, player: Vec2, radius: f32) -> Option<Vec2> {
     let class = SizeClass::Large;
     for step in 0..24 {
         let angle = step as f32 * std::f32::consts::TAU / 24.0;
         for r in REJOIN_RADII {
             let p = player + Vec2::from_angle(angle) * r;
-            let fits = if lantern {
-                r > radius + PLAYER_RADIUS && lantern::head_fits(level, p)
-                    && level.tiles.segment_hit(p, player, art_boss_lantern::BULB_RADIUS).is_none()
-            } else {
-                level.tiles.circle_clear(p, radius, class)
-                    && walkable_line(level, p, player, radius, class)
-            };
-            if fits {
+            if level.tiles.circle_clear(p, radius, class)
+                && walkable_line(level, p, player, radius, class)
+            {
                 return Some(p);
             }
         }
@@ -4464,7 +4472,7 @@ fn rejoin_spot(level: &Level, player: Vec2, radius: f32, lantern: bool) -> Optio
     // walk to (a maze pocket, behind a rat-hole). Still bring the boss *near*
     // it — the siege rule below breaks the last wall — but never into one.
     let p = player + Vec2::new(REJOIN_RADII[0], 0.0);
-    nearest_body_clear(level, p, radius, class, 24, lantern)
+    nearest_body_clear(level, p, radius, class, 24)
 }
 
 /// The nearest cell centre to `p` where a body of `radius` actually fits (a
@@ -4476,7 +4484,6 @@ fn nearest_body_clear(
     radius: f32,
     class: SizeClass,
     max_cells: i32,
-    lantern: bool,
 ) -> Option<Vec2> {
     let (pcx, pcy) = collision::cell_of(p);
     for r in 0..=max_cells {
@@ -4490,12 +4497,7 @@ fn nearest_body_clear(
                     continue;
                 }
                 let centre = Vec2::new((cx as f32 + 0.5) * collision::TILE_F, (cy as f32 + 0.5) * collision::TILE_F);
-                let fits = if lantern {
-                    lantern::head_fits(level, centre)
-                } else {
-                    level.tiles.circle_clear(centre, radius, class)
-                };
-                if fits {
+                if level.tiles.circle_clear(centre, radius, class) {
                     return Some(centre);
                 }
             }
@@ -4580,10 +4582,7 @@ fn recentre_the_fight(boss: &mut Boss, level: &Level, rat: Vec2) {
     } else {
         level.fight_rect_around(rat)
     };
-    boss.dock = level
-        .tiles
-        .nearest_open_center(boss.arena.center_world(), SizeClass::Large, 16)
-        .unwrap_or_else(|| boss.arena.center_world());
+    boss.dock = boss_dock(level, boss.kind, boss.arena);
     boss.recentre_cd = RECENTRE_COOLDOWN;
 }
 
@@ -4631,16 +4630,10 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         return;
     }
     let radius = boss.kind.body_radius();
-    let has_leap_lane = || {
-        if boss.kind == BossKind::Lantern {
-            lantern::head_path_fits(ctx.level, boss.pos, ctx.player_pos)
-        } else {
-            walkable_line(ctx.level, boss.pos, ctx.player_pos, radius, SizeClass::Large)
-        }
-    };
     if boss.leap_cd <= 0.0
         && !boss.kind.own_gap_closer()
-        && has_leap_lane()
+        && (boss.kind == BossKind::Lantern
+            || walkable_line(ctx.level, boss.pos, ctx.player_pos, radius, SizeClass::Large))
     {
         boss.leap_t = LEAP_SECS;
         boss.leap_cd = LEAP_COOLDOWN;
@@ -4847,14 +4840,10 @@ pub fn boss_update_system(
         // cannot route back (or cannot outrun a kiting rat) must not be able
         // to strand the level. See [`RELOCATE_AFTER_SECS`].
         let to_player = player.pos - boss.pos;
-        let sight_radius = if boss.kind == BossKind::Lantern {
-            art_boss_lantern::BULB_RADIUS
-        } else {
-            boss.kind.body_radius()
-        };
-        let no_los = level
+        let floats = boss.kind == BossKind::Lantern;
+        let no_los = !floats && level
             .tiles
-            .segment_hit(boss.pos, player.pos, sight_radius)
+            .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
             .is_some();
         // A boss that is close enough and can see the rat but cannot *move*
         // (wedged on a wall jamb, or with no attack whose footprint fits where
@@ -4870,7 +4859,7 @@ pub fn boss_update_system(
             fight.since_sample = 0.0;
         }
         let stuck = fight.stuck;
-        if to_player.len() > REJOIN_DIST || no_los || stuck {
+        if !floats && (to_player.len() > REJOIN_DIST || no_los || stuck) {
             boss.lost += dt;
             // Only out of the neutral beat. The timer keeps running through an
             // attack, but the move itself waits for it to finish: relocating a
@@ -4881,21 +4870,13 @@ pub fn boss_update_system(
             // chain returns to the neutral state, so the rule still cannot
             // strand a level; it just lands on the first neutral tick.
             if boss.lost >= RELOCATE_AFTER_SECS && boss.is_neutral() {
-                if let Some(spot) = rejoin_spot(
-                    &level,
-                    player.pos,
-                    boss.kind.body_radius(),
-                    boss.kind == BossKind::Lantern,
-                ) {
+                if let Some(spot) = rejoin_spot(&level, player.pos, boss.kind.body_radius()) {
                     boss.lost = 0.0;
                     boss.pos = spot;
                     boss.target = player.pos;
                     let to = player.pos - spot;
                     if to.len_sq() > 1e-6 {
                         boss.facing = to.normalized();
-                    }
-                    if boss.kind == BossKind::Lantern {
-                        lantern::relocate(&mut boss, &level);
                     }
                     let accent = level.palette.accent;
                     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, spot, accent);
@@ -4932,8 +4913,8 @@ pub fn boss_update_system(
         // seconds is the condition the siege was written for, whether or not
         // the pacing looks like motion.
         let near = to_player.len() < 220.0;
-        let walled_off =
-            !walkable_line(&level, boss.pos, player.pos, boss.kind.body_radius(), SizeClass::Large);
+        let walled_off = !floats
+            && !walkable_line(&level, boss.pos, player.pos, boss.kind.body_radius(), SizeClass::Large);
         if near && walled_off {
             fight.siege += dt;
             if fight.siege >= SIEGE_AFTER_SECS {

@@ -28,6 +28,7 @@ use super::collision::TileMap;
 use super::ecs::components::{BiteSnap, Lash, LashPhase, WhipCrack};
 use super::ecs::constants::PLAYER_SUBSTEP;
 use super::ecs::systems::player::{dash_duration_from, DASH_BOOST};
+use super::ecs::systems::weapons_wave3b::super_dash_radius;
 use super::level::Theme;
 use super::player::Player;
 use super::weapon::{
@@ -1320,7 +1321,8 @@ pub fn draw_dash_charge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam
         return;
     }
     let centre = w2s(player.pos, cam);
-    draw_charge_ring(pb, centre, player.dash_charge, elapsed);
+    let scale = player.buffs.draw_scale();
+    draw_charge_ring(pb, centre, player.dash_charge, elapsed, scale);
 }
 
 /// The **Super Dash charge ring** itself: the on-rat read-out closes into a
@@ -1330,7 +1332,13 @@ pub fn draw_dash_charge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam
 /// At a full meter the lit pips pulse, which is the "held long enough" cue in
 /// the corner of the eye — the simulated meter keeps filling (it caps at 1.0)
 /// and never fires on its own, so the pulse is information, not a countdown.
-fn draw_charge_ring(pb: &mut PixelBuffer, centre: (i32, i32), charge: f32, elapsed: f32) {
+pub(super) fn draw_charge_ring(
+    pb: &mut PixelBuffer,
+    centre: (i32, i32),
+    charge: f32,
+    elapsed: f32,
+    scale: f32,
+) {
     let charge = charge.clamp(0.0, 1.0);
     let full = charge >= 1.0;
     let pulse = if full {
@@ -1338,13 +1346,15 @@ fn draw_charge_ring(pb: &mut PixelBuffer, centre: (i32, i32), charge: f32, elaps
     } else {
         1.0
     };
-    for i in 0..CHARGE_PIPS {
-        let t = i as f32 / CHARGE_PIPS as f32;
+    let radius = GAUGE_RADIUS * scale;
+    let pips = (CHARGE_PIPS as f32 * scale).round() as i32;
+    for i in 0..pips {
+        let t = i as f32 / pips as f32;
         // Clockwise from the top, so the fill reads like every other meter.
         let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * t;
         let dir = Vec2::from_angle(a);
-        let x = centre.0 + (dir.x * GAUGE_RADIUS).round() as i32;
-        let y = centre.1 + (dir.y * GAUGE_RADIUS).round() as i32;
+        let x = centre.0 + (dir.x * radius).round() as i32;
+        let y = centre.1 + (dir.y * radius).round() as i32;
         if t < charge {
             let colour = if full { CHARGE_FULL } else { CHARGE_COLOR };
             blend(pb, x, y, colour, (0.45 + 0.55 * pulse).min(1.0));
@@ -1374,7 +1384,13 @@ pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap,
     if !player.dash_charging {
         return;
     }
+    let Some(weapon) = player.loadout.weapons.iter().find(|w| w.kind == WeaponKind::SuperDash)
+    else {
+        return;
+    };
     let charge = player.dash_charge.clamp(0.0, 1.0);
+    let scale = player.buffs.draw_scale();
+    let sweep_radius = super_dash_radius(weapon.dash_radius(), charge, scale);
     let face = if player.face.len_sq() > 1e-4 {
         player.face.normalized()
     } else {
@@ -1399,9 +1415,10 @@ pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap,
             blend(pb, s.0, s.1, PREVIEW_COLOR, alpha + 0.18);
             break;
         }
-        if d >= 8.0 {
-            let s = w2s(p, cam);
-            blend(pb, s.0, s.1, PREVIEW_COLOR, alpha);
+        if d >= 8.0 * scale {
+            super::art_wave3a::draw_dash_lane_slice(
+                pb, p - cam, face.perp(), sweep_radius, PREVIEW_COLOR, alpha,
+            );
         }
         d += PLAYER_SUBSTEP;
     }
@@ -2961,6 +2978,27 @@ mod tests {
         let mut p = Player::new(pos, WeaponKind::Gnaw);
         p.face = Vec2::from_angle(ang);
         p
+    }
+
+    #[test]
+    fn dash_charge_ring_follows_the_size_buff() {
+        use crate::game::ecs::systems::powerups::{GROWTH_SECS, SHRINK_SECS};
+
+        let radius = |giant, tiny| {
+            let mut player = rat(Vec2::splat(64.0), 0.0);
+            player.buffs.giant = giant;
+            player.buffs.tiny = tiny;
+            player.dash_charging = true;
+            player.dash_charge = 0.5;
+            let mut pb = PixelBuffer::new(128, 128);
+            draw_dash_charge(&mut pb, &player, 0.0, Vec2::ZERO);
+            let top = (0..64).find(|&y| pb.pixel_at(64, y) != (0, 0, 0)).unwrap();
+            (64 - top) as f32
+        };
+        let normal = radius(0.0, 0.0);
+        assert_eq!(normal, 10.0);
+        assert!((radius(GROWTH_SECS - 1.0, 0.0) - normal * 5.0).abs() <= 0.5);
+        assert!((radius(0.0, SHRINK_SECS - 1.0) - normal * 0.35).abs() <= 0.5);
     }
 
     /// A rat that owns a Tail Thrash at `charge` (0 = just fired, 1 = ready).

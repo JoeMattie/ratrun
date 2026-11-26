@@ -1432,8 +1432,8 @@ pub fn ripcord_system(
     // The cord quotes the dash it came from, charge and all: a charged dash's
     // longer route is joined by a wider, harder-hitting cord.
     let charge = track.charge.clamp(0.0, 1.0);
-    let radius = weapon.dash_radius()
-        * (1.0 + crate::game::ecs::systems::weapons_wave3b::SUPER_DASH_RADIUS_PER_CHARGE * charge);
+    let scale = player.buffs.draw_scale();
+    let radius = super::weapons_wave3b::super_dash_radius(weapon.dash_radius(), charge, scale);
     let dmg = weapon.damage()
         * player.damage_mult()
         * player.loadout.weapon_damage_mult(weapon.kind)
@@ -1504,7 +1504,7 @@ pub fn ripcord_system(
                 );
                 slid = true;
             }
-            vfx::emit_ripcord_hit(&mut particles, &mut rng.0, pos, back, killed);
+            vfx::emit_ripcord_hit(&mut particles, &mut rng.0, pos, back, killed, scale);
         }
 
         // Bosses take the damage only (design §3).
@@ -1543,6 +1543,7 @@ pub fn ripcord_system(
                     boss.pos,
                     boss.pos - start,
                     killed,
+                    scale,
                 );
                 damage_numbers.record(
                     boss.id,
@@ -1575,12 +1576,12 @@ pub fn ripcord_system(
     // Draw the cord while it is taut, then let the fuse run out. The legs are
     // the dash's own route, so the cord is exactly what was travelled.
     let frac = (track.route_life / RIPCORD_SECS).clamp(0.0, 1.0);
-    vfx::emit_ripcord_cord(&mut particles, &mut rng.0, track.route(), frac, start);
+    vfx::emit_ripcord_cord(&mut particles, &mut rng.0, track.route(), frac, start, scale);
     if taut {
         track.route_life -= dt;
         if track.route_life <= 0.0 {
             // The fuse burns out: the cord snaps back to the rat's tail.
-            vfx::emit_ripcord_snap(&mut particles, &mut rng.0, track.route(), start);
+            vfx::emit_ripcord_snap(&mut particles, &mut rng.0, track.route(), start, scale);
             track.clear_route();
         }
     }

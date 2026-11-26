@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.4.1 (2026-11-26)
+
+- The Lantern swims over walls, stays opaque when it dives, and strikes more
+  often. Its phase shifts are shorter.
+- Growth Serum widens Super Dash and Ripcord hits. Dash effects grow with you.
+- Foreground shadows can enter at the edge of the screen before the objects
+  that cast them.
+- The spectator wall can run at uncapped MAX speed. Use `--speed max` to start
+  there and `--skill mixed` to rotate through Expert, Skilled and Casual.
+
 ## 0.4.0 (2026-11-26)
 
 ### New

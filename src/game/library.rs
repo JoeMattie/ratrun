@@ -1314,8 +1314,8 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
         BossKind::Lantern => (
             "Outfall · 15:00",
             "Fishes with the house current. Let the real lure snap, then strike the cheek. \
-             A darkened lamp can send out a decoy. Shooting it can draw a leap down the \
-             marked lane. Once the real lamp drops, dash across the cone to escape the \
+             A darkened lamp can send out a decoy. When it disappears, watch for a leap \
+             down the marked lane. Once the real lamp drops, dash across the cone to escape the \
              pull and keep clear of the mouth.",
         ),
     }
@@ -2206,7 +2206,13 @@ fn boss_facts(k: BossKind, f: &mut Facts) {
     const HP_REF: f32 = 30_000.0;
     let stage = crate::game::campaign::theme_stage(boss_theme(k));
     let hp = k.hp_pool(stage);
-    f.push_bar("HIT POINTS", format!("{hp:.0}"), hp / HP_REF);
+    let hp_text = if k == BossKind::Lantern {
+        let high = hp * crate::game::art_boss_lantern::BOSS_AREA_KIT_HP_MULT;
+        format!("{hp:.0}–{high:.0}")
+    } else {
+        format!("{hp:.0}")
+    };
+    f.push_bar("HIT POINTS", hp_text, hp / HP_REF);
     f.push("CONTACT", format!("{:.0}", k.contact_damage()));
     f.push("PHASES", format!("{}", k.phase_for(1.0).max(3)));
     // (No "DIES IN" row: it printed the death animation's length, which read

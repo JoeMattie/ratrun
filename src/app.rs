@@ -8258,19 +8258,23 @@ mod tests {
             "outfall-seabed" | "outfall-diver-swim" | "outfall-diver-float"
             | "outfall-swimmers" | "outfall-pot-set" | "outfall-pot-closing"
             | "outfall-pot-shut" | "outfall-surge-active" | "w6-laundry"
-            | "w6-giant-hole" | "w6-long-dash" | "w6-superdash-full" => {
+            | "w6-giant-hole" | "w6-long-dash" | "w6-superdash-full"
+            | "w8-giant-charge" | "w8-giant-release" | "w8-shadow" => {
                 use crate::game::art_crabpot::CrabPotState;
                 use crate::game::collision::{SizeClass, TileMap};
                 use crate::game::ecs::resources::DashHold;
                 use crate::game::level::PlantKind;
                 let theme = match target.as_str() {
                     "w6-laundry" => Theme::Laundry,
-                    t if t.starts_with("w6-") => Theme::Sewer,
+                    t if t.starts_with("w6-") || t.starts_with("w8-") => Theme::Sewer,
                     _ => Theme::Outfall,
                 };
                 hh.app.start_practice(theme);
                 hh.frame(&[KeyCode::Enter]);
                 hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                if target.starts_with("w8-giant-") {
+                    hh.app.set_foreground(false);
+                }
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
                 w.clear_enemies();
@@ -8331,6 +8335,7 @@ mod tests {
                         w.level.objects.crab_pots = vec![pot];
                     }
                     "outfall-surge-active" => w.elapsed = 9.50,
+                    "w8-shadow" => {},
                     "w6-laundry" => {
                         use crate::game::level::PropKind;
                         let (bank, pile) = w.level.props.iter()
@@ -8359,7 +8364,7 @@ mod tests {
                         w.hitboxes = true;
                         w.cam_focus = Some((hole.pos + rat) * 0.5);
                     }
-                    "w6-long-dash" | "w6-superdash-full" => {
+                    "w6-long-dash" | "w6-superdash-full" | "w8-giant-charge" | "w8-giant-release" => {
                         let hall = w.level.largest_hall().unwrap().rect;
                         let (at, dir) = hall.cells().find_map(|(x, y)| {
                             let at = TileMap::tile_rect(x, y).center();
@@ -8369,18 +8374,34 @@ mod tests {
                         }).expect("128 px open lane");
                         w.player.pos = at;
                         w.player.face = dir;
-                        w.cam_focus = Some(at + dir * if target == "w6-long-dash" { 24.0 } else { 56.0 });
+                        let camera_lead = match target.as_str() {
+                            "w6-long-dash" | "w8-giant-charge" => 24.0,
+                            _ => 56.0,
+                        };
+                        w.cam_focus = Some(at + dir * camera_lead);
                         if target == "w6-long-dash" {
                             for i in 0..17 {
                                 w.update(dt, dir, i == 0);
                             }
                         } else {
+                            if target.starts_with("w8-") {
+                                w.player.buffs.giant = 16.0;
+                            }
                             w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
                             for i in 0..56 {
                                 w.update_with_dash_hold(
                                     dt, Vec2::ZERO, false, false, Some(at + dir * 140.0),
                                     DashHold { down: i == 0, held: true, up: false },
                                 );
+                            }
+                            if target == "w8-giant-release" {
+                                for i in 0..5 {
+                                    w.update_with_dash_hold(
+                                        dt, dir, false, false, Some(at + dir * 140.0),
+                                        DashHold { down: false, held: false, up: i == 0 },
+                                    );
+                                }
+                                w.cam_focus = Some(w.player.pos);
                             }
                         }
                     }
@@ -8475,16 +8496,33 @@ mod tests {
                 }
                 assert!(w.force_boss_here(BossKind::Lantern));
                 let boss = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let strip_frame = scene.strip_prefix("strip-")
+                    .map(|frame| frame.parse::<usize>().expect("Lantern strip frame number"));
+                let wall_scene = scene == "wall" || strip_frame.is_some();
+                if wall_scene {
+                    use crate::game::art_walls::{WallAxis, WallKind};
+                    use crate::game::collision::{cell_of, TileKind};
+
+                    let (x, y) = cell_of(w.player.pos + Vec2::new(92.0, 0.0));
+                    w.level.tiles.fill_cells(x - 7, y - 5, 14, 11, TileKind::Open);
+                    w.level.tiles.fill_cells(x, y - 5, 1, 11, TileKind::Wall(WallKind::Solid));
+                    // The lintel crosses the track to expose the overhang draw order.
+                    w.level.tiles.set(x, y, TileKind::Wall(WallKind::RatHole { axis: WallAxis::Horizontal }));
+                    w.level.tiles.rebuild_masks();
+                    w.shake_scale = 0.0;
+                }
                 let start_frames = match scene {
                     "arrival" => 45,
                     "body" | "swim" => 118,
+                    "wall" => 120,
+                    _ if wall_scene => 120 + [0, 20, 40, 60, 82][strip_frame.unwrap()],
                     _ => 150,
                 };
                 for _ in 0..start_frames {
                     w.update(1.0 / 60.0, Vec2::ZERO, false);
                 }
                 let hp = match scene {
-                    "decoy" | "dark" | "snuffed" => Some(0.60),
+                    "decoy" | "dark" | "lunge" | "submerge" | "snuffed" => Some(0.60),
                     "gape" | "stamp" | "death" => Some(0.30),
                     _ => None,
                 };
@@ -8492,7 +8530,7 @@ mod tests {
                     let mut body = w.ecs.get_mut::<Boss>(boss).unwrap();
                     body.hp = body.max_hp * hp;
                 }
-                if scene != "arrival" && scene != "body" {
+                if scene != "arrival" && scene != "body" && strip_frame.is_none() {
                     let mut captured = false;
                     for _ in 0..1200 {
                         w.update(1.0 / 60.0, Vec2::ZERO, false);
@@ -8505,6 +8543,9 @@ mod tests {
                         captured = match scene {
                             "feint" => view.state == LanternState::FeintTell && view.progress >= 0.7,
                             "dark" => view.state == LanternState::DarkTell && view.progress >= 0.55,
+                            "lunge" => view.state == LanternState::DarkLunge && view.progress >= 0.20,
+                            "submerge" => view.state == LanternState::PhaseShift && view.progress >= 0.4,
+                            "wall" => (view.pos.x - w.player.pos.x - 92.0).abs() < 5.0,
                             "decoy" => view.real_bulb.is_some()
                                 && view.decoy.is_some_and(|bulb| bulb.pos.dist(view.pos) <= 45.0 * art_boss_lantern::BODY_SCALE),
                             "snuffed" => w.level.objects.outfall_boss_snuff.is_some()
@@ -8526,8 +8567,11 @@ mod tests {
                 let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
                     .and_then(|value| value.parse::<f32>().ok()).unwrap_or(1.0);
                 w.cam_focus = Some(match scene {
+                    "wall" | "submerge" => view.pos,
+                    _ if wall_scene => w.player.pos + Vec2::new(94.0, 0.0),
+                    "lunge" => (view.pos + w.player.pos) * 0.5,
                     "arrival" => view.real_bulb.map_or(view.pos, |bulb| (view.pos + bulb.pos) * 0.5),
-                    "body" | "swim" | "death" => view.floating_body().pos
+                    "body" | "swim" | "death" => view.pos
                         - view.facing * (12.0 + (zoom - 1.0) * 27.0),
                     "feint" => view.attack.map_or(view.pos, |shape| (view.pos + shape.center()) * 0.5),
                     "gape" | "stamp" => art_boss_lantern::mouth_pos(&view),
@@ -10630,6 +10674,7 @@ mod tests {
         // `RATRUN_DUMP_FORE_RAT=dx,dy` moves the rat relative to the anchor
         // (`0,0` stands it directly under the item) and
         // `RATRUN_DUMP_FORE_HORDE=n` rings the rat with fodder.
+        // `w8-shadow` isolates one band and frames its shadow's entry edge.
         use crate::render::foreground::{self, ForeKind};
         let kind_named = |name: &str| {
             let name = name.trim().to_ascii_lowercase().replace(['-', '_'], "");
@@ -10642,8 +10687,13 @@ mod tests {
             }
         };
         let mut sky_kind = std::env::var("RATRUN_DUMP_SKY").ok().as_deref().and_then(kind_named);
-        if let Some(n) = std::env::var("RATRUN_DUMP_FORE").ok().and_then(|v| v.parse::<usize>().ok()) {
-            let want = std::env::var("RATRUN_DUMP_FORE_KIND").unwrap_or_default().to_ascii_lowercase();
+        let shadow_only = target == "w8-shadow";
+        let fore_index = std::env::var("RATRUN_DUMP_FORE").ok()
+            .and_then(|v| v.parse::<usize>().ok()).or(shadow_only.then_some(0));
+        if let Some(n) = fore_index {
+            let want = std::env::var("RATRUN_DUMP_FORE_KIND")
+                .unwrap_or_else(|_| if shadow_only { "CatwalkGrating".into() } else { String::new() })
+                .to_ascii_lowercase();
             let kind_filter = kind_named(&want);
             let rat_off = std::env::var("RATRUN_DUMP_FORE_RAT")
                 .ok()
@@ -10693,16 +10743,28 @@ mod tests {
                         }
                     }
                     w.cam_focus = Some(at);
+                    if shadow_only {
+                        let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
+                            .and_then(|value| value.parse().ok()).map(crate::render::zoom::snap)
+                            .unwrap_or(1.0);
+                        let size = w.viewport * zoom;
+                        w.cam_focus = Some(w.foreground_layer.capture_shadow_only(item, at, size, zoom));
+                    }
                     hh.app.foreground = hh.app.foreground_env.unwrap_or(true);
                     hh.app.picture_dirty = true;
-                    hh.app.console_paused = true;
-                    hh.frame(&[]);
+                    if shadow_only {
+                        hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+                    } else {
+                        hh.app.console_paused = true;
+                        hh.frame(&[]);
+                    }
                 } else if w.level.theme == Theme::Trailer {
                     sky_kind = sky_kind.or(kind_filter).or_else(|| {
                         [ForeKind::BranchCanopy, ForeKind::PowerLines, ForeKind::CloudBand]
                             .get(n).copied().filter(|_| want.is_empty())
                     });
                 } else {
+                    assert!(!shadow_only, "shadow capture has no band matching {want:?} #{n}");
                     eprintln!("dump fore: no item matches {want:?} #{n}");
                 }
             }
@@ -10916,7 +10978,8 @@ mod tests {
         }
         // Reframe scripted Outfall poses without ticking their tells.
         let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
-        let frozen_pose = posed_outfall || target.starts_with("w6-") || target.starts_with("dropping-");
+        let frozen_pose = posed_outfall || target.starts_with("w6-") || target.starts_with("w8-")
+            || target.starts_with("dropping-");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
