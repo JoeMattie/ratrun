@@ -74,6 +74,8 @@ pub mod metrics;
 pub mod placement;
 /// Standing water (the wet floors' puddles); its own salted rng, run last.
 pub mod puddles;
+/// Decorative clothes piles and overflowing baskets (Laundry only); its own salted rng, run last.
+pub mod laundry_piles;
 pub mod validate;
 
 use crate::math::Vec2;
@@ -158,8 +160,10 @@ pub struct StageTimings {
     pub nav: u64,
     /// Render-only fixtures and ambient emitter placement.
     pub lights: u64,
-    /// Standing water (`puddles::place`): the last stage of all.
+    /// Standing water (`puddles::place`).
     pub puddles: u64,
+    /// Laundry clothes piles (`laundry_piles::place`): the last stage of all.
+    pub laundry_piles: u64,
 }
 
 impl StageTimings {
@@ -179,6 +183,7 @@ impl StageTimings {
             nav: self.nav.min(other.nav),
             lights: self.lights.min(other.lights),
             puddles: self.puddles.min(other.puddles),
+            laundry_piles: self.laundry_piles.min(other.laundry_piles),
         }
     }
 
@@ -195,6 +200,7 @@ impl StageTimings {
             + self.nav
             + self.lights
             + self.puddles
+            + self.laundry_piles
     }
 }
 
@@ -303,6 +309,7 @@ fn generate_stages(
         boss: crate::game::level::BossArena::default(),
         trailer: crate::game::level::TrailerDeck::default(),
         puddles: Vec::new(),
+        clothes_piles: Vec::new(),
     };
     if theme == Theme::Outfall {
         stage!(hazards, {
@@ -313,11 +320,14 @@ fn generate_stages(
     }
     stage!(lights, lights::place(&mut level, attempt));
     let mut level = strip_boss_arena(level);
-    // Standing water: the last stage of all, on its own salted rng over the
-    // finished grid (`puddles`'s module docs). It writes only
-    // `Level::puddles`, which the map pin does not fold, and it draws nothing
-    // another stage reads, so no earlier stage can move.
+    // Standing water: on its own salted rng over the finished grid (`puddles`'s
+    // module docs). It writes only `Level::puddles`, which the map pin does not
+    // fold, and it draws nothing another stage reads, so no earlier stage can
+    // move.
     stage!(puddles, puddles::place(&mut level, attempt));
+    // Laundry clothes piles and overflowing baskets: the last stage of all,
+    // Laundry only, on its own salted rng, writing only `Level::clothes_piles`.
+    stage!(laundry_piles, laundry_piles::place(&mut level, attempt));
     level
 }
 

@@ -670,7 +670,7 @@ fn draw_art(art: &mut PixelBuffer, scenes: &mut Scenes, key: Key, accent: Rgb, t
                 kind,
                 rect: Rectf::new(centre.x - w * 0.5, centre.y - h * 0.5, w, h),
             };
-            art_props::draw_prop(art, &prop, cam, &Palette::for_theme(theme));
+            art_props::draw_prop_at(art, &prop, cam, &Palette::for_theme(theme), t);
         }
         Key::Floor(theme) => {
             let level = scene_level(scenes, theme);
@@ -680,7 +680,7 @@ fn draw_art(art: &mut PixelBuffer, scenes: &mut Scenes, key: Key, accent: Rgb, t
             }
             art_floor::draw_floor(art, level, cam, t);
             for prop in &level.props {
-                art_props::draw_prop(art, prop, cam, &level.palette);
+                art_props::draw_prop_at(art, prop, cam, &level.palette, t);
             }
         }
     }
@@ -1257,6 +1257,7 @@ fn build_scene(theme: Theme) -> Level {
         boss: crate::game::level::BossArena::default(),
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
+        clothes_piles: Vec::new(),
     };
     // A few props on the floor, cycling the theme's own furniture.
     let kinds = theme_props(theme);

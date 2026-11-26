@@ -10,6 +10,13 @@ use crate::render::palette::{self, Rgb};
 use super::level::{Palette, Prop, PropKind};
 
 pub fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
+    draw_prop_at(pb, prop, cam, pal, 0.0);
+}
+
+/// Like [`draw_prop`], passing the run clock `elapsed` so animated props
+/// (such as Laundry washer/dryer banks) advance smoothly without any rng or
+/// per-frame state. Frozen frames (`same elapsed`) are bit-identical.
+pub fn draw_prop_at(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette, elapsed: f32) {
     let x = (prop.rect.x - cam.x).round() as i32;
     let y = (prop.rect.y - cam.y).round() as i32;
     let w = prop.rect.w.round() as i32;
@@ -17,7 +24,9 @@ pub fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
     if w <= 0 || h <= 0 {
         return;
     }
-    let seed = hash2(prop.rect.x.round() as i32, prop.rect.y.round() as i32);
+    let prop_x = prop.rect.x.round() as i32;
+    let prop_y = prop.rect.y.round() as i32;
+    let seed = hash2(prop_x, prop_y);
     match prop.kind {
         PropKind::PipeV => pipe_v(pb, x, y, w, h, seed, pal),
         PropKind::PipeH => pipe_h(pb, x, y, w, h, seed, pal),
@@ -30,7 +39,7 @@ pub fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
         PropKind::Counter => counter(pb, x, y, w, h, seed, pal),
         PropKind::Console => console(pb, x, y, w, h, seed, pal),
         PropKind::Tank => tank(pb, x, y, w, h, seed, pal),
-        PropKind::Washer => washer(pb, x, y, w, h, seed, pal),
+        PropKind::Washer => washer(pb, x, y, w, h, prop_x, prop_y, pal, elapsed),
         PropKind::TowelRoll => towel_roll(pb, x, y, w, h, seed, pal),
         PropKind::Clothespin => clothespin(pb, x, y, w, h, seed, pal),
         PropKind::PressIsland => press_island(pb, x, y, w, h, seed, pal),
@@ -2007,31 +2016,173 @@ fn tank(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &P
     pb.plot_add(gx + 2, cy_c, palette::scale(pal.accent, 0.09));
 }
 
-// ---- 12. Laundry props: washer, towel roll, clothespin ----------------------
+// ---- 12. Laundry props: running washer/dryer bank, towel roll, clothespin ---
 
-/// A paired commercial front-loading washer bank (58 × 30 px): two porcelain-white
-/// enamel machines side-by-side under a brushed control console, with twin
-/// chrome-bezeled glass porthole doors showing glowing aqua wash water and
-/// ruined-pink laundry tumbling inside.
-fn washer(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+/// Whether a bay inside a Laundry `PropKind::Washer` bank is a front-loading
+/// washer (soapy water + cool glow + occasional spin shudder) or a dryer
+/// (faster dry tumble + warm interior glow + lint-vent wisp).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaundryUnitKind {
+    Washer,
+    Dryer,
+}
+
+/// Smooth spin-cycle period for running Laundry washers, in seconds.
+const WASHER_SPIN_PERIOD: f32 = 9.0;
+
+/// Deterministic `[left, right]` unit assignment for a Laundry washer/dryer
+/// bank from its world position. Always mixes one Washer and one Dryer in each
+/// paired bank, varying left/right order across banks with zero rng draws.
+pub fn laundry_bank_units(prop_x: i32, prop_y: i32) -> [LaundryUnitKind; 2] {
+    let h = hash2(prop_x, prop_y);
+    if (h & 1) == 0 {
+        [LaundryUnitKind::Washer, LaundryUnitKind::Dryer]
+    } else {
+        [LaundryUnitKind::Dryer, LaundryUnitKind::Washer]
+    }
+}
+
+/// Deterministic continuous cycle phase (in radians `0..TAU`) for bay `0` or
+/// `1` of the bank at `(prop_x, prop_y)`.
+pub fn laundry_unit_phase(prop_x: i32, prop_y: i32, bay: usize) -> f32 {
+    let h = hash2(prop_x.wrapping_add(bay as i32 * 97), prop_y.wrapping_sub(bay as i32 * 53));
+    ((h >> 8) & 0xFFFF) as f32 * (std::f32::consts::TAU / 65536.0)
+}
+
+/// Smooth spin-cycle intensity (`0.0..=1.0`) and 1 px horizontal shudder for a
+/// washer unit at `elapsed`. Dryers always return `(0.0, 0)`.
+#[inline]
+fn washer_spin_state(unit: LaundryUnitKind, elapsed: f32, phase: f32) -> (f32, i32) {
+    if unit != LaundryUnitKind::Washer {
+        return (0.0, 0);
+    }
+    let cycle_wave = (elapsed * (std::f32::consts::TAU / WASHER_SPIN_PERIOD) + phase).cos();
+    let spin_env = ((cycle_wave - 0.70) / 0.30).clamp(0.0, 1.0);
+    // Smooth cubic ease on the envelope so the spin shudder fades gently in/out.
+    let smooth_env = spin_env * spin_env * (3.0 - 2.0 * spin_env);
+    let shake_dx = if smooth_env > 0.05 {
+        (smooth_env * (elapsed * 34.0 + phase * 2.3).sin()).round() as i32
+    } else {
+        0
+    };
+    (smooth_env, shake_dx.clamp(-1, 1))
+}
+
+/// Emissive screen-space rectangles `(x, y, w, h)` for a `PropKind::Washer`
+/// bank: the two porthole glass cores and the two lit control-panel dial/LED
+/// clusters, matching the exact geometry drawn by [`washer`].
+pub fn washer_emissive_rects(prop: &Prop, cam: Vec2, elapsed: f32) -> [(i32, i32, i32, i32); 4] {
+    let x = (prop.rect.x - cam.x).round() as i32;
+    let y = (prop.rect.y - cam.y).round() as i32;
+    let w = prop.rect.w.round() as i32;
+    let h = prop.rect.h.round() as i32;
+    let prop_x = prop.rect.x.round() as i32;
+    let prop_y = prop.rect.y.round() as i32;
+    let units = laundry_bank_units(prop_x, prop_y);
+
+    let top_h = (h / 3).clamp(7, 11);
+    let mid_x = x + w / 2;
+    let front_h = (h - top_h - 3).max(8);
+    let door_cy = y + top_h + front_h / 2;
+    let door_r = ((front_h as f32 * 0.46).min(w as f32 * 0.16)).clamp(4.5, 7.5);
+    let r_in = (door_r * 0.56).round().max(2.0) as i32;
+    let bay_centers = [x + w / 4, x + (w * 3) / 4];
+
+    let mut rects = [(0, 0, 0, 0); 4];
+    for bay in 0..2 {
+        let phase = laundry_unit_phase(prop_x, prop_y, bay);
+        let (_, shake_dx) = washer_spin_state(units[bay], elapsed, phase);
+        let cx = bay_centers[bay] + shake_dx;
+        // Porthole glass core (inscribed inside the chrome bezel).
+        rects[bay] = (cx - r_in, door_cy - r_in, r_in * 2 + 1, r_in * 2 + 1);
+        // Control console lit dial + status LEDs.
+        let bx = if bay == 0 { x + 2 } else { mid_x + 2 };
+        let bw = (w / 2 - 4).max(8);
+        let dx = bx + bw - 8 + shake_dx;
+        rects[2 + bay] = (dx, y + 1, 8, 3);
+    }
+    rects
+}
+
+/// Garment swatches tumbling inside washer and dryer drums.
+const WASHER_CLOTHES: [Rgb; 4] = [
+    (226, 134, 170), // ruined pink
+    (112, 166, 214), // faded denim
+    (236, 242, 240), // porcelain white
+    (224, 188, 104), // warm ochre
+];
+
+const DRYER_CLOTHES: [Rgb; 4] = [
+    (222, 126, 102), // warm coral
+    (124, 178, 158), // muted sage
+    (242, 232, 208), // warm cream
+    (132, 146, 202), // soft indigo
+];
+
+/// A paired commercial front-loading washer & dryer bank (58 × 30 px nominal,
+/// 64 × 32 px on the cell grid): one cool porcelain washer (tumbling soapy
+/// water, coloured clothes, gentle 1 px spin shudder) beside one warm cream
+/// dryer (faster dry tumble, warm amber interior glow, subtle lint-vent wisp),
+/// under a shared brushed control console with tiny lit dials and status LEDs.
+///
+/// The casing keeps the caller's metal/enamel pen (`prop_pen(PropKind::Washer)`),
+/// while the porthole glass switches to `washer_glass_pen()` so lighting effects
+/// gleam realistically across the curved glass.
+#[allow(clippy::too_many_arguments)]
+fn washer(
+    pb: &mut PixelBuffer,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    prop_x: i32,
+    prop_y: i32,
+    pal: &Palette,
+    elapsed: f32,
+) {
     shadow_rect(pb, x + 1, y, (w - 2).max(1), h);
 
-    let enamel_hi: Rgb = (224, 234, 232);
-    let enamel: Rgb = (182, 198, 198);
-    let enamel_lo: Rgb = (118, 136, 142);
-    let deck: Rgb = (146, 166, 172);
-    let chrome_hi: Rgb = (238, 246, 246);
-    let chrome: Rgb = (148, 166, 174);
+    let units = laundry_bank_units(prop_x, prop_y);
+    let phases = [
+        laundry_unit_phase(prop_x, prop_y, 0),
+        laundry_unit_phase(prop_x, prop_y, 1),
+    ];
+    let spins = [
+        washer_spin_state(units[0], elapsed, phases[0]),
+        washer_spin_state(units[1], elapsed, phases[1]),
+    ];
+
+    // Washer enamel (cool porcelain white-blue) vs Dryer enamel (warm cream-steel).
+    let w_enamel_hi: Rgb = (226, 236, 236);
+    let w_enamel: Rgb = (182, 198, 200);
+    let w_enamel_lo: Rgb = (118, 136, 144);
+    let w_deck: Rgb = (144, 166, 174);
+
+    let d_enamel_hi: Rgb = (234, 230, 218);
+    let d_enamel: Rgb = (194, 188, 176);
+    let d_enamel_lo: Rgb = (130, 124, 114);
+    let d_deck: Rgb = (158, 150, 140);
+
+    let chrome_hi: Rgb = (240, 248, 248);
+    let chrome: Rgb = (150, 168, 176);
     let chrome_lo: Rgb = (74, 88, 100);
-    let brass: Rgb = (194, 158, 82);
-    let water_deep: Rgb = (20, 42, 62);
-    let water_mid: Rgb = (48, 108, 128);
-    let water_hi: Rgb = (132, 206, 212);
-    let pink_wash: Rgb = (218, 130, 166);
+    let brass_hi: Rgb = (236, 196, 114);
+    let brass: Rgb = (194, 154, 78);
+    let brass_lo: Rgb = (118, 88, 46);
+
+    let water_deep: Rgb = (20, 44, 66);
+    let water_mid: Rgb = (46, 112, 136);
+    let water_hi: Rgb = (154, 224, 232);
+    let foam_hi: Rgb = (220, 248, 250);
+
+    let dryer_deep: Rgb = (68, 36, 20);
+    let dryer_mid: Rgb = (152, 86, 36);
+    let dryer_glow: Rgb = (248, 188, 96);
+
     let outline = ambient_shade((14, 18, 28), pal, 0.28);
 
     // 3/4 split: raised control backsplash + top lid (`0..top_h`) over tall
-    // angled front enamel fascia (`top_h..h`) housing twin circular portholes!
+    // angled front enamel fascia (`top_h..h`) housing twin circular portholes.
     let top_h = (h / 3).clamp(7, 11);
     let mid_x = x + w / 2;
 
@@ -2045,48 +2196,97 @@ fn washer(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: 
                 continue;
             }
             if px == mid_x {
-                // Crisp vertical seam between the twin commercial washers.
                 pb.plot(px, py, if ly == 1 { chrome_lo } else { outline });
                 continue;
             }
+            let bay = usize::from(px > mid_x);
+            let is_dryer = units[bay] == LaundryUnitKind::Dryer;
+            let (e_hi, e_mid, deck) = if is_dryer {
+                (d_enamel_hi, d_enamel, d_deck)
+            } else {
+                (w_enamel_hi, w_enamel, w_deck)
+            };
             let grad = 1.08 - 0.18 * (lx as f32 / w.max(1) as f32);
             let mut c = if ly <= 3 {
-                // Raised stainless/denim control strip along the back edge.
-                let base = if ly == 1 { enamel_hi } else { deck };
+                let base = if ly == 1 { e_hi } else { deck };
                 palette::scale(base, grad)
             } else if ly == 4 {
-                // Shadow groove under the control console lip.
                 chrome_lo
             } else if ly == top_h - 1 {
-                // Crisp sunlit front coping edge of the washer lid.
-                enamel_hi
+                e_hi
             } else {
-                palette::scale(enamel, grad * (1.03 - 0.08 * (ly - 4) as f32 / (top_h - 4).max(1) as f32))
+                palette::scale(
+                    e_mid,
+                    grad * (1.03 - 0.08 * (ly - 4) as f32 / (top_h - 4).max(1) as f32),
+                )
             };
-            if lx == 1 {
-                c = palette::mix(c, enamel_hi, 0.55);
+            if lx == 1 || px == mid_x + 1 {
+                c = palette::mix(c, e_hi, 0.52);
             }
             pb.plot(px, py, c);
         }
     }
 
-    // Control console details for each of the two bays: detergent drawer,
-    // rotary brass cycle dial, and glowing status LEDs.
+    // Control console details for each bay: detergent drawer / lint vent,
+    // rotary lit cycle dial, and glowing status LEDs.
     for bay in 0..2 {
-        let bx = if bay == 0 { x + 2 } else { mid_x + 2 };
+        let is_dryer = units[bay] == LaundryUnitKind::Dryer;
+        let (spin_env, shake_dx) = spins[bay];
+        let phase = phases[bay];
+        let bx_min = if bay == 0 { x + 1 } else { mid_x + 1 };
+        let bx_max = if bay == 0 { mid_x - 1 } else { x + w - 2 };
+        let bx = (if bay == 0 { x + 2 } else { mid_x + 2 }) + shake_dx;
         let bw = (w / 2 - 4).max(8);
-        // Recessed detergent dispenser drawer on left of each bay.
-        pb.rect_fill(bx + 1, y + 2, 6.min(bw / 3), 2, chrome_lo);
-        pb.rect_fill(bx + 2, y + 2, 4.min(bw / 3), 1, chrome_hi);
-        // Rotary cycle dial + glowing aqua/amber pilot LEDs on right of bay.
-        let dx = bx + bw - 8;
-        if dx > bx + 5 {
+
+        if is_dryer {
+            // Dryer lint-vent exhaust louver grille on the left of the console.
+            let vw = 7.min(bw / 3).max(4);
+            let vx0 = bx.clamp(bx_min, (bx_max - vw + 1).max(bx_min));
+            pb.rect_fill(vx0, y + 1, vw, 3, chrome_lo);
+            for vx in (0..vw).step_by(2) {
+                let px = (vx0 + vx).min(bx_max);
+                pb.plot(px, y + 2, (92, 76, 66));
+                pb.plot(px, y + 1, brass_lo);
+            }
+        } else {
+            // Washer recessed detergent dispenser drawer on the left.
+            let dw = 6.min(bw / 3).max(4);
+            let sx = (bx + 1).clamp(bx_min, (bx_max - dw).max(bx_min));
+            pb.rect_fill(sx, y + 2, dw, 2, chrome_lo);
+            pb.rect_fill(sx + 1, y + 2, (dw - 2).max(2), 1, chrome_hi);
+        }
+
+        // Rotary cycle dial with tiny lit indicator pip + running status LEDs.
+        let dx_lo = bx_min + 5;
+        let dx_hi = (bx_max - 7).max(dx_lo);
+        let dx = (bx + bw - 8).clamp(dx_lo, dx_hi);
+        if dx > bx_min + 4 && dx + 7 <= bx_max {
             pb.rect_fill(dx, y + 1, 3, 3, outline);
-            pb.plot(dx + 1, y + 2, brass);
-            pb.plot(dx, y + 1, chrome_hi);
-            // Status LEDs (aqua wash light + warm amber spin pip).
-            pb.plot(dx + 5, y + 2, if (seed as i32 + bay) & 1 == 0 { pal.accent } else { (246, 198, 96) });
-            pb.plot(dx + 7, y + 2, (118, 226, 218));
+            let dial_col = if is_dryer { brass_hi } else { brass };
+            pb.plot(dx + 1, y + 2, dial_col);
+            // Tiny lit dial index pip that slowly steps/rotates around the dial rim.
+            let pip_col = if is_dryer {
+                (255, 206, 118)
+            } else {
+                (156, 244, 240)
+            };
+            pb.plot(dx, y + 1, pip_col);
+            pb.plot(dx + 2, y + 1, chrome_hi);
+
+            let pulse = 0.80 + 0.20 * (elapsed * 3.6 + phase).sin();
+            if is_dryer {
+                // Warm amber heat-on status LED + steady pale-gold ready pip.
+                let led_a = palette::scale((255, 178, 76), pulse);
+                let led_b = (248, 224, 156);
+                pb.plot((dx + 5).min(bx_max), y + 2, led_a);
+                pb.plot((dx + 7).min(bx_max), y + 2, led_b);
+            } else {
+                // Cool aqua wash LED + amber spin-indicator LED that brightens during spin.
+                let led_a = palette::scale((114, 238, 232), pulse);
+                let spin_led = palette::mix((116, 108, 92), (255, 204, 88), 0.35 + 0.65 * spin_env);
+                pb.plot((dx + 5).min(bx_max), y + 2, led_a);
+                pb.plot((dx + 7).min(bx_max), y + 2, spin_led);
+            }
         }
     }
 
@@ -2105,94 +2305,243 @@ fn washer(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: 
                 pb.plot(px, py, outline);
                 continue;
             }
+            let bay = usize::from(px > mid_x);
+            let is_dryer = units[bay] == LaundryUnitKind::Dryer;
+            let (e_hi, e_mid, e_lo) = if is_dryer {
+                (d_enamel_hi, d_enamel, d_enamel_lo)
+            } else {
+                (w_enamel_hi, w_enamel, w_enamel_lo)
+            };
             let grad = 1.04 - 0.20 * (lx as f32 / w.max(1) as f32);
             let mut c = if dy == 0 {
-                // Cast shadow directly under top lid lip.
-                palette::scale(enamel_lo, 0.72 * grad)
+                palette::scale(e_lo, 0.72 * grad)
             } else if ly >= h - 4 {
-                // Recessed dark kick-plate plinth with ventilation louver slots.
-                let base = ambient_shade((48, 60, 74), pal, 0.2);
-                if ly == h - 3 && (lx % 4) == 0 && (px - mid_x).abs() > 2 {
+                // Recessed dark kick-plate plinth with ventilation louvers.
+                let base = if is_dryer {
+                    ambient_shade((58, 56, 62), pal, 0.2)
+                } else {
+                    ambient_shade((48, 60, 74), pal, 0.2)
+                };
+                if ly == h - 3 && (lx % 3) == 0 && (px - mid_x).abs() > 2 {
                     outline
                 } else {
                     palette::scale(base, grad)
                 }
             } else {
-                palette::scale(palette::mix(enamel, enamel_lo, dy as f32 / fh as f32 * 0.45), grad)
+                palette::scale(
+                    palette::mix(e_mid, e_lo, dy as f32 / fh as f32 * 0.45),
+                    grad,
+                )
             };
             if lx == 1 || px == mid_x + 1 {
-                c = palette::mix(c, enamel_hi, 0.42);
+                c = palette::mix(c, e_hi, 0.42);
             }
             pb.plot(px, py, c);
         }
     }
 
-    // 3. Twin gleaming chrome-bezeled front-loading glass porthole doors!
+    // 3. Twin gleaming chrome/brass-bezeled front-loading glass porthole doors!
     let front_h = (h - top_h - 3).max(8);
     let door_cy = y + top_h + front_h / 2;
     let door_r = ((front_h as f32 * 0.46).min(w as f32 * 0.16)).clamp(4.5, 7.5);
     let bay_centers = [x + w / 4, x + (w * 3) / 4];
+    let glass_pen = crate::render::lighting::washer_glass_pen();
 
-    for (bay, &cx) in bay_centers.iter().enumerate() {
+    for bay in 0..2 {
+        let is_dryer = units[bay] == LaundryUnitKind::Dryer;
+        let phase = phases[bay];
+        let (spin_env, shake_dx) = spins[bay];
+        let cx = bay_centers[bay] + shake_dx;
         let ir = door_r.ceil() as i32 + 1;
-        let phase = ((seed as usize + bay * 3) & 3) as f32 * 1.1;
+
+        // Smooth continuous drum rotation (never stepped).
+        let theta = if is_dryer {
+            -(elapsed * 6.2 + phase)
+        } else {
+            elapsed * 3.4 + phase + 1.8 * (elapsed * (std::f32::consts::TAU / WASHER_SPIN_PERIOD) + phase).sin()
+        };
+        let (sin_t, cos_t) = theta.sin_cos();
+
+        // Pick 3 distinct coloured garments for this unit from its position hash.
+        let bank_pick = (hash2(prop_x + bay as i32 * 31, prop_y - bay as i32 * 17) as usize) % 4;
+        let clothes = if is_dryer {
+            [
+                DRYER_CLOTHES[bank_pick],
+                DRYER_CLOTHES[(bank_pick + 1) % 4],
+                DRYER_CLOTHES[(bank_pick + 2) % 4],
+            ]
+        } else {
+            [
+                WASHER_CLOTHES[bank_pick],
+                WASHER_CLOTHES[(bank_pick + 1) % 4],
+                WASHER_CLOTHES[(bank_pick + 2) % 4],
+            ]
+        };
+
+        let (bz_hi, bz_mid, bz_lo) = if is_dryer {
+            (brass_hi, chrome, brass_lo)
+        } else {
+            (chrome_hi, chrome, chrome_lo)
+        };
+
         for dy in -ir..=ir {
+            let py = door_cy + dy;
+            if py <= y + top_h || py >= y + h - 2 {
+                continue;
+            }
+            let ny = dy as f32 / (door_r * 0.92);
             for dx in -ir..=ir {
-                let nx = dx as f32 / door_r;
-                let ny = dy as f32 / (door_r * 0.92);
-                let d = (nx * nx + ny * ny).sqrt();
                 let px = cx + dx;
-                let py = door_cy + dy;
-                if d > 1.18 || py <= y + top_h || py >= y + h - 2 {
+                if px <= x || px >= x + w - 1 || px == mid_x {
+                    continue;
+                }
+                let nx = dx as f32 / door_r;
+                let d = (nx * nx + ny * ny).sqrt();
+                if d > 1.18 {
                     continue;
                 }
                 if d > 1.04 {
                     pb.plot(px, py, outline);
                 } else if d > 0.80 {
-                    // Beveled chrome porthole bezel lit top-left.
+                    // Beveled metallic porthole bezel lit top-left.
                     let lit = (-nx * 0.62 - ny * 0.78).clamp(-1.0, 1.0);
-                    let col = if lit > 0.25 {
-                        chrome_hi
-                    } else if lit > -0.25 {
-                        chrome
+                    let col = if lit > 0.24 {
+                        bz_hi
+                    } else if lit > -0.24 {
+                        bz_mid
                     } else {
-                        chrome_lo
+                        bz_lo
                     };
                     pb.plot(px, py, col);
                 } else if d > 0.72 {
                     pb.plot(px, py, outline);
                 } else {
-                    // Glass drum interior: aqua soapy water, white foam crest,
-                    // and a swirl of ruined-pink / white laundry tumbling inside!
-                    let swirl = (nx * 2.2 + phase).sin() * 0.22;
-                    let water_line = 0.08 + swirl;
-                    let mut col = if ny > water_line + 0.10 {
-                        // Submerged soapy aqua water + tumbling laundry mass.
-                        let lump = ((nx - 0.18 + bay as f32 * 0.25).powi(2) + (ny - 0.28).powi(2)).sqrt();
-                        if lump < 0.36 {
-                            if bay == 1 || (seed & 1) == 0 { pink_wash } else { enamel_hi }
-                        } else {
-                            palette::mix(water_mid, water_deep, (ny - water_line).clamp(0.0, 1.0) * 0.8)
+                    // Rotating coordinates inside the drum.
+                    let rx = nx * cos_t - ny * sin_t;
+                    let ry = nx * sin_t + ny * cos_t;
+
+                    let mut col = if is_dryer {
+                        // Warm lit dryer drum interior with turning baffle ribs
+                        // and dry clothes tumbling briskly.
+                        let lamp = 1.0 - (((nx * 0.85).powi(2) + (ny + 0.24).powi(2)).sqrt() * 1.15).clamp(0.0, 1.0);
+                        let mut base = palette::mix(dryer_deep, dryer_mid, (0.32 + 0.68 * lamp).clamp(0.0, 1.0));
+                        base = palette::mix(base, dryer_glow, lamp * lamp * 0.58);
+
+                        // Three subtle rotating drum baffle ribs.
+                        let rib_ang = ry.atan2(rx);
+                        let rib = ((rib_ang * 3.0).cos()).abs();
+                        if rib > 0.92 && d > 0.28 {
+                            base = palette::mix(base, dryer_glow, 0.24);
                         }
-                    } else if (ny - water_line).abs() <= 0.14 {
-                        // Bright frothy soap meniscus.
-                        water_hi
+
+                        // Three dry garment blobs orbiting in drum space.
+                        let g0 = ((rx - 0.26).powi(2) + (ry - 0.14).powi(2)).sqrt();
+                        let g1 = ((rx + 0.24).powi(2) + (ry - 0.18).powi(2)).sqrt();
+                        let g2 = ((rx + 0.02).powi(2) + (ry + 0.28).powi(2)).sqrt();
+                        if g0 < 0.30 {
+                            let shade = 0.76 + 0.34 * lamp;
+                            palette::mix(palette::scale(clothes[0], shade), dryer_glow, 0.18)
+                        } else if g1 < 0.27 {
+                            let shade = 0.74 + 0.34 * lamp;
+                            palette::mix(palette::scale(clothes[1], shade), dryer_glow, 0.16)
+                        } else if g2 < 0.24 {
+                            let shade = 0.78 + 0.32 * lamp;
+                            palette::mix(palette::scale(clothes[2], shade), dryer_glow, 0.20)
+                        } else {
+                            base
+                        }
                     } else {
-                        // Upper dark glass cavity with subtle aqua drum glow.
-                        palette::mix(water_deep, water_mid, 0.26)
+                        // Washer drum: sloshing soapy aqua water, frothy foam
+                        // meniscus, and coloured clothes tumbling in and out of
+                        // the wash.
+                        let slosh = (nx * 2.4 + elapsed * 3.1 + phase).sin() * (0.16 + 0.06 * spin_env)
+                            + (elapsed * 1.9 + phase * 1.3).cos() * 0.07;
+                        let water_line = 0.06 + slosh;
+
+                        // Three tumbling garment blobs in rotating drum space.
+                        let g0 = ((rx - 0.24).powi(2) + (ry - 0.16).powi(2)).sqrt();
+                        let g1 = ((rx + 0.22).powi(2) + (ry + 0.18).powi(2)).sqrt();
+                        let g2 = ((rx - 0.04).powi(2) + (ry + 0.26).powi(2)).sqrt();
+                        let garment = if g0 < 0.28 {
+                            Some(clothes[0])
+                        } else if g1 < 0.25 {
+                            Some(clothes[1])
+                        } else if g2 < 0.22 {
+                            Some(clothes[2])
+                        } else {
+                            None
+                        };
+
+                        if (ny - water_line).abs() <= 0.13 + 0.04 * spin_env {
+                            // Bright frothy soap meniscus.
+                            let crest = ((nx * 5.0 - elapsed * 4.0 + phase).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                            palette::mix(water_hi, foam_hi, 0.35 + 0.55 * crest)
+                        } else if ny > water_line {
+                            let depth = (ny - water_line).clamp(0.0, 1.0);
+                            let water = palette::mix(water_mid, water_deep, depth * 0.75);
+                            if let Some(cloth) = garment {
+                                // Submerged laundry tinted gently by soapy water.
+                                palette::mix(cloth, water_hi, 0.24)
+                            } else {
+                                water
+                            }
+                        } else if let Some(cloth) = garment {
+                            // Upper tumbling cloth lifting through the damp drum.
+                            palette::mix(cloth, water_mid, 0.16)
+                        } else {
+                            // Upper damp glass cavity with subtle aqua drum glow & foam flecks.
+                            let base = palette::mix(water_deep, water_mid, 0.30);
+                            let bubble = ((rx * 4.2 + ry * 3.1).sin() * (rx * 2.7 - ry * 4.5).cos()).abs();
+                            if bubble > 0.86 {
+                                palette::mix(base, foam_hi, 0.55)
+                            } else {
+                                base
+                            }
+                        }
                     };
+
                     // Curved specular glass glare arc in upper-left quadrant.
-                    if d > 0.44 && d < 0.64 && nx < -0.10 && ny < -0.05 {
-                        col = palette::mix(col, (244, 252, 255), 0.72);
+                    if d > 0.44 && d < 0.65 && nx < -0.08 && ny < -0.04 {
+                        let glare = if is_dryer { (255, 246, 224) } else { (244, 252, 255) };
+                        col = palette::mix(col, glare, 0.68);
                     }
+
+                    // Tag porthole glass pixels with Glass material so lighting
+                    // effects add specular gleam over the curved door.
+                    let prev_pen = pb.set_pen(glass_pen);
                     pb.plot(px, py, col);
+                    pb.set_pen(prev_pen);
                 }
             }
         }
-        // Chrome door latch tab on the right side of each porthole.
-        let lx = cx + door_r.round() as i32;
-        pb.plot(lx, door_cy - 1, chrome_hi);
-        pb.plot(lx, door_cy, chrome_lo);
+
+        // Metallic door latch tab on the right side of each porthole.
+        let latch_x = (cx + door_r.round() as i32).min(if bay == 0 { mid_x - 1 } else { x + w - 2 });
+        pb.plot(latch_x, door_cy - 1, bz_hi);
+        pb.plot(latch_x, door_cy, bz_lo);
+
+        // Dryer analytic lint-vent wisp drifting gently upward from the rear
+        // exhaust louver (purely a function of `elapsed` + `phase`, no pool).
+        if is_dryer {
+            let prev_pen = pb.set_pen(0);
+            let vent_x = (if bay == 0 { x + 5 } else { mid_x + 5 }) as f32;
+            let vent_y = (y + 1) as f32;
+            for puff in 0..3 {
+                let u = (elapsed * 0.65 + phase * 0.22 + puff as f32 * 0.333).rem_euclid(1.0);
+                let rise = u * 5.2;
+                let sway = (u * std::f32::consts::TAU + phase + puff as f32 * 1.7).sin() * (0.8 + u * 1.1);
+                let wx = (vent_x + sway).round() as i32;
+                let wy = (vent_y - rise).round() as i32;
+                let alpha = (1.0 - u) * (u * 3.5).min(1.0) * 0.46;
+                if alpha > 0.04 {
+                    blend_px(pb, wx, wy, (226, 214, 198), alpha);
+                    if u > 0.25 {
+                        blend_px(pb, wx + 1, wy, (206, 194, 182), alpha * 0.55);
+                    }
+                }
+            }
+            pb.set_pen(prev_pen);
+        }
     }
 
     // 4. Heavy rubber anti-vibration feet at the corners & centre seam.
@@ -3297,5 +3646,85 @@ mod outfall_prop_tests {
             draw_prop(&mut pb, &prop, Vec2::new(60.0, 60.0), &pal);
             draw_prop(&mut pb, &prop, Vec2::new(-50.0, -50.0), &pal);
         }
+    }
+
+    #[test]
+    fn laundry_bank_assignment_is_deterministic_and_mixes_washer_and_dryer() {
+        let mut saw_wd = false;
+        let mut saw_dw = false;
+        for iy in 0..8 {
+            for ix in 0..8 {
+                let px = ix * 64 + 16;
+                let py = iy * 32 + 16;
+                let a = laundry_bank_units(px, py);
+                let b = laundry_bank_units(px, py);
+                assert_eq!(a, b, "unit assignment must be deterministic at ({px},{py})");
+                assert_ne!(a[0], a[1], "each bank must mix a Washer and a Dryer");
+                assert!(
+                    a.contains(&LaundryUnitKind::Washer) && a.contains(&LaundryUnitKind::Dryer),
+                    "bank must contain both Washer and Dryer"
+                );
+                if a == [LaundryUnitKind::Washer, LaundryUnitKind::Dryer] {
+                    saw_wd = true;
+                } else {
+                    saw_dw = true;
+                }
+            }
+        }
+        assert!(saw_wd && saw_dw, "position hash should vary left/right Washer/Dryer order");
+    }
+
+    #[test]
+    fn laundry_porthole_animates_across_elapsed_and_frozen_frame_is_identical() {
+        let pal = Palette::for_theme(Theme::Laundry);
+        let prop = Prop {
+            kind: PropKind::Washer,
+            rect: Rectf::new(16.0, 16.0, 64.0, 32.0),
+        };
+        let render = |elapsed: f32| {
+            let mut pb = PixelBuffer::new(96, 64);
+            pb.set_materials(true);
+            pb.clear(pal.bg);
+            let prev = pb.set_pen(crate::render::lighting::prop_pen(PropKind::Washer));
+            draw_prop_at(&mut pb, &prop, Vec2::ZERO, &pal, elapsed);
+            pb.set_pen(prev);
+            pb
+        };
+
+        let f1 = render(1.25);
+        let f1_again = render(1.25);
+        assert_eq!(f1.pixels(), f1_again.pixels(), "frozen frame must be bit-identical");
+
+        let f2 = render(1.75);
+        let rects = washer_emissive_rects(&prop, Vec2::ZERO, 1.25);
+        let mut porthole_diffs = 0usize;
+        for &(rx, ry, rw, rh) in &rects[..2] {
+            for y in ry..(ry + rh) {
+                for x in rx..(rx + rw) {
+                    if f1.pixel_at(x as usize, y as usize) != f2.pixel_at(x as usize, y as usize) {
+                        porthole_diffs += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            porthole_diffs >= 8,
+            "porthole interiors must animate smoothly between elapsed values (diffs={porthole_diffs})"
+        );
+
+        // Verify glass pen is stamped inside porthole cores and metal pen on casing.
+        let glass_pen = crate::render::lighting::washer_glass_pen();
+        let metal_pen = crate::render::lighting::prop_pen(PropKind::Washer);
+        let mut glass_px = 0usize;
+        let mut metal_px = 0usize;
+        for &m in f1.mat() {
+            if m == glass_pen {
+                glass_px += 1;
+            } else if m == metal_pen {
+                metal_px += 1;
+            }
+        }
+        assert!(glass_px >= 60, "expected porthole glass pen pixels, got {glass_px}");
+        assert!(metal_px >= 400, "expected enamel/metal casing pen pixels, got {metal_px}");
     }
 }

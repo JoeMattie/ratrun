@@ -1354,6 +1354,7 @@ fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
         boss: BossArena::default(),
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
+        clothes_piles: Vec::new(),
     }
 }
 
@@ -1409,6 +1410,7 @@ fn deck_patch() -> Level {
             slides: Vec::new(),
         },
         puddles: Vec::new(),
+        clothes_piles: Vec::new(),
     }
 }
 

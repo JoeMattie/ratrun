@@ -1194,6 +1194,35 @@ impl Puddle {
     }
 }
 
+/// What kind of decorative laundry heap sits on the Laundry floor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClothesPileKind {
+    /// Small loose scatter of a folded shirt and stray sock (~10 × 7 px).
+    SmallHeap,
+    /// Medium tumbled heap of mixed shirts, towels and socks (~15 × 10 px).
+    MediumHeap,
+    /// Large slumped mound with a draped bedsheet corner (~20 × 13 px).
+    LargeHeap,
+    /// Woven laundry basket overflowing with folded clothes (~14 × 13 px).
+    Basket,
+}
+
+/// One decorative pile of clothes or overflowing basket on the Laundry floor.
+///
+/// Purely decorative: never paints a tile, never blocks, slows or routes, and
+/// is invisible to gameplay, the bot, fog and the minimap. Placed last by
+/// [`super::levelgen::laundry_piles`] on its own salted rng so the map pin
+/// cannot move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClothesPile {
+    /// Centre, world px. Always on an open floor cell.
+    pub pos: Vec2,
+    /// Heap size or overflowing basket.
+    pub kind: ClothesPileKind,
+    /// Deterministic colour and fold variation.
+    pub seed: u32,
+}
+
 // ---- The level -------------------------------------------------------------
 
 #[derive(bevy_ecs::resource::Resource)]
@@ -1241,6 +1270,10 @@ pub struct Level {
     /// stage, so it cannot move the map pin. Empty on the Lab, the Printworks
     /// and the Flatbed.
     pub puddles: Vec<Puddle>,
+    /// Decorative heaps of clothes and overflowing baskets (Laundry only).
+    /// Placed last by [`super::levelgen::laundry_piles`] on its own salted rng,
+    /// so it cannot move the map pin. Empty on every other theme.
+    pub clothes_piles: Vec<ClothesPile>,
 }
 
 /// The fight furniture a boss arena used to carry (`DESIGN_REVIEW.md` §5).
@@ -1319,6 +1352,7 @@ impl Level {
             boss: BossArena::default(),
             trailer: TrailerDeck::default(),
             puddles: Vec::new(),
+            clothes_piles: Vec::new(),
         }
     }
 

@@ -109,7 +109,7 @@ use super::{
     art_boss_magpie,
     art_boss_mangle, art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
-    art_props, art_puddle, art_rat, art_rat_giant, art_traps, art_walls, art_wave3a, art_boss_lantern, art_roster_outfall,
+    art_props, art_puddle, art_rat, art_rat_giant, art_traps, art_walls, art_wave3a, art_boss_lantern, art_roster_outfall, art_laundry,
 };
 
 /// How much of the simulation's screen shake reaches the camera. The owner
@@ -2467,6 +2467,7 @@ impl World {
         // every pixel is tagged with the wet-floor material so the lighting pass
         // reflects a lamp in it.
         self.draw_puddles(pb, cam, viewport);
+        self.draw_clothes_piles(pb, cam, viewport);
         if self.level.theme == Theme::Outfall {
             art_floor::draw_outfall_hazards(pb, &self.level, cam, self.elapsed);
         }
@@ -2513,11 +2514,15 @@ impl World {
                 continue;
             }
             let pen = pb.set_pen(crate::render::lighting::prop_pen(p.kind));
-            art_props::draw_prop(pb, p, cam, &self.level.palette);
+            art_props::draw_prop_at(pb, p, cam, &self.level.palette, self.elapsed);
             pb.set_pen(pen);
             if matches!(p.kind, PropKind::Console | PropKind::Tank) {
                 let (mx, my) = self.w2s(p.rect.center(), cam);
                 self.light_map.mark_emissive_rect(pb, mx - 2, my - 3, 5, 2);
+            } else if p.kind == PropKind::Washer {
+                for (rx, ry, rw, rh) in art_props::washer_emissive_rects(p, cam, self.elapsed) {
+                    self.light_map.mark_emissive_rect(pb, rx, ry, rw, rh);
+                }
             }
         }
 
@@ -3975,6 +3980,27 @@ impl World {
                     ripple.big,
                 );
             }
+        }
+        pb.set_pen(pen);
+    }
+
+    /// Decorative piles of clothes and overflowing baskets on the Laundry
+    /// floor. Drawn after puddles and before walls, props and bodies so bodies
+    /// walk cleanly over them. Render-only.
+    fn draw_clothes_piles(&mut self, pb: &mut PixelBuffer, cam: Vec2, viewport: Vec2) {
+        if self.level.clothes_piles.is_empty() {
+            return;
+        }
+        let pen = pb.set_pen(crate::render::lighting::cloth_pen());
+        for pile in &self.level.clothes_piles {
+            if !on_screen(
+                self.w2s(pile.pos, cam),
+                art_laundry::MAX_PILE_RADIUS_PX,
+                viewport,
+            ) {
+                continue;
+            }
+            art_laundry::draw_clothes_pile(pb, pile, cam, &self.level.palette);
         }
         pb.set_pen(pen);
     }
