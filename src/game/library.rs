@@ -387,6 +387,7 @@ fn pickup_name(k: PickupKind) -> &'static str {
         PickupKind::ShrinkDraught => "Shrink Draught",
         PickupKind::WhiteCoat => "White Coat",
         PickupKind::TheCollar => "The Collar",
+        PickupKind::Headlamp => "Headlamp",
     }
 }
 
@@ -1109,9 +1110,8 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
         ),
         MinibossKind::MilkCarton => (
             "Kitchen · 3:00 — named miniboss",
-            "Three weeks past instructions. It tilts on its printed corners and spills \
-             one long rectangle out of the spout. Circle around the folded seam while \
-             the puddle decides where it lives.",
+            "Three weeks past instructions. The carton tips forward and sprays a fan of \
+             milk. Step outside the marked cone or put a wall between you and the spout.",
         ),
         MinibossKind::ValveWidow => (
             "Sewer · 9:00 — named miniboss",
@@ -1249,9 +1249,9 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
         ),
         BossKind::Broom => (
             "Kitchen · 15:00 — one of two bosses",
-            "Custody, with feet. The sweeper marches, stomps a shadowed foot and drags \
-             its whole reach round in an arc. It always leaves a safe pocket at its \
-             heel; the trick is being in it when the bristles arrive.",
+            "Custody, with feet. The bristles pass over the pocket at its heel. Stay \
+             out at range and the Sweeper runs. Step clear of the marked lane and \
+             strike while both feet are planted.",
         ),
         BossKind::Mower => (
             "Lab · 15:00 — one of two bosses",
@@ -1429,9 +1429,8 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
     match k {
         WeaponKind::Gnaw => (
             "Chest · Gnaw L5 + Sharp Teeth",
-            "The bite spits a tooth that lodges, waits a beat, and then pulls back to \
-             wherever the rat has got to, biting on the way home. Nothing is wasted; \
-             everything comes back in.",
+            "The bite lobs a tooth that catches one foe where it lands. It lodges for \
+             1s, then pulls back to you and bites foes along the way. Everything comes back in.",
         ),
         WeaponKind::CheeseSpray => (
             "Chest · Cheese Spray L5 + Fat Reserves",
@@ -1701,6 +1700,10 @@ fn pickup_text(k: PickupKind) -> (&'static str, &'static str) {
         PickupKind::TheCollar => (
             "Rare drop · any floor",
             "Gems pay double XP. Elites and the miniboss close faster. +             The tag still carries your number.",
+        ),
+        PickupKind::Headlamp => (
+            "Rare drop · any floor",
+            "Reveals the map ahead. The horde veers out of the beam. Batteries issued loose.",
         ),
     }
 }
@@ -2491,6 +2494,11 @@ fn pickup_facts(k: PickupKind, f: &mut Facts) {
             f.push("GEM XP", format!("{:.0}×", powerups::COLLAR_XP_MULT));
             f.push("ELITES AND MINIBOSS", format!("+{:.0}% move speed", (powerups::COLLAR_CHASE_MULT - 1.0) * 100.0));
             f.push("LASTS", format!("{:.0}s", powerups::COLLAR_SECS));
+        }
+        PickupKind::Headlamp => {
+            f.push("EFFECT", "reveals ground, parts the horde");
+            f.push("REACH", format!("{:.0} px", powerups::HEADLAMP_RANGE));
+            f.push("LASTS", format!("{:.0}s", powerups::HEADLAMP_SECS));
         }
     }
     f.push("FOUND", "the rare pickup roll");

@@ -763,6 +763,24 @@ fn the_evolutions_run() {
     }
 }
 
+#[test]
+fn the_milk_teeth_plate_lobs_a_tooth() {
+    use crate::game::ecs::components::{MilkPhase, MilkTooth};
+
+    let mut scene = LibraryScene::build(Key::Evolution(WeaponKind::Gnaw)).unwrap();
+    let mut saw_lob = false;
+    let mut saw_landing = false;
+    one_loop(&mut scene, |s| {
+        let w = s.world();
+        let mut query = w.ecs.query::<&MilkTooth>();
+        for tooth in query.iter(&w.ecs) {
+            saw_lob |= tooth.phase == MilkPhase::Out && tooth.height() > 8.0;
+            saw_landing |= tooth.phase == MilkPhase::Lodged;
+        }
+    });
+    assert!(saw_lob && saw_landing, "the plate must show the throw and its landing");
+}
+
 /// The field guide separates what a body springs from what the rat is the
 /// point of: a glue board, a mousetrap, a steam grate and an ink pad are shown
 /// being sprung by fodder (the rat is not drawn); a pit, a rat-hole and the
@@ -890,6 +908,7 @@ fn the_pocket_finds_are_collected() {
         PickupKind::ShrinkDraught,
         PickupKind::WhiteCoat,
         PickupKind::TheCollar,
+        PickupKind::Headlamp,
     ] {
         let key = Key::Pickup(kind);
         let mut scene = LibraryScene::build(key).expect("a pickup scene");
@@ -1127,6 +1146,31 @@ fn every_boss_body_stays_on_its_plate() {
             );
         }
     }
+}
+
+#[test]
+fn the_sweeper_plate_shows_the_lane_sprint_and_skid() {
+    use crate::game::art_boss_broom::BroomBossState::{Run, RunRecover, RunWindup};
+    let mut scene = LibraryScene::build(Key::Boss(BossKind::Broom)).expect("Sweeper scene");
+    let mut phases = [false; 3];
+    for _ in 0..(scene.loop_secs() / TICK) as u32 {
+        scene.step();
+        for entity in scene.world().ecs.iter_entities() {
+            if let Some(boss) = entity.get::<Boss>() {
+                match boss.state {
+                    BossState::Broom(RunWindup) => {
+                        phases[0] |= boss.hazards.iter().any(|h| {
+                            matches!(h.shape, HazardShape::Rect { .. }) && !h.is_expired()
+                        });
+                    }
+                    BossState::Broom(Run) => phases[1] = true,
+                    BossState::Broom(RunRecover) => phases[2] = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(phases, [true; 3]);
 }
 
 /// A floor's card is a real furnished, **lit** room cut from the floor's own

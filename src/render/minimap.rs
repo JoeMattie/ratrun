@@ -459,12 +459,13 @@ pub enum PickupTag {
     ShrinkDraught,
     WhiteCoat,
     Collar,
+    Headlamp,
 }
 
 impl PickupTag {
     /// Every icon this tag can draw, in legend order (chest first: it is the
     /// landmark the player walks back for).
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Chest,
         Self::Heal,
         Self::Magnet,
@@ -477,6 +478,7 @@ impl PickupTag {
         Self::ShrinkDraught,
         Self::WhiteCoat,
         Self::Collar,
+        Self::Headlamp,
     ];
 
     /// The single glyph that stands for this find on the expanded map and in
@@ -496,6 +498,7 @@ impl PickupTag {
             Self::ShrinkDraught => 'T',
             Self::WhiteCoat => 'W',
             Self::Collar => 'K',
+            Self::Headlamp => 'H',
         }
     }
 
@@ -515,6 +518,7 @@ impl PickupTag {
             Self::ShrinkDraught => (192, 235, 255),
             Self::WhiteCoat => (255, 255, 248),
             Self::Collar => (255, 201, 100),
+            Self::Headlamp => crate::game::art_headlamp::HEADLAMP_LENS_COLOR,
         }
     }
 
@@ -533,6 +537,7 @@ impl PickupTag {
             Self::ShrinkDraught => "Shrink Draught",
             Self::WhiteCoat => "White Coat",
             Self::Collar => "The Collar",
+            Self::Headlamp => "Headlamp",
         }
     }
 }
@@ -2331,12 +2336,14 @@ fn draw_expanded_sidebar(
     }
 
     // Tall-terminal visibility key + controls footer (120×40 and 200×60).
-    if !compact && y + 7 <= bottom {
-        y += 1;
-        for i in 0..max_w.min(24) {
-            buf[(x + i as u16, y)].set_char('─').set_fg(EDGE).set_bg(PLATE);
+    if !compact && y + 6 <= bottom {
+        // Reserve four rows for the full key and two for the footer.
+        if y + 7 <= bottom {
+            for i in 0..max_w.min(24) {
+                buf[(x + i as u16, y)].set_char('─').set_fg(EDGE).set_bg(PLATE);
+            }
+            y += 1;
         }
-        y += 1;
         buf.set_stringn(
             x,
             y,
@@ -2359,9 +2366,6 @@ fn draw_expanded_sidebar(
             ),
         ];
         for &(swatch, col, lbl) in vis_rows {
-            if y + 2 >= bottom {
-                break;
-            }
             buf.set_stringn(x, y, swatch, 2, Style::default().fg(col).bg(PLATE));
             buf.set_stringn(
                 x + 2,

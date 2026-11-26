@@ -308,6 +308,8 @@ pub struct World {
     /// Render-only Verlet physics whip chain for Spiked Tail / Barbed Wire.
     /// Never simulated, never round-tripped, never reads `World::rng`.
     whip_chain: art_rat::WhipChain,
+    /// The scaled rat's render-only gait, sampled at tick cadence so draws can be skipped.
+    rat_gait: Option<art_rat_giant::RatGait>,
 
     // ---- Facade round-trip placeholders ----------------------------------
     rng_spare: Option<StdRng>,
@@ -620,6 +622,7 @@ impl World {
             sfx: Vec::new(),
             tail_ready_at: f32::NEG_INFINITY,
             whip_chain: art_rat::WhipChain::new(),
+            rat_gait: None,
 
             // Unused twin of each round-tripped value. `swap_in` leaves the
             // facade holding this while the real value lives in the ECS
@@ -1403,6 +1406,10 @@ impl World {
             self.end_tick();
             return;
         }
+        let start_pos = self.player.pos;
+        let start_face = self.player.face;
+        let start_scale = self.player.buffs.draw_scale();
+        let start_elapsed = self.elapsed;
         // Legacy `update` line 123.
         self.elapsed += dt;
 
@@ -1410,6 +1417,16 @@ impl World {
         self.schedule.run(&mut self.ecs);
         self.end_tick();
         self.try_revive();
+        let scale = self.player.buffs.draw_scale();
+        if scale == 1.0 {
+            self.rat_gait = None;
+        } else {
+            let gait = self.rat_gait.get_or_insert_with(|| {
+                art_rat_giant::RatGait::legacy(start_pos, start_face, start_elapsed)
+            });
+            let distance = (self.player.pos - start_pos).len();
+            gait.advance(distance, dt, (start_scale + scale) * 0.5);
+        }
     }
 
     /// Get up once per run (the nest's **Ninth Life**).
@@ -1544,6 +1561,7 @@ impl World {
         self.ecs.insert_resource(Shake {
             amount: self.shake,
             ofs: self.shake_ofs,
+            impact: Vec2::ZERO,
         });
         self.ecs
             .insert_resource(SfxQueue(std::mem::take(&mut self.sfx)));
@@ -2084,7 +2102,7 @@ impl World {
         let landing = if kind == BossKind::Lantern {
             super::ecs::systems::boss::lantern_arrival_beside(&self.level, self.player.pos)
         } else {
-            self.boss_point_beside(self.player.pos, kind.body_radius())
+            self.boss_point_beside(self.player.pos, kind)
         };
         let Some(pos) = landing else {
             return false;
@@ -2121,7 +2139,7 @@ impl World {
             );
             // The arrival's burst draws from the boss's own stream, exactly as
             // the scheduled spawn's does, so it never perturbs the run rng.
-            crate::game::particle::vfx::emit_boss_spawn(&mut self.particles, &mut fight.rng.0, pos, accent);
+            super::ecs::systems::boss::emit_arrival_fx(kind, &mut self.particles, &mut fight.rng.0, pos, accent);
             boss
         };
         spawn_with_id(&mut self.ecs, boss);
@@ -2155,13 +2173,14 @@ impl World {
     /// 27 px across and does not fit a one-cell aisle, so the second pass
     /// settles for a walkable cell and lets `wall_resolve` nudge the body clear
     /// of the wall it clips. Fixed sweep, no rng draw.
-    fn boss_point_beside(&self, rat: Vec2, radius: f32) -> Option<Vec2> {
+    fn boss_point_beside(&self, rat: Vec2, kind: BossKind) -> Option<Vec2> {
         const STEPS: usize = 16;
         const DISTANCES: [f32; 6] = [48.0, 44.0, 52.0, 40.0, 56.0, 60.0];
         let large = crate::game::collision::SizeClass::Large;
         let outfall = self.level.theme == Theme::Outfall;
+        let radius = kind.body_radius();
         for strict in [true, false] {
-            if outfall && !strict {
+            if !strict && (outfall || kind == BossKind::HorseshoeCrab) {
                 break;
             }
             let mut best: Option<(f32, Vec2)> = None;
@@ -2515,6 +2534,12 @@ impl World {
 
         // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
         self.particles.draw_stains(pb, cam);
+        let schedule = self.ecs.resource::<super::ecs::systems::miniboss::MinibossSchedule>();
+        for splash in &schedule.milk_splashes {
+            if on_screen(self.w2s(splash.pos, cam), 6.0, viewport) {
+                art_miniboss::draw_milk_splash(pb, splash, cam, self.elapsed);
+            }
+        }
 
         // Standing water: the puddles, then the ripples the feet left in them.
         // Right after the stains and before the boss ground layer, so a
@@ -2546,6 +2571,14 @@ impl World {
         // Boss ground layer: floor telegraphs and drop shadows, after the
         // stains and before props/entities (the art's "Ground" layer).
         self.draw_boss_ground(pb, cam);
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &MilkTooth)>();
+            for (_, tooth) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if on_screen(self.w2s(tooth.pos, cam), 10.0, viewport) {
+                    art_wave3a::draw_milk_tooth_shadow(pb, tooth, cam);
+                }
+            }
+        }
         // Wall ground layer: contact shadows and floor thresholds, under
         // everything that stands on the floor.
         self.draw_wall_layer(pb, cam, WallLayer::Ground);
@@ -2751,6 +2784,7 @@ impl World {
                         | PickupKind::ShrinkDraught
                         | PickupKind::WhiteCoat
                         | PickupKind::TheCollar
+                        | PickupKind::Headlamp
                 );
                 let gr = (if is_pocket { 6.0 } else { 7.0 } + pulse * 3.5) as i32;
                 let grf = gr as f32;
@@ -2977,8 +3011,7 @@ impl World {
             }
         }
 
-        // Fondue Fork strings & Milk Teeth darts (drawn over enemies so the
-        // yellow posts, sagging cheese line, ivory hook & dotted thread stay crisp).
+        // Fondue Fork's posts and sagging cheese line stay readable over enemies.
         {
             let mut query = self.ecs.query::<(&SpawnId, &CheeseString)>();
             for (_, line) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
@@ -2990,21 +3023,22 @@ impl World {
                 }
             }
         }
+        // Player rat.
+        self.draw_player(pb, cam, bob_lean);
+
+        // The lifted tooth is drawn over the bodies, with its shadow below.
         {
             let ppos = self.player.pos;
             let mut query = self.ecs.query::<(&SpawnId, &MilkTooth)>();
-            for (_, dart) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                let s = self.w2s(dart.pos, cam);
-                let ps = self.w2s(ppos, cam);
+            let ps = self.w2s(ppos, cam);
+            for (_, tooth) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(tooth.body_pos(), cam);
                 if on_screen(s, 10.0, viewport) || on_screen(ps, 10.0, viewport) {
-                    art_wave3a::draw_milk_tooth(pb, dart, ppos, cam);
+                    art_wave3a::draw_milk_tooth(pb, tooth, ppos, cam);
                     self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 2, 2);
                 }
             }
         }
-
-        // Player rat.
-        self.draw_player(pb, cam, bob_lean);
 
         // Instant melee weapon visuals anchored to the rat: Gnaw's closing white
         // tooth crescents (`BiteSnap`) and Tail Whip's frontal pink half-circle
@@ -3393,6 +3427,9 @@ impl World {
             use super::ecs::systems::miniboss::{Miniboss, MinibossShape};
             let mut query = self.ecs.query::<(&SpawnId, &Enemy, &Miniboss)>();
             for (_, e, mb) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if e.alive() && mb.signature().shape == super::ecs::systems::miniboss::SignatureShape::MilkSpray {
+                    art_miniboss::draw_milk_spray(pb, mb, cam);
+                }
                 let Some((MinibossShape::Trench { a, b, half }, _, live)) =
                     mb.manoeuvre.charge_lane(e.pos, e.radius)
                 else {
@@ -3750,6 +3787,13 @@ impl World {
         // A card plate with no rat (`World::hide_rat`): the simulation still
         // has one, the picture does not.
         if self.hide_rat {
+            if self.living_miniboss().is_some_and(|(_, mb)| {
+                mb.preview && mb.kind == super::ecs::systems::miniboss::MinibossKind::MilkCarton
+            }) {
+                crate::render::library::scene::draw_world_practice_dummy(
+                    pb, self.w2s(self.player.pos, cam),
+                );
+            }
             return;
         }
         // Super Dash charge: the lane preview under the rat. Faint blue-white
@@ -3859,6 +3903,18 @@ impl World {
             };
             pb.plot(x, y, glint);
         }
+        if self.player.buffs.headlamp > 0.0 {
+            let head = if self.player.buffs.is_giant() || self.player.buffs.tiny > 0.0 {
+                art_rat_giant::headlamp_mount(&self.player, self.elapsed, scale, outfit, self.rat_gait)
+            } else {
+                art_rat::headlamp_mount(&self.player, self.elapsed, outfit)
+            } + bob_lean;
+            super::art_headlamp::draw_rat_headlamp(
+                pb, head, self.player.face, scale, cam, self.elapsed,
+                self.player.buffs.headlamp <= super::ecs::systems::powerups::HEADLAMP_FADE_SECS,
+            );
+            self.light_map.mark_emissive_highlights(pb, self.w2s(head, cam), (3.0 * scale).ceil() as i32);
+        }
         pb.set_pen(pen);
         if self.whip_chain.is_active() {
             let tip_s = self.w2s(self.whip_chain.tip(), cam);
@@ -3897,14 +3953,13 @@ impl World {
 
     /// Draw the rat procedurally at the current size buff's scale.
     ///
-    /// Calls [`art_rat_giant::draw_giant_rat`] directly into the scene buffer so
+    /// Calls [`art_rat_giant::draw_giant_rat_with_outfit`] into the scene buffer so
     /// the giant rat renders at full detail rather than as a nearest-neighbour
     /// upscale of the 1× sprite. The long weapon effects (Laser Eyes' beam, the
     /// Spiked Tail's live whip and its impact star, and the Tail Thrash arc)
     /// keep their ordinary size from the same rat centre.
     ///
-    /// Render-only: it reads the player, the frame clock and the render-only
-    /// whip chain, and writes pixels.
+    /// Reads the player, frame clock, gait and whip chain to paint the sprite.
     fn draw_scaled_rat(
         &self,
         pb: &mut PixelBuffer,
@@ -3922,6 +3977,7 @@ impl World {
             scale,
             tail_flash,
             outfit,
+            self.rat_gait,
         );
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
@@ -3953,6 +4009,16 @@ impl World {
             let margin_vp = self.render_viewport;
             let body_visible = on_screen(self.w2s(boss.pos, cam), margin, margin_vp);
             let target_visible = on_screen(self.w2s(boss.target, cam), margin, margin_vp);
+            if boss.kind == BossKind::HorseshoeCrab {
+                for hazard in &boss.hazards {
+                    if hazard.slow <= 0.0 || hazard.is_expired() {
+                        continue;
+                    }
+                    if let crate::game::ecs::systems::boss::HazardShape::Circle { center, radius } = hazard.shape {
+                        art_boss_horseshoe_crab::draw_blood_pool(pb, cam, center, radius, hazard.is_active());
+                    }
+                }
+            }
             if !body_visible && !target_visible {
                 continue;
             }
@@ -4004,7 +4070,9 @@ impl World {
             {
                 continue;
             }
-            art_miniboss::draw_telegraph(pb, mb, cam, accent);
+            if mb.signature().shape != super::ecs::systems::miniboss::SignatureShape::MilkSpray {
+                art_miniboss::draw_telegraph(pb, mb, cam, accent);
+            }
         }
     }
 
@@ -4045,7 +4113,12 @@ impl World {
                 }
             }
             pb.set_pen(pen);
-            self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
+            let emissive_radius = if boss.kind == BossKind::HorseshoeCrab {
+                (19.0 * art_boss_horseshoe_crab::BODY_SCALE).ceil() as i32
+            } else {
+                19
+            };
+            self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), emissive_radius);
         }
     }
 
@@ -6436,5 +6509,36 @@ mod outfall_diver_tests {
             brute_pen,
             "Sewer body must stay grounded at its true position"
         );
+    }
+
+    #[test]
+    fn life_size_frames_match_the_ordinary_rat_art() {
+        let mut w = World::new(Theme::Sewer, 42);
+        w.player.pos = Vec2::new(60.0, 40.0);
+        w.player.face = Vec2::new(0.6, -0.8);
+        w.player.vel = w.player.face * 52.0;
+        w.rat_gait = Some(art_rat_giant::RatGait::legacy(Vec2::ZERO, Vec2::ZERO, 0.0));
+
+        for theme in [Theme::Sewer, Theme::Outfall] {
+            for elapsed in [0.1, 0.45, 1.3] {
+                let actual = draw_rat_on_theme(&mut w, theme, (120, 80), elapsed, 0.0, 0.0);
+                let mut expected = PixelBuffer::new(120, 80);
+                expected.set_materials(true);
+                expected.clear(BG);
+                expected.set_pen(crate::render::lighting::rat_pen());
+                art_rat::draw_rat_with_outfit(
+                    &mut expected,
+                    &w.player,
+                    elapsed,
+                    Vec2::ZERO,
+                    0.0,
+                    None,
+                    None,
+                    art_rat::RatOutfit::for_theme(theme),
+                );
+                assert_eq!(actual.pixels(), expected.pixels());
+                assert_eq!(actual.mat(), expected.mat());
+            }
+        }
     }
 }

@@ -1,12 +1,15 @@
-//! Geometry for the nine signature families added alongside per-kind movement.
+//! Geometry for the newer signature families.
 //! Telegraphs, damage, bot steering and Library fitting use the same geometry.
 
 use bevy_ecs::prelude::*;
 
 use super::miniboss::{Miniboss, MinibossShape, MinibossState, SignatureShape, STAMP_STEP, TELL_LOCK};
 use super::projectiles::los_clear;
+use crate::detmath::DetF32;
+use crate::game::art_walls::{wall_colliders, WallCellView};
+use crate::game::collision::{cell_of, segment_rect_hit, TileCell, TileMap};
 use crate::game::ecs::resources::{RatTrack, TickInput, RAT_TRACK_CAPACITY};
-use crate::game::level::Level;
+use crate::game::level::{Level, Rectf, Theme};
 use crate::game::player::Player;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
@@ -16,6 +19,167 @@ const RETURN_HUB: f32 = 8.0;
 const SCONCE_REACH: f32 = 140.0;
 const DRIP_MIDDLE: f32 = 0.25;
 const FALSE_POP_RADIUS: f32 = 5.0;
+
+pub const MILK_REACH: f32 = 92.0;
+pub const MILK_HALF_ANGLE: f32 = std::f32::consts::PI / 10.0;
+const MILK_SPOUT: f32 = 12.0;
+pub const MILK_SPEED: f32 = 390.0;
+const SPLASH_LIFE: f32 = 1.25;
+// Along each axis the 36° sector spans no more than its 92 px reach.
+// Eight 16 px tiles cover that span, even with padding for the hit radius.
+const SPRAY_CELLS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MilkSpray {
+    pub origin: Vec2,
+    pub aim: Vec2,
+    pub reach: f32,
+    first: (i32, i32),
+    obstructed: bool,
+    walls: [[TileCell; SPRAY_CELLS]; SPRAY_CELLS],
+}
+
+impl MilkSpray {
+    pub(super) fn open(body: Vec2, aim: Vec2) -> Self {
+        Self {
+            origin: body + aim * MILK_SPOUT,
+            aim,
+            reach: MILK_REACH,
+            first: (0, 0),
+            obstructed: false,
+            walls: [[TileCell::OPEN; SPRAY_CELLS]; SPRAY_CELLS],
+        }
+    }
+
+    pub(super) fn capture(tiles: &TileMap, body: Vec2, aim: Vec2) -> Self {
+        let mut spray = Self::open(body, aim);
+        if let Some(hit) = tiles.segment_hit(body, spray.origin, 0.0) {
+            spray.origin = body + aim * (hit * MILK_SPOUT - 0.2).max(0.0);
+        }
+        let (lo, hi) = spray.bounds();
+        spray.first = cell_of(lo - Vec2::splat(4.0));
+        let last = cell_of(hi + Vec2::splat(4.0));
+        debug_assert!(last.0 - spray.first.0 < SPRAY_CELLS as i32);
+        debug_assert!(last.1 - spray.first.1 < SPRAY_CELLS as i32);
+        for (y, row) in spray.walls.iter_mut().enumerate() {
+            for (x, cell) in row.iter_mut().enumerate() {
+                *cell = tiles.cell(spray.first.0 + x as i32, spray.first.1 + y as i32);
+                spray.obstructed |= !cell.kind.is_open();
+            }
+        }
+        spray
+    }
+
+    pub fn bounds(&self) -> (Vec2, Vec2) {
+        sector_bounds(self.origin, self.aim, self.reach, MILK_HALF_ANGLE, 0.0)
+    }
+
+    /// First contact with the same permanent colliders that stop projectiles.
+    fn wall_hit(&self, end: Vec2) -> Option<f32> {
+        if !self.obstructed {
+            return None;
+        }
+        let from = self.origin;
+        // A ray exactly on a cell boundary can graze the wall on either side.
+        let lower = Vec2::new(from.x.min(end.x), from.y.min(end.y)) - Vec2::splat(0.001);
+        let (lo_x, lo_y) = cell_of(lower);
+        let (hi_x, hi_y) = cell_of(Vec2::new(from.x.max(end.x), from.y.max(end.y)));
+        let mut first: Option<f32> = None;
+        for cy in lo_y.max(self.first.1)..=hi_y.min(self.first.1 + SPRAY_CELLS as i32 - 1) {
+            let row = &self.walls[(cy - self.first.1) as usize];
+            for cx in lo_x.max(self.first.0)..=hi_x.min(self.first.0 + SPRAY_CELLS as i32 - 1) {
+                let cell = row[(cx - self.first.0) as usize];
+                let Some(kind) = cell.kind.wall_kind() else { continue };
+                // Collision uses only the cell coordinates, kind and mask.
+                let view = WallCellView::new(cx, cy, 0, Theme::Kitchen, kind, cell.mask);
+                let mut rects = [Rectf::new(0.0, 0.0, 0.0, 0.0); 2];
+                let count = wall_colliders(&view, &mut rects);
+                for rect in &rects[..count] {
+                    if let Some(t) = segment_rect_hit(from, end, 0.0, rect) {
+                        first = Some(first.map_or(t, |previous| previous.min(t)));
+                    }
+                }
+            }
+        }
+        first
+    }
+
+    pub fn contains(&self, p: Vec2, radius: f32) -> bool {
+        let offset = p - self.origin;
+        let padded_reach = self.reach + radius;
+        if offset.len_sq() > padded_reach * padded_reach {
+            return false;
+        }
+        let along = offset.dot(self.aim);
+        let across = offset.dot(self.aim.perp());
+        let inside = along >= 0.0 && across.abs() <= along * MILK_HALF_ANGLE.dtan();
+        if radius == 0.0 {
+            return inside && self.wall_hit(p).is_none();
+        }
+        let nearest = if inside {
+            if offset.len_sq() <= self.reach * self.reach {
+                p
+            } else {
+                self.origin + offset.normalized() * self.reach
+            }
+        } else {
+            let edge = self.aim.rotate(MILK_HALF_ANGLE.copysign(across));
+            self.origin + edge * offset.dot(edge).clamp(0.0, self.reach)
+        };
+        p.dist_sq(nearest) <= radius * radius
+            && self.wall_hit(nearest).is_none()
+            && (nearest == p || self.wall_hit(p).is_none())
+    }
+
+    pub(super) fn deposit(
+        &self, previous: f32, now: f32, elapsed: f32, splashes: &mut Vec<MilkSplash>,
+    ) {
+        if previous >= MILK_REACH / MILK_SPEED {
+            return;
+        }
+        // Seven narrow streams break up at staggered distances. When a wall
+        // intercepts one, deposit its first splash just short of the face.
+        for i in 0..7 {
+            let dir = self.aim.rotate((i as f32 - 3.0) * MILK_HALF_ANGLE * 0.28);
+            let limit = self.wall_hit(self.origin + dir * self.reach)
+                .map_or(self.reach, |hit| hit * self.reach - 2.0);
+            let mut last = 0.0;
+            for j in 0..4 {
+                let dist = (23.0 + 19.0 * j as f32 + ((i * 17 + j * 7) % 13) as f32).min(limit);
+                if dist < 5.0 || dist <= last {
+                    break;
+                }
+                last = dist;
+                let arrival = dist / MILK_SPEED;
+                if previous < arrival && now >= arrival {
+                    splashes.push(MilkSplash {
+                        pos: self.origin + dir * dist,
+                        size: 1.5 + ((i * 3 + j * 11) % 7) as f32 * 0.23,
+                        born: elapsed - (now - arrival),
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MilkSplash {
+    pub pos: Vec2,
+    pub size: f32,
+    born: f32,
+}
+
+impl MilkSplash {
+    pub(super) fn expired(&self, elapsed: f32) -> bool {
+        elapsed - self.born >= SPLASH_LIFE
+    }
+
+    pub fn opacity(&self, elapsed: f32) -> f32 {
+        let age = elapsed - self.born;
+        (age / 0.08).clamp(0.0, 1.0) * ((SPLASH_LIFE - age) / 0.55).clamp(0.0, 1.0)
+    }
+}
 
 pub fn record_rat_track(input: Res<TickInput>, rat: Res<Player>, mut track: ResMut<RatTrack>) {
     track.record(input.dt, rat.pos);
@@ -221,6 +385,13 @@ pub(super) fn resolve(
             mask: active.map_or(0b111, |(_, t)| 1 << drip_index(t)),
         },
         SignatureShape::Umbra { half_angle, len } => MinibossShape::Umbra { origin, aim, half_angle, len },
+        SignatureShape::MilkSpray => {
+            let mut spray = mb.milk_spray();
+            if let Some((_, time)) = active {
+                spray.reach = (time * MILK_SPEED).min(MILK_REACH);
+            }
+            MinibossShape::MilkSpray(spray)
+        }
         _ => unreachable!("legacy signature shape"),
     }
 }
@@ -324,6 +495,7 @@ pub(super) fn contains(shape: &MinibossShape, p: Vec2, r: f32) -> bool {
                     ) <= r * r
             })
         }
+        MinibossShape::MilkSpray(spray) => spray.contains(p, r),
         _ => unreachable!("legacy miniboss footprint"),
     }
 }
@@ -360,6 +532,7 @@ impl MinibossShape {
                 }
                 return Some((lo, hi));
             }
+            Self::MilkSpray(spray) => return Some(spray.bounds()),
             _ => return None,
         };
         let center = origin + aim * ((along.0 + along.1) * 0.5);
@@ -441,9 +614,19 @@ fn rasterize(
     }
 }
 
+pub fn milk_warning_colour(timer: f32) -> Rgb {
+    if timer < TELL_LOCK { (242, 139, 81) } else { (255, 199, 103) }
+}
+
 pub fn draw_telegraph(
     pb: &mut PixelBuffer, mb: &Miniboss, footprint: &MinibossShape, cam: Vec2, scale: Vec2,
 ) {
+    if matches!(footprint, MinibossShape::MilkSpray(_)) {
+        if mb.state == MinibossState::Tell {
+            draw_outline(pb, footprint, cam, scale, milk_warning_colour(mb.timer));
+        }
+        return;
+    }
     if let MinibossShape::False { origin, bulbs, selected, .. } = *footprint {
         let screen = |p: Vec2| {
             let p = p - cam;
@@ -550,6 +733,79 @@ mod tests {
                 assert!(geometry.contains(danger, R), "{shape:?}: {danger:?} should be hit");
             }
         }
+    }
+
+    #[test]
+    fn milk_spray_follows_the_locked_cone_and_stops_at_wall_faces() {
+        let mut level = Level::empty(Theme::Kitchen);
+        let mut mb = staged(SignatureShape::MilkSpray);
+        mb.kind = MinibossKind::MilkCarton;
+        let full = resolve(SignatureShape::MilkSpray, &mb, None);
+        assert!(full.contains(point(51.0, 11.0), 0.0));
+        assert!(full.contains(point(104.0, 0.0), 0.0));
+        assert!(!full.contains(point(106.0, 0.0), 0.0));
+        assert!(!full.contains(point(48.0, 20.0), R));
+        assert!(!full.contains(point(4.0, 0.0), R));
+
+        let (x, y) = cell_of(point(32.0, 0.0));
+        level.tiles.set(x, y, TileKind::Wall(WallKind::Solid));
+        mb.spray = Some(MilkSpray::capture(&level.tiles, ORIGIN, AIM));
+        let clipped = resolve(SignatureShape::MilkSpray, &mb, None);
+        assert!(clipped.contains(point(31.0, 3.0), 0.0));
+        assert!(!clipped.contains(point(32.0, 3.0), 0.0));
+        assert!(!clipped.contains(point(49.0, 0.0), R));
+        assert!(clipped.contains(point(49.0, -10.0), 0.0));
+
+        mb.state = MinibossState::Active;
+        mb.timer = 0.02;
+        assert!(!mb.active_shape().unwrap().contains(point(26.0, 0.0), 0.0));
+        mb.timer = 0.06;
+        assert!(mb.active_shape().unwrap().contains(point(26.0, 0.0), 0.0));
+        mb.timer = mb.active_duration();
+        assert_eq!(mb.active_shape(), Some(clipped));
+    }
+
+    #[test]
+    fn milk_spray_hits_once_at_the_appointment_damage() {
+        for (appointment, damage) in [18.0, 22.0, 26.0, 30.0].into_iter().enumerate() {
+            let mut mb = Miniboss::new(MinibossKind::MilkCarton, appointment);
+            mb.origin = ORIGIN;
+            mb.aim = AIM;
+            mb.timer = TELL_LOCK;
+            mb.state = MinibossState::Tell;
+            assert!(mb.active_shape().is_none());
+            mb.state = MinibossState::Active;
+            let mut rat = Player::new(point(48.0, 0.0), WeaponKind::Gnaw);
+            let hp = rat.hp;
+            let armor = rat.loadout.stats.armor;
+            let front = mb.active_shape().unwrap();
+            assert!(apply_strike(&mut mb, &mut rat, &front, None));
+            assert_eq!(hp - rat.hp, damage - armor);
+            mb.timer += 0.1;
+            rat.iframes = 0.0;
+            let front = mb.active_shape().unwrap();
+            assert!(!apply_strike(&mut mb, &mut rat, &front, None));
+        }
+    }
+
+    #[test]
+    fn milk_splashes_arrive_with_the_jet_and_expire() {
+        let mut level = Level::empty(Theme::Kitchen);
+        let (x, y) = cell_of(point(32.0, 0.0));
+        level.tiles.fill_cells(x, y - 2, 1, 5, TileKind::Wall(WallKind::Solid));
+        let spray = MilkSpray::capture(&level.tiles, ORIGIN, AIM);
+        let mut splashes = Vec::new();
+        spray.deposit(0.0, 0.01, 0.01, &mut splashes);
+        assert!(splashes.is_empty());
+        spray.deposit(0.01, 0.30, 0.30, &mut splashes);
+        assert!(!splashes.is_empty());
+        assert!(splashes.iter().all(|s| s.pos.x < point(32.0, 0.0).x));
+        spray.deposit(0.30, 0.50, 0.50, &mut splashes);
+        let splash = splashes[0];
+        assert!(splash.opacity(splash.born + 0.74) > splash.opacity(splash.born + 1.08));
+        assert!(!splash.expired(splash.born + 1.24));
+        assert!(splash.expired(splash.born + 1.26));
+        assert_eq!(splash.opacity(splash.born + 1.26), 0.0);
     }
 
     #[test]

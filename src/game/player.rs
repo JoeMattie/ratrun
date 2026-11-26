@@ -43,13 +43,15 @@ pub struct Buffs {
     pub white_coat: f32,
     /// The Collar: double gem XP and faster heavy pursuers. 16 s.
     pub collar: f32,
+    /// Headlamp: a forward beam that reveals ground and steers the horde. 18 s.
+    pub headlamp: f32,
 }
 
 impl Buffs {
     /// Every tick: age the countdowns. Returns the kinds that expired this
     /// tick, so the caller can play the release cue without a second pass.
-    pub fn tick(&mut self, dt: f32) -> [bool; 8] {
-        let mut expired = [false; 8];
+    pub fn tick(&mut self, dt: f32) -> [bool; 9] {
+        let mut expired = [false; 9];
         for (slot, was) in [
             (&mut self.shield, 0),
             (&mut self.slow_bullets, 1),
@@ -59,6 +61,7 @@ impl Buffs {
             (&mut self.tiny, 5),
             (&mut self.white_coat, 6),
             (&mut self.collar, 7),
+            (&mut self.headlamp, 8),
         ] {
             if *slot > 0.0 {
                 *slot = (*slot - dt).max(0.0);
@@ -78,6 +81,7 @@ impl Buffs {
             || self.tiny > 0.0
             || self.white_coat > 0.0
             || self.collar > 0.0
+            || self.headlamp > 0.0
     }
 
     /// Is the rat giant right now? (`Growth Serum`.) One reader-facing name for

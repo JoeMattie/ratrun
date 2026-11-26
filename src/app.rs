@@ -369,6 +369,8 @@ struct PictureKey {
     shake: u32,
     /// Scheduled fixture attenuation, in bits, derived from the floor clock.
     blackout: u32,
+    /// Timer and facing changes can be staged directly in a frozen picture.
+    headlamp: Option<(u32, u32, u32)>,
 }
 
 impl PictureKey {
@@ -386,6 +388,9 @@ impl PictureKey {
             fx: w.lighting_fx,
             shake: w.shake_scale.to_bits(),
             blackout: w.blackout().to_bits(),
+            headlamp: (w.player.buffs.headlamp > 0.0).then(|| (
+                w.player.buffs.headlamp.to_bits(), w.player.face.x.to_bits(), w.player.face.y.to_bits(),
+            )),
         }
     }
 }
@@ -6354,7 +6359,7 @@ mod tests {
         let arrays = [KeyCode::Char('4'), KeyCode::Char('7'), KeyCode::F(1), KeyCode::F(5)];
         h.frame(&arrays);
         let picks = h.app.testbed.unwrap();
-        assert_eq!(picks.pickup, *PickupKind::all().last().unwrap());
+        assert_eq!(picks.pickup, PickupKind::Headlamp);
         assert_eq!(picks.enemy, EnemyKind::ShoreCrab);
         assert_eq!(picks.boss, *BossKind::all().last().unwrap());
         assert_eq!(picks.miniboss, *MinibossKind::all().last().unwrap());
@@ -8248,12 +8253,118 @@ mod tests {
                 hh.app.set_next_seed(seed.parse().expect("RATRUN_DUMP_SEED must be a u64"));
             }
         }
-        if target.starts_with("outfall-") || target.starts_with("lantern-") {
+        if target.starts_with("outfall-") || target.starts_with("lantern-") || target.starts_with("horseshoe-") {
             hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
         }
         hh.frame(&[]);
 
         match target.as_str() {
+            "w11-headlamp" | "w11-headlamp-off" | "w11-headlamp-pickup"
+            | "w11-mudlark-walk" | "w11-carton-walk" | "w11-milk-teeth" => {
+                use crate::game::art_walls::{WallAxis, WallKind};
+                use crate::game::collision::{cell_of, TileKind, TileMap};
+                use crate::game::ecs::components::MilkTooth;
+                use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
+                use crate::game::enemy::Enemy;
+                use crate::game::fog::Fog;
+                use crate::game::gem::Pickup;
+
+                let theme = if target == "w11-carton-walk" { Theme::Kitchen } else { Theme::Sewer };
+                hh.app.start_practice(theme);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = if matches!(target.as_str(), "w11-headlamp" | "w11-headlamp-off") {
+                    minimap::MinimapSize::Normal
+                } else {
+                    minimap::MinimapSize::Hidden
+                };
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.clear_enemies();
+                w.player.loadout.weapons.clear();
+                w.shake_scale = 0.0;
+                let hall = w.player.pos;
+                let (x, y) = cell_of(hall);
+                w.level.tiles.fill_cells(x - 10, y - 4, 21, 9, TileKind::Open);
+                w.level.tiles.rebuild_masks();
+                w.level.props.clear();
+                let east = Vec2::new(1.0, 0.0);
+                let dt = 1.0 / 60.0;
+                w.player.face = east;
+                match target.as_str() {
+                    "w11-headlamp" | "w11-headlamp-off" => {
+                        let rat = TileMap::tile_rect(x - 4, y).center();
+                        w.level.puddles.clear();
+                        for row in y - 10..=y + 10 {
+                            w.level.tiles.set(x + 1, row, TileKind::Wall(WallKind::Solid));
+                        }
+                        w.level.tiles.set(x + 1, y, TileKind::Wall(WallKind::RatHole { axis: WallAxis::Vertical }));
+                        w.level.tiles.rebuild_masks();
+                        w.player.pos = rat;
+                        w.cam_focus = Some(rat + east * 35.0);
+                        w.elapsed = 304.0;
+                        w.fog = Fog::new(w.level.tiles.cols(), w.level.tiles.rows());
+                        let enabled = target == "w11-headlamp";
+                        if enabled {
+                            w.spawn_pickup(Pickup { pos: rat, kind: PickupKind::Headlamp, bob: 0.0 });
+                        }
+                        let offsets = [Vec2::new(47.0, -4.0), Vec2::new(57.0, 5.0), Vec2::new(66.0, -14.0)];
+                        let bodies = offsets.map(|offset| w.spawn_enemy(EnemyKind::Skitterer, rat + offset, 2.0));
+                        for _ in 0..43 {
+                            w.update_with_aim(dt, Vec2::ZERO, false, false, Some(rat + east * 100.0));
+                        }
+                        assert_eq!(w.fog.is_seen(x + 3, y), enabled);
+                        let positions = bodies.map(|e| w.ecs.get::<Enemy>(e).unwrap().pos - rat);
+                        eprintln!("Headlamp enabled={enabled}, seen cells={}, body offsets={positions:?}", w.fog.seen_count());
+                    }
+                    "w11-headlamp-pickup" => {
+                        w.cam_focus = Some(hall);
+                        w.player.pos = hall - Vec2::new(17.0, 8.0);
+                        let pos = hall + Vec2::new(24.0, -14.0);
+                        w.spawn_pickup(Pickup { pos, kind: PickupKind::Headlamp, bob: 0.3 });
+                    }
+                    "w11-mudlark-walk" | "w11-carton-walk" => {
+                        let kind = if theme == Theme::Kitchen { MinibossKind::MilkCarton } else { MinibossKind::Mudlark };
+                        let start = hall - Vec2::new(49.0, 9.0);
+                        w.player.pos = hall + east * 24.0;
+                        let entity = w.spawn_miniboss(kind, 0, start);
+                        {
+                            let mut body = w.ecs.get_mut::<Miniboss>(entity).unwrap();
+                            body.announced = true;
+                            body.state = MinibossState::Cooldown;
+                            body.timer = 0.0;
+                            body.aim = east;
+                        }
+                        for _ in 0..29 {
+                            w.update(dt, Vec2::ZERO, false);
+                        }
+                        let body = w.ecs.get::<Enemy>(entity).unwrap();
+                        assert!(body.pos.x > start.x + 4.0, "the miniboss must walk");
+                        w.cam_focus = Some(body.pos + (w.player.pos - body.pos) * 0.43);
+                    }
+                    "w11-milk-teeth" => {
+                        let rat = hall - east * 30.0;
+                        w.player.pos = rat;
+                        w.cam_focus = Some(hall);
+                        w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::Gnaw));
+                        let weapon = &mut w.player.loadout.weapons[0];
+                        weapon.level = 5;
+                        weapon.evolved = true;
+                        weapon.timer = 0.0;
+                        w.spawn_enemy(EnemyKind::Pillbug, rat + east * 16.0, 20.0);
+                        w.spawn_enemy(EnemyKind::Brute, rat + east * 60.0, 5.0);
+                        for _ in 0..17 {
+                            w.update_with_aim(dt, Vec2::ZERO, false, false, Some(rat + east * 56.0));
+                        }
+                        let mut teeth = w.ecs.query::<&MilkTooth>();
+                        assert!(teeth.iter(&w.ecs).any(|tooth| tooth.height() > 10.0));
+                    }
+                    _ => unreachable!(),
+                }
+                hh.app.hud.tick(0.0, w, &[], hh.app.muted);
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+
             "sector-transfer" => {
                 hh.enter_playing();
                 let world = hh.app.world.as_mut().unwrap();
@@ -8711,6 +8822,77 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
+            t if t.starts_with("horseshoe-") => {
+                use crate::game::art_boss_horseshoe_crab::{self as art, CrabState};
+                use crate::game::art_walls::WallKind;
+                use crate::game::collision::{cell_of, TileKind, TILE_F};
+                use crate::game::ecs::systems::boss::{Boss, BossArtView, BossKind, BossState};
+
+                hh.app.start_practice(Theme::Sewer);
+                hh.frame(&[KeyCode::Enter]);
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.player.loadout.weapons.clear();
+                w.shake_scale = 0.0;
+                let scene = &t["horseshoe-".len()..];
+                let (x, y) = cell_of(w.player.pos);
+                w.level.tiles.fill_cells(x - 7, y - 4, 13, 9, TileKind::Open);
+                if scene.starts_with("shell-") {
+                    w.level.tiles.fill_cells(x + 4, y - 4, 1, 9, TileKind::Wall(WallKind::Solid));
+                }
+                w.level.tiles.rebuild_masks();
+                let rat = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * TILE_F;
+                w.player.pos = rat;
+                assert!(w.force_boss_here(BossKind::HorseshoeCrab));
+                let entity = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let tail = scene == "tail";
+                {
+                    let mut boss = w.ecs.get_mut::<Boss>(entity).unwrap();
+                    // Start the charge with enough runway to show its locked lane.
+                    if scene != "arrival" {
+                        boss.pos = rat - Vec2::new(48.0, 0.0);
+                        boss.facing = Vec2::new(1.0, 0.0);
+                        boss.set_state(BossState::HorseshoeCrab(CrabState::Dome), 0.01);
+                    }
+                    if tail {
+                        // Skip the charge by placing the rat inside close tail reach.
+                        w.player.pos = boss.pos + Vec2::new(28.0, 0.0);
+                    }
+                    if scene == "death" {
+                        boss.hp = 0.0;
+                    }
+                }
+                let mut captured = false;
+                for _ in 0..320 {
+                    w.update(1.0 / 60.0, Vec2::ZERO, false);
+                    let boss = w.ecs.get::<Boss>(entity).unwrap();
+                    captured = match scene {
+                        "arrival" => boss.anim >= 0.20,
+                        "shell-tell" => boss.state == BossState::HorseshoeCrab(CrabState::BulldozeTell)
+                            && boss.progress() >= 0.75,
+                        "shell-strike" => boss.state == BossState::HorseshoeCrab(CrabState::Bulldoze)
+                            && boss.progress() >= 0.26,
+                        "tail" => boss.state == BossState::HorseshoeCrab(CrabState::TelsonSweep)
+                            && boss.progress() >= art::TELSON_ACTIVE_PROGRESS + 0.12,
+                        "death" => boss.dead && boss.progress() >= 0.40,
+                        _ => panic!("unknown Horseshoe capture: {scene}"),
+                    };
+                    if captured {
+                        break;
+                    }
+                }
+                assert!(captured, "The Horseshoe did not reach {scene}");
+                let body = w.ecs.get::<Boss>(entity).unwrap();
+                let BossArtView::HorseshoeCrab(view) = body.view() else { unreachable!() };
+                let close = std::env::var("RATRUN_DUMP_ZOOM").ok().as_deref() == Some("0.5");
+                w.cam_focus = Some(match scene {
+                    "shell-tell" | "shell-strike" if !close => (view.pos + view.target) * 0.5 - view.facing * 12.0,
+                    "tail" => (view.pos + art::telson_tip(&view)) * 0.5,
+                    _ => view.pos - view.facing * (14.0 * if close { 0.5 } else { 1.0 }),
+                });
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             // The dash module and the on-rat gauge in each of their three
             // states. `RATRUN_DUMP_CTRL=1` captures the Ctrl mapping (the
             // default is the Space fallback).
@@ -9026,6 +9208,48 @@ mod tests {
                     assert!(w.player.pos.dist(pos) > LASER_EYE_OFFSET);
                     assert!(w.laser_visual().is_some_and(|beam| beam.origin.dist(eye) < 0.01));
                 }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            t if t.starts_with("miniboss-milk-") => {
+                use crate::game::art_walls::WallKind;
+                use crate::game::collision::{cell_of, TileKind};
+                use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
+                hh.app.start_practice(Theme::Kitchen);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.player.loadout.weapons.clear();
+                w.elapsed = 186.0;
+                w.shake_scale = 0.0;
+                let rat = w.player.pos;
+                let (x, y) = cell_of(rat);
+                w.level.tiles.fill_cells(x - 4, y - 3, 9, 7, TileKind::Open);
+                let pose = t.trim_start_matches("miniboss-milk-");
+                if pose == "wall" {
+                    w.level.tiles.set(x + 1, y, TileKind::Wall(WallKind::Solid));
+                }
+                w.level.tiles.rebuild_masks();
+                w.level.props.clear();
+                let pos = rat - Vec2::new(48.0, 0.0);
+                let e = w.spawn_miniboss(MinibossKind::MilkCarton, 0, pos);
+                w.ecs.get_mut::<Miniboss>(e).unwrap().announced = true;
+                let (frames, expected) = match pose {
+                    "track" => (16, MinibossState::Tell),
+                    "tell" => (45, MinibossState::Tell),
+                    "launch" => (65, MinibossState::Active),
+                    "strike" | "wall" => (83, MinibossState::Active),
+                    "tail" => (102, MinibossState::Active),
+                    "splashes" => (111, MinibossState::Recover),
+                    "fade" => (131, MinibossState::Recover),
+                    _ => panic!("unknown milk spray capture {pose}"),
+                };
+                for _ in 0..frames {
+                    w.update(1.0 / 60.0, Vec2::ZERO, false);
+                }
+                assert_eq!(w.ecs.get::<Miniboss>(e).unwrap().state, expected);
+                w.cam_focus = Some(rat + Vec2::new(2.0, 0.0));
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
@@ -10364,6 +10588,66 @@ mod tests {
                     hh.frame(&[KeyCode::Enter]);
                 }
             }
+            // Hold a real Kitchen run at a selected tick after its tell starts.
+            "sweeper-run" => {
+                use crate::game::art_boss_broom::{BroomBossState, RUN_HALF_WIDTH};
+                use crate::game::collision::SizeClass;
+                use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
+                hh.app.start_practice(Theme::Kitchen);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.clear_enemies();
+                w.player.loadout.weapons.clear();
+                w.player.iframes = 30.0;
+                w.shake_scale = 0.0;
+                let east = Vec2::new(1.0, 0.16).normalized();
+                let (start, facing) = w.level.rooms.iter().find_map(|room| {
+                    let center = room.rect.center_world();
+                    [east, -east].into_iter().find_map(|dir| {
+                        let start = center - dir * 45.0;
+                        let end = start + dir * 97.0;
+                        (w.level.tiles.circle_clear(start, RUN_HALF_WIDTH, SizeClass::Large)
+                            && w.level.tiles.circle_clear(end, RUN_HALF_WIDTH, SizeClass::Large)
+                            && w.level.tiles.segment_hit(start, end, RUN_HALF_WIDTH).is_none())
+                        .then_some((start, dir))
+                    })
+                }).expect("clear Kitchen run lane");
+                w.player.pos = start + facing * 75.0;
+                assert!(w.force_boss_here(BossKind::Broom));
+                let entity = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let dt = 1.0 / 60.0;
+                for _ in 0..1200 {
+                    let mut boss = w.ecs.get_mut::<Boss>(entity).unwrap();
+                    if boss.state == BossState::Broom(BroomBossState::RunWindup) {
+                        break;
+                    }
+                    boss.pos = start;
+                    w.update(dt, Vec2::ZERO, false);
+                }
+                let boss = w.ecs.get::<Boss>(entity).unwrap();
+                assert_eq!(boss.state, BossState::Broom(BroomBossState::RunWindup));
+                let end = boss.target;
+                let frames = std::env::var("RATRUN_DUMP_FRAMES")
+                    .ok().and_then(|value| value.parse::<u32>().ok()).unwrap_or(25);
+                for frame in 0..frames {
+                    if frame == 20 {
+                        w.player.pos += facing.perp() * 25.0;
+                    }
+                    w.update(dt, Vec2::ZERO, false);
+                }
+                let boss = w.ecs.get::<Boss>(entity).unwrap();
+                eprintln!("Sweeper frame {frames}: {:?} {:.2}", boss.state, boss.progress());
+                let focus = if boss.state == BossState::Broom(BroomBossState::RunWindup) {
+                    (start + end) * 0.5 - facing * 6.0 + Vec2::new(0.0, -3.0)
+                } else {
+                    (boss.pos + w.player.pos) * 0.5 - facing * 12.0 + Vec2::new(0.0, -10.0)
+                };
+                w.cam_focus = Some(focus);
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             // `bossfight-<n>`: boss `n` of `BossKind::all()` on its own floor,
             // a few seconds into the fight, the rat standing off in the arena.
             t if t.starts_with("bossfight") => {
@@ -10419,11 +10703,24 @@ mod tests {
                         hh.frame(&[KeyCode::Enter]);
                     }
                 }
-                if kind == BossKind::Lantern {
+                if matches!(kind, BossKind::Lantern | BossKind::HorseshoeCrab) {
+                    if kind == BossKind::HorseshoeCrab {
+                        hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                    }
                     let w = hh.app.world.as_mut().unwrap();
+                    if kind == BossKind::HorseshoeCrab {
+                        w.set_zoom_instant(1.25);
+                    }
                     let focus = w.ecs.iter_entities().find_map(|e| {
-                        let view = e.get::<crate::game::ecs::systems::boss::Boss>()?.lantern_view()?;
-                        Some(view.pos - view.facing * 40.0)
+                        use crate::game::ecs::systems::boss::{Boss, BossArtView};
+                        match e.get::<Boss>()?.view() {
+                            BossArtView::Lantern(v) => Some(v.pos - v.facing * 40.0),
+                            BossArtView::HorseshoeCrab(v) => {
+                                let tip = crate::game::art_boss_horseshoe_crab::telson_tip(&v);
+                                Some(v.pos + (tip - v.pos) * 0.28)
+                            }
+                            _ => None,
+                        }
                     });
                     w.cam_focus = focus;
                     hh.app.picture_dirty = true;
@@ -10581,7 +10878,8 @@ mod tests {
             // lighting effects. `sconce`: the rat in front of the nearest wall
             // lamp with bodies between lamp and camera; `pendant`: bodies in a
             // ring under the nearest hanging lamp; `wet`: the same lamp with no
-            // bodies (floor reflections); `corner`: the rat in the room farthest
+            // bodies (floor reflections); `headlamp`: the rat lights a hall ahead;
+            // `corner`: the rat in the room farthest
             // from the map centre with bodies round it (the overhead offset).
             // `RATRUN_DUMP_N=n` takes the n-th nearest lamp and
             // `RATRUN_DUMP_AT=seconds` sets the frozen scene clock.
@@ -10598,6 +10896,16 @@ mod tests {
                 } else {
                     hh.app.start_practice(theme);
                     hh.frame(&[KeyCode::Enter]);
+                }
+                if scene == "headlamp" {
+                    use crate::render::lighting::LightingMode;
+                    let mode = match std::env::var("RATRUN_DUMP_LIGHTS").as_deref() {
+                        Ok("hard") => LightingMode::Hard,
+                        Ok("coarse") => LightingMode::Coarse,
+                        Ok("compact") => LightingMode::Compact,
+                        _ => LightingMode::Full,
+                    };
+                    hh.app.set_lighting(mode);
                 }
                 let nth = std::env::var("RATRUN_DUMP_N")
                     .ok()
@@ -10667,7 +10975,16 @@ mod tests {
                 lamps.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
                 let mut spots: Vec<Vec2> = Vec::new();
                 let rat_at;
-                if scene == "corner" {
+                if scene == "headlamp" {
+                    let hall = w.level.largest_hall().expect("a hall for the Headlamp capture");
+                    rat_at = hall.center() - Vec2::new(36.0, 0.0);
+                    w.player.face = Vec2::new(1.0, 0.0);
+                    w.player.buffs.headlamp = crate::game::ecs::systems::powerups::HEADLAMP_SECS;
+                    w.cam_focus = Some(rat_at + Vec2::new(30.0, 0.0));
+                    for offset in [Vec2::new(47.0, -12.0), Vec2::new(64.0, 14.0)] {
+                        spots.push(rat_at + offset);
+                    }
+                } else if scene == "corner" {
                     let centre = Vec2::new(
                         w.level.tiles.cols() as f32 * 8.0,
                         w.level.tiles.rows() as f32 * 8.0,
@@ -11102,10 +11419,16 @@ mod tests {
                 hh.frame(&[]);
             }
         }
-        // Reframe scripted Outfall poses without ticking their tells.
+        // Reframe staged poses without advancing their simulation.
         let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
-        let frozen_pose = posed_outfall || target.starts_with("w6-") || target.starts_with("w8-")
-            || target.starts_with("dropping-");
+        let frozen_pose = posed_outfall
+            || target.starts_with("horseshoe-")
+            || target.starts_with("w6-")
+            || target.starts_with("w8-")
+            || target.starts_with("dropping-")
+            || target.starts_with("miniboss-milk-")
+            || target.starts_with("w11-")
+            || matches!(target.as_str(), "sweeper-run" | "giant");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
@@ -11887,6 +12210,17 @@ mod tests {
         assert_eq!(h.app.world_draws, drawn + 1, "the fixture power must redraw");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "the blackout stays frozen");
+
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.app.world.as_mut().unwrap().player.buffs.headlamp = 18.0;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a staged Headlamp must redraw");
+        h.app.world.as_mut().unwrap().player.face = Vec2::new(1.0, 0.0);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 2, "a turn of the beam must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 2, "the beam stays frozen");
 
         // The zoom: every frame of the ease is a new picture, then it stops.
         let mut h = paused_harness();

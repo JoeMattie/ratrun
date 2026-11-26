@@ -653,12 +653,12 @@ impl WeaponKind {
     pub fn evolution(self) -> Option<Evolution> {
         let e = |passive, name, flavor, attack| Some(Evolution { passive, name, flavor, attack });
         match self {
-            // Milk Teeth — the lead dart lodges, then comes home biting.
+            // Milk Teeth — the lobbed tooth bites on landing and on return.
             WeaponKind::Gnaw => e(
                 super::loadout::PassiveKind::Damage,
                 "Milk Teeth",
                 "They always come back in.",
-                "Lead dart lodges 1s, then yanks back to you through every foe in line.",
+                "Lobs a tooth that bites on landing, lodges 1s, then bites on its way back.",
             ),
             // Fondue Fork — the outer two darts plant tines and string a wire.
             WeaponKind::CheeseSpray => e(

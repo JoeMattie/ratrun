@@ -252,7 +252,9 @@ pub fn spawn_crabs_system(
 /// Apply the crab's sideways gait in the ordinary steering slot.
 /// The flow direction breaks the tie when the rat is exactly on the facing
 /// axis, and supplies a route around walls when the claws face across one.
-pub(crate) fn scuttle(e: &mut Enemy, level: &Level, target: Vec2, flow: Vec2, dt: f32, speed: f32) {
+pub(crate) fn scuttle(
+    e: &mut Enemy, level: &Level, target: Vec2, flow: Vec2, dt: f32, speed: f32, deflection: Vec2,
+) {
     let to = target - e.pos;
     let distance = to.len();
     let direct = to.normalized();
@@ -286,6 +288,7 @@ pub(crate) fn scuttle(e: &mut Enemy, level: &Level, target: Vec2, flow: Vec2, dt
     let class = SizeClass::of_enemy(KIND);
     for dir in [side + forward, forward - side, flow, direct] {
         let velocity = dir.normalized() * speed;
+        let velocity = if deflection == Vec2::ZERO { velocity } else { velocity + deflection * speed };
         let step = velocity * dt;
         let end = if level.theme == Theme::Outfall {
             clamp_outfall_displacement(level, start, step, e.radius, class)
@@ -602,7 +605,7 @@ mod tests {
         let w = open_world(Theme::Outfall);
         let start = w.player.pos - EAST * 65.0;
         let mut body = Enemy::spawn_fixed(KIND, start, 1.0);
-        body.steer_crab(&w.level, w.player.pos, NORTH, DT, 1.0);
+        body.steer_crab(&w.level, w.player.pos, NORTH, DT, 1.0, Vec2::ZERO);
         assert_eq!(body.facing, EAST);
         assert!((body.vel.len() - 46.0).abs() < 1e-4);
         assert!(body.vel.dot(NORTH) > body.vel.dot(EAST));

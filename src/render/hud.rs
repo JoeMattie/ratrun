@@ -404,6 +404,7 @@ pub enum CalloutKind {
     ShrinkDraught,
     WhiteCoat,
     Collar,
+    Headlamp,
 }
 
 impl CalloutKind {
@@ -433,6 +434,7 @@ impl CalloutKind {
             CalloutKind::ShrinkDraught => palette::to_color(PickupKind::ShrinkDraught.color()),
             CalloutKind::WhiteCoat => palette::to_color(PickupKind::WhiteCoat.color()),
             CalloutKind::Collar => palette::to_color(PickupKind::TheCollar.color()),
+            CalloutKind::Headlamp => palette::to_color(PickupKind::Headlamp.color()),
         }
     }
 }
@@ -536,6 +538,7 @@ pub struct HudState {
     /// The wave-3 pocket-find strip: `B12 M5 P4 S6` — one chip per active
     /// timed buff, refilled in `tick` so the draw path allocates nothing.
     buffs: String,
+    headlamp_icon_at: Option<u16>,
     /// The nest chip's text (`NEST +6 upgrades`), refilled in `tick` from the
     /// run's permanent upgrades. Empty for a fresh profile, so the chip never
     /// appears for a player who has not bought anything.
@@ -628,6 +631,7 @@ impl Default for HudState {
             dash_name: "SPACE".to_string(),
             active_name: "SPACE".to_string(),
             buffs: String::with_capacity(48),
+            headlamp_icon_at: None,
             nest: String::with_capacity(24),
             wide_chips: false,
             boss_hp_text: String::with_capacity(24),
@@ -847,6 +851,14 @@ impl HudState {
                     CalloutKind::Collar,
                     "+THE COLLAR",
                     "DOUBLE GEM XP · 16s",
+                    2.4,
+                );
+            }
+            PickupKind::Headlamp => {
+                self.push_callout(
+                    CalloutKind::Headlamp,
+                    "+HEADLAMP",
+                    "FOES VEER · MAP LIT · 18s",
                     2.4,
                 );
             }
@@ -1147,6 +1159,7 @@ impl HudState {
         //     seconds it has left (`B12 M5 P4 S6`). Refilled here (not in the
         //     draw path) so the strip reuses its buffer every frame.
         let wide_chips = self.wide_chips;
+        let mut headlamp_icon_at = None;
         refill(&mut self.buffs, |b| {
             let buffs = &world.player.buffs;
             let mut any = false;
@@ -1159,12 +1172,17 @@ impl HudState {
                 (PickupKind::ShrinkDraught, buffs.tiny),
                 (PickupKind::WhiteCoat, buffs.white_coat),
                 (PickupKind::TheCollar, buffs.collar),
+                (PickupKind::Headlamp, buffs.headlamp),
             ] {
                 if left <= 0.0 {
                     continue;
                 }
                 if any {
                     b.push(' ');
+                }
+                if kind == PickupKind::Headlamp {
+                    headlamp_icon_at = Some(b.len() as u16);
+                    b.push_str("    ");
                 }
                 let secs = left.ceil().max(1.0) as u32;
                 // `B12 M05 P04 S06` is two letters of nothing: the review could
@@ -1179,6 +1197,7 @@ impl HudState {
                 any = true;
             }
         });
+        self.headlamp_icon_at = headlamp_icon_at;
 
         // 5b. The nest chip: how many permanent tracks this run is carrying.
         //     Retained buffer, so the draw path still allocates nothing.
@@ -2338,6 +2357,7 @@ fn buff_chip_name(kind: PickupKind) -> &'static str {
         PickupKind::ShrinkDraught => "TINY",
         PickupKind::WhiteCoat => "WHITE COAT",
         PickupKind::TheCollar => "COLLAR",
+        PickupKind::Headlamp => "HEADLAMP",
     }
 }
 
@@ -2648,6 +2668,11 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     }
 
     draw_buff_strip(frame, area, &state.buffs);
+    if area.y > 0 {
+        if let Some(at) = state.headlamp_icon_at.filter(|at| at + 7 <= area.width.saturating_sub(2)) {
+            draw_headlamp_chip_icon(frame, area.x + 1 + at, area.y - 1);
+        }
+    }
     draw_nest_chip(frame, area, &state.nest);
 }
 
@@ -2700,6 +2725,19 @@ pub(crate) fn draw_buff_strip(frame: &mut Frame, area: Rect, text: &str) {
         w as usize,
         Style::default().fg(BRASS_KEY).bg(PLATE),
     );
+}
+
+fn draw_headlamp_chip_icon(frame: &mut Frame, x: u16, y: u16) {
+    use crate::render::framebuffer::PixelBuffer;
+    static ICON: std::sync::OnceLock<PixelBuffer> = std::sync::OnceLock::new();
+    let icon = ICON.get_or_init(|| {
+        let mut art = PixelBuffer::new(8, 8);
+        crate::game::art_headlamp::draw_headlamp_icon(&mut art, 0, 0);
+        let mut small = PixelBuffer::new(4, 2);
+        art.resample_to(&mut small);
+        small
+    });
+    icon.render_to(Rect::new(x, y, 4, 1), frame.buffer_mut());
 }
 
 /// Draw a compact eighth-cell bar directly into `buf` with no label.

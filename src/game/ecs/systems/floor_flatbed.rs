@@ -457,7 +457,7 @@ pub fn floor_flatbed_system(
         .map(|(_, d)| d.pos);
 
     for &(_, entity) in order.iter() {
-        let Ok((_, _, mut e, state)) = enemies.get_mut(entity) else {
+        let Ok((_, id, mut e, state)) = enemies.get_mut(entity) else {
             continue;
         };
         if !e.alive() {
@@ -483,6 +483,7 @@ pub fn floor_flatbed_system(
                         level,
                         flow,
                         speed_mult,
+                        id.0,
                         &mut player,
                         &mut particles,
                         &mut rng,
@@ -503,6 +504,7 @@ pub fn floor_flatbed_system(
                             level,
                             flow,
                             speed_mult,
+                            id.0,
                             &mut player,
                             &mut particles,
                             &mut rng,
@@ -548,6 +550,7 @@ fn can_tick(
     level: &Level,
     flow: &FlowField,
     speed_mult: f32,
+    spawn: u64,
     player: &mut Player,
     particles: &mut Particles,
     rng: &mut RngRes,
@@ -664,6 +667,11 @@ fn can_tick(
                         field.normalized()
                     } else {
                         direct
+                    };
+                    let dir = if let Some(beam) = super::powerups::HeadlampBeam::from_player(level, player, player.face) {
+                        dir + beam.shy(level, e, spawn)
+                    } else {
+                        dir
                     };
                     let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
                     let before = e.pos;

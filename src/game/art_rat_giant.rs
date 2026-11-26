@@ -14,10 +14,10 @@
 //! eye glint, and 1-px whiskers) stays razor-sharp at every scale and at any
 //! 360-degree facing.
 //!
-//! Pure drawing: reads only `Player`, `elapsed`, `cam`, `scale`, and
-//! `tail_flash`; holds no state, allocates nothing on the heap, and draws no
-//! rng. Cast drop shadows temporarily clear the lighting material pen (`0`) so
-//! the lighting pass never rim-lights floor shadow pixels as creature fur.
+//! The facade samples travelled distance once per tick into a render-only gait
+//! clock. Drawing reads that clock and the player pose without advancing either,
+//! allocating on the heap, or drawing rng. Cast shadows clear the material pen
+//! (`0`) so the lighting pass never rim-lights floor shadow pixels as creature fur.
 
 use std::f32::consts::{PI, TAU};
 
@@ -109,6 +109,10 @@ const TAIL_BASE_UNITS: f32 = 12.6;
 /// Stack-allocated tail spline and capsule counts (zero heap allocation).
 const TAIL_MAX_PTS: usize = 96;
 const TAIL_MAX_CAPS: usize = 24;
+/// The ordinary rat's trot advances this many radians per pixel.
+const WALK_RADIANS_PER_PIXEL: f32 = 1.15;
+/// Blend back to the life-size pose over the last fraction of the scale ramp.
+const GAIT_RETURN_BAND: f32 = 0.35;
 
 #[inline]
 fn w2s(p: Vec2, cam: Vec2) -> (i32, i32) {
@@ -182,6 +186,82 @@ fn darken(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
     pb.plot(x, y, scale_rgb(bg, 1.0 - amount.clamp(0.0, 1.0)));
 }
 
+/// Animation state kept by `World` only while a size effect changes the draw scale.
+#[derive(Clone, Copy)]
+pub(super) struct RatGait {
+    walk: f32,
+    stroke: f32,
+    idle: f32,
+}
+
+impl RatGait {
+    pub(super) fn legacy(pos: Vec2, face: Vec2, elapsed: f32) -> Self {
+        Self {
+            walk: pos.dot(rat_facing(face)) * WALK_RADIANS_PER_PIXEL,
+            stroke: elapsed,
+            idle: elapsed,
+        }
+    }
+
+    pub(super) fn advance(&mut self, distance: f32, dt: f32, scale: f32) {
+        let scaled_distance = distance / scale;
+        self.walk += scaled_distance * WALK_RADIANS_PER_PIXEL;
+        // Convert distance to seconds at the ordinary rat's default walk speed,
+        // so the old running swish and swim frequencies set the base stride.
+        self.stroke += scaled_distance / crate::tuning::Player::default().move_speed;
+        self.idle += dt / scale;
+    }
+}
+
+fn rat_facing(face: Vec2) -> Vec2 {
+    if face.len_sq() > 1e-4 {
+        face.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    }
+}
+
+/// Blend wave values during the return to life size. Interpolating the values
+/// lets the poses meet even when their phases differ by several turns.
+#[derive(Clone, Copy)]
+struct GaitWave {
+    legacy: f32,
+    integrated: f32,
+    weight: f32,
+}
+
+impl GaitWave {
+    fn at(self, rate: f32) -> Self {
+        Self {
+            legacy: self.legacy * rate,
+            integrated: self.integrated * rate,
+            weight: self.weight,
+        }
+    }
+
+    #[inline]
+    fn sample(self, offset: f32, wave: impl Fn(f32) -> f32) -> f32 {
+        if self.weight == 0.0 {
+            return wave(self.legacy + offset);
+        }
+        let integrated = wave(self.integrated + offset);
+        if self.weight == 1.0 {
+            return integrated;
+        }
+        wave(self.legacy + offset) * (1.0 - self.weight) + integrated * self.weight
+    }
+
+    #[inline]
+    fn sin(self, offset: f32) -> f32 {
+        self.sample(offset, f32::sin)
+    }
+
+    #[inline]
+    fn cos(self, offset: f32) -> f32 {
+        self.sample(offset, f32::cos)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Tint {
     hurt: f32,
@@ -237,8 +317,9 @@ struct GiantPose {
     sv: f32,
     /// Detail ramp: `0.0` near scale 1, `1.0` by scale 3+.
     detail: f32,
-    /// Gait phase (same timing as `art_rat`: `pos.dot(face) * 1.15`).
-    phase: f32,
+    walk: GaitWave,
+    idle: GaitWave,
+    stroke: GaitWave,
     wig: f32,
     breathe: f32,
     moving: f32,
@@ -251,8 +332,6 @@ struct GiantPose {
     ground: Vec2,
     lift: f32,
     base_lift: f32,
-    swim_phase: f32,
-    hover_phase: f32,
 }
 
 impl GiantPose {
@@ -262,13 +341,34 @@ impl GiantPose {
         cam: Vec2,
         scale: f32,
         outfit: RatOutfit,
+        gait: Option<RatGait>,
     ) -> Self {
-        let scale = scale.max(crate::game::ecs::systems::powerups::SHRINK_SCALE);
-        let raw_face = if player.face.len_sq() > 1e-4 {
-            player.face.normalized()
+        use super::ecs::systems::powerups::{GIANT_SHRINK_SECS, SHRINK_RAMP_SECS, SHRINK_SCALE};
+
+        let scale = scale.max(SHRINK_SCALE);
+        let raw_face = rat_facing(player.face);
+        let legacy = RatGait::legacy(player.pos, player.face, elapsed);
+        let integrated = gait.unwrap_or(legacy);
+        let shrinking_out = if player.buffs.is_giant() {
+            player.buffs.giant <= GIANT_SHRINK_SECS
         } else {
-            Vec2::new(0.0, -1.0)
+            player.buffs.tiny > 0.0 && player.buffs.tiny <= SHRINK_RAMP_SECS
         };
+        let weight = if gait.is_none() || scale == 1.0 {
+            0.0
+        } else if shrinking_out {
+            smoothstep(0.0, GAIT_RETURN_BAND, (scale - 1.0).abs())
+        } else {
+            1.0
+        };
+        let wave = |legacy, integrated| GaitWave {
+            legacy,
+            integrated,
+            weight,
+        };
+        let walk = wave(legacy.walk, integrated.walk);
+        let idle = wave(legacy.idle, integrated.idle);
+        let stroke = wave(legacy.stroke, integrated.stroke);
         let speed = player.vel.len();
         let top = player.loadout.stats.move_speed.max(1.0);
         let moving = (speed / top).clamp(0.0, 1.0);
@@ -297,13 +397,14 @@ impl GiantPose {
 
         if outfit != RatOutfit::Standard {
             let float = if outfit == RatOutfit::Diver { 1.0 } else { 0.0 };
-            let hover_phase = elapsed * 2.5;
-            let swim_phase = elapsed * 8.5;
-            let bob_scale = scale.clamp(0.45, 2.6);
+            let hover = idle.at(2.5);
+            let swim = stroke.at(8.5);
+            let swim_sin = swim.sin(0.0);
+            let hover_sin = hover.sin(0.0);
             let base_lift = DIVER_LIFT * scale.clamp(0.45, 3.2);
-            let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash) * bob_scale;
-            let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash) * bob_scale;
-            let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash) * bob_scale;
+            let bob_y = hover_sin * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash) * scale;
+            let bob_x = idle.at(1.3).sin(0.7) * 0.25 * (1.0 - moving) * (1.0 - dash) * scale;
+            let surge = swim_sin * 0.35 * moving * (1.0 - dash) * scale;
             let lift = (base_lift - bob_y) * float;
             let ground = player.pos - cam;
             let center = ground + Vec2::new(bob_x * float, -lift) + raw_face * (surge * float);
@@ -315,14 +416,14 @@ impl GiantPose {
             } else {
                 0.0
             };
-            let swim_yaw = 0.09 * moving * (1.0 - dash) * swim_phase.sin()
-                + 0.045 * (1.0 - moving) * (hover_phase + 0.6).cos();
+            let swim_yaw = 0.09 * moving * (1.0 - dash) * swim_sin
+                + 0.045 * (1.0 - moving) * hover.cos(0.6);
             let face = raw_face.rotate(turn_lean + swim_yaw);
             let perp = face.perp();
             let wig = (0.14 * (1.0 - moving) + 0.56 * moving) * (1.0 - 0.85 * dash);
-            let breathe = 0.12 * (1.0 - moving) * hover_phase.sin();
-            let hip_shift = 0.20 * moving * swim_phase.sin() * (1.0 - dash);
-            let sh_shift = -0.15 * moving * swim_phase.sin() * (1.0 - dash);
+            let breathe = 0.12 * (1.0 - moving) * hover_sin;
+            let hip_shift = 0.20 * moving * swim_sin * (1.0 - dash);
+            let sh_shift = -0.15 * moving * swim_sin * (1.0 - dash);
 
             return Self {
                 center,
@@ -332,7 +433,9 @@ impl GiantPose {
                 su: (1.0 + 0.06 * moving + 0.34 * dash - CHARGE_COIL_SQUASH * coil - squash * 0.7) * scale,
                 sv: (1.0 - 0.04 * moving - 0.15 * dash + CHARGE_COIL_SPREAD * coil + squash * 1.15) * scale,
                 detail: ((scale - 1.15) / 1.85).clamp(0.0, 1.0),
-                phase: swim_phase,
+                walk,
+                idle,
+                stroke,
                 wig,
                 breathe,
                 moving,
@@ -345,28 +448,31 @@ impl GiantPose {
                 ground,
                 lift,
                 base_lift,
-                swim_phase,
-                hover_phase,
             };
         }
 
         let perp = raw_face.perp();
-        let phase = player.pos.dot(raw_face) * 1.15;
+        let step = walk.sin(0.0);
         let wig = 0.42 * moving * (1.0 - dash);
-        let breathe = 0.16 * (1.0 - moving) * (elapsed * 3.2).sin();
-        let hip_shift = 0.22 * moving * phase.sin() * (1.0 - dash);
-        let sh_shift = -0.18 * moving * phase.sin() * (1.0 - dash);
+        let breathe = 0.16 * (1.0 - moving) * idle.at(3.2).sin(0.0);
+        let hip_shift = 0.22 * moving * step * (1.0 - dash);
+        let sh_shift = -0.18 * moving * step * (1.0 - dash);
         let ground = player.pos - cam;
+        // Two footfalls per diagonal trot cycle. Lift the torso between them.
+        let lift = 0.28 * (scale - 1.0).max(0.0) * moving * (1.0 - dash)
+            * (1.0 - walk.at(2.0).cos(0.0));
 
         Self {
-            center: ground,
+            center: ground - Vec2::new(0.0, lift),
             face: raw_face,
             perp,
             scale,
             su: (1.0 + 0.30 * dash - CHARGE_COIL_SQUASH * coil - squash * 0.7) * scale,
             sv: (1.0 - 0.13 * dash + CHARGE_COIL_SPREAD * coil + squash * 1.15) * scale,
             detail: ((scale - 1.15) / 1.85).clamp(0.0, 1.0),
-            phase,
+            walk,
+            idle,
+            stroke,
             wig,
             breathe,
             moving,
@@ -379,8 +485,6 @@ impl GiantPose {
             ground,
             lift: 0.0,
             base_lift: 1.0,
-            swim_phase: 0.0,
-            hover_phase: 0.0,
         }
     }
 
@@ -389,12 +493,12 @@ impl GiantPose {
     fn spine(&self, u: f32) -> f32 {
         if self.diver {
             let steady = ((2.2 - u) * 0.25).clamp(0.0, 1.0);
-            let idle_w = 0.14 * (self.hover_phase - u * 0.55).sin() * (1.0 - self.moving);
-            let swim_w = 0.56 * (self.swim_phase - u * 0.75).sin() * self.moving;
+            let idle_w = 0.14 * self.idle.at(2.5).sin(-u * 0.55) * (1.0 - self.moving);
+            let swim_w = 0.56 * self.stroke.at(8.5).sin(-u * 0.75) * self.moving;
             (idle_w + swim_w) * steady * (1.0 - 0.85 * self.dash)
         } else {
             let steady = ((3.0 - u) * 0.24).clamp(0.0, 1.0);
-            self.wig * steady * (self.phase - u * 0.7).sin()
+            self.wig * steady * self.walk.sin(-u * 0.7)
         }
     }
 
@@ -528,13 +632,15 @@ pub fn draw_giant_rat(
         scale,
         tail_flash,
         RatOutfit::Standard,
+        None,
     );
 }
 
 /// [`draw_giant_rat`], selecting the rat's outfit (`RatOutfit::Diver` on the
 /// Outfall so both Growth Serum 5× and Shrink Draught 0.35× wear the diving
 /// suit and swim). Render-only.
-pub fn draw_giant_rat_with_outfit(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_giant_rat_with_outfit(
     pb: &mut PixelBuffer,
     player: &Player,
     elapsed: f32,
@@ -542,11 +648,12 @@ pub fn draw_giant_rat_with_outfit(
     scale: f32,
     tail_flash: f32,
     outfit: RatOutfit,
+    gait: Option<RatGait>,
 ) {
     if pb.w == 0 || pb.h == 0 {
         return;
     }
-    let pose = GiantPose::from_player_with_outfit(player, elapsed, cam, scale, outfit);
+    let pose = GiantPose::from_player_with_outfit(player, elapsed, cam, scale, outfit, gait);
     let tint = Tint::from_player(player, elapsed);
     let lash = tail_flash.clamp(0.0, 1.0);
 
@@ -616,6 +723,17 @@ pub fn draw_giant_rat_with_outfit(
     }
 }
 
+pub(super) fn headlamp_mount(
+    player: &Player,
+    elapsed: f32,
+    scale: f32,
+    outfit: RatOutfit,
+    gait: Option<RatGait>,
+) -> Vec2 {
+    let pose = GiantPose::from_player_with_outfit(player, elapsed, Vec2::ZERO, scale, outfit, gait);
+    pose.place(if pose.diver { HELMET_U } else { 3.2 }, 0.0)
+}
+
 /// Speed lines peeling off the giant's haunches during a dash.
 fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &GiantPose) {
     let streaks = (7.0 * pose.scale).ceil() as i32;
@@ -636,8 +754,8 @@ fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &GiantPose) {
 fn draw_body_shadow(pb: &mut PixelBuffer, pose: &GiantPose) {
     let sh_offset = Vec2::new(1.15 * pose.scale + 0.5, 1.45 * pose.scale + 0.5);
     let reach = (6.8 * pose.scale * (1.0 + 0.3 * pose.dash)).ceil() as i32 + 4;
-    let cx = pose.center.x.round() as i32;
-    let cy = pose.center.y.round() as i32;
+    let cx = pose.ground.x.round() as i32;
+    let cy = pose.ground.y.round() as i32;
     let x0 = (cx - reach).max(0);
     let x1 = (cx + reach).min(pb.w as i32 - 1);
     let y0 = (cy - reach).max(0);
@@ -648,7 +766,7 @@ fn draw_body_shadow(pb: &mut PixelBuffer, pose: &GiantPose) {
     let feather = 2.0 + 0.5 * pose.scale;
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let d = Vec2::new(x as f32, y as f32) - pose.center - sh_offset;
+            let d = Vec2::new(x as f32, y as f32) - pose.ground - sh_offset;
             let (u, v) = pose.to_local(d);
             if u < -4.8 || u > 6.2 || v.abs() > 3.8 {
                 continue;
@@ -718,18 +836,20 @@ fn draw_tail(
     let mut max_x = p.x;
     let mut min_y = p.y;
     let mut max_y = p.y;
+    let idle = pose.idle.at(if pose.diver { 2.6 } else { 1.7 });
+    let stroke = pose.stroke.at(if pose.diver { 8.5 } else { 13.0 });
 
     for (i, slot) in pts.iter_mut().enumerate().take(n_pts + 1).skip(1) {
         let s = (i as f32 - 0.5) / n_pts as f32;
         let (idle_th, run_th) = if pose.diver {
             (
-                0.35 * s + 0.52 * s * (elapsed * 2.6 - s * 3.4).sin(),
-                0.10 * s + 0.85 * s * (elapsed * 8.5 - s * 4.8).sin() * whip_damp,
+                0.35 * s + 0.52 * s * idle.sin(-s * 3.4),
+                0.10 * s + 0.85 * s * stroke.sin(-s * 4.8) * whip_damp,
             )
         } else {
             (
-                1.55 * s.powf(1.35) + 0.24 * (elapsed * 1.7 - s * 2.2).sin(),
-                0.18 * s + 0.58 * s * (elapsed * 13.0 - s * 5.2).sin() * whip_damp,
+                1.55 * s.powf(1.35) + 0.24 * idle.sin(-s * 2.2),
+                0.18 * s + 0.58 * s * stroke.sin(-s * 5.2) * whip_damp,
             )
         };
         let lash_th = lash * (1.15 * (s * 5.5 - (1.0 - lash) * 8.5).sin() * s + 0.65 * s);
@@ -937,8 +1057,7 @@ fn draw_tail(
     }
 }
 
-/// Four articulated paws with splayed toes stepping in diagonal trot pairs
-/// (same gait phase as `art_rat::draw_feet`).
+/// Four articulated paws with splayed toes stepping in diagonal trot pairs.
 fn draw_paws(pb: &mut PixelBuffer, pose: &GiantPose, tint: Tint) {
     let reach_f = 0.32 + 0.72 * pose.moving;
     let alpha = tint.alpha();
@@ -950,17 +1069,17 @@ fn draw_paws(pb: &mut PixelBuffer, pose: &GiantPose, tint: Tint) {
     ];
 
     for (k, &(u0, side, is_front)) in paws.iter().enumerate() {
-        let ph = pose.phase + if k < 2 { 0.0 } else { PI };
-        let swing = ph.sin() * (if is_front { 0.85 } else { 1.05 }) * pose.moving * (1.0 - pose.dash)
+        let offset = if k < 2 { 0.0 } else { PI };
+        let swing = pose.walk.sin(offset) * (if is_front { 0.85 } else { 1.05 }) * pose.moving * (1.0 - pose.dash)
             - 0.85 * pose.dash;
-        let lift = ph.cos().max(0.0);
+        let lift = pose.walk.cos(offset).max(0.0);
         let u_paw = u0 + swing + if is_front { 0.15 } else { -0.10 };
         let base_hw = if is_front { 1.82 } else { 2.48 };
         let v_paw = side
             * (base_hw + reach_f * (if is_front { 0.68 } else { 0.58 }) + 0.28 * lift * pose.moving);
 
         let root_w = pose.place(u0 + swing * 0.25, side * (base_hw - 0.45));
-        let paw_w = pose.place(u_paw, v_paw);
+        let paw_w = pose.place(u_paw, v_paw) + (pose.ground - pose.center);
 
         let paw_r = (if is_front { 0.48 } else { 0.62 }) * pose.scale;
         let limb_r = (if is_front { 0.40 } else { 0.56 }) * pose.scale;
@@ -1415,15 +1534,17 @@ fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &GiantPose, tint: Tint) {
     let alpha = tint.alpha();
     let m = pose.moving;
     let g = pose.dash;
+    let hover = pose.idle.at(2.5);
+    let swim = pose.stroke.at(8.5);
 
     // 1. Front paddling rubber arms and webbed mitts.
     for side in [-1.0f32, 1.0] {
-        let ph_i = pose.hover_phase + side * 0.9;
-        let ph_s = pose.swim_phase + if side > 0.0 { 0.0 } else { 0.85 };
-        let u_idle = 0.65 + 0.32 * ph_i.sin();
-        let v_idle = side * (2.05 + 0.30 * ph_i.cos());
-        let u_swim = 0.50 + 0.90 * ph_s.cos();
-        let v_swim = side * (2.15 + 0.68 * ph_s.sin().max(-0.25));
+        let idle_offset = side * 0.9;
+        let swim_offset = if side > 0.0 { 0.0 } else { 0.85 };
+        let u_idle = 0.65 + 0.32 * hover.sin(idle_offset);
+        let v_idle = side * (2.05 + 0.30 * hover.cos(idle_offset));
+        let u_swim = 0.50 + 0.90 * swim.cos(swim_offset);
+        let v_swim = side * (2.15 + 0.68 * swim.sin(swim_offset).max(-0.25));
         let u = (u_idle * (1.0 - m) + u_swim * m) * (1.0 - g) + (-0.30) * g;
         let v = (v_idle * (1.0 - m) + v_swim * m) * (1.0 - g) + (side * 2.05) * g;
 
@@ -1471,7 +1592,7 @@ fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &GiantPose, tint: Tint) {
     //    ribs and brass-yellow trailing edge trim.
     for side in [-1.0f32, 1.0] {
         let off = if side > 0.0 { 0.0 } else { PI };
-        let kick = (pose.hover_phase + off).sin() * (1.0 - m) + (pose.swim_phase + off).sin() * m;
+        let kick = hover.sin(off) * (1.0 - m) + swim.sin(off) * m;
         let u_root = -2.65 - 0.30 * g;
         let v_root = side * (1.68 - 0.42 * g + 0.18 * kick * (1.0 - g));
         let u_tip = -4.55 - 0.65 * m - 0.60 * g - 0.45 * kick * (1.0 - g);
@@ -2028,6 +2149,119 @@ mod tests {
     }
 
     #[test]
+    fn scaled_gait_cadence_follows_distance_and_inverse_scale() {
+        use crate::game::ecs::systems::powerups::{GIANT_SCALE, SHRINK_SCALE};
+
+        let speed = crate::tuning::Player::default().move_speed;
+        let after_one_second = |scale| {
+            let mut gait = RatGait::legacy(Vec2::ZERO, Vec2::new(1.0, 0.0), 0.0);
+            for _ in 0..60 {
+                gait.advance(speed / 60.0, 1.0 / 60.0, scale);
+            }
+            gait
+        };
+        let ordinary = after_one_second(1.0);
+        assert!((ordinary.walk - speed * 1.15).abs() < 1e-3);
+        assert!((ordinary.stroke - 1.0).abs() < 1e-5);
+        for scale in [GIANT_SCALE, SHRINK_SCALE] {
+            let gait = after_one_second(scale);
+            assert!((gait.walk / ordinary.walk - 1.0 / scale).abs() < 1e-5);
+            assert!((gait.stroke / ordinary.stroke - 1.0 / scale).abs() < 1e-5);
+            assert!((gait.idle - 1.0 / scale).abs() < 1e-5);
+        }
+
+        let mut stationary = ordinary;
+        stationary.advance(0.0, 1.0, GIANT_SCALE);
+        assert_eq!(stationary.walk, ordinary.walk);
+        assert_eq!(stationary.stroke, ordinary.stroke);
+        assert!((stationary.idle - ordinary.idle - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scaled_gait_integrates_through_grow_in() {
+        use crate::game::ecs::systems::powerups::{giant_draw_scale, GIANT_GROW_SECS};
+
+        let mut p = test_rat(Vec2::new(110.0, 70.0), Vec2::new(0.0, 1.0));
+        let mut gait = RatGait::legacy(p.pos, p.face, 120.0);
+        let dt = GIANT_GROW_SECS / 24.0;
+        let mut prev_scale = 1.0;
+        let mut prev_phase = gait.walk;
+        let mut prev_stroke = gait.stroke;
+        for tick in 1..=24 {
+            let elapsed = 120.0 + tick as f32 * dt;
+            if prev_scale == 1.0 {
+                gait = RatGait::legacy(p.pos, p.face, prev_stroke);
+            }
+            p.buffs.giant = GROWTH_SECS - tick as f32 * dt;
+            let scale = giant_draw_scale(p.buffs.giant).unwrap();
+            if tick == 12 {
+                p.face = Vec2::new(1.0, 0.0);
+            }
+            p.pos += p.face;
+            let sample_scale = (prev_scale + scale) * 0.5;
+            gait.advance(1.0, dt, sample_scale);
+            let pose = GiantPose::from_player_with_outfit(
+                &p, elapsed, Vec2::ZERO, scale, RatOutfit::Standard, Some(gait),
+            );
+            let phase = if scale == 1.0 { pose.walk.legacy } else { pose.walk.integrated };
+            let stroke = if scale == 1.0 { pose.stroke.legacy } else { pose.stroke.integrated };
+            assert_eq!(pose.walk.weight, if scale == 1.0 { 0.0 } else { 1.0 });
+            assert!((phase - prev_phase - 1.15 / sample_scale).abs() < 1e-4);
+            let stroke_step = if scale == 1.0 {
+                dt
+            } else {
+                1.0 / (crate::tuning::Player::default().move_speed * sample_scale)
+            };
+            assert!((stroke - prev_stroke - stroke_step).abs() < 1e-5);
+            prev_phase = phase;
+            prev_stroke = stroke;
+            prev_scale = scale;
+        }
+    }
+
+    #[test]
+    fn scale_one_ignores_integrated_gait_in_both_outfits() {
+        let mut p = test_rat(Vec2::new(50.0, 38.0), Vec2::new(0.6, -0.8));
+        p.vel = p.face * 42.0;
+        p.buffs.giant = 0.05;
+        let gait = RatGait { walk: 5.2, stroke: 1.7, idle: 0.4 };
+        let render = |outfit, gait| {
+            let mut pb = PixelBuffer::new(100, 76);
+            pb.set_materials(true);
+            pb.clear(BG);
+            draw_giant_rat_with_outfit(&mut pb, &p, 37.0, Vec2::ZERO, 1.0, 0.0, outfit, gait);
+            pb
+        };
+        for outfit in [RatOutfit::Standard, RatOutfit::Diver] {
+            let legacy = render(outfit, None);
+            let returned = render(outfit, Some(gait));
+            assert_eq!(returned.pixels(), legacy.pixels());
+            assert_eq!(returned.mat(), legacy.mat());
+        }
+    }
+
+    #[test]
+    fn scaled_gait_eases_toward_legacy_at_the_end_of_either_buff() {
+        use crate::game::ecs::systems::powerups::GIANT_SHRINK_SECS;
+
+        let mut p = test_rat(Vec2::new(50.0, 38.0), Vec2::new(1.0, 0.0));
+        let elapsed = 12.0;
+        let legacy = RatGait::legacy(p.pos, p.face, elapsed);
+        let gait = RatGait { walk: legacy.walk + PI, stroke: 0.0, idle: 0.0 };
+        for (giant, tiny) in [(GIANT_SHRINK_SECS * 1.01 / 5.0, 0.0), (0.0, 0.004)] {
+            p.buffs.giant = giant;
+            p.buffs.tiny = tiny;
+            let scale = p.buffs.draw_scale();
+            assert_ne!(scale, 1.0);
+            let pose = GiantPose::from_player_with_outfit(
+                &p, elapsed, Vec2::ZERO, scale, RatOutfit::Standard, Some(gait),
+            );
+            assert!(pose.walk.weight > 0.0 && pose.walk.weight < 0.003);
+            assert!((pose.walk.sin(0.0) - legacy.walk.sin()).abs() < 0.006);
+        }
+    }
+
+    #[test]
     fn giant_rat_paints_at_every_scale_and_facing() {
         let scales = [1.0f32, 1.5, 2.5, 4.0, 5.0];
         for &s in &scales {
@@ -2129,21 +2363,27 @@ mod tests {
 
     #[test]
     fn giant_rat_tail_flash_and_walk_frames_change_pixels() {
-        let render = |pos: Vec2, cam: Vec2, flash: f32| {
+        let pos = Vec2::new(110.0, 70.0);
+        let face = Vec2::new(1.0, 0.0);
+        let gait = RatGait::legacy(pos, face, 0.4);
+        let render = |gait, flash| {
             let mut pb = PixelBuffer::new(200, 140);
             pb.clear(BG);
-            let mut p = test_rat(pos, Vec2::new(1.0, 0.0));
+            let mut p = test_rat(pos, face);
             p.vel = Vec2::new(58.0, 0.0);
-            draw_giant_rat(&mut pb, &p, 0.4, cam, 5.0, flash);
+            draw_giant_rat_with_outfit(
+                &mut pb, &p, 0.4, Vec2::ZERO, 5.0, flash, RatOutfit::Standard, Some(gait),
+            );
             pb
         };
-        let base_a = render(Vec2::new(110.0, 70.0), Vec2::ZERO, 0.0);
-        let base_b = render(Vec2::new(110.0, 70.0), Vec2::ZERO, 0.0);
-        let lashed = render(Vec2::new(110.0, 70.0), Vec2::ZERO, 0.85);
-        // Advance position and camera together by half a stride so the rat stays
-        // at the exact same screen pixel while its trot phase flips by PI.
-        let step = PI / 1.15;
-        let half_stride = render(Vec2::new(110.0 + step, 70.0), Vec2::new(step, 0.0), 0.0);
+        let base_a = render(gait, 0.0);
+        let base_b = render(gait, 0.0);
+        let lashed = render(gait, 0.85);
+        // Advance half a giant stride while framing the rat at the same pixel.
+        let step = 5.0 * PI / 1.15;
+        let mut next = gait;
+        next.advance(step, step / 58.0, 5.0);
+        let half_stride = render(next, 0.0);
 
         let mut lash_diff = 0usize;
         let mut walk_diff = 0usize;
@@ -2232,6 +2472,7 @@ mod tests {
                 scale,
                 0.0,
                 RatOutfit::Standard,
+                None,
             );
             assert_eq!(std_a.pixels(), std_b.pixels(), "Standard must match draw_giant_rat");
 
@@ -2247,6 +2488,7 @@ mod tests {
                 scale,
                 0.0,
                 RatOutfit::Diver,
+                None,
             );
 
             let mut diff_px = 0usize;
@@ -2284,10 +2526,16 @@ mod tests {
         let orig_pos = p.pos;
         let mut f0 = PixelBuffer::new(220, 140);
         f0.clear(BG);
-        draw_giant_rat_with_outfit(&mut f0, &p, 0.0, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
+        let mut gait = RatGait::legacy(p.pos, p.face, 0.0);
+        draw_giant_rat_with_outfit(
+            &mut f0, &p, 0.0, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver, Some(gait),
+        );
         let mut f1 = PixelBuffer::new(220, 140);
         f1.clear(BG);
-        draw_giant_rat_with_outfit(&mut f1, &p, 0.65, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
+        gait.advance(0.0, 0.65, 5.0);
+        draw_giant_rat_with_outfit(
+            &mut f1, &p, 0.65, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver, Some(gait),
+        );
         assert_eq!(p.pos, orig_pos);
         assert_ne!(f0.pixels(), f1.pixels(), "giant diver swim bob must animate over time");
 
@@ -2296,7 +2544,9 @@ mod tests {
         mat_pb.set_materials(true);
         mat_pb.clear(BG);
         mat_pb.set_pen(crate::render::lighting::giant_rat_pen());
-        draw_giant_rat_with_outfit(&mut mat_pb, &p, 0.0, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
+        draw_giant_rat_with_outfit(
+            &mut mat_pb, &p, 0.0, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver, None,
+        );
         let gx = p.pos.x as usize;
         let gy = p.pos.y as usize;
         assert!(

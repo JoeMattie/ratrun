@@ -39,7 +39,8 @@
 use bevy_ecs::resource::Resource;
 
 use crate::game::art_walls::WallKind;
-use crate::game::collision::{cell_of, TileKind};
+use crate::game::collision::{cell_of, TileKind, TileMap};
+use crate::game::ecs::systems::powerups::{HeadlampBeam, HEADLAMP_RANGE};
 use crate::game::level::{Level, TileRect};
 use crate::math::Vec2;
 
@@ -380,12 +381,38 @@ impl Fog {
         self.view_clock = self.clock;
         // A maze entrance is "found" the first time its breach is on screen;
         // the marker then persists (see `World::maze_markers`).
+        self.note_seen_entrances(level);
+        fresh
+    }
+
+    /// Sweep the lamp even when the rat turns without changing cells. Keep
+    /// the ordinary flood's live stamps so the added light can fade separately.
+    pub(crate) fn reveal_headlamp(&mut self, level: &Level, beam: HeadlampBeam) {
+        let reach = Vec2::splat(HEADLAMP_RANGE);
+        let (x0, y0) = cell_of(beam.origin - reach);
+        let (x1, y1) = cell_of(beam.origin + reach);
+        for y in y0.max(0)..=y1.min(self.rows - 1) {
+            for x in x0.max(0)..=x1.min(self.cols - 1) {
+                if !self.in_view(x, y) && beam.reaches(level, TileMap::tile_rect(x, y).center()) {
+                    let i = (y * self.cols + x) as usize;
+                    self.mark_seen(i);
+                    // Do not add a beam-only cell to the standing flood on
+                    // a tick when the two reveals share a clock stamp.
+                    if self.clock == self.view_clock {
+                        self.seen_at[i] = self.clock.saturating_sub(1);
+                    }
+                }
+            }
+        }
+        self.note_seen_entrances(level);
+    }
+
+    fn note_seen_entrances(&mut self, level: &Level) {
         for (i, maze) in level.mazes.iter().enumerate() {
             if !self.maze_entrance_seen[i] && self.is_seen(maze.entry.0, maze.entry.1) {
                 self.maze_entrance_seen[i] = true;
             }
         }
-        fresh
     }
 
     /// Console `reveal`: mark every cell explored so the whole map shows.

@@ -26,6 +26,9 @@ pub fn reveal_system(level: Res<Level>, player: Res<Player>, mut fog: ResMut<Fog
         return;
     }
     fog.update_from(&level, player.pos);
+    if let Some(beam) = super::powerups::HeadlampBeam::from_player(&level, &player, player.face) {
+        fog.reveal_headlamp(&level, beam);
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +154,36 @@ mod tests {
         }
         assert!(on.fog().seen_count() > 0, "the reveal never ran");
         assert_eq!(off.fog().seen_count(), 0);
+    }
+
+    #[test]
+    fn headlamp_reveals_through_an_open_gap_and_stops_at_solid_tiles() {
+        use crate::game::art_walls::{WallAxis, WallKind};
+        use crate::game::collision::TileKind;
+        let mut w = World::new(Theme::Sewer, 7);
+        w.level = Level::empty(Theme::Sewer);
+        w.player.pos = TileMap::tile_rect(10, 15).center();
+        w.player.face = Vec2::new(1.0, 0.0);
+        for y in 0..w.level.tiles.rows() {
+            for x in [12, 16] {
+                w.level.tiles.set(x, y, TileKind::Wall(WallKind::Solid));
+            }
+        }
+        w.level.tiles.set(12, 15, TileKind::Wall(WallKind::RatHole { axis: WallAxis::Vertical }));
+        w.level.tiles.rebuild_masks();
+        run_reveal(&mut w, 1.0 / 60.0);
+        assert!(!w.fog.is_seen(14, 15), "normal reveal stops at the uncrossed hole");
+
+        w.player.buffs.headlamp = super::super::powerups::HEADLAMP_SECS;
+        w.player.face = Vec2::new(-1.0, 0.0);
+        run_reveal(&mut w, 1.0 / 60.0);
+        assert!(!w.fog.is_seen(14, 15), "the lamp is pointing away");
+
+        w.player.face = Vec2::new(1.0, 0.0);
+        run_reveal(&mut w, 1.0 / 60.0);
+        assert!(w.fog.is_seen(14, 15), "the beam reveals floor through the gap");
+        assert!(!w.fog.is_seen(17, 15), "the solid wall stops the beam");
+        assert!(!w.fog.is_seen(14, 18), "the unlit floor stays unexplored");
     }
 
     #[test]

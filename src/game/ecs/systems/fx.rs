@@ -31,13 +31,18 @@ pub fn particles_system(input: Res<TickInput>, mut particles: ResMut<Particles>)
     particles.update(input.dt);
 }
 
-/// Legacy shake decay + jitter offset.
+/// Legacy shake decay and jitter, with a damped rebound for impact pulses.
 ///
 /// Determinism: the two `random_range(-1.0..1.0)` draws happen **only** when
 /// `shake > 0.05`, in the legacy x-then-y order, and the decay happens after
 /// them (both coordinates use the pre-decay amplitude). Drawing speculatively
 /// would diverge the global rng stream.
-pub fn shake_system(input: Res<TickInput>, mut shake: ResMut<Shake>, mut rng: ResMut<RngRes>) {
+pub fn shake_system(
+    input: Res<TickInput>,
+    mut shake: ResMut<Shake>,
+    mut rng: ResMut<RngRes>,
+    mut rebound: Local<Vec2>,
+) {
     let dt = input.dt;
     if shake.amount > 0.05 {
         let amount = shake.amount;
@@ -48,6 +53,15 @@ pub fn shake_system(input: Res<TickInput>, mut shake: ResMut<Shake>, mut rng: Re
         shake.amount = (shake.amount - dt * 30.0).max(0.0);
     } else {
         shake.ofs = Vec2::ZERO;
+    }
+    let impact = shake.impact;
+    *rebound = if impact != Vec2::ZERO {
+        impact
+    } else {
+        -*rebound * (1.0 - dt * 26.0).max(0.0)
+    };
+    if rebound.len_sq() > 0.01 {
+        shake.ofs += *rebound;
     }
 }
 
@@ -138,6 +152,23 @@ mod tests {
         assert!(w.shake_ofs.x.abs() <= 10.0);
         assert!(w.shake_ofs.y.abs() <= 10.0);
         assert!((w.shake - (10.0 - DT * 30.0)).abs() < 1e-5, "no decay");
+    }
+
+    #[test]
+    fn impact_shake_rebounds_without_consuming_simulation_rng() {
+        let mut w = World::new(Theme::Kitchen, 17);
+        let mut quiet = World::new(Theme::Kitchen, 17);
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.resource_mut::<Shake>().impact = Vec2::new(1.6, 2.8);
+        w.ecs.run_system_cached(shake_system).expect("shake runs");
+        w.end_tick();
+        assert_eq!(w.shake_ofs, Vec2::new(1.6, 2.8));
+
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.run_system_cached(shake_system).expect("shake runs");
+        w.end_tick();
+        assert!((-2.8..0.0).contains(&w.shake_ofs.y));
+        assert_eq!(w.rng.random::<u64>(), quiet.rng.random::<u64>());
     }
 
     #[test]

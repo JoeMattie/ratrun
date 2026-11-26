@@ -14,7 +14,7 @@ use crate::game::ecs::components::{
 use crate::game::ecs::resources::{ActiveFx, DashTrack, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossKind, MinibossState};
-use crate::game::ecs::systems::powerups::Decoy;
+use crate::game::ecs::systems::powerups::{Decoy, HeadlampBeam, HEADLAMP_HALF_ANGLE, HEADLAMP_RANGE};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Chest, Gem, Gold, Pickup};
 use crate::game::level::PropKind;
@@ -28,7 +28,11 @@ use super::*;
 const MAX_RIMS: usize = 512;
 const MAX_DROPPING_LIGHTS: usize = 12;
 const DROPPING_DRY_SECS: f32 = 2.0;
-const GLOW_RGB: Rgb = (110, 255, 120);
+// The green channel can reach the lighting ceiling when pools overlap. Keep
+// the other channels low so overlapping spills retain their colour.
+const GLOW_RGB: Rgb = (0, 255, 0);
+const DROPPING_GLOW_REACH: f32 = 2.75;
+const DROPPING_GLOW_GAIN: f32 = 10.0;
 
 fn dropping_light(drop: &Dropping) -> Option<Light> {
     let left = DROPPING_LIFE - drop.age;
@@ -40,9 +44,9 @@ fn dropping_light(drop: &Dropping) -> Option<Light> {
     let fade = (left / DROPPING_DRY_SECS).min(1.0);
     let mut light = Light::radial(
         drop.pos,
-        DROPPING_LIGHT_RADIUS[rank],
+        DROPPING_LIGHT_RADIUS[rank] * DROPPING_GLOW_REACH,
         GLOW_RGB,
-        DROPPING_LIGHT_ENERGY[rank] * arm * fade,
+        DROPPING_LIGHT_ENERGY[rank] * DROPPING_GLOW_GAIN * arm * fade,
     );
     light.falloff = Falloff::Small;
     light.height = 2.0;
@@ -204,6 +208,8 @@ fn laser_art_and_lights_use_the_moved_hit_segments() {
 
 const MAX_LAVA_LIGHTS: usize = 24;
 
+pub(super) const HEADLAMP_LIGHT_PRIORITY: u8 = 4;
+
 impl LightMap {
     /// Gather all lights from world state; returns the active boss phase if any.
     pub(super) fn gather_lights(
@@ -271,6 +277,26 @@ impl LightMap {
                 occlude: true,
                 hard: false,
             });
+        }
+
+        if let Some(beam) = HeadlampBeam::from_player(scene.level, scene.player, scene.player.face) {
+            let mut light = Light::radial(
+                beam.origin,
+                HEADLAMP_RANGE,
+                crate::game::art_headlamp::HEADLAMP_LENS_COLOR,
+                2.45,
+            );
+            light.shape = LightShape::Cone {
+                radius: HEADLAMP_RANGE,
+                dir: beam.dir,
+                half_angle: HEADLAMP_HALF_ANGLE,
+            };
+            light.falloff = Falloff::Linear;
+            // Add a warm core so the beam reads on dark floor albedo in a blackout.
+            light.scatter = 0.18;
+            // The grid clips this light with the same tile rays as the fog.
+            light.casts_shadow = false;
+            self.push_shaped(light, HEADLAMP_LIGHT_PRIORITY);
         }
 
         let dash_scale = scene.player.buffs.draw_scale();
@@ -1096,8 +1122,9 @@ impl LightMap {
 
             // Milk Teeth dart: warm ivory glint.
             if let Some(dart) = entity.get::<MilkTooth>() {
-                let sx = dart.pos.x - cam.x;
-                let sy = dart.pos.y - cam.y;
+                let body = dart.body_pos();
+                let sx = body.x - cam.x;
+                let sy = body.y - cam.y;
                 let r = 18.0;
                 if in_range(sx, sy, r) {
                     self.lights.push(PointLight {
@@ -1796,6 +1823,8 @@ impl LightMap {
             let r = r * TAIL_REACH;
             sx + r >= 0.0 && sy + r >= 0.0 && sx - r < vw && sy - r < vh
         };
+        let horseshoe = matches!(boss.state, BossState::HorseshoeCrab(_));
+        let size = if horseshoe { crate::game::art_boss_horseshoe_crab::BODY_SCALE } else { 1.0 };
         let bsx = boss.pos.x - cam.x;
         let bsy = boss.pos.y - cam.y;
         let face = if boss.facing.len_sq() > 0.01 {
@@ -1814,11 +1843,11 @@ impl LightMap {
             2 => (252, 75, 118),
             _ => (202, 75, 255),
         };
-        if in_range(bsx, bsy, 168.0) {
+        if in_range(bsx, bsy, 168.0 * size) {
             self.lights.push(PointLight {
                 x: bsx,
                 y: bsy,
-                radius: 168.0,
+                radius: 168.0 * size,
                 color: tint,
                 intensity: 85,
                 scatter: 23,
@@ -2533,11 +2562,11 @@ impl LightMap {
             }
             _ => {
                 // Fallback aura for future wave-3 bosses.
-                if in_range(bsx, bsy, 58.0) {
+                if in_range(bsx, bsy, 58.0 * size) {
                     self.lights.push(PointLight {
                         x: bsx,
                         y: bsy,
-                        radius: 56.0,
+                        radius: 56.0 * size,
                         color: (255, 145, 95),
                         intensity: 210,
                         scatter: 48,
@@ -2558,18 +2587,21 @@ impl LightMap {
             let sx = c.x - cam.x;
             let sy = c.y - cam.y;
             let active = hazard.is_active();
-            let r = if active { 46.0 } else { 36.0 };
+            let r = (if active { 46.0 } else { 36.0 }) * size;
+            let blue_blood = horseshoe && hazard.slow > 0.0;
             if in_range(sx, sy, r) {
                 self.lights.push(PointLight {
                     x: sx,
                     y: sy,
                     radius: r,
-                    color: if active {
+                    color: if blue_blood {
+                        (89, 145, 252)
+                    } else if active {
                         (255, 92, 66)
                     } else {
                         (255, 195, 76)
                     },
-                    intensity: if active { 260 } else { 205 },
+                    intensity: if blue_blood { 115 } else if active { 260 } else { 205 },
                     scatter: if active { 68 } else { 44 },
                     priority: 3,
                     occlude: false,
