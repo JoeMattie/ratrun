@@ -2886,7 +2886,10 @@ impl World {
                 ecs: &mut self.ecs,
                 level: &self.level,
                 cam,
-                size: (pb.w as f32, pb.h as f32),
+                zoom: match zoom::clamp(self.zoom_view) {
+                    z if (z - 1.0).abs() < 0.002 => 1.0,
+                    z => z,
+                },
                 rat: self.player.pos,
                 elapsed: self.elapsed,
             };
