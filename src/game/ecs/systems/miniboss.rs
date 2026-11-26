@@ -2123,7 +2123,7 @@ mod tests {
         assert!(killed, "Hantavirus never ticked the miniboss down");
         let unclaimed = chests(&mut w);
         assert_eq!(unclaimed + w.pending_chests as usize, 1, "a DOT kill yields one chest");
-        assert_eq!(gold_values(&mut w).into_iter().map(u32::from).sum::<u32>() + w.gold, MINIBOSS_GOLD.into());
+        assert_eq!(gold_values(&mut w).into_iter().sum::<u32>() + w.gold, MINIBOSS_GOLD);
     }
 
     /// The chest never lands in a wall, an unreachable pocket or a flatbed pit.

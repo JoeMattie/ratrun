@@ -8167,6 +8167,39 @@ mod tests {
                 hh.app.select_idx = floor.min(Theme::playable().len() - 1);
                 hh.frame(&[]);
             }
+            "gem-field" | "gem-flash" => {
+                use crate::game::ecs::resources::spawn_with_id;
+                use crate::game::gem::{Gem, GemTier, MERGE_EVERY};
+                use crate::game::gem::Gold;
+                hh.enter_playing();
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                let pos = w.player.pos;
+                if target == "gem-flash" {
+                    // A smaller simulation viewport makes the merge eligible
+                    // without moving its result outside the review camera.
+                    let viewport = w.viewport;
+                    w.viewport = Vec2::splat(8.0);
+                    let at = pos + Vec2::new(20.0, -9.0);
+                    let first = w.spawn_gem(Gem::new(at, 310));
+                    w.spawn_gem(Gem::new(at, 210));
+                    w.elapsed = MERGE_EVERY;
+                    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+                    w.ecs.run_system_cached(crate::game::ecs::systems::loot::gem_merge_system)
+                        .expect("gem merge runs");
+                    w.end_tick();
+                    assert!(w.ecs.get::<Gem>(first).unwrap().merged);
+                    w.viewport = viewport;
+                }
+                for (i, tier) in GemTier::ALL.into_iter().enumerate() {
+                    let x = i as f32 * 14.0 - 34.0;
+                    w.spawn_gem(Gem::new(pos + Vec2::new(x, 14.0), tier.min_value()));
+                    w.spawn_gem(Gem::new(pos + Vec2::new(-x, -22.0), tier.min_value()));
+                    spawn_with_id(&mut w.ecs, Gold::new(pos + Vec2::new(x + 5.0, 8.0), 1));
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet" => {
                 use crate::game::weapon::{LASER_ARC_DEG, LASER_SWEEP_SECS};
                 hh.enter_playing();

@@ -86,5 +86,4 @@ pub mod art_puddle;
 // Hantavirus's droppings on the floor (`art_droppings`).
 pub mod art_droppings;
 pub mod art_lava;
-#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod art_gems;

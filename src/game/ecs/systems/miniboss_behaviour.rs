@@ -912,7 +912,8 @@ mod tests {
             (w, orbit, charge, summoner)
         }
 
-        fn trace() -> (Vec<(Vec2, Motion)>, Vec<(u64, Vec2)>, [u64; 3]) {
+        type MovementTrace = (Vec<(Vec2, Motion)>, Vec<(u64, Vec2)>, [u64; 3]);
+        fn trace() -> MovementTrace {
             let (mut w, orbit, charge, summoner) = scenario();
             let mut untouched = scenario().0.rng;
             summon_wave(&mut w, summoner);
