@@ -566,7 +566,7 @@ struct QualityController {
 
 pub struct LightMap {
     pub(super) lights: Candidates,
-    shaped: Vec<(Light, u8)>,
+    shaped: Vec<(Light, u8, LightTag)>,
     marks: Vec<Mark>,
     /// Screen-space enemy rim glints for this frame, filled by the gather and
     /// stamped as marks once the sprites are final (`sources.rs`).
@@ -699,7 +699,14 @@ impl LightMap {
     /// priority-1 halos cannot crowd out the rat's aura) and is dropped
     /// otherwise.
     pub fn push_shaped(&mut self, light: Light, priority: u8) {
-        push_shaped(&mut self.shaped, light, priority);
+        push_shaped(&mut self.shaped, light, priority, LightTag::Moving { priority });
+    }
+
+    /// Submit a stationary, non-directional emitter. Its samples feed relief, sheen and
+    /// water glints. The light shares the dynamic budget and skips body
+    /// shadows and fixture mirrors.
+    pub fn push_ground(&mut self, light: Light, priority: u8) {
+        push_shaped(&mut self.shaped, light, priority, LightTag::Ground);
     }
 
     /// A cheap coloured halo from a short-lived source, in world pixels.
@@ -940,7 +947,12 @@ impl LightMap {
             } else {
                 Falloff::Smooth
             };
-            push_shaped(&mut self.shaped, light, p.priority);
+            push_shaped(
+                &mut self.shaped,
+                light,
+                p.priority,
+                LightTag::Moving { priority: p.priority },
+            );
         }
         // Prefer the rat, then the brighter lights and foreground flashes.
         self.shaped.sort_unstable_by(|a, b| {
@@ -953,18 +965,16 @@ impl LightMap {
         drop(_prank);
         crate::prof::count(crate::prof::Stage::CShaped, self.shaped.len() as u64);
         let mut shadow_index = 0;
-        for &(mut light, priority) in self.shaped.iter().take(cap) {
+        for &(mut light, _, tag) in self.shaped.iter().take(cap) {
             if !self.grid.overlaps(light) {
                 continue;
             }
             crate::prof::count(crate::prof::Stage::CShapedLit, 1);
             let directional = matches!(light.shape, LightShape::Directional { .. });
-            let tag = if directional {
-                LightTag::Sun
-            } else {
-                LightTag::Moving { priority }
-            };
-            if fx {
+            let tag = if directional { LightTag::Sun } else { tag };
+            // Ground sources reach specular and water through the grid. Keep
+            // them out of the strongest-light list used to cast body shadows.
+            if fx && tag != LightTag::Ground {
                 fx::push_fx_light(
                     &mut self.fx_lights,
                     FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed)),
@@ -1220,9 +1230,9 @@ impl LightMap {
 
 /// The body of [`LightMap::push_shaped`], on the list alone so it can run
 /// while another field of the map is borrowed.
-fn push_shaped(shaped: &mut Vec<(Light, u8)>, light: Light, priority: u8) {
+fn push_shaped(shaped: &mut Vec<(Light, u8, LightTag)>, light: Light, priority: u8, tag: LightTag) {
     if shaped.len() < MAX_SHAPED {
-        shaped.push((light, priority));
+        shaped.push((light, priority, tag));
         return;
     }
     // First of the lowest priority: deterministic, and only on overflow.
@@ -1233,7 +1243,7 @@ fn push_shaped(shaped: &mut Vec<(Light, u8)>, light: Light, priority: u8) {
         }
     }
     if shaped[weakest].1 < priority {
-        shaped[weakest] = (light, priority);
+        shaped[weakest] = (light, priority, tag);
     }
 }
 
@@ -1741,6 +1751,131 @@ pub(super) fn palette_dither(color: Rgb, depth: ColorDepth, x: usize, y: usize) 
     let offset = phase * span / 32;
     let adjust = |c| (i16::from(c) + offset).clamp(0, 255) as u8;
     (adjust(color.0), adjust(color.1), adjust(color.2))
+}
+
+#[cfg(test)]
+mod dropping_light_tests {
+    use super::*;
+    use crate::game::ecs::components::{Dropping, SpawnId};
+    use crate::game::weapon::{DROPPING_ARM, DROPPING_LIFE};
+    use crate::game::world::World;
+    use fx::testkit::{fx_scene, fx_world};
+
+    fn spawn_drop(w: &mut World, id: u64, pos: Vec2, level: u8, age: f32) {
+        w.ecs.spawn((
+            Dropping {
+                pos,
+                age,
+                damage: 3.0,
+                jumps: 1,
+                reach: 14.0,
+                radius: 7.0,
+                seed: id as u32,
+                level,
+            },
+            SpawnId(id),
+        ));
+    }
+
+    fn gather(w: &World) -> LightMap {
+        let scene = fx_scene(w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        let mut map = LightMap::new();
+        let _ = map.gather_lights(96, 64, &scene);
+        map
+    }
+
+    #[test]
+    fn dropping_lights_scale_by_rank_arm_and_dry() {
+        let cases = [
+            (1, DROPPING_ARM, 10.0, 0.45),
+            (2, DROPPING_ARM, 12.0, 0.6),
+            (3, DROPPING_ARM, 14.0, 0.75),
+            (4, DROPPING_ARM, 17.0, 0.9),
+            (5, DROPPING_ARM, 20.0, 1.1),
+            (5, 0.0, 20.0, 0.55),
+            (5, DROPPING_LIFE - 2.0, 20.0, 1.1),
+            (5, DROPPING_LIFE - 1.0, 20.0, 0.55),
+            (5, DROPPING_LIFE - 0.5, 20.0, 0.275),
+        ];
+        let mut w = fx_world(Theme::Sewer);
+        for (i, &(level, age, _, _)) in cases.iter().enumerate() {
+            spawn_drop(&mut w, i as u64, Vec2::new(40.0, 40.0), level, age);
+        }
+        spawn_drop(&mut w, 20, Vec2::new(40.0, 40.0), 5, DROPPING_LIFE);
+
+        let map = gather(&w);
+        let lights: Vec<_> = map
+            .shaped
+            .iter()
+            .rev()
+            .filter(|entry| entry.2 == LightTag::Ground)
+            .collect();
+        assert_eq!(lights.len(), cases.len());
+        for ((light, _, _), (_, _, radius, energy)) in lights.into_iter().zip(cases) {
+            assert!(matches!(light.shape, LightShape::Radial { radius: r } if r == radius));
+            assert!((light.energy - energy).abs() < 1e-6);
+            assert_eq!(light.color, (110, 255, 120));
+            assert_eq!(light.falloff, Falloff::Small);
+            assert!(light.flicker.is_none());
+        }
+    }
+
+    #[test]
+    fn dropping_lights_keep_the_twelve_newest_visible_drops() {
+        let mut w = fx_world(Theme::Sewer);
+        for id in [1, 16, 3, 12, 5, 6, 7, 8, 9, 10, 11, 4, 13, 14, 15, 2] {
+            let pos = Vec2::new(id as f32 * 4.0, 40.0);
+            spawn_drop(&mut w, id, pos, 1, DROPPING_ARM);
+        }
+        spawn_drop(&mut w, 17, Vec2::new(400.0, 400.0), 1, DROPPING_ARM);
+
+        let map = gather(&w);
+        let positions: Vec<_> = map
+            .shaped
+            .iter()
+            .filter(|entry| entry.2 == LightTag::Ground)
+            .map(|entry| entry.0.pos.x)
+            .collect();
+        let expected: Vec<_> = (5..=16).rev().map(|id| id as f32 * 4.0).collect();
+        assert_eq!(positions, expected);
+    }
+
+    #[test]
+    fn dropping_lights_feed_the_surface_and_follow_lighting_settings() {
+        let mut w = fx_world(Theme::Sewer);
+        let render = |w: &World, mode, fx| {
+            let mut scene = fx_scene(w, mode, ColorDepth::Truecolor, Vec2::ZERO);
+            scene.fx = fx;
+            let mut pb = PixelBuffer::new(96, 64);
+            pb.clear((85, 71, 78));
+            let mut map = LightMap::new();
+            map.apply_scene(&mut pb, &scene);
+            (pb, map)
+        };
+        let (base, _) = render(&w, LightingMode::Full, false);
+        let (off, _) = render(&w, LightingMode::Off, false);
+        spawn_drop(&mut w, 1, Vec2::new(40.0, 40.0), 5, DROPPING_ARM);
+
+        let (lit, _) = render(&w, LightingMode::Full, false);
+        assert_ne!(
+            base.pixels(),
+            lit.pixels(),
+            "base lighting includes the dropping"
+        );
+        let (still_off, _) = render(&w, LightingMode::Off, false);
+        assert_eq!(off.pixels(), still_off.pixels());
+
+        let (_, map) = render(&w, LightingMode::Full, true);
+        assert!(map
+            .grid
+            .info
+            .iter()
+            .any(|info| info.dom_rgb == (110, 255, 120) && info.spec > 0));
+        assert!(map
+            .fx_lights
+            .iter()
+            .all(|light| light.tag != LightTag::Ground));
+    }
 }
 
 #[cfg(test)]

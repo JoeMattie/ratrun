@@ -109,6 +109,8 @@ pub(super) enum LightTag {
     Moving { priority: u8 },
     /// A directional light (the Flatbed sun).
     Sun,
+    /// A stationary per-frame source that contributes to surface lighting.
+    Ground,
 }
 
 /// Per-sample record beside [`super::engine::Sample`]. Reset every fx frame.
