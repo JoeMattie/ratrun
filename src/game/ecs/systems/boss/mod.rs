@@ -3021,6 +3021,8 @@ pub enum BossCue {
     CobraDeath,
     LanternTell,
     LanternStrike,
+    /// One alternating footfall during the Sweeper's sprint.
+    BroomRunFootfall { left: bool },
 }
 
 impl BossCue {
@@ -3146,6 +3148,7 @@ impl BossCue {
             BossCue::CobraDeath => Sfx::CobraDeath,
             BossCue::LanternTell => Sfx::Splash,
             BossCue::LanternStrike => Sfx::SplashBig,
+            BossCue::BroomRunFootfall { .. } => Sfx::BroomStomp,
         }
     }
 }
@@ -3420,6 +3423,16 @@ fn emit_cues(
                     rng,
                     boss.target,
                     art_boss_broom::STOMP_SHOCKWAVE_RADIUS,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::BroomRunFootfall { left } => {
+                let feet = art_boss_broom::foot_hitboxes(&boss.broom_view());
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    feet[usize::from(!left)].pos,
+                    art_boss_broom::RUN_FOOT_RADIUS,
                     boss.phase >= 2,
                 );
             }
@@ -4636,6 +4649,12 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         boss.leap_t = 0.0;
         return;
     }
+    // Give a ready Sweeper sprint its tell before shared pursuit can close
+    // the gap. Obstructed routes and the cooldown still use normal pursuit.
+    if boss.kind == BossKind::Broom && broom::can_run(ctx, boss) {
+        boss.leap_t = 0.0;
+        return;
+    }
     if boss.leap_t > 0.0 {
         // Committed to the leap: a straight dash at [`LEAP_SPEED`], steered at
         // the rat each tick so it cannot be side-stepped by a pixel.
@@ -5019,6 +5038,11 @@ pub fn boss_update_system(
             };
         }
 
+        for cue in &out.cues {
+            if let BossCue::BroomRunFootfall { left } = *cue {
+                shake.impact = Vec2::new(if left { -1.6 } else { 1.6 }, 2.8);
+            }
+        }
         // The controller's feedback requests, mapped to sound and particles.
         emit_cues(
             &out.cues,

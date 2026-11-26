@@ -1828,6 +1828,38 @@ impl ScriptedFight {
     }
 }
 
+#[test]
+fn the_sweeper_completes_a_committed_run_against_a_kiting_rat() {
+    use BroomBossState::{Idle, Run, RunRecover, RunWindup};
+    let mut fight = ScriptedFight::new(BossKind::Broom, 994);
+    let mut seen = [false; 4];
+    let mut footfall_fired = false;
+    for _ in 0..1200 {
+        let before = boss_of(&mut fight.w).unwrap();
+        if !seen[0] {
+            fight.w.player.pos = before.pos + Vec2::new(104.0, 0.0);
+        }
+        fight.w.player.hp = fight.w.player.max_hp();
+        update_boss(&mut fight.w, DT);
+        let boss = boss_of(&mut fight.w).unwrap();
+        match boss.state {
+            BossState::Broom(RunWindup) => seen[0] = true,
+            BossState::Broom(Run) => {
+                seen[1] = true;
+                footfall_fired |= boss.hazards.iter().any(BossHazard::is_active);
+            }
+            BossState::Broom(RunRecover) => seen[2] = true,
+            BossState::Broom(Idle) if seen[2] => {
+                seen[3] = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(seen, [true; 4]);
+    assert!(footfall_fired);
+}
+
 /// The jaguar, under every weapon script, in a 30 s fight.
 #[test]
 fn the_jaguar_attacks_under_every_weapon_script() {

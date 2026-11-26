@@ -1539,6 +1539,7 @@ impl World {
         self.ecs.insert_resource(Shake {
             amount: self.shake,
             ofs: self.shake_ofs,
+            impact: Vec2::ZERO,
         });
         self.ecs
             .insert_resource(SfxQueue(std::mem::take(&mut self.sfx)));

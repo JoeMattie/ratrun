@@ -1129,6 +1129,31 @@ fn every_boss_body_stays_on_its_plate() {
     }
 }
 
+#[test]
+fn the_sweeper_plate_shows_the_lane_sprint_and_skid() {
+    use crate::game::art_boss_broom::BroomBossState::{Run, RunRecover, RunWindup};
+    let mut scene = LibraryScene::build(Key::Boss(BossKind::Broom)).expect("Sweeper scene");
+    let mut phases = [false; 3];
+    for _ in 0..(scene.loop_secs() / TICK) as u32 {
+        scene.step();
+        for entity in scene.world().ecs.iter_entities() {
+            if let Some(boss) = entity.get::<Boss>() {
+                match boss.state {
+                    BossState::Broom(RunWindup) => {
+                        phases[0] |= boss.hazards.iter().any(|h| {
+                            matches!(h.shape, HazardShape::Rect { .. }) && !h.is_expired()
+                        });
+                    }
+                    BossState::Broom(Run) => phases[1] = true,
+                    BossState::Broom(RunRecover) => phases[2] = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(phases, [true; 3]);
+}
+
 /// A floor's card is a real furnished, **lit** room cut from the floor's own
 /// generated map: walls, a prop, a light fixture and a wall sconce in the
 /// 12 × 8-tile window, the floor's real lighting (not the cards' flat light),

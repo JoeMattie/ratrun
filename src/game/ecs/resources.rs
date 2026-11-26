@@ -359,11 +359,12 @@ impl LevelIndex {
     }
 }
 
-/// The legacy `shake` / `shake_ofs` fields.
+/// Camera shake from legacy jitter and deterministic impact pulses.
 #[derive(Resource, Default)]
 pub struct Shake {
     pub amount: f32,
     pub ofs: Vec2,
+    pub impact: Vec2,
 }
 
 // ---- Balance instrumentation (lives in the ECS world permanently) --------

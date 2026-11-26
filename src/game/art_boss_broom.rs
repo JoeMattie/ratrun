@@ -60,6 +60,16 @@ pub const STANCE_HALF_WIDTH: f32 = 10.5;
 /// fair bullet-to-foot collision checks.
 pub const FOOT_HIT_RADIUS: f32 = 6.0;
 
+/// Charge footprint shared by the controller, the slippers and the plate.
+pub const RUN_HALF_WIDTH: f32 = 19.0;
+pub const RUN_FOOT_RADIUS: f32 = 9.0;
+pub const RUN_FOOTFALLS: usize = 6;
+
+/// Evenly spaced beats, with room after the last beat for its active window.
+pub fn run_footfall_progress(index: usize) -> f32 {
+    (index as f32 + 0.5) / (RUN_FOOTFALLS + 1) as f32
+}
+
 /// Shoe capsule half-length along the foot's facing axis (world px).
 /// Combine with [`FOOT_CAPSULE_RADIUS`] for exact shoe-shaped collision.
 pub const FOOT_CAPSULE_HALF_LEN: f32 = 4.2;
@@ -248,6 +258,17 @@ pub enum BroomBossState {
     /// - **Damage**: `0 dmg`.
     /// - **Counterplay**: Victory lap! Collect XP/loot once the boss despawns.
     Defeat,
+
+    /// Lean into a straight sprint. The stock 0.60 s / 0.45 s tell tracks during
+    /// its first 30%, then locks a 38 px-wide lane ending at `view.target`.
+    RunWindup,
+    /// Alternate six footfalls at 240 / 275 px/s. Each plants a 9 px circle
+    /// for 0.065 s, dealing 18 / 22 damage and radial knockback. The route,
+    /// including the skid, is at most 160 / 175 px and may end at a wall.
+    Run,
+    /// Skid the last 10 px in 0.18 s, then catch breath with both feet down.
+    /// The whole 1.0 s recovery has no contact damage and takes 25% extra damage.
+    RunRecover,
 }
 
 /// Pure, `Copy` render-state snapshot of **The Sweeper**.
@@ -271,7 +292,7 @@ pub struct BroomBossView {
     /// Remaining health fraction in `0.0..=1.0`.
     pub hp_frac: f32,
     /// World-space telegraph/aim target (stomp landing point in `StompWalk`,
-    /// lunge focus in `BroomJab`, drop point in `DustpanDrop`).
+    /// lunge focus in `BroomJab`, drop point in `DustpanDrop`, or the run's stop).
     pub target: Vec2,
     /// `true` once the boss has completed `PhaseChange` (`hp_frac <= 0.50`).
     pub enraged: bool,
@@ -406,6 +427,8 @@ struct FootPose {
     grounded: bool,
     /// Whether this foot is currently hurt-shaking (shows toe-stub stars + red throb).
     hurt_shake: bool,
+    /// Screen-space tilt and crouch at the top of the trouser leg.
+    lean: Vec2,
     /// Visual tilt of slipper on the ankle (radians; askew when hurt/enraged).
     skew: f32,
 }
@@ -504,6 +527,7 @@ fn compute_pose(view: &BroomBossView) -> BossPose {
         scale: 1.0,
         grounded: true,
         hurt_shake: false,
+        lean: Vec2::ZERO,
         skew: 0.0,
     };
     let mut right = FootPose {
@@ -513,6 +537,7 @@ fn compute_pose(view: &BroomBossView) -> BossPose {
         scale: 1.0,
         grounded: true,
         hurt_shake: false,
+        lean: Vec2::ZERO,
         skew: if anger > 0.5 { 0.16 } else { 0.0 },
     };
 
@@ -839,6 +864,39 @@ fn compute_pose(view: &BroomBossView) -> BossPose {
                 right.grounded = false;
             }
         }
+        BroomBossState::RunWindup | BroomBossState::Run | BroomBossState::RunRecover => {
+            let (lean, stride, lift) = match view.state {
+                BroomBossState::RunWindup => {
+                    let crouch = smoothstep(p);
+                    (crouch, -5.0 * crouch, 0.0)
+                }
+                BroomBossState::Run => {
+                    let stride = (p * (RUN_FOOTFALLS + 1) as f32 - 0.5)
+                        .min(RUN_FOOTFALLS as f32 - 0.5);
+                    let cycle = stride * PI;
+                    let brake = 1.0 - smoothstep((p - 0.86) / 0.14);
+                    (1.0, cycle.cos() * 10.0, -cycle.sin() * 8.5 * brake)
+                }
+                _ => {
+                    let skid = 1.0 - smoothstep(p / 0.25);
+                    (0.5 + 0.35 * skid + 0.08 * (p * TAU * 2.0).sin(), -5.0 * skid, 0.0)
+                }
+            };
+            // Match the foot centers used by the controller at touchdown.
+            left.ground = view.pos - perp * 10.0 + f * stride;
+            right.ground = view.pos + perp * 10.0 - f * stride;
+            left.lift = lift.max(0.0);
+            right.lift = (-lift).max(0.0);
+            left.grounded = left.lift < 1.0;
+            right.grounded = right.lift < 1.0;
+            let torso = Vec2::new(f.x * 17.0, 7.0 + f.y * 4.0) * lean;
+            left.lean = torso;
+            right.lean = torso;
+            broom.ground = view.pos - f * 21.0 + perp * 13.0;
+            broom.lift = 5.0 + 5.0 * lean;
+            broom.dir = -f;
+            broom.hand_target = view.pos + f * 18.0 + Vec2::new(0.0, -25.0) + torso;
+        }
     }
 
     BossPose {
@@ -1132,7 +1190,24 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &BroomBossView, cam: Vec2, accent
                 );
             }
         }
-        BroomBossState::Idle => {}
+        BroomBossState::RunRecover if p < 0.32 => {
+            let t = p / 0.32;
+            let back = norm_face(view.facing) * (3.0 + t * 14.0);
+            for foot in [pose.left, pose.right] {
+                draw_shockwave_and_dust(
+                    pb,
+                    w2s(foot.ground - back, cam),
+                    12.0,
+                    0.28 + 0.72 * t,
+                    DUST_COL,
+                    false,
+                );
+            }
+        }
+        BroomBossState::Idle
+        | BroomBossState::RunWindup
+        | BroomBossState::Run
+        | BroomBossState::RunRecover => {}
     }
 
     // 3) Soft floor contact shadows for both feet, the broom head/dropped handle, and the dustpan.
@@ -1708,7 +1783,7 @@ fn draw_leg_assembly(
     draw_sock_and_trouser(
         pb,
         ankle_origin,
-        foot.scale,
+        foot,
         has_sock_hole,
         side,
         hit,
@@ -1840,7 +1915,7 @@ fn draw_slipper(
 fn draw_sock_and_trouser(
     pb: &mut PixelBuffer,
     ankle: Vec2,
-    sc: f32,
+    foot: &FootPose,
     has_sock_hole: bool,
     side: f32,
     hit: f32,
@@ -1852,11 +1927,13 @@ fn draw_sock_and_trouser(
     //   h ∈ [ 0.0,  7.0]*sc : ribbed cream sock + double stripe + frayed outer hole
     //   h ∈ [ 6.8, 11.8]*sc : turned-up light-wash denim cuff with gold topstitch
     //   h ∈ [11.6, 29.5]*sc : rising indigo trouser leg, fading out from h=16..29.5
-    let h_max = 29.5 * sc;
+    let sc = foot.scale;
+    let vertical = sc * (1.0 - foot.lean.y / 29.5);
+    let h_max = 29.5 * vertical;
     let half_w_max = 8.4 * sc;
 
-    let x0 = (ankle.x - half_w_max).floor() as i32;
-    let x1 = (ankle.x + half_w_max).ceil() as i32;
+    let x0 = (ankle.x - half_w_max + foot.lean.x.min(0.0)).floor() as i32;
+    let x1 = (ankle.x + half_w_max + foot.lean.x.max(0.0)).ceil() as i32;
     let y0 = (ankle.y - h_max - 1.0).floor() as i32;
     let y1 = (ankle.y + 1.5 * sc).ceil() as i32;
 
@@ -1871,7 +1948,7 @@ fn draw_sock_and_trouser(
     let rim_col = if hit > 0.45 { (110, 72, 60) } else { (0, 0, 0) };
 
     for y in y0..=y1 {
-        let h = (ankle.y - y as f32) / sc;
+        let h = (ankle.y - y as f32) / vertical;
         if !(-0.8..=29.5).contains(&h) {
             continue;
         }
@@ -1887,7 +1964,7 @@ fn draw_sock_and_trouser(
             continue;
         }
 
-        let lean_x = -side * (h * 0.055 * sc);
+        let lean_x = -side * (h * 0.055 * sc) + foot.lean.x * (h / 29.5).max(0.0);
         let (hw, part) = if h < 6.8 {
             let tuck = if h < 0.7 {
                 (1.0 - ((0.7 - h) / 1.8).powi(2)).max(0.0).sqrt()
@@ -2341,7 +2418,7 @@ mod tests {
     use crate::game::player::Player;
     use crate::game::weapon::WeaponKind;
 
-    const ALL_STATES: [BroomBossState; 11] = [
+    const ALL_STATES: [BroomBossState; 14] = [
         BroomBossState::Idle,
         BroomBossState::StompWalk { left_foot: true },
         BroomBossState::StompWalk { left_foot: false },
@@ -2353,6 +2430,9 @@ mod tests {
         BroomBossState::Hurt { left_foot_hit: false },
         BroomBossState::PhaseChange,
         BroomBossState::Defeat,
+        BroomBossState::RunWindup,
+        BroomBossState::Run,
+        BroomBossState::RunRecover,
     ];
 
     fn sample_view(pos: Vec2, ang: f32, state: BroomBossState, progress: f32) -> BroomBossView {

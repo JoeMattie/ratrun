@@ -923,8 +923,8 @@ impl Bot {
         }
     }
 
-    /// The Lantern can warn across the screen while its head is still outside it.
-    fn sees_lantern_hazard(&self, w: &World, rat: Vec2, shape: HazardShape) -> bool {
+    /// Long attacks can warn across the screen while the boss is still outside it.
+    fn sees_long_boss_hazard(&self, w: &World, rat: Vec2, shape: HazardShape) -> bool {
         self.sees(w, rat, shape.center()) || shape.contains(rat, R + 16.0)
     }
 
@@ -1119,13 +1119,16 @@ impl Bot {
                 self.boss_kind = Some(boss.kind);
                 let sees_head = self.sees(w, p, boss.pos);
                 let is_lantern = boss.kind == BossKind::Lantern;
-                if !sees_head && !is_lantern {
+                use crate::game::art_boss_broom::BroomBossState::{Run, RunRecover, RunWindup};
+                let run_tell = boss.state == BossState::Broom(RunWindup);
+                let running = matches!(boss.state, BossState::Broom(RunWindup | Run | RunRecover));
+                if !sees_head && !is_lantern && !running {
                     continue;
                 }
                 // A boss that is out of reach (the hawk overhead) is only a
                 // shadow: dodging it would be dodging nothing, and the bot must
                 // spend that movement reading the deck marks instead.
-                if sees_head && !boss.overhead() && (!is_lantern || boss.contact_damage > 0.0) {
+                if sees_head && !boss.overhead() && (!(is_lantern || running) || boss.contact_damage > 0.0) {
                     self.threats.push(Threat::BossBody {
                         pos: boss.pos,
                         radius: boss.kind.body_radius(),
@@ -1133,13 +1136,15 @@ impl Bot {
                     });
                 }
                 for h in &boss.hazards {
+                    // The Sweeper's tell scores the whole lane. After takeoff,
+                    // the shared hazard field reads the individual footfalls.
                     // A damage-free hazard is a *shove*, not a hit: the
                     // Magpie's wing-beat gusts are push-only, and treating one
                     // as lethal made the bot break its orbit and step into the
                     // gust's own line to get away from it. The pushing still
                     // moves the rat; there is nothing to dodge.
-                    if h.is_expired() || !h.hit_player || h.damage <= 0.0
-                        || (!sees_head && !self.sees_lantern_hazard(w, p, h.shape))
+                    if h.is_expired() || (!h.hit_player && !run_tell) || h.damage <= 0.0
+                        || (!sees_head && !self.sees_long_boss_hazard(w, p, h.shape))
                     {
                         continue;
                     }
@@ -1192,7 +1197,7 @@ impl Bot {
                         _ => None,
                     };
                     if let Some((shape, warn, damage)) = warning
-                        .filter(|(shape, _, _)| sees_head || self.sees_lantern_hazard(w, p, *shape))
+                        .filter(|(shape, _, _)| sees_head || self.sees_long_boss_hazard(w, p, *shape))
                     {
                         self.threats.push(Threat::Hazard {
                             shape,
@@ -1203,7 +1208,7 @@ impl Bot {
                     }
                     if matches!(view.state, GapeTell | GapePull) {
                         if let Some(shape) = view.stamp
-                            .filter(|&shape| sees_head || self.sees_lantern_hazard(w, p, shape))
+                            .filter(|&shape| sees_head || self.sees_long_boss_hazard(w, p, shape))
                         {
                             let until_stamp = remaining + if view.state == GapeTell {
                                 GAPE_PULL_DURATION
