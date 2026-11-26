@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn the_kind_is_registered_counted_and_capped_as_a_guest() {
         use crate::game::roster;
-        assert_eq!(EnemyKind::all().len(), 50);
+        assert_eq!(EnemyKind::all().len(), 58);
         assert!(EnemyKind::all().contains(&EnemyKind::Drake));
         assert_eq!(EnemyKind::Drake.name(), "drake");
         assert_eq!(EnemyKind::Drake.base_hp(), 92.8);

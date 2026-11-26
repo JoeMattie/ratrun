@@ -92,8 +92,9 @@ use crate::game::ecs::resources::{
 };
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
+use crate::game::ecs::systems::{boss::Boss, floor_outfall};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::Level;
+use crate::game::level::{Level, Theme};
 use crate::game::nav::{FlowField, NavBudget};
 use crate::game::player::Player;
 use crate::math::Vec2;
@@ -153,6 +154,8 @@ pub fn enemy_steering_system(
     // Console `freeze on`: the horde holds still. Default false = normal.
     debug: Res<DebugFlags>,
     hold: Res<crate::game::ecs::resources::HoldPointFx>,
+    bosses: Query<&Boss>,
+    mut outfall_bulbs: Local<Vec<Vec2>>,
 ) {
     let dt = input.dt;
     if debug.freeze {
@@ -191,6 +194,21 @@ pub fn enemy_steering_system(
         .filter(|(_, d)| d.live())
         .max_by_key(|(id, _)| id.0)
         .map(|(_, d)| d.pos);
+    let outfall = level.theme == Theme::Outfall;
+    let rat_wet = outfall
+        && enemies.iter().any(|(_, _, e)| e.kind == EnemyKind::Skater && e.targetable())
+        && level.wet_at(ppos);
+    if outfall {
+        outfall_bulbs.clear();
+        if enemies.iter().any(|(_, _, e)| e.kind == EnemyKind::FrySchool && e.targetable()) {
+            floor_outfall::collect_school_lights(
+                &level,
+                enemies.iter().map(|(_, _, e)| e),
+                bosses.iter(),
+                &mut outfall_bulbs,
+            );
+        }
+    }
 
     // Legacy indexed `self.enemies[i]`; here that is `SpawnId` order. Unique
     // ids, so an unstable sort is the same order.
@@ -280,7 +298,13 @@ pub fn enemy_steering_system(
             1.0
         };
         let clamp = hold.gait_at(&player, &level, e.pos);
-        e.steer(target, flow_dir, dt, speed_mult * glue * ink * chase * clamp);
+        let mut gait = speed_mult * glue * ink * chase * clamp;
+        if outfall && e.kind.has_outfall_state() && e.targetable() {
+            gait *= floor_outfall::steering_intent(
+                &mut e, &level, ppos, rat_wet, &outfall_bulbs, &mut target, &mut flow_dir, dt,
+            );
+        }
+        e.steer(target, flow_dir, dt, gait);
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.
@@ -369,6 +393,7 @@ pub fn enemy_fire_system(
                 let v = (aim - from).normalized() * 75.0;
                 let mut b = Bullet::new(from, v, dmg, Faction::Enemy, color);
                 b.life = 4.0;
+                b.outfall_bubble = e.kind == EnemyKind::PistolShrimp;
                 // Laundry: the Starch Bulb's jet leaves slow (no-op otherwise).
                 crate::game::ecs::systems::floor_laundry::shape_shot(e.kind, &mut b);
                 pending.push((id.0, b));
@@ -652,6 +677,7 @@ mod tests {
         assert_eq!(b.life, 4.0);
         assert_eq!(b.size, 1);
         assert_eq!(b.color, accent);
+        assert!(!b.outfall_bubble);
         assert!(approx(w.enemies()[0].fire_cd, 2.2), "{:?}", w.enemies()[0].fire_cd);
     }
 
@@ -702,6 +728,27 @@ mod tests {
         assert!(w.enemies()[2].fire_cd < 0.0, "{:?}", w.enemies()[2].fire_cd);
         // Melee enemies have no fire cooldown at all.
         assert!(approx(w.enemies()[3].fire_cd, 1.5));
+    }
+
+    #[test]
+    fn pistol_shrimp_bubble_keeps_the_standard_spitter_ballistics() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.level = Level::empty(Theme::Outfall);
+        let from = w.player.pos + Vec2::new(100.0, 0.0);
+        let shrimp = w.spawn_enemy(EnemyKind::PistolShrimp, from, 1.0);
+        w.ecs.get_mut::<Enemy>(shrimp).unwrap().fire_cd = 0.0;
+        let spitter = w.spawn_enemy(EnemyKind::Spitter, from, 1.0);
+        w.ecs.get_mut::<Enemy>(spitter).unwrap().fire_cd = 0.0;
+        run_one(&mut w, enemy_fire_system);
+
+        let shots = w.bullets();
+        assert_eq!(shots.len(), 2);
+        assert!(shots[0].outfall_bubble && !shots[1].outfall_bubble);
+        assert_eq!(shots[0].vel, shots[1].vel);
+        assert_eq!(shots[0].radius, shots[1].radius);
+        assert_eq!(shots[0].damage, shots[1].damage);
+        assert_eq!(shots[0].life, shots[1].life);
+        assert!(approx(w.ecs.get::<Enemy>(shrimp).unwrap().fire_cd, 2.2));
     }
 
     /// Bullets stop on walls, so a spitter must not fire through cover. The

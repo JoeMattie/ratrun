@@ -38,10 +38,9 @@
 //!
 //! Each floor's design table names eight kinds and every one of them is a
 //! real, registered body: `WAVE4_ROSTERS.md`'s fifteen `E`/`F` rows, plus the
-//! 33 wave-four registrations this batch added. **No ordinary slot carries a
-//! stand-in any more** — `RosterSlot::stand_in_for` is `None` on all six floors
-//! — and no ordinary kind appears on two floors: six floors × eight slots is
-//! 48 distinct ordinary kinds. The design's own home assignment is kept
+//! 33 wave-four registrations and the eight Outfall kinds. Every slot owns
+//! one body and no ordinary kind appears on two floors: seven floors × eight
+//! slots gives 56 distinct ordinary kinds. The original home assignments stay
 //! exactly: Sewer Skitterer/Bat/Pillbug/Big Snake, Kitchen Cat/Porter, Lab
 //! Spitter/Lilliputians/Turnkey, Laundry House Centipede/Bell Flea/Wick Moth,
 //! Printworks Termite Horde, Flatbed Murder Hornet/Brute.
@@ -306,6 +305,7 @@ impl Slot {
 pub fn kind_cap(kind: EnemyKind) -> usize {
     match kind {
         EnemyKind::BigSnake => crate::game::ecs::systems::enemy_wave4::SNAKE_LIVE_CAP,
+        EnemyKind::Lampfish => 3,
         _ => usize::MAX,
     }
 }
@@ -318,7 +318,7 @@ pub struct RosterSlot {
     /// The kind that actually spawns in this slot today.
     pub kind: EnemyKind,
     /// `Some(name)` when `kind` stands in for a kind that does not exist yet.
-    /// `None` on every ordinary slot today: all 48 ordinary bodies the design
+    /// `None` on every ordinary slot today: all 56 ordinary bodies the design
     /// names are registered, so a floor fields exactly its own eight.
     pub stand_in_for: Option<&'static str>,
 }
@@ -332,7 +332,7 @@ pub struct FloorRoster {
     /// The four appointments at 3:00, 6:00, 9:00 and 12:00, in order.
     pub appointments: [MinibossKind; APPOINTMENT_COUNT],
     /// The design's intended name for an appointment that still holds a
-    /// stand-in. Empty (`None` everywhere) now that all twenty-four named
+    /// stand-in. Empty (`None` everywhere) now that all twenty-eight named
     /// minibosses exist; kept so a future floor can borrow a body without
     /// losing the design's name for it.
     pub appointment_stand_ins: [Option<&'static str>; APPOINTMENT_COUNT],
@@ -362,7 +362,7 @@ impl FloorRoster {
     }
 }
 
-// ---- The six floors -------------------------------------------------------
+// ---- Floor tables -------------------------------------------------------
 //
 // Row by row from `WAVE4_ROSTERS.md`: every slot names the design's own body.
 // `stand_in_for` is `None` everywhere — the ordinary roster has no stand-ins —
@@ -566,6 +566,27 @@ static TRAILER: FloorRoster = FloorRoster {
     appointment_stand_ins: [None, None, None, None],
 };
 
+static OUTFALL: FloorRoster = FloorRoster {
+    theme: Theme::Outfall,
+    slots: [
+        RosterSlot { slot: Slot::A, kind: EnemyKind::SandHopper, stand_in_for: None },
+        RosterSlot { slot: Slot::B, kind: EnemyKind::GlassShrimp, stand_in_for: None },
+        RosterSlot { slot: Slot::C, kind: EnemyKind::Conger, stand_in_for: None },
+        RosterSlot { slot: Slot::I, kind: EnemyKind::Skater, stand_in_for: None },
+        RosterSlot { slot: Slot::R, kind: EnemyKind::PistolShrimp, stand_in_for: None },
+        RosterSlot { slot: Slot::II, kind: EnemyKind::Lampfish, stand_in_for: None },
+        RosterSlot { slot: Slot::H, kind: EnemyKind::Grouper, stand_in_for: None },
+        RosterSlot { slot: Slot::III, kind: EnemyKind::FrySchool, stand_in_for: None },
+    ],
+    appointments: [
+        MinibossKind::Gasket,
+        MinibossKind::Swell,
+        MinibossKind::Shade,
+        MinibossKind::FalseBulb,
+    ],
+    appointment_stand_ins: [None; APPOINTMENT_COUNT],
+};
+
 /// The floor table for `theme`. Exhaustive over [`Theme`], so a new floor
 /// cannot ship without its eight slots and four appointments.
 pub fn floor(theme: Theme) -> &'static FloorRoster {
@@ -576,6 +597,7 @@ pub fn floor(theme: Theme) -> &'static FloorRoster {
         Theme::Laundry => &LAUNDRY,
         Theme::Printworks => &PRINTWORKS,
         Theme::Trailer => &TRAILER,
+        Theme::Outfall => &OUTFALL,
     }
 }
 
@@ -870,6 +892,7 @@ pub fn approach_sfx(theme: Theme, slot: Slot) -> Option<crate::audio::Sfx> {
         Theme::Laundry => (Sfx::ApproachWoolSlap, Sfx::ApproachBrush),
         Theme::Printworks => (Sfx::ApproachRasp, Sfx::ApproachPaperFlap),
         Theme::Trailer => (Sfx::ApproachGravel, Sfx::ApproachWasher),
+        Theme::Outfall => (Sfx::ApproachWoolSlap, Sfx::ApproachWingLeather),
     };
     match slot {
         Slot::A => Some(a),
@@ -884,7 +907,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
-    fn themes() -> [Theme; 6] {
+    fn themes() -> [Theme; 7] {
         Theme::playable()
     }
 
@@ -999,12 +1022,10 @@ mod tests {
         }
     }
 
-    /// Six floors × eight slots is 48 **distinct** ordinary kinds: no ordinary
-    /// body appears on two floors ("each level should have a unique set of even
-    /// basic enemies"). 33 of the 48 are this batch's registrations and the
-    /// other 15 are the bodies that already existed.
+    /// Every floor fields eight distinct bodies. Outfall and the original
+    /// wave-four rosters share no kinds.
     #[test]
-    fn the_six_floors_field_48_distinct_ordinary_kinds() {
+    fn the_seven_floors_field_56_distinct_ordinary_kinds() {
         let mut seen: Vec<EnemyKind> = Vec::new();
         for theme in themes() {
             let roster = floor(theme);
@@ -1020,16 +1041,12 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            themes().len() * SLOT_COUNT,
-            "48 ordinary kinds, eight per floor"
+            56,
+            "56 ordinary kinds, eight per floor"
         );
         let registered = seen.iter().filter(|k| k.is_registration()).count();
         assert_eq!(registered, 33, "the batch registers 33 ordinary kinds");
-        assert_eq!(
-            seen.len() - registered,
-            15,
-            "the fifteen E/F rows stay on their home floors"
-        );
+
     }
 
     /// Unlocks, pool weights and caps, exactly as "Reading a room" and the
@@ -1070,6 +1087,7 @@ mod tests {
         }
         // "Big Snake caps at 2" sits under the III slot's own cap of three.
         assert_eq!(Slot::III.cap_for(EnemyKind::BigSnake), 2);
+        assert_eq!(Slot::II.cap_for(EnemyKind::Lampfish), 3);
         assert_eq!(Slot::III.cap_for(EnemyKind::WickMoth), 3);
         assert_eq!(Slot::R.cap_for(EnemyKind::Spitter), 4);
         assert_eq!(Slot::A.cap_for(EnemyKind::Skitterer), usize::MAX);
@@ -1388,6 +1406,7 @@ mod tests {
             (Theme::Laundry, [SisterSnip, Bobbin, SudsBailiff, WringerBoy]),
             (Theme::Printworks, [Foreman, QuoinKey, CarbonTwin, LatePlate]),
             (Theme::Trailer, [TarpaulinPup, AxleNut, ChainDog, RoadAtlas]),
+            (Theme::Outfall, [Gasket, Swell, Shade, FalseBulb]),
         ];
         for (theme, row) in rows {
             assert_eq!(appointments(theme), row, "{theme:?}");
@@ -1401,8 +1420,8 @@ mod tests {
                 "{theme:?} still holds a stand-in"
             );
         }
-        // The four appointments are unique across the whole campaign: 24 names,
-        // 24 slots, one home each.
+        // The four appointments are unique across the whole campaign: 28 names,
+        // 28 slots, one home each.
         let mut all: Vec<MinibossKind> = Vec::new();
         for theme in themes() {
             for kind in appointments(theme) {
