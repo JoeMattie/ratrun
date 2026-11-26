@@ -69,17 +69,21 @@ use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
     Cvars, LastPickups, LevelIndex, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters,
-    SfxQueue, Shake, TickInput, XpBank,
+    SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
 use crate::game::ecs::systems::boss::BossFight;
 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossSchedule};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::gem::{Chest, Gem, Gold, Pickup, PickupKind};
+use crate::game::gem::{
+    Chest, Gem, GemTier, Gold, Pickup, PickupKind, GEM_SOFT_CAP, MERGE_CELL, MERGE_EVERY, MERGE_FROM,
+};
 use crate::game::level::Level;
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::game::particle::vfx;
 use crate::game::ecs::systems::powerups;
+use crate::game::ecs::systems::spawn::widest_view;
+use crate::math::Vec2;
 
 /// Share of a **named** miniboss's max HP a Nuke takes instead of killing it.
 ///
@@ -492,6 +496,7 @@ pub fn gems_system(
         let Ok((_, _, mut g)) = gems.get_mut(entity) else {
             continue;
         };
+        g.merged = false;
         let to = ppos - g.pos;
         let dist = to.len();
         if g.magnetized || dist < magnet {
@@ -537,6 +542,122 @@ pub fn gems_system(
             sfx.0.push(Sfx::LevelUp);
         }
         counters.pending_levelups += ups;
+    }
+}
+
+struct MergeMember {
+    cell: (i32, i32),
+    id: u64,
+    entity: Entity,
+    pos: Vec2,
+    value: u32,
+}
+
+struct MergeCell {
+    members: std::ops::Range<usize>,
+    first_id: u64,
+    distance_sq: f32,
+}
+
+#[derive(Default)]
+pub struct GemMergeScratch {
+    period: u32,
+    members: Vec<MergeMember>,
+    cells: Vec<MergeCell>,
+}
+
+/// Consolidate unmagnetized gems beyond the widest view after collection.
+/// Periodic passes merge every eligible cell in order of its oldest gem.
+/// Between those passes, cap pressure takes the farthest cells first.
+pub fn gem_merge_system(
+    mut commands: Commands,
+    counters: Res<RunCounters>,
+    viewport: Res<Viewport>,
+    player: Res<Player>,
+    mut gems: Query<(Entity, &SpawnId, &mut Gem)>,
+    mut scratch: Local<GemMergeScratch>,
+) {
+    let period = (counters.elapsed / MERGE_EVERY) as u32;
+    let periodic = period != scratch.period;
+    scratch.period = period;
+    let mut count = gems.iter().len();
+    if count < 2 || (!periodic && count <= GEM_SOFT_CAP) {
+        return;
+    }
+
+    let merge_from_sq = (widest_view(viewport.0) * (MERGE_FROM * 0.5)).len_sq();
+    let rat = player.pos;
+    let GemMergeScratch { members, cells, .. } = &mut *scratch;
+    members.clear();
+    cells.clear();
+    for (entity, id, gem) in gems.iter() {
+        if gem.magnetized || gem.pos.dist_sq(rat) <= merge_from_sq {
+            continue;
+        }
+        members.push(MergeMember {
+            cell: (
+                (gem.pos.x / MERGE_CELL).floor() as i32,
+                (gem.pos.y / MERGE_CELL).floor() as i32,
+            ),
+            id: id.0,
+            entity,
+            pos: gem.pos,
+            value: gem.value,
+        });
+    }
+    members.sort_unstable_by_key(|member| (member.cell, member.id));
+    let mut start = 0;
+    for group in members.chunk_by(|a, b| a.cell == b.cell) {
+        let end = start + group.len();
+        if group.len() > 1 {
+            let first = &group[0];
+            let (x, y) = first.cell;
+            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * MERGE_CELL;
+            cells.push(MergeCell {
+                members: start..end,
+                first_id: first.id,
+                distance_sq: center.dist_sq(rat),
+            });
+        }
+        start = end;
+    }
+    if periodic {
+        cells.sort_unstable_by_key(|cell| cell.first_id);
+    } else {
+        cells.sort_unstable_by(|a, b| {
+            b.distance_sq.total_cmp(&a.distance_sq).then(a.first_id.cmp(&b.first_id))
+        });
+    }
+
+    for cell in cells.iter() {
+        if !periodic && count <= GEM_SOFT_CAP {
+            break;
+        }
+        let group = &members[cell.members.clone()];
+        let Ok((_, _, mut survivor)) = gems.get_mut(group[0].entity) else {
+            continue;
+        };
+        let mut value = 0u32;
+        let mut weight = 0.0;
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for member in group {
+            let w = f64::from(member.value);
+            value = value.saturating_add(member.value);
+            weight += w;
+            x += f64::from(member.pos.x) * w;
+            y += f64::from(member.pos.y) * w;
+        }
+        if weight > 0.0 {
+            survivor.pos = Vec2::new((x / weight) as f32, (y / weight) as f32);
+        }
+        survivor.value = value;
+        survivor.color = GemTier::for_value(value).color();
+        survivor.merged = true;
+        for member in &group[1..] {
+            commands.entity(member.entity).despawn();
+        }
+        count -= group.len() - 1;
     }
 }
 
@@ -879,6 +1000,7 @@ mod tests {
             .run_system_cached(reap_enemies_system)
             .expect("reap runs");
         w.ecs.run_system_cached(gems_system).expect("gems run");
+        w.ecs.run_system_cached(gem_merge_system).expect("gem merge runs");
         w.ecs.run_system_cached(treasure_system).expect("treasure runs");
         w.ecs
             .run_system_cached(pickups_system)
@@ -892,6 +1014,160 @@ mod tests {
     fn run_loot_chain(w: &mut World, dt: f32) {
         run_loot_chain_raw(w, dt);
         w.end_tick();
+    }
+
+    fn gem_merge_world() -> World {
+        let mut w = World::new(Theme::Sewer, 96);
+        w.player.pos = Vec2::ZERO;
+        w.viewport = Vec2::new(60.0, 80.0); // merge distance: exactly 150 px
+        w
+    }
+
+    fn run_gem_merge(w: &mut World, elapsed: f32) {
+        w.elapsed = elapsed;
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.run_system_cached(gem_merge_system).expect("gem merge runs");
+        w.end_tick();
+    }
+
+    #[test]
+    fn gem_merge_keeps_oldest_and_collects_the_full_value() {
+        let mut w = gem_merge_world();
+        let first = w.spawn_gem(Gem::new(Vec2::new(306.0, 20.0), 12));
+        let second = w.spawn_gem(Gem::new(Vec2::new(330.0, 44.0), 24));
+        let id = w.ecs.get::<SpawnId>(first).unwrap().0;
+
+        run_gem_merge(&mut w, MERGE_EVERY);
+        assert!(w.ecs.get::<Gem>(second).is_none());
+        assert_eq!(w.ecs.get::<SpawnId>(first).unwrap().0, id);
+        let g = w.ecs.get::<Gem>(first).unwrap();
+        let center = Vec2::new(322.0, 36.0);
+        assert_eq!(g.pos, center);
+        assert_eq!(g.value, 36);
+        assert_eq!(GemTier::for_value(g.value), GemTier::Gem);
+        assert_eq!(g.color, GemTier::Gem.color());
+        assert!(g.merged);
+
+        w.player.pos = center;
+        run_loot_chain(&mut w, DT);
+        assert!(w.gems().is_empty());
+        assert_eq!(crate::game::player::xp_to_reach(w.player.level) + w.player.xp, 36);
+    }
+
+    #[test]
+    fn gem_merge_excludes_nearby_and_magnetized_gems() {
+        let mut w = gem_merge_world();
+        let near = w.spawn_gem(Gem::new(Vec2::new(149.0, 0.0), 1));
+        let edge = w.spawn_gem(Gem::new(Vec2::new(150.0, 0.0), 1));
+        let lone = w.spawn_gem(Gem::new(Vec2::new(151.0, 0.0), 1));
+        let mut magnetized = Gem::new(Vec2::new(306.0, 20.0), 9);
+        magnetized.magnetized = true;
+        let moving = w.spawn_gem(magnetized);
+        let first = w.spawn_gem(Gem::new(Vec2::new(330.0, 22.0), 2));
+        let second = w.spawn_gem(Gem::new(Vec2::new(340.0, 22.0), 3));
+
+        run_gem_merge(&mut w, MERGE_EVERY);
+        for entity in [near, edge, lone, moving] {
+            assert!(!w.ecs.get::<Gem>(entity).unwrap().merged);
+        }
+        assert_eq!(w.ecs.get::<Gem>(moving).unwrap().value, 9);
+        assert_eq!(w.ecs.get::<Gem>(first).unwrap().value, 5);
+        assert!(w.ecs.get::<Gem>(second).is_none());
+    }
+
+    #[test]
+    fn gem_merge_repeats_on_the_clock_and_flash_lasts_one_tick() {
+        let mut w = gem_merge_world();
+        let pos = Vec2::new(305.0, 20.0);
+        let first = w.spawn_gem(Gem::new(pos, 1));
+        w.spawn_gem(Gem::new(pos, 2));
+
+        run_gem_merge(&mut w, MERGE_EVERY - DT);
+        assert_eq!(w.gems().len(), 2);
+        run_gem_merge(&mut w, MERGE_EVERY);
+        assert_eq!(w.gems().len(), 1);
+        assert!(w.ecs.get::<Gem>(first).unwrap().merged);
+
+        w.spawn_gem(Gem::new(pos, 3));
+        w.elapsed = MERGE_EVERY + DT;
+        run_loot_chain(&mut w, DT);
+        assert_eq!(w.gems().len(), 2);
+        assert!(!w.ecs.get::<Gem>(first).unwrap().merged);
+        run_gem_merge(&mut w, MERGE_EVERY * 2.0);
+        assert_eq!(w.ecs.get::<Gem>(first).unwrap().value, 6);
+        assert!(w.ecs.get::<Gem>(first).unwrap().merged);
+    }
+
+    #[test]
+    fn gem_merge_soft_cap_checks_the_farthest_cells_first_each_tick() {
+        let mut w = gem_merge_world();
+        for _ in 0..GEM_SOFT_CAP - 4 {
+            w.spawn_gem(Gem::new(Vec2::ZERO, 1));
+        }
+        let near = Vec2::new(305.0, 20.0);
+        let far = Vec2::new(570.0, 20.0);
+        let near_first = w.spawn_gem(Gem::new(near, 1));
+        let near_second = w.spawn_gem(Gem::new(near, 2));
+        let far_first = w.spawn_gem(Gem::new(far, 3));
+        let far_second = w.spawn_gem(Gem::new(far, 4));
+
+        run_gem_merge(&mut w, DT);
+        assert_eq!(w.gems().len(), GEM_SOFT_CAP);
+        assert!(w.ecs.get::<Gem>(far_second).is_some());
+        let extra = w.spawn_gem(Gem::new(far, 5));
+        run_gem_merge(&mut w, 2.0 * DT);
+        assert_eq!(w.gems().len(), GEM_SOFT_CAP - 1);
+        assert_eq!(w.ecs.get::<Gem>(far_first).unwrap().value, 12);
+        assert!(w.ecs.get::<Gem>(far_second).is_none());
+        assert!(w.ecs.get::<Gem>(extra).is_none());
+        assert!(w.ecs.get::<Gem>(near_second).is_some());
+
+        w.spawn_gem(Gem::new(Vec2::ZERO, 1));
+        w.spawn_gem(Gem::new(Vec2::ZERO, 1));
+        run_gem_merge(&mut w, 3.0 * DT);
+        assert_eq!(w.gems().len(), GEM_SOFT_CAP);
+        assert_eq!(w.ecs.get::<Gem>(near_first).unwrap().value, 3);
+        assert!(w.ecs.get::<Gem>(near_second).is_none());
+    }
+
+    #[test]
+    fn gem_merge_twin_worlds_agree_with_different_query_order() {
+        let mut a = gem_merge_world();
+        let mut b = gem_merge_world();
+        let drops = [(301.2, 10), (584.2, 20), (308.9, 90), (599.1, 480), (301.5, 1)];
+        for (x, value) in drops {
+            a.spawn_gem(Gem::new(Vec2::new(x, 20.0), value));
+        }
+        // Assign matching ids while reversing the archetype's insertion order.
+        let mut ids = a.ecs.query_filtered::<&SpawnId, With<Gem>>();
+        let mut ids: Vec<u64> = ids.iter(&a.ecs).map(|id| id.0).collect();
+        ids.sort_unstable();
+        assert_eq!(ids.len(), drops.len());
+        for ((x, value), id) in drops.into_iter().zip(ids).rev() {
+            let entity = b.spawn_gem(Gem::new(Vec2::new(x, 20.0), value));
+            b.ecs.get_mut::<SpawnId>(entity).unwrap().0 = id;
+        }
+
+        run_gem_merge(&mut a, MERGE_EVERY);
+        run_gem_merge(&mut b, MERGE_EVERY);
+        let a = a.gems();
+        let b = b.gems();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.len(), b.len());
+        for (a, b) in a.iter().zip(&b) {
+            assert_eq!((a.pos, a.value, a.color, a.merged), (b.pos, b.value, b.color, b.merged));
+        }
+    }
+
+    #[test]
+    fn gem_merge_saturates_value_without_shifting_the_center() {
+        let mut w = gem_merge_world();
+        let first = w.spawn_gem(Gem::new(Vec2::new(300.0, 20.0), u32::MAX));
+        w.spawn_gem(Gem::new(Vec2::new(340.0, 20.0), u32::MAX));
+        run_gem_merge(&mut w, MERGE_EVERY);
+        let g = w.ecs.get::<Gem>(first).unwrap();
+        assert_eq!(g.value, u32::MAX);
+        assert_eq!(g.pos, Vec2::new(320.0, 20.0));
     }
 
     #[test]

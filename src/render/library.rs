@@ -71,7 +71,7 @@ use crate::game::collision::SizeClass;
 use crate::game::ecs::systems::boss::BossKind;
 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossState};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::gem::PickupKind;
+use crate::game::gem::{Gem, GemTier, PickupKind};
 use crate::game::hazards;
 use crate::game::level::{
     theme_props, Level, LevelObjects, Palette, Pit, PitKind, Prop, Rectf, Theme, TileRect,
@@ -1131,6 +1131,14 @@ fn draw_object_art(
         ObjectKind::Elite => {
             let _ = pal;
         }
+        ObjectKind::Gem => {
+            let spacing = ((art.w as i32 - 9) / 4).clamp(1, 9);
+            for (i, tier) in GemTier::ALL.into_iter().enumerate() {
+                let pos = (centre.x as i32 + (i as i32 - 2) * spacing, centre.y as i32);
+                let gem = Gem::new(centre, tier.min_value());
+                crate::game::art_gems::draw_gem(art, pos, &gem, 0.0, i as u32);
+            }
+        }
     }
 }
 
@@ -1273,6 +1281,7 @@ fn draw_card(
         return None;
     }
     let row = entry_row(rows, ui.tab, ui.cursor)?;
+    let gem_card = row.key == Key::Object(ObjectKind::Gem);
     let seen = lib.is_seen(row.key);
     let full = catalogued(lib, row.key);
     // Everything the text half will need, measured before the art takes a row.
@@ -1330,7 +1339,7 @@ fn draw_card(
     let art_w_cells = area
         .width
         .saturating_sub(2)
-        .min(if narrow { 26 } else { 44 });
+        .min(if narrow && !gem_card { 26 } else { 44 });
     let art_rect = Rect::new(area.x + 1, area.y + 2, art_w_cells, art_h);
     if art_rect.height >= 2 {
         ui.art
@@ -1440,6 +1449,24 @@ fn draw_card(
         y += 1;
     }
 
+    // Short cards still fit the entire XP scale in two columns.
+    if full && gem_card && area.bottom() - y <= fact_rows + STATS_H {
+        let cols = area.width / 2;
+        for pair in facts.rows().chunks(2) {
+            if y >= area.bottom() {
+                break;
+            }
+            for (i, fact) in pair.iter().enumerate() {
+                let value = fact.value.strip_suffix(" XP").unwrap_or(&fact.value);
+                let text = format!("{} {value}", fact.label);
+                put(f, area.x + i as u16 * cols, y, cols, &text, ink(COAT));
+            }
+            y += 1;
+        }
+        hits.add(area, Target::LibraryRow(ui.cursor));
+        return Some(());
+    }
+
     // Facts: label, value, and a five-cell bar where a bar says more.
     if y < area.bottom().saturating_sub(STATS_H) {
         f.render_widget(
@@ -1462,6 +1489,45 @@ fn draw_card(
     }
     hits.add(area, Target::LibraryRow(ui.cursor));
     Some(())
+}
+
+#[cfg(test)]
+#[test]
+fn gem_card_shows_every_tier_on_supported_terminal_sizes() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let rows = library::all_rows();
+    let key = Key::Object(ObjectKind::Gem);
+    let mut lib = Library::default();
+    lib.mark_seen(key);
+    for (w, h) in [(57, 20), (80, 24), (120, 40)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut ui = LibraryUi::default();
+        ui.set_tab(Tab::FieldGuide);
+        assert!(ui.select_key(&rows, key));
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                draw(f, area, &rows, &lib, (90, 220, 200), &mut ui, &mut HitMap::default());
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        for (name, band) in [
+            ("Shard", "pale green 1–4"),
+            ("Chip", "cyan 5–24"),
+            ("Gem", "violet 25–99"),
+            ("Crystal", "amber 100–499"),
+            ("Core", "crimson 500+"),
+        ] {
+            assert!(text.contains(name) && text.contains(band), "{w}x{h}: missing {name}");
+        }
+    }
 }
 
 /// Greedy word wrap at `width` columns. Words are never split, so a card can

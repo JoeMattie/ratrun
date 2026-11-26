@@ -91,7 +91,8 @@ use super::ecs::systems::boss::{
 };
 use super::ecs::systems::gates::{GateRuntime, MazeEvent};
 use super::enemy::{Enemy, EnemyKind};
-use super::gem::{Chest, Gem, Gold, Pickup, PickupKind};
+use super::art_gems;
+use super::gem::{Chest, Gem, GemTier, Gold, Pickup, PickupKind};
 use super::art_traps::MazeRewardState;
 use super::level::{Level, PropKind, RoomKind, Theme};
 use super::loadout::{self, ChestReward, Loadout, PassiveKind};
@@ -2567,15 +2568,16 @@ impl World {
         // Gems.
         {
             let mut query = self.ecs.query::<(&SpawnId, &Gem)>();
-            for (_, g) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            for (sid, g) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(g.pos, cam);
-                if !on_screen(s, 3.0, viewport) {
+                let radius = GemTier::for_value(g.value).radius_px();
+                if !on_screen(s, radius as f32, viewport) {
                     continue;
                 }
-                pb.plot(s.0, s.1, g.color);
-                pb.plot_add(s.0 + 1, s.1, palette::scale(g.color, 0.5));
-                pb.plot_add(s.0, s.1 + 1, palette::scale(g.color, 0.5));
-                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
+                art_gems::draw_gem(pb, s, g, self.elapsed, sid.0 as u32);
+                let size = 2 * radius + 1;
+                self.light_map
+                    .mark_emissive_rect(pb, s.0 - radius, s.1 - radius, size, size);
             }
         }
 
@@ -5200,40 +5202,16 @@ mod zoom_tests {
         // A big map, the rat parked at its middle: the camera is not clamped.
         w.player.pos = w.level.arena * 0.5;
         let vw = SCREEN.0 as f32;
-        w.spawn_gem(Gem {
-            pos: w.player.pos + Vec2::new(vw * 0.75, 0.0),
-            color: (255, 0, 255),
-            value: 1,
-            ..Gem::new(Vec2::ZERO, 1)
-        });
-
-        w.set_zoom_instant(1.0);
-        w.draw(&mut pb);
-        assert!(!frame_has_magenta(&pb), "off screen at 1x (the culling view)");
-
-        w.set_zoom_instant(2.0);
-        w.draw(&mut pb);
-        assert!(frame_has_magenta(&pb), "the gem is drawn at 2x");
-    }
-
-    /// Magenta is used by nothing the level art paints, so any magenta pixel is
-    /// the marker gem.
-    fn frame_has_magenta(pb: &PixelBuffer) -> bool {
-        for y in 0..pb.h {
-            for x in 0..pb.w {
-                let (r, g, b) = pb.pixel_at(x, y);
-                // A box-filtered 1-px gem is diluted by its 2 × 2 box, and the
-                // ink pass then stamps the tier's diamond over it (brightened
-                // toward white), so the test asks for "purple survives" — a red
-                // and blue clearly above green — not "purple is exactly the
-                // gem's colour".
-                let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
-                if r > 40 && b > 40 && r > g + 40 && b > g + 40 {
-                    return true;
-                }
-            }
+        let pos = w.player.pos + Vec2::new(vw * 0.75, 0.0);
+        for (zoom, visible) in [(1.0, false), (2.0, true)] {
+            w.set_zoom_instant(zoom);
+            w.draw(&mut pb);
+            let without_gem = pb.pixels().to_vec();
+            w.spawn_gem(Gem::new(pos, 25));
+            w.draw(&mut pb);
+            assert_eq!(pb.pixels() != without_gem.as_slice(), visible, "zoom {zoom}");
+            w.clear_gems();
         }
-        false
     }
 
     /// Degenerate terminals and every zoom, including a mid-transition

@@ -58,6 +58,7 @@
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies`; a named miniboss's chest + gold drop here (`miniboss::drop_loot`) |
 //! | 18 | `loot::gems_system` | `update_gems` |
+//! | 18a | `loot::gem_merge_system` | merge distant, unmagnetized gems after collection |
 //! | 18b | `loot::treasure_system` | gold and chests |
 //! | 19 | `loot::pickups_system` | `update_pickups` |
 //! | 20 | `loot::nuke_reap_system` | the nested re-reap after a Nuke (same miniboss drop, so a nuked miniboss still leaves its chest) |
@@ -428,7 +429,9 @@ pub fn build_tick_schedule() -> Schedule {
             // reap despawns it.
             weapons_wave3a::hantavirus_death_system,
             loot::reap_enemies_system,
-            loot::gems_system,
+            // Keep collection and consolidation adjacent without adding a
+            // 21st entry to the outer chain.
+            (loot::gems_system, loot::gem_merge_system).chain(),
             loot::treasure_system,
             loot::pickups_system,
             loot::nuke_reap_system,

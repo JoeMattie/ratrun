@@ -24,6 +24,8 @@
   edges are dotted. The Tab map footer explains both marks.
 - **Foreground bands.** Switch on Foreground to reveal oversized pipes,
   catwalks and other overhead objects that cross the view.
+- **Five XP gem tiers.** Distant gems combine into larger drops that carry
+  their combined XP. The Field Guide lists each tier's colour and value.
 
 ## 0.3.0 (2026-11-25)
 

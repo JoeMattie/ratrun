@@ -5,6 +5,88 @@ use bevy_ecs::prelude::Component;
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
+/// Minimum merge distance in units of the widest view's half-diagonal.
+pub const MERGE_FROM: f32 = 1.5;
+pub const MERGE_EVERY: f32 = 2.0;
+pub const MERGE_CELL: f32 = 96.0;
+pub const GEM_SOFT_CAP: usize = 400;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GemTier {
+    Shard,
+    Chip,
+    Gem,
+    Crystal,
+    Core,
+}
+
+impl GemTier {
+    pub const ALL: [Self; 5] = [Self::Shard, Self::Chip, Self::Gem, Self::Crystal, Self::Core];
+
+    pub fn for_value(value: u32) -> Self {
+        if value >= Self::Core.min_value() {
+            Self::Core
+        } else if value >= Self::Crystal.min_value() {
+            Self::Crystal
+        } else if value >= Self::Gem.min_value() {
+            Self::Gem
+        } else if value >= Self::Chip.min_value() {
+            Self::Chip
+        } else {
+            Self::Shard
+        }
+    }
+
+    pub const fn min_value(self) -> u32 {
+        match self {
+            Self::Shard => 1,
+            Self::Chip => 5,
+            Self::Gem => 25,
+            Self::Crystal => 100,
+            Self::Core => 500,
+        }
+    }
+
+    pub const fn color(self) -> Rgb {
+        match self {
+            Self::Shard => (150, 240, 170),
+            Self::Chip => (90, 210, 255),
+            Self::Gem => (190, 120, 255),
+            Self::Crystal => (255, 200, 70),
+            Self::Core => (255, 80, 90),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Shard => "Shard",
+            Self::Chip => "Chip",
+            Self::Gem => "Gem",
+            Self::Crystal => "Crystal",
+            Self::Core => "Core",
+        }
+    }
+
+    pub const fn color_name(self) -> &'static str {
+        match self {
+            Self::Shard => "pale green",
+            Self::Chip => "cyan",
+            Self::Gem => "violet",
+            Self::Crystal => "amber",
+            Self::Core => "crimson",
+        }
+    }
+
+    pub const fn radius_px(self) -> i32 {
+        match self {
+            Self::Shard | Self::Chip => 1,
+            Self::Gem => 2,
+            Self::Crystal => 3,
+            Self::Core => 4,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Gem {
     pub pos: Vec2,
@@ -12,24 +94,19 @@ pub struct Gem {
     pub value: u32,
     pub magnetized: bool,
     pub color: Rgb,
+    /// Set on the tick this gem absorbs others, for the formation flash.
+    pub merged: bool,
 }
 
 impl Gem {
     pub fn new(pos: Vec2, value: u32) -> Self {
-        // Bigger gems are warmer/brighter.
-        let color = if value >= 25 {
-            (255, 220, 90)
-        } else if value >= 5 {
-            (120, 230, 255)
-        } else {
-            (90, 200, 255)
-        };
         Self {
             pos,
             vel: Vec2::ZERO,
             value,
             magnetized: false,
-            color,
+            color: GemTier::for_value(value).color(),
+            merged: false,
         }
     }
 }
@@ -174,7 +251,19 @@ pub struct Chest {
 
 #[cfg(test)]
 mod tests {
-    use super::PickupKind;
+    use super::{GemTier, PickupKind};
+
+    #[test]
+    fn gem_tier_value_boundaries() {
+        use GemTier::*;
+        for (value, tier) in [
+            (0, Shard), (1, Shard), (4, Shard), (5, Chip), (24, Chip),
+            (25, Gem), (99, Gem), (100, Crystal), (499, Crystal),
+            (500, Core), (u32::MAX, Core),
+        ] {
+            assert_eq!(GemTier::for_value(value), tier, "{value} XP");
+        }
+    }
 
     /// The table the console's `pickup` command, its Tab completion and the
     /// Library's registry all walk: every kind exactly once, in enum order, and
