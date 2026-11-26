@@ -77,6 +77,10 @@ const ONE_WAY_EXIT_RGB: Rgb = (96, 242, 182);
 const PLATE_RGB: Rgb = (19, 24, 27);
 const COAT_RGB: Rgb = (235, 232, 232);
 const TAIL_RGB: Rgb = (239, 168, 185);
+const PLAYER_PULSE_HZ: f64 = 1.6;
+const WHITE_RGB: Rgb = (255, 255, 255);
+/// ANSI 16 silver. The coat's RGB already folds to white at this depth.
+const ANSI_COAT_RGB: Rgb = (192, 192, 192);
 
 /// The **oxblood veil**: never-seen territory reads as a dark, desaturated red
 /// wash rather than a flat saturated red field (which read like an error
@@ -647,8 +651,10 @@ pub struct MinimapView<'a> {
     pub palette: MinimapPalette,
     /// Sector name displayed in the expanded map title bar (e.g. `"SEWER"`).
     pub sector_name: &'a str,
-    /// Monotonic animation clock in seconds.
+    /// Simulation clock in seconds for world landmarks.
     pub clock: f32,
+    /// Monotonic wall time in seconds for the player marker.
+    pub player_clock: f64,
     /// Compact corner radar or expanded full-level map.
     pub mode: MinimapMode,
     /// Saved compact radar size preference (`Normal`, `Small`, or `Hidden`).
@@ -1034,7 +1040,8 @@ pub fn draw_compact(
     let cols = source.cols();
     let rows = source.rows();
     scratch.prepare_reveal(cols, rows, view.reveal_clock);
-    let theme = DerivedPalette::from_palette(view.palette);
+    let depth = crate::term::color_depth();
+    let theme = DerivedPalette::from_palette_at(view.palette, depth);
 
     // Normal renders 1:1 cells-per-pixel; Small uses feature-preserving 2×2
     // downsampling so room walls, doorways, and nearby maze entrances remain
@@ -1346,8 +1353,7 @@ pub fn draw_compact(
         }
     }
 
-    // 5. Player position + subtle directional facing pip (in Normal; Small uses
-    //    a crisp single-pixel rat blip so nearby doorways/walls stay clear).
+    // 5. Player position, with a directional facing pip in Normal.
     let plx = (view.player_cell.0 - origin_x as f32) * inv_step;
     let ply = (view.player_cell.1 - origin_y as f32) * inv_step;
     if !is_small {
@@ -1360,8 +1366,8 @@ pub fn draw_compact(
             plot_pixel_in_window(&mut scratch.pixels, pw, ph, fx, fy, TAIL_RGB);
         }
     }
-    let player_col = palette::mix(COAT_RGB, (255, 255, 255), 0.35 * pulse);
-    plot_pixel_in_window(&mut scratch.pixels, pw, ph, plx, ply, player_col);
+    let (player_col, halo) = player_pulse(view.player_clock, depth);
+    let player_drawn = plot_pixel_in_window(&mut scratch.pixels, pw, ph, plx, ply, player_col);
 
     // 6. Stamped-metal frame (matching `menu::panel` top-left catchlight).
     let accent_color = palette::marking(view.palette.wall_edge, view.palette.accent);
@@ -1425,6 +1431,11 @@ pub fn draw_compact(
 
     // 7. Blit half-block pixel buffer into `inner`.
     blit_half_blocks(buf, inner, &scratch.pixels, pw);
+    if player_drawn {
+        let x = inner.x + plx.floor() as u16;
+        let y = inner.y + ply.floor() as u16 / 2;
+        draw_player_halo(buf, inner, (x, y), halo);
+    }
 
     // 8. Draw off-window 8-way directional bearing / boss chevron on the compact rim.
     if let Some((dx, dy)) = edge_bearing {
@@ -1506,7 +1517,8 @@ pub fn draw_expanded(
     }
 
     let accent_color = palette::marking(view.palette.wall_edge, view.palette.accent);
-    let theme = DerivedPalette::from_palette(view.palette);
+    let depth = crate::term::color_depth();
+    let theme = DerivedPalette::from_palette_at(view.palette, depth);
 
     // Fill modal interior with dark metal `PLATE` and draw stamped border.
     for y in modal.y..modal.bottom() {
@@ -1942,8 +1954,9 @@ pub fn draw_expanded(
         }
     }
     if let Some((tx, ty)) = cell_to_term(view.player_cell.0, view.player_cell.1) {
-        let pcol = palette::to_color(palette::mix(COAT_RGB, TAIL_RGB, 0.25 * pulse));
-        stamp_glyph(buf, tx, ty, '●', pcol, true);
+        let (player_col, halo) = player_pulse(view.player_clock, depth);
+        draw_player_halo(buf, map_rect, (tx, ty), halo);
+        stamp_glyph(buf, tx, ty, '●', palette::to_color(player_col), true);
     }
 
     // 6. Exploration percentage & top frame header bar.
@@ -2595,6 +2608,41 @@ fn place_label(
 
 // ---- Geometry & Raster Helpers ---------------------------------------------
 
+fn player_pulse(seconds: f64, depth: crate::term::ColorDepth) -> (Rgb, f32) {
+    let phase = seconds * PLAYER_PULSE_HZ * std::f64::consts::TAU;
+    let wave = (0.5 - 0.5 * phase.cos()) as f32;
+    if depth == crate::term::ColorDepth::Ansi16 {
+        return if wave >= 0.5 {
+            (WHITE_RGB, 0.60)
+        } else {
+            (ANSI_COAT_RGB, 0.0)
+        };
+    }
+    (palette::mix(COAT_RGB, WHITE_RGB, wave), 0.36 * wave)
+}
+
+/// Light the eight adjacent map cells in their existing half-block colors.
+/// Keep map symbols, text and the border clear.
+fn draw_player_halo(buf: &mut Buffer, map: Rect, (x, y): (u16, u16), alpha: f32) {
+    if alpha == 0.0 {
+        return;
+    }
+    let tint = |color| match color {
+        Color::Rgb(r, g, b) => palette::to_color(palette::mix((r, g, b), COAT_RGB, alpha)),
+        other => other,
+    };
+    for row in y.saturating_sub(1).max(map.y)..=y.saturating_add(1).min(map.bottom() - 1) {
+        for col in x.saturating_sub(1).max(map.x)..=x.saturating_add(1).min(map.right() - 1) {
+            let cell = &mut buf[(col, row)];
+            if (col, row) != (x, y) && matches!(cell.symbol(), "▀" | " ") {
+                let fg = tint(cell.fg);
+                let bg = tint(cell.bg);
+                cell.set_fg(fg).set_bg(bg);
+            }
+        }
+    }
+}
+
 #[inline]
 fn in_bounds(source: &(impl MinimapSource + ?Sized), cx: i32, cy: i32) -> bool {
     cx >= 0 && cy >= 0 && cx < source.cols() && cy < source.rows()
@@ -3162,6 +3210,7 @@ mod tests {
             palette,
             sector_name: sector,
             clock: 185.4,
+            player_clock: 0.0,
             mode,
             compact_size: MinimapSize::Normal,
             hud_compass_active: false,
@@ -3172,6 +3221,71 @@ mod tests {
             size_key: DEFAULT_SIZE_KEY,
             reveal_clock: 1,
         }
+    }
+
+    #[test]
+    fn player_marker_and_halo_pulse_on_both_maps() {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut map = FakeMap::new(80, 80);
+        map.cells.fill(MinimapCell::Floor);
+        map.seen.fill(true);
+        map.recency.fill(1.0);
+        let mut scratch = MinimapScratch::new();
+        for (mode, size) in [
+            (MinimapMode::Compact, MinimapSize::Normal),
+            (MinimapMode::Compact, MinimapSize::Small),
+            (MinimapMode::Expanded, MinimapSize::Normal),
+        ] {
+            let mut view = make_view(mode, MinimapPalette::SEWER, "SEWER", &[], &[], false, 120, 40);
+            view.compact_size = size;
+            view.player_cell = (40.5, 40.5);
+            view.player_facing = (0.0, 0.0);
+            view.viewport_cells = CellRect::default();
+
+            let mut trough = Buffer::empty(area);
+            draw_into(&mut trough, area, &view, &map, &mut scratch);
+            view.player_clock = 0.5 / PLAYER_PULSE_HZ;
+            let mut peak = Buffer::empty(area);
+            draw_into(&mut peak, area, &view, &map, &mut scratch);
+
+            let white = palette::to_color(WHITE_RGB);
+            let marker = peak.content.iter()
+                .position(|c| c.fg == white || c.bg == white)
+                .expect("white player marker");
+            let width = usize::from(area.width);
+            let x = marker % width;
+            let y = marker / width;
+            assert_ne!(trough.content[marker], peak.content[marker]);
+            for (i, (low, high)) in trough.content.iter().zip(&peak.content).enumerate() {
+                let within_halo = (i % width).abs_diff(x) <= 1 && (i / width).abs_diff(y) <= 1;
+                assert_eq!(low != high, within_halo, "{mode:?}/{size:?}, cell {i}");
+                if i != marker {
+                    assert_eq!(low.symbol(), high.symbol(), "halo must keep the map glyph");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn player_pulse_blends_in_rgb_and_blinks_in_ansi16() {
+        use crate::term::ColorDepth;
+
+        let period = 1.0 / PLAYER_PULSE_HZ;
+        for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256] {
+            assert_eq!(player_pulse(0.0, depth), (COAT_RGB, 0.0));
+            let (color, halo) = player_pulse(period / 4.0, depth);
+            assert!(color.0 > COAT_RGB.0 && color.0 < WHITE_RGB.0);
+            assert!(halo > 0.0 && halo < player_pulse(period / 2.0, depth).1);
+            assert_eq!(player_pulse(period / 2.0, depth).0, WHITE_RGB);
+        }
+        let depth = ColorDepth::Ansi16;
+        let (low, halo_low) = player_pulse(0.0, depth);
+        let (high, halo_high) = player_pulse(period / 2.0, depth);
+        assert_eq!(palette::to_term(low, depth), Color::Gray);
+        assert_eq!(palette::to_term(high, depth), Color::White);
+        assert_eq!(halo_low, 0.0);
+        assert!(halo_high > 0.0);
+        assert_eq!(player_pulse(period, depth), (low, halo_low));
     }
 
     #[test]

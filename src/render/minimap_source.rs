@@ -314,6 +314,7 @@ impl MinimapFrame {
             palette,
             sector_name: world.level.theme.name(),
             clock: world.elapsed,
+            player_clock: 0.0,
             mode: if expanded {
                 MinimapMode::Expanded
             } else {
