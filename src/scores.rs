@@ -768,7 +768,7 @@ impl ScoreTable {
     /// The rule: **a floor unlocks when its campaign stage is reachable.**
     /// Stage one is always open; a later stage is reachable once every earlier
     /// stage has been cleared on at least one of its floors (so clearing the
-    /// Laundry opens stage three exactly like clearing the Kitchen does).
+    /// Laundry or the Outfall opens stage three exactly like clearing the Kitchen does).
     ///
     /// Since batch twelve the Flatbed is the campaign's **fourth** level, and
     /// the campaign ends on it; as a practice floor it is **always open** (the
@@ -1109,6 +1109,7 @@ mod tests {
         assert!(t.floor_unlocked(Theme::Sewer));
         assert!(!t.floor_unlocked(Theme::Kitchen));
         assert!(!t.floor_unlocked(Theme::Laundry));
+        assert!(!t.floor_unlocked(Theme::Outfall));
         assert!(!t.floor_unlocked(Theme::Lab));
         assert!(!t.floor_unlocked(Theme::Printworks));
         assert!(
@@ -1120,8 +1121,9 @@ mod tests {
         assert!(t.floor_cleared(Theme::Sewer));
         assert!(
             t.floor_unlocked(Theme::Kitchen) && t.floor_unlocked(Theme::Laundry),
-            "clearing stage one opens both stage-two floors"
+            "clearing stage one opens the Kitchen and the Laundry"
         );
+        assert!(t.floor_unlocked(Theme::Outfall));
         assert!(!t.floor_unlocked(Theme::Lab));
         assert_eq!(
             t.floor_best(Theme::Sewer),

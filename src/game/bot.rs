@@ -1114,7 +1114,7 @@ impl Bot {
                 // A boss that is out of reach (the hawk overhead) is only a
                 // shadow: dodging it would be dodging nothing, and the bot must
                 // spend that movement reading the deck marks instead.
-                if !boss.overhead() {
+                if !boss.overhead() && (boss.kind != BossKind::Lantern || boss.contact_damage > 0.0) {
                     self.threats.push(Threat::BossBody {
                         pos: boss.pos,
                         radius: boss.kind.body_radius(),
@@ -1162,6 +1162,44 @@ impl Bot {
                             active_left: to_bite + crate::game::art_boss_mangle::BITE_WINDOW,
                             damage: crate::game::art_boss_mangle::BITE_DAMAGE,
                         });
+                    }
+                }
+                if let Some(view) = boss.lantern_view() {
+                    use crate::game::art_boss_lantern::{
+                        LanternState::*, DARK_LUNGE_DAMAGE, DECOY_LEAP_DAMAGE, GAPE_PULL_DURATION,
+                        GAPE_STAMP_DAMAGE, GAPE_STAMP_DURATION, JAW_SNAP_DAMAGE,
+                    };
+                    let remaining = (boss.duration - boss.elapsed).max(0.0);
+                    let warning = match view.state {
+                        FeintTell => view.attack.map(|shape| (shape, remaining, JAW_SNAP_DAMAGE)),
+                        DarkTell => view.attack.map(|shape| (shape, remaining, DARK_LUNGE_DAMAGE)),
+                        DecoyLeapTell => view.attack.map(|shape| (shape, remaining, DECOY_LEAP_DAMAGE)),
+                        GapeTell => view.attack.map(|shape| (shape, remaining, 8.0)),
+                        GapePull => view.attack.map(|shape| (shape, 0.0, 8.0)),
+                        _ => None,
+                    };
+                    if let Some((shape, warn, damage)) = warning {
+                        self.threats.push(Threat::Hazard {
+                            shape,
+                            warn_left: self.quantise_warn(warn),
+                            active_left: remaining + 0.1,
+                            damage,
+                        });
+                    }
+                    if matches!(view.state, GapeTell | GapePull) {
+                        if let Some(shape) = view.stamp {
+                            let until_stamp = remaining + if view.state == GapeTell {
+                                GAPE_PULL_DURATION
+                            } else {
+                                0.0
+                            };
+                            self.threats.push(Threat::Hazard {
+                                shape,
+                                warn_left: self.quantise_warn(until_stamp),
+                                active_left: until_stamp + GAPE_STAMP_DURATION,
+                                damage: GAPE_STAMP_DAMAGE,
+                            });
+                        }
                     }
                 }
             } else if let Some(wick) = e.get::<crate::game::ecs::components::Wick>() {
@@ -1292,6 +1330,24 @@ impl Bot {
     fn scan_floor_enemy(&mut self, w: &World, en: &Enemy, p: Vec2) -> bool {
         use crate::game::ecs::systems::{floor_kitchen, floor_lab, floor_laundry, floor_sewer};
         match en.kind {
+            EnemyKind::Skater | EnemyKind::Lampfish => {
+                use crate::game::ecs::systems::floor_outfall::{
+                    outfall_enemy_tell, OutfallTellPhase, LAMPFISH_LUNGE_DAMAGE, SKATER_SPLASH_DAMAGE,
+                };
+                if let Some(tell) = outfall_enemy_tell(en) {
+                    if self.sees(w, p, tell.shape.center()) {
+                        let warn = if tell.phase == OutfallTellPhase::Tell { tell.remaining } else { 0.0 };
+                        let base = if en.kind == EnemyKind::Skater { SKATER_SPLASH_DAMAGE } else { LAMPFISH_LUNGE_DAMAGE };
+                        self.threats.push(Threat::Hazard {
+                            shape: tell.shape,
+                            warn_left: self.quantise_warn(warn),
+                            active_left: tell.remaining + 0.05,
+                            damage: base * en.damage / en.kind.damage(),
+                        });
+                    }
+                }
+                true
+            }
             EnemyKind::SumpLeech => {
                 if let Some((lip, tip, phase, _)) = floor_sewer::leech_tongue(en) {
                     let mid = (lip + tip) * 0.5;
@@ -2875,16 +2931,15 @@ fn explored_clear(w: &World, q: Vec2, r: f32) -> bool {
     pit_clear(w, q, r)
 }
 
-/// The flatbed's holes are open floor to the tile grid, so the bot has to read
-/// the deck's hazard list itself: it never plans a waypoint, a runway or a dash
-/// through a broken plank or a missing rail section. Every other theme has an
-/// empty list, so this is one length check there.
+/// The deck's holes and the Outfall's drops are open to the tile grid.
 fn pit_clear(w: &World, q: Vec2, r: f32) -> bool {
-    if w.level.trailer.pits.is_empty() {
-        return true;
-    }
+    let pits = if w.level.theme == crate::game::level::Theme::Outfall {
+        &w.level.objects.tidal_pits
+    } else {
+        &w.level.trailer.pits
+    };
     let m = r + 2.0;
-    !w.level.trailer.pits.iter().any(|pit| {
+    !pits.iter().any(|pit| {
         let rect = pit.rect.to_world();
         q.x + m > rect.x && q.x - m < rect.right() && q.y + m > rect.y && q.y - m < rect.bottom()
     })

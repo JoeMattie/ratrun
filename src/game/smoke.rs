@@ -159,6 +159,7 @@ impl SmokeLayer {
             Theme::Sewer => 0x517C_C1B7_2722_0A95,
             Theme::Kitchen => 0x94D0_49BB_1331_11EB,
             Theme::Lab => 0xBF58_476D_1CE4_E5B9,
+            Theme::Outfall => 0x2C17_5FA9_6BDE_3E80,
             _ => 0x9E37_79B9_7F4A_7C15,
         };
         let mut s = seed ^ salt ^ 0x5A0C_E123_4567_89AB;
@@ -446,6 +447,7 @@ impl SmokeLayer {
             Theme::Sewer => (124, 152, 146),
             Theme::Kitchen => (176, 156, 136),
             Theme::Lab => (136, 166, 188),
+            Theme::Outfall => (84, 136, 158),
             _ => (150, 152, 160),
         };
         for i in 0..count {
@@ -786,6 +788,7 @@ fn dust_color(theme: Theme) -> Rgb {
         Theme::Sewer => (116, 136, 128),
         Theme::Kitchen => (176, 152, 124),
         Theme::Lab => (136, 148, 172),
+        Theme::Outfall => (102, 136, 146),
         _ => (148, 150, 156),
     }
 }

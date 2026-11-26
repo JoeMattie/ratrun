@@ -109,7 +109,7 @@ use super::{
     art_boss_magpie,
     art_boss_mangle, art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
-    art_props, art_puddle, art_rat, art_rat_giant, art_traps, art_walls, art_wave3a,
+    art_props, art_puddle, art_rat, art_rat_giant, art_traps, art_walls, art_wave3a, art_boss_lantern, art_roster_outfall,
 };
 
 /// How much of the simulation's screen shake reaches the camera. The owner
@@ -483,6 +483,7 @@ impl World {
         // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
         // by the boss framework). Permanent, like `NukeTick`.
         ecs.insert_resource(BossDue::default());
+        ecs.insert_resource(super::ecs::systems::outfall::OutfallOrigins::default());
         // The guest's clock (the Drake's 45 s gap and live count). Permanent
         // scratch, like `BossDue`; a fresh level starts with no Drake and no
         // gap running.
@@ -895,6 +896,23 @@ impl World {
     /// accessors.
     pub fn boss_kind(&self) -> Option<BossKind> {
         self.living_boss().map(|b| b.kind)
+    }
+
+    pub(crate) fn outfall_surge_enabled(&self) -> bool {
+        if self.level.theme != Theme::Outfall {
+            return false;
+        }
+        let due = self.ecs.resource::<BossDue>();
+        super::hazards::outfall_surge_enabled(
+            self.director.boss_spawned
+                || due.is_pending()
+                || due.claimed
+                || self.ecs.iter_entities().any(|e| {
+                    e.get::<Boss>().is_some_and(|boss| boss.kind == BossKind::Lantern)
+                }),
+            self.testbed,
+            self.elapsed,
+        )
     }
 
     /// Is the living boss out of reach (the Redtail overhead, only a shadow)?
@@ -1739,6 +1757,8 @@ impl World {
                 let pos = self.player.pos + heading * (distance * scale);
                 if self.level.pit_at(pos).is_none()
                     && self.level.tiles.circle_clear(pos, radius, class)
+                    && (self.level.theme != Theme::Outfall
+                        || super::hazards::outfall_sand_clear(&self.level, pos, radius, class))
                 {
                     return pos;
                 }
@@ -1751,6 +1771,9 @@ impl World {
     pub(crate) fn clear_testbed_boss(&mut self) {
         self.clear_components::<Boss>();
         self.clear_components::<BossProjectile>();
+        if self.level.theme == Theme::Outfall {
+            self.level.objects.outfall_boss_snuff = None;
+        }
         *self.ecs.resource_mut::<BossFight>() = BossFight::default();
         *self.ecs.resource_mut::<BossDue>() = BossDue::default();
         *self.ecs.resource_mut::<BossVirus>() = BossVirus::default();
@@ -2017,7 +2040,9 @@ impl World {
             .tiles
             .nearest_open_center(arena.center_world(), large, 16)
             .unwrap_or_else(|| arena.center_world());
-        let pos = self.boss_point_beside(self.player.pos, kind.body_radius());
+        let Some(pos) = self.boss_point_beside(self.player.pos, kind.body_radius()) else {
+            return false;
+        };
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
         let id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
@@ -2075,11 +2100,15 @@ impl World {
     /// 27 px across and does not fit a one-cell aisle, so the second pass
     /// settles for a walkable cell and lets `wall_resolve` nudge the body clear
     /// of the wall it clips. Fixed sweep, no rng draw.
-    fn boss_point_beside(&self, rat: Vec2, radius: f32) -> Vec2 {
+    fn boss_point_beside(&self, rat: Vec2, radius: f32) -> Option<Vec2> {
         const STEPS: usize = 16;
         const DISTANCES: [f32; 6] = [48.0, 44.0, 52.0, 40.0, 56.0, 60.0];
         let large = crate::game::collision::SizeClass::Large;
+        let outfall = self.level.theme == Theme::Outfall;
         for strict in [true, false] {
+            if outfall && !strict {
+                break;
+            }
             let mut best: Option<(f32, Vec2)> = None;
             for step in 0..STEPS {
                 let angle = step as f32 * std::f32::consts::TAU / STEPS as f32;
@@ -2087,7 +2116,10 @@ impl World {
                 let dir = Vec2::new(c, s);
                 for d in DISTANCES {
                     let p = rat + dir * d;
-                    if self.level.pit_at(p).is_some() {
+                    if self.level.pit_at(p).is_some()
+                        || (outfall
+                            && !super::hazards::outfall_sand_clear(&self.level, p, radius, large))
+                    {
                         continue;
                     }
                     let (cx, cy) = crate::game::collision::cell_of(p);
@@ -2104,15 +2136,19 @@ impl World {
                 }
             }
             if let Some((_, p)) = best {
-                return p;
+                return Some(p);
             }
+        }
+        if outfall {
+            let (cx, cy) = super::collision::cell_of(rat);
+            return (cy - 16..=cy + 16)
+                .flat_map(|y| (cx - 16..=cx + 16).map(move |x| TileMap::tile_rect(x, y).center()))
+                .filter(|&p| super::hazards::outfall_sand_clear(&self.level, p, radius, large))
+                .min_by(|a, b| a.dist_sq(rat).total_cmp(&b.dist_sq(rat)));
         }
         // Nowhere within reach is walkable: the nearest open cell, so the body
         // can never end up inside a wall.
-        self.level
-            .tiles
-            .nearest_open_center(rat, large, 8)
-            .unwrap_or(rat)
+        Some(self.level.tiles.nearest_open_center(rat, large, 8).unwrap_or(rat))
     }
 
     /// Console `magnet`: pull every gem toward the rat.
@@ -2431,6 +2467,9 @@ impl World {
         // every pixel is tagged with the wet-floor material so the lighting pass
         // reflects a lamp in it.
         self.draw_puddles(pb, cam, viewport);
+        if self.level.theme == Theme::Outfall {
+            art_floor::draw_outfall_hazards(pb, &self.level, cam, self.elapsed);
+        }
 
         // The overhead light's ground shadows (batch 13, `render::lighting::
         // overhead`): on the floor, before the walls, props and bodies, so
@@ -2488,8 +2527,7 @@ impl World {
         draw_fixtures(
             &mut self.light_map,
             pb,
-            &self.level.objects.lights,
-            self.level.theme,
+            &self.level,
             cam,
             self.elapsed,
             blackout,
@@ -3221,6 +3259,12 @@ impl World {
             }
         }
 
+        if self.level.theme == Theme::Outfall {
+            art_floor::draw_outfall_tells(
+                pb, &self.level, self.player.pos, cam, self.elapsed, self.outfall_surge_enabled(),
+            );
+        }
+
         // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground
         // hazard the rat steps out of, so the ring is a warning, not decor.
         {
@@ -3279,7 +3323,9 @@ impl World {
                         }
                     }
                 }
-                if b.lob.is_some() {
+                if b.outfall_bubble {
+                    art_roster_outfall::draw_bubble_pellet(pb, b, cam);
+                } else if b.lob.is_some() {
                     pb.filled_circle(s.0, s.1, 1, palette::scale(b.color, 1.2));
                     let trail = self.w2s(b.prev_pos, cam);
                     pb.plot_add(trail.0, trail.1, palette::scale(b.color, 0.5));
@@ -3447,14 +3493,19 @@ impl World {
         {
             let mut query = self.ecs.query::<&Boss>();
             for boss in query.iter(&self.ecs) {
-                let BossArtView::Cobra(v) = boss.view() else {
-                    continue;
-                };
-                let margin = boss.kind.cull_margin();
-                if on_screen(self.w2s(boss.pos, cam), margin, viewport)
-                    || on_screen(self.w2s(boss.target, cam), margin, viewport)
-                {
-                    art_boss_cobra::draw_coil_tell(pb, &v, cam);
+                match boss.view() {
+                    BossArtView::Cobra(v) => {
+                        let margin = boss.kind.cull_margin();
+                        if on_screen(self.w2s(boss.pos, cam), margin, viewport)
+                            || on_screen(self.w2s(boss.target, cam), margin, viewport)
+                        {
+                            art_boss_cobra::draw_coil_tell(pb, &v, cam);
+                        }
+                    }
+                    BossArtView::Lantern(v) => {
+                        art_boss_lantern::draw_tell_overlay(pb, &v, cam, self.level.palette.accent);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -3796,6 +3847,7 @@ impl World {
                 BossArtView::Cobra(v) => {
                     art_boss_cobra::draw_ground(pb, &v, cam, accent);
                 }
+                BossArtView::Lantern(v) => art_boss_lantern::draw_ground(pb, &v, cam, accent),
             }
         }
     }
@@ -3846,6 +3898,7 @@ impl World {
                 BossArtView::MegaRat(v) => art_boss_megarat::draw_megarat(pb, &v, cam, accent),
                 BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
                 BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
+                BossArtView::Lantern(v) => art_boss_lantern::draw(pb, &v, cam, accent),
             }
             pb.set_pen(pen);
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
@@ -4346,6 +4399,7 @@ pub(crate) fn on_screen(s: (i32, i32), margin: f32, viewport: Vec2) -> bool {
 pub(crate) fn floor_tell_reach(kind: EnemyKind, radius: f32) -> Option<f32> {
     use crate::game::ecs::systems::{
         floor_flatbed, floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer,
+        floor_outfall,
     };
     match kind {
         // Sewer: the tongue leaves the body's rim.
@@ -4372,6 +4426,10 @@ pub(crate) fn floor_tell_reach(kind: EnemyKind, radius: f32) -> Option<f32> {
         ),
         // Flatbed: the marked roll (stamped by the wave-4 block).
         EnemyKind::LooseCan => Some(radius + floor_flatbed::CAN_ROLL_LENGTH + 12.0),
+        EnemyKind::Skater => Some(radius + floor_outfall::SKATER_SPLASH_LEN + 8.0),
+        EnemyKind::Lampfish => Some(
+            radius + floor_outfall::LAMPFISH_LUNGE_LEN.max(floor_outfall::LAMPFISH_BULB_OFFSET) + 8.0,
+        ),
         _ => match kind.archetype() {
             // Unchanged: the Bell Flea's crosses and the Turnkey's crossbar.
             EnemyKind::BellFlea | EnemyKind::Turnkey => Some(radius * 3.0 + 8.0),
@@ -4394,6 +4452,7 @@ fn draw_floor_tell(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: palette::
         EnemyKind::StapleCrawler => {
             crate::game::art_roster_printworks::draw_staple_tell(pb, e, cam)
         }
+        EnemyKind::Skater | EnemyKind::Lampfish => art_roster_outfall::draw_tell(pb, e, cam, accent),
         _ => art_enemy::draw_w3_tells(pb, e, cam, accent),
     }
 }
@@ -4994,6 +5053,30 @@ mod zoom_tests {
     /// set here the way the App sets it on a resize.
     #[test]
     fn the_same_seed_plays_out_identically_at_every_zoom() {
+        assert_zoom_replay(Theme::Sewer);
+    }
+
+    #[test]
+    fn forced_lantern_arrival_uses_the_surge_gate() {
+        let mut w = World::new(Theme::Outfall, 11);
+        w.configure_testbed();
+        w.elapsed = 8.5;
+        assert!(w.outfall_surge_enabled());
+        w.force_boss(BossKind::Lantern);
+        assert!(!w.outfall_surge_enabled(), "the pending arrival suppresses the warning");
+        w.clear_testbed_boss();
+        assert!(w.force_boss_here(BossKind::Lantern));
+        assert!(!w.outfall_surge_enabled(), "the manual arrival also suppresses the warning");
+        w.clear_testbed_boss();
+        assert!(w.outfall_surge_enabled());
+    }
+
+    #[test]
+    fn outfall_surge_and_lure_replay_identically_at_every_zoom() {
+        assert_zoom_replay(Theme::Outfall);
+    }
+
+    fn assert_zoom_replay(theme: Theme) {
         let logical = Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32);
         let mut prints = Vec::new();
         let mut hashes = Vec::new();
@@ -5001,7 +5084,13 @@ mod zoom_tests {
         for z in [Some(zoom::MIN), Some(1.0), Some(zoom::MAX), None] {
             let drawn = z.is_some();
             let z = z.unwrap_or(1.0);
-            let mut w = World::new(Theme::Sewer, 11);
+            let mut w = World::new(theme, 11);
+            if theme == Theme::Outfall {
+                // Start beside a lure immediately before the surge warning.
+                w.player.pos = w.level.objects.lure_traps[0].pos;
+                w.elapsed = 7.5;
+                w.player.god = true;
+            }
             // Lighting and smoke are render-only too: keep them on (whatever
             // the terminal's colour depth says) so the promise covers them.
             w.lighting = LightingMode::Full;
@@ -5033,6 +5122,10 @@ mod zoom_tests {
                     w.viewport, logical,
                     "neither a draw nor a zoom may move the simulation's viewport"
                 );
+            }
+            if theme == Theme::Outfall {
+                use crate::game::hazards::LurePhase;
+                assert_eq!(w.level.objects.lure_traps[0].phase, LurePhase::Spent);
             }
             prints.push(fingerprint(&mut w));
             hashes.push(frame_hash(&pb));

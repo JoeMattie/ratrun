@@ -256,7 +256,12 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
             if !on(s, 1) {
                 continue;
             }
-            pellet(pb, s, brighten(b.color, 0.55));
+            if b.outfall_bubble {
+                pb.ring(s.0, s.1, 1, (154, 231, 242));
+                pb.plot(s.0, s.1, BORDER);
+            } else {
+                pellet(pb, s, brighten(b.color, 0.55));
+            }
         }
     }
 
@@ -301,6 +306,16 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         for e in q.iter(&*v.ecs) {
             if !e.alive() {
                 continue;
+            }
+            if matches!(e.kind, crate::game::enemy::EnemyKind::Skater | crate::game::enemy::EnemyKind::Lampfish) {
+                use crate::game::ecs::systems::floor_outfall::{outfall_enemy_tell, OutfallTellPhase};
+                if let Some(tell) = outfall_enemy_tell(e) {
+                    let active = tell.phase == OutfallTellPhase::Strike;
+                    crate::render::hazard_outline::draw_shape_ink(
+                        pb, &tell.shape, v.cam, v.scale, unit, v.elapsed,
+                        crate::render::hazard_outline::miniboss_colour(active), active,
+                    );
+                }
             }
             if e.w3.flea_phase != 0 {
                 let warm = (238, 198, 126);
@@ -348,12 +363,26 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
     {
         let mut q = v.ecs.query::<&crate::game::ecs::systems::boss::Boss>();
         for boss in q.iter(&*v.ecs) {
-            if boss.dead || boss.hazards.is_empty() {
+            if boss.dead {
                 continue;
             }
-            crate::render::hazard_outline::draw_ink(
-                pb, boss, v.cam, v.scale, unit, v.elapsed,
-            );
+            use crate::render::hazard_outline::{draw_ink, draw_shape_ink, warn_colour};
+            if let Some(view) = boss.lantern_view() {
+                use crate::game::art_boss_lantern::LanternState::*;
+                if matches!(view.state, FeintTell | DarkTell | DecoyLeapTell | GapeTell | GapePull) {
+                    for (shape, active) in [(view.attack, view.state == GapePull), (view.stamp, false)] {
+                        if let Some(shape) = shape {
+                            draw_shape_ink(
+                                pb, &shape, v.cam, v.scale, unit, v.elapsed,
+                                warn_colour(boss.kind, active), active,
+                            );
+                        }
+                    }
+                }
+            }
+            if !boss.hazards.is_empty() {
+                draw_ink(pb, boss, v.cam, v.scale, unit, v.elapsed);
+            }
         }
     }
 
@@ -386,7 +415,7 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         let c = if grate.plume() { (255, 252, 232) } else { (250, 196, 128) };
         dotted_rect(pb, (s.0 - half, s.1 - half, s.0 + half, s.1 + half), c, 2);
     }
-    for pit in &v.level.trailer.pits {
+    for pit in v.level.trailer.pits.iter().chain(&v.level.objects.tidal_pits) {
         let a = screen(pit.rect.center_world(), v.cam, v.scale);
         let w = (pit.rect.w as f32 * crate::game::collision::TILE_F / v.scale.x).round() as i32;
         let h = (pit.rect.h as f32 * crate::game::collision::TILE_F / v.scale.y).round() as i32;
@@ -396,7 +425,11 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         dotted_rect(
             pb,
             (a.0 - w / 2, a.1 - h / 2, a.0 + w / 2, a.1 + h / 2),
-            (246, 226, 178),
+            if pit.kind == crate::game::level::PitKind::TidalDrop {
+                (143, 211, 220)
+            } else {
+                (246, 226, 178)
+            },
             2,
         );
     }

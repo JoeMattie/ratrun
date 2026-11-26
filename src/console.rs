@@ -1233,6 +1233,7 @@ const BOSS_SHORT_NAMES: &[(BossKind, &[&str])] = &[
     (BossKind::MegaRat, &["r01"]),
     (BossKind::Hawk, &[]),
     (BossKind::Cobra, &[]),
+    (BossKind::Lantern, &["anglerfish", "angler"]),
 ];
 
 /// Every name `boss` accepts for `kind`: the internal name, the HUD plate's
@@ -2025,8 +2026,13 @@ fn cmd_boss(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
         return Err("no run in progress".into());
     };
     if here {
+        let occupied = world.boss_kind().is_some();
         if !world.force_boss_here(kind) {
-            return Err("a boss is already on the floor".into());
+            return Err(if occupied {
+                "a boss is already on the floor"
+            } else {
+                "no space for this boss nearby"
+            }.into());
         }
         app.console_line(
             format!("boss fight started here: {}", kind.name()),
@@ -3322,6 +3328,8 @@ mod tests {
             ("cobra", BossKind::Cobra),
             ("king cobra", BossKind::Cobra),
             ("KING-COBRA", BossKind::Cobra),
+            ("the lantern", BossKind::Lantern),
+            ("anglerfish", BossKind::Lantern),
             ("nightedition", BossKind::NightEdition),
             ("the night edition", BossKind::NightEdition),
             ("press", BossKind::NightEdition),

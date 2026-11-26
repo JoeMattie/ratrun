@@ -268,6 +268,7 @@ pub(crate) fn material(theme: Theme) -> palette::Rgb {
         Theme::Laundry => (159, 200, 200),
         Theme::Printworks => (182, 180, 165),
         Theme::Trailer => (206, 178, 132),
+        Theme::Outfall => crate::render::campaign::CampaignLevel::Outfall.material_rgb(),
     }
 }
 
@@ -1011,6 +1012,7 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
             " ███▄▄███▄▄███▄▄██ ",
             "══╧══╧══╧══╧══╧══╧═",
         ],
+        Theme::Outfall => crate::render::campaign::OUTFALL_EMBLEM,
     };
     for (i, s) in emblem.iter().enumerate() {
         center(f, r, i as u16, label(s, accent));

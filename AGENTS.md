@@ -7,7 +7,7 @@ Guidance for coding agents working in this repository. **Read [`CLAUDE.md`](CLAU
 - **Do not compile or run.** No `cargo` (build, check, test, clippy, run, fmt), no `rustc`, no `rustfmt`, no game binaries, bot batches or capture harnesses. The coordinator merges the batch into the main checkout, compiles **once**, and fixes the breakage there. Write the code and the tests you would have run, and report exactly what is unverified.
 - **Never edit the determinism goldens** (`src/game/ecs/harness.rs`) or the map pin (`src/game/levelgen/mod.rs` `TRACE_HASHES`) to make a failure pass. A deliberate behaviour change moves them, in the same change, with the reason recorded in the module docs.
 - **Touch only the files your task names.** If you must add a line to a shared file (an enum variant, a match arm, a `mod` line, a table row), re-read it immediately before the edit, insert once at the end of the list, and never reformat, reorder or rewrite the surrounding code.
-- **No git writes.** No `add`, `commit`, `stash`, `checkout`, `restore`, `reset`, `merge`, `rebase` or `clean`; read-only git is fine. The coordinator commits. If a file looks wrong because another agent is mid-edit, leave it and re-read it later — never "restore" it.
+- **Commit on your own branch in your own worktree.** Exclude `.review*` files from commits. Never touch `main` or another worker's branch. Do not compile.
 - **Gameplay and design decisions need no approval.** Make them and list them in your report.
 - **Report, then stop.** Finish with what you built (file:line), the decisions you made, every file you touched, what is unverified or may not compile, the tests the coordinator must run, and the expected movement of the goldens or the map pin.
 

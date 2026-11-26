@@ -15,6 +15,7 @@
 //! | 0b | `hazards::hazards_system` | drip shaft, steam grates and ink pads; explicitly after 0 and before 1 |
 //! | 0c | `floor_sewer::floor_sewer_slow_system` | the Sump Leech's tongue slow folded into this tick's throttle (Sewer); explicitly after 0b and before 1 |
 //! | 1 | `player::player_system` | `update_player` |
+//! | 1-outfall | `outfall::outfall_motion_system` | recover the rat, apply the surge and release Congers before the footsteps, fog and director |
 //! | 1a | `miniboss_shapes::record_rat_track` | sample the post-move rat into the Wake/Drip history; no rng |
 //! | 1b | `puddles::puddle_steps_system` | trench puddle expiry, wet-floor footsteps and ripples; explicitly after 1a and before 2 |
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
@@ -23,6 +24,7 @@
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
 //! | 4 | `spawn::director_system` | `run_director` |
 //! | 4 | `floor_sewer::sewer_opening_system` | fixed Sewer encounters; after the director and before 4a |
+//! | 4-outfall | `floor_outfall::outfall_snuff_system` | resolve live fixtures before a named attack locks and before grid build |
 //! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); before 4b |
 //! | 4b | `boss::boss_spawn_system` | boss hand-off (reads `BossDue`) |
 //! | 4c | `boss::megarat::boss_summon_system` | a boss's `Call` spawns its rats here, outside the `EnemyIndex` window |
@@ -45,6 +47,7 @@
 //! | 13 | `projectiles::pools_system` | `update_pools` |
 //! | 13b | `boss::boss_damage_system` | player damage → boss hit shapes |
 //! | 13c | `boss::boss_update_system` | boss state machine + hazards |
+//! | 13c-outfall | `boss::lantern::lantern_gape_system` | apply the current from the boss update to the rat and gems |
 //! | 13d | `boss::cobra::coil_block_system` | the King Cobra's coils push a walking rat out of the body (a dashing one passes over); explicitly after 13c and before 14 |
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
@@ -53,10 +56,11 @@
 //! | 16b | `evolutions::{milk_teeth,fondue_tines,fondue_string}_system`, `fairy_ring_system`, `drain_cleaner_system`, `roll_call_system`, `dead_letter_system`, `ripcord_system` | evolved weapons (new), in this order |
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
 //! | 16c2 | `enemy_wave4::wave4_system` | wave-4 kinds' tells and hazards (new); right after 16c |
-//! | 16c3 | `floor_sewer::floor_sewer_system`, `floor_kitchen::floor_kitchen_system`, `floor_lab::floor_lab_system`, `floor_laundry::floor_laundry_system`, `floor_printworks::floor_printworks_system`, `floor_flatbed::floor_flatbed_system` | the per-floor roster rules (new), in this order; right after 16c2 |
+//! | 16c3 | `floor_sewer::floor_sewer_system`, `floor_kitchen::floor_kitchen_system`, `floor_lab::floor_lab_system`, `floor_laundry::floor_laundry_system`, `floor_printworks::floor_printworks_system`, `floor_flatbed::floor_flatbed_system`, `floor_outfall::floor_outfall_system` | the per-floor roster rules (new), in this order; right after 16c2 |
 //! | 16c3a | `drake::drake_system` | the guest's tell → peck → recover (Sewer only, a no-op without a Drake); in the same slot, right after `floor_sewer_system` |
 //! | 16c4 | `approach::approach_sfx_system` | fodder approach sounds (new; writes only `SfxQueue`); right after 16c3 |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
+//! | 16d-outfall | `outfall::outfall_falls_system` | recover bodies and loose drops after grid readers and before death jumps and loot |
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies`; a named miniboss's chest + gold drop here (`miniboss::drop_loot`) |
 //! | 18 | `loot::gems_system` | `update_gems` |
@@ -107,7 +111,7 @@ use super::systems::{
     floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer, fog, fx, gates, hazards,
     loot, miniboss, player, powerups, projectiles, puddles, shop, spawn, trailer, traps,
     weapon_spiketail, weapons, weapons_wave3a, weapons_wave3b,
-    weapon_lava, weapons_wave5,
+    weapon_lava, weapons_wave5, floor_outfall, outfall,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -185,6 +189,7 @@ pub fn build_tick_schedule() -> Schedule {
     schedule.add_systems(
         (
             player::player_system,
+            outfall::outfall_motion_system,
             super::systems::miniboss_shapes::record_rat_track,
             fog::reveal_system,
             enemy_move::flow_refresh_system,
@@ -242,6 +247,7 @@ pub fn build_tick_schedule() -> Schedule {
             projectiles::pools_system,
             boss::boss_damage_system,
             boss::boss_update_system,
+            boss::lantern::lantern_gape_system,
             combat::player_bullet_hits_system,
             combat::enemy_bullet_hits_system,
             combat::contact_system,
@@ -295,7 +301,7 @@ pub fn build_tick_schedule() -> Schedule {
     // its chest is dropped by the reap itself (rows 17 and 20). That is what
     // makes the chest path-independent: whatever killed it, it is reaped.
     schedule.add_systems(
-        (floor_sewer::sewer_opening_system, miniboss::miniboss_system)
+        (floor_sewer::sewer_opening_system, floor_outfall::outfall_snuff_system, miniboss::miniboss_system)
             .chain()
             .after(spawn::director_system)
             .before(boss::boss_spawn_system),
@@ -414,6 +420,7 @@ pub fn build_tick_schedule() -> Schedule {
                 floor_laundry::floor_laundry_system,
                 floor_printworks::floor_printworks_system,
                 floor_flatbed::floor_flatbed_system,
+                floor_outfall::floor_outfall_system,
                 // 16c4: the fodder approach sounds. Reads the bodies where
                 // they stand after every behaviour pass; writes only the
                 // `SfxQueue` (no rng, no entity, no simulated value).
@@ -424,7 +431,7 @@ pub fn build_tick_schedule() -> Schedule {
             // tuple). A pit fall takes 35 % of an enemy's max HP and can kill,
             // so it is a damage pass and must precede the Hantavirus death
             // jump below; it never spawns or despawns.
-            trailer::trailer_system,
+            (trailer::trailer_system, outfall::outfall_falls_system).chain(),
             // 16e: a Hantavirus host that died this tick (any source, the
             // evolved weapons, a Wick burst and a flatbed fall above included) passes
             // its remaining jumps on while the corpse and the `EnemyIndex`
@@ -459,7 +466,7 @@ pub fn build_tick_schedule() -> Schedule {
     // window is untouched.
     schedule.add_systems(
         boss::cobra::coil_block_system
-            .after(boss::boss_update_system)
+            .after(boss::lantern::lantern_gape_system)
             .before(combat::player_bullet_hits_system),
     );
 

@@ -139,6 +139,7 @@ fn accent(world: &World) -> Color {
         Theme::Printworks => (120, 178, 182),
         // Sun-bleached deck planks.
         Theme::Trailer => (214, 196, 150),
+        Theme::Outfall => (111, 188, 190),
     })
 }
 
