@@ -357,14 +357,31 @@ def profile_comparison(lines, cohorts, profiles):
             lo, hi = wilson(win, count)
             first = [r["levels"][0]["second_weapon_at"] for r in runs
                      if r["levels"][0]["second_weapon_at"] is not None]
+            first_card_weapon = sum(
+                bool(floor["level_up_times"]) and floor["level_up_times"][0] == floor["second_weapon_at"]
+                for floor in (r["levels"][0] for r in runs)
+            )
             early = [r["death"]["at"] for r in runs if r["death"] and r["death"]["level"] == 0]
             card = measured(profile, "first_card_1")
             rows.append((point, skill, f"{round(win * count)}/{count} ({win:.1%})",
                          f"{lo:.1%}–{hi:.1%}", number(card),
                          f"{number(float(np.median(first)))} ({len(first)}/{count})" if first else "—",
+                         f"{first_card_weapon}/{count}",
                          f"{sum(t < 180 for t in early)}/{sum(180 <= t < 300 for t in early)} / {count} runs"))
     table(lines, ("Profile", "Skill", "Wins", "95% CI", "Mean first card (s)",
-                  "Median second weapon (s)", "Sewer deaths before 3:00 / 3:00–5:00"), rows)
+                  "Median second weapon (s)", "Second weapon on first card", "Sewer deaths before 3:00 / 3:00–5:00"), rows)
+    rows = []
+    for point, control in (("candidate", "round3"), ("candidate", "power-off"),
+                           ("half-hp-double-enemy", "round3"),
+                           ("candidate-mid", "candidate"), ("candidate-max", "candidate")):
+        for skill in SKILLS:
+            cohort = cohorts[point][skill]
+            paired = list(zip(cohort, cohorts[control][skill][:len(cohort)], strict=True))
+            gains = sum(c["won"] and not b["won"] for c, b in paired)
+            losses = sum(b["won"] and not c["won"] for c, b in paired)
+            rows.append((point, control, skill, len(paired), gains, losses,
+                         f"{(gains - losses) * 100 / len(paired):+.1f}"))
+    table(lines, ("Profile", "Control", "Skill", "Pairs", "Profile-only wins", "Control-only wins", "Win change (pp)"), rows)
     rows = []
     for point in ("candidate", "power-off", "round3"):
         models = [MeasuredProfile(profiles[point][skill]) for skill in SKILLS]
@@ -383,17 +400,20 @@ def report(output, baselines=()):
     proof = json.loads((output / "determinism.json").read_bytes())
     pilot, _, pilot_seconds = load_stage(output, "pilot")
     confirm, campaigns, confirm_seconds = load_stage(output, "confirm")
-    if (confirm["source_revision"] != result["revision"]
-            or proof["source_revision"] != result["revision"] or not proof["bytes_equal"]):
-        raise ValueError("confirmation must use the fitted simulation revision and a matched pilot")
+    if (confirm["source_revision"] != proof["source_revision"]
+            or pilot["source_revision"] != proof["source_revision"] or not proof["bytes_equal"]):
+        raise ValueError("confirmation must use the revision of the matched pilot")
     if confirm["points"]["candidate"] != result["values"]:
         raise ValueError("confirmation used a different candidate")
+    candidate_jobs = [job for job in confirm["jobs"] if job["point"] == "candidate"]
+    if any(job["tuning"] != result["defaults_overlay"] for job in candidate_jobs):
+        raise ValueError("confirmation changed the fitted candidate overlay")
     cohorts = confirmed_cohorts(campaigns)
     profiles = {point: {s: observe(cases[s]) for s in SKILLS} for point, cases in cohorts.items()}
     actual = profiles["candidate"]
     previous = []
     lines = ["# Rat Run horde power study, round 4", "",
-             f"Round 4 used simulation revision `{result['revision']}`. "
+             f"Round 4 screened `{result['revision']}` and confirmed `{confirm['source_revision']}`. "
              "Campaigns followed Sewer, Kitchen, Lab and Flatbed with a fresh Nest. "
              f"Confirmation used seeds {CONFIRM_SEED}–{CONFIRM_SEED + CONFIRM_RUNS - 1} for every skill.", ""]
     for round_no, baseline in enumerate(baselines, 1):
@@ -425,6 +445,7 @@ def report(output, baselines=()):
     write_plots(output, result, actual, previous)
     (output / "confirmation.json").write_text(json.dumps({
         "source_revision": confirm["source_revision"],
+        "screen_source_revision": result["revision"],
         "predicted": result["candidate"],
         "observed_mean_and_count": actual,
         "skill_win_wilson95": {s: wilson(*actual[s]["win"]) for s in SKILLS},
