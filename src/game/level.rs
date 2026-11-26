@@ -693,6 +693,15 @@ pub struct LightFixture {
 }
 
 impl LightFixture {
+    /// A sputtering or spent wall lamp is never a stable gameplay light.
+    pub fn is_live_sconce(&self) -> bool {
+        self.kind == LightFixtureKind::Sconce && !Self::sconce_spent(self.seed)
+    }
+
+    pub fn sconce_spent(seed: u32) -> bool {
+        seed.is_multiple_of(8)
+    }
+
     /// The direction a wall-mounted lamp faces: the unit vector pointing away
     /// from the wall face it hangs on, into the floor it lights.
     ///

@@ -369,7 +369,7 @@ enum Threat {
     },
     /// A named miniboss's signature telegraph / active shape.
     MinibossHazard {
-        shape: MinibossShape,
+        shape_index: usize,
         warn_left: f32,
         active_left: f32,
         damage: f32,
@@ -455,6 +455,9 @@ pub struct Bot {
     heading: Vec2,
     /// Reused threat / gem scratch so a decision allocates nothing.
     threats: Vec<Threat>,
+    // A Wake carries its locked path. Keep that storage out of every ordinary
+    // body or pellet snapshot in the danger field.
+    miniboss_shapes: Vec<MinibossShape>,
     gems: Vec<(Vec2, u32)>,
     pickups: Vec<(Vec2, PickupKind)>,
     /// Level the policy was reset for (keeps goal state per level).
@@ -498,6 +501,7 @@ impl Bot {
             goal_radius: 200.0,
             heading: Vec2::ZERO,
             threats: Vec::with_capacity(256),
+            miniboss_shapes: Vec::with_capacity(1),
             gems: Vec::with_capacity(64),
             pickups: Vec::with_capacity(8),
             level: 0,
@@ -989,6 +993,7 @@ impl Bot {
     /// Snapshot every threat near the rat (and the nearby loot).
     fn scan(&mut self, w: &World) {
         self.threats.clear();
+        self.miniboss_shapes.clear();
         self.gems.clear();
         self.pickups.clear();
         let p = w.player.pos;
@@ -1054,8 +1059,10 @@ impl Bot {
                                 0.0
                             };
                             if active_left > 0.0 {
+                                let shape_index = self.miniboss_shapes.len();
+                                self.miniboss_shapes.push(shape);
                                 self.threats.push(Threat::MinibossHazard {
-                                    shape,
+                                    shape_index,
                                     warn_left,
                                     active_left,
                                     damage: mb.signature_damage,
@@ -1708,7 +1715,7 @@ impl Bot {
             }
 
             for threat in &self.threats {
-                danger += wt * threat_cost(p, *threat, q, t, contact_scale);
+                danger += wt * threat_cost(&self.miniboss_shapes, *threat, q, t, contact_scale);
             }
         }
 
@@ -1975,8 +1982,12 @@ impl Bot {
                         imminent = true;
                     }
                 }
-                Threat::MinibossHazard { shape, active_left, .. } => {
-                    if active_left > 0.0 && shape.contains(p, R + 1.5) {
+                Threat::MinibossHazard { shape_index, active_left, .. } => {
+                    let shape = &self.miniboss_shapes[shape_index];
+                    // A readable slot or lens can be only a little wider
+                    // than the rat. Use its true radius for these footprints.
+                    let radius = if shape.signature_bounds().is_some() { R } else { R + 1.5 };
+                    if active_left > 0.0 && shape.contains(p, radius) {
                         imminent = true;
                     }
                 }
@@ -2586,7 +2597,13 @@ fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
 const STOMP_FREE_CONTACT: f32 = 0.2;
 
 /// Danger of one threat to a candidate position `q` at `t` seconds from now.
-fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) -> f32 {
+fn threat_cost(
+    miniboss_shapes: &[MinibossShape],
+    threat: Threat,
+    q: Vec2,
+    t: f32,
+    contact_scale: f32,
+) -> f32 {
     match threat {
         Threat::Enemy {
             pos,
@@ -2673,14 +2690,17 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
             }
         }
         Threat::MinibossHazard {
-            shape,
+            shape_index,
             warn_left,
             active_left,
             damage,
         } => {
             // `warn_left` is 0 for every skill but Casual (see the scan), so
             // the lookahead gate below only ever delays Casual's read.
-            if active_left <= 0.0 || !shape.contains(q, R) || warn_left > t + 0.12 {
+            if active_left <= 0.0
+                || warn_left > t + 0.12
+                || !miniboss_shapes[shape_index].contains(q, R)
+            {
                 0.0
             } else {
                 (damage / 10.0).clamp(0.8, 4.0) * 16.0
@@ -3650,7 +3670,7 @@ mod tests {
             hair,
             bait_good: false,
         };
-        let cost = |t: Threat, q: Vec2| threat_cost(Vec2::ZERO, t, q, 0.12, 1.0);
+        let cost = |t: Threat, q: Vec2| threat_cost(&[], t, q, 0.12, 1.0);
 
         let ordinary = trap(true, false, false);
         assert!(cost(ordinary, plate) >= 30.0, "the plate must outweigh any loot pull");
@@ -3851,7 +3871,7 @@ mod tests {
     fn floor_cost(threats: &[Threat], q: Vec2) -> f32 {
         threats
             .iter()
-            .map(|t| threat_cost(Vec2::ZERO, *t, q, 2.0, 1.0))
+            .map(|t| threat_cost(&[], *t, q, 2.0, 1.0))
             .sum()
     }
 

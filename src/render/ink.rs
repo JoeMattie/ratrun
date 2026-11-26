@@ -333,7 +333,13 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         let mut q = v.ecs.query::<&Miniboss>();
         for mb in q.iter(&*v.ecs) {
             let Some(shape) = mb.telegraph() else { continue };
-            outline_shape(pb, &*v, &shape, unit);
+            if shape.signature_bounds().is_some() {
+                crate::game::ecs::systems::miniboss_shapes::draw_telegraph(
+                    pb, mb, &shape, v.cam, v.scale,
+                );
+            } else {
+                outline_shape(pb, &*v, &shape, unit);
+            }
         }
     }
 
@@ -569,6 +575,7 @@ fn outline_shape(pb: &mut PixelBuffer, v: &InkView, shape: &MinibossShape, unit:
                 dotted_line(pb, at(head, bi), at(head, bo), c, 1);
             }
         }
+        _ => {}
     }
 }
 
