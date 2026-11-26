@@ -27,7 +27,7 @@ use crate::render::palette::{mix, scale, Rgb};
 use super::collision::TileMap;
 use super::ecs::components::{BiteSnap, Lash, LashPhase, WhipCrack};
 use super::ecs::constants::PLAYER_SUBSTEP;
-use super::ecs::systems::player::{dash_duration, DASH_BOOST, DASH_SECS};
+use super::ecs::systems::player::{dash_duration_from, DASH_BOOST};
 use super::ecs::systems::weapons_wave3b::super_dash_radius;
 use super::level::Theme;
 use super::player::Player;
@@ -1189,7 +1189,7 @@ fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose
     let speed = player.vel.len();
     let top = player.loadout.stats.move_speed.max(1.0);
     let moving = (speed / top).clamp(0.0, 1.0);
-    let dash = (player.dash_active / DASH_SECS).clamp(0.0, 1.0).sqrt();
+    let dash = (player.dash_active / player.dash_base_duration()).clamp(0.0, 1.0).sqrt();
     // The Super Dash charge pose: the rat coils (shorter and wider, the exact
     // opposite of the dash stretch) as the meter fills, so the release reads
     // as a spring let go. Zero unless the dash is being held, and a tap never
@@ -1400,7 +1400,7 @@ pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap,
         * player.speed_mult.max(0.0)
         * player.buffs.move_speed_scale()
         * DASH_BOOST;
-    let len = speed * dash_duration(charge);
+    let len = speed * dash_duration_from(player.dash_base_duration(), charge);
     let alpha = 0.15 + 0.27 * charge;
     let (radius, class) = player.movement_body(tiles);
     // Two-pixel steps: a lane that reads as a line without drawing the whole

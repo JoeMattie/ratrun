@@ -367,7 +367,7 @@ fn slip_weave(e: &mut Enemy, dt: f32) {
     if e.stun > 0.0 {
         return;
     }
-    let speed = e.kind.speed() * e.speed_scale * e.slow_mult;
+    let speed = e.speed() * e.speed_scale * e.slow_mult;
     e.vel += Vec2::from_angle(e.wander) * (SLIP_EXTRA_WEAVE * speed) * (6.0 * dt).min(1.0);
 }
 
@@ -386,7 +386,7 @@ fn slug_tick(e: &mut Enemy, st: &mut PressBody, level: &Level, rat: Vec2, dt: f3
         return;
     }
     st.blind_t -= dt;
-    let base = e.kind.speed() * e.speed_scale * e.slow_mult;
+    let base = e.speed() * e.speed_scale * e.slow_mult;
     let pace = e.vel.len().max(base);
     e.vel = st.heading * pace;
     e.facing = st.heading;

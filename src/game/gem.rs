@@ -24,17 +24,12 @@ impl GemTier {
     pub const ALL: [Self; 5] = [Self::Shard, Self::Chip, Self::Gem, Self::Crystal, Self::Core];
 
     pub fn for_value(value: u32) -> Self {
-        if value >= Self::Core.min_value() {
-            Self::Core
-        } else if value >= Self::Crystal.min_value() {
-            Self::Crystal
-        } else if value >= Self::Gem.min_value() {
-            Self::Gem
-        } else if value >= Self::Chip.min_value() {
-            Self::Chip
-        } else {
-            Self::Shard
-        }
+        Self::for_value_with(value, &Self::ALL.map(Self::min_value))
+    }
+
+    pub fn for_value_with(value: u32, thresholds: &[u32; 5]) -> Self {
+        let index = thresholds.iter().rposition(|&minimum| value >= minimum).unwrap_or(0);
+        Self::ALL[index]
     }
 
     pub const fn min_value(self) -> u32 {

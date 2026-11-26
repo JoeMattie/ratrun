@@ -75,7 +75,7 @@ use crate::game::ecs::systems::boss::BossFight;
 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossSchedule};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{
-    Chest, Gem, GemTier, Gold, Pickup, PickupKind, GEM_SOFT_CAP, MERGE_CELL, MERGE_EVERY, MERGE_FROM,
+    Chest, Gem, GemTier, Gold, Pickup, PickupKind,
 };
 use crate::game::level::Level;
 use crate::game::particle::Particles;
@@ -119,25 +119,26 @@ pub fn roll_pickup_kind(rng: &mut impl rand::Rng) -> PickupKind {
 /// The bucket one 32-bit word lands in (the table's cumulative weights).
 #[inline]
 pub fn roll_pickup_kind_from_word(word: u32) -> PickupKind {
-    // Lemire's multiply-high: uniform over `0..PICKUP_WEIGHT_TOTAL` with no
-    // rejection loop, so the draw count is fixed.
-    let bucket =
-        ((u64::from(word) * u64::from(PICKUP_WEIGHT_TOTAL)) >> 32) as u32;
-    match bucket {
-        0..=29 => PickupKind::Heal,
-        32..=49 => PickupKind::Magnet,
-        50..=52 => PickupKind::Nuke,
-        54..=57 => PickupKind::GrowthSerum,
-        58..=71 => PickupKind::BottleCap,
-        72..=81 => PickupKind::WindupMouse,
-        82..=90 => PickupKind::PocketWatch,
-        91..=99 => PickupKind::CleanSocks,
-        // The new finds take two Heal buckets and one Nuke bucket.
-        30 => PickupKind::ShrinkDraught,
-        31 => PickupKind::WhiteCoat,
-        53 => PickupKind::TheCollar,
-        _ => unreachable!("multiply-high gives a bucket below PICKUP_WEIGHT_TOTAL"),
+    pickup_from_word(word, &crate::tuning::Loot::default().pickup_weights)
+}
+
+fn pickup_from_word(word: u32, weights: &[u32; 11]) -> PickupKind {
+    const KINDS: [PickupKind; 11] = [
+        PickupKind::Heal, PickupKind::ShrinkDraught, PickupKind::WhiteCoat,
+        PickupKind::Magnet, PickupKind::Nuke, PickupKind::TheCollar, PickupKind::GrowthSerum,
+        PickupKind::BottleCap, PickupKind::WindupMouse, PickupKind::PocketWatch, PickupKind::CleanSocks,
+    ];
+    // Widen the product so custom weights still spend exactly one RNG word.
+    let total: u64 = weights.iter().map(|&weight| u64::from(weight)).sum();
+    let mut bucket = ((u128::from(word) * u128::from(total)) >> 32) as u64;
+    for (kind, &weight) in KINDS.into_iter().zip(weights) {
+        let weight = u64::from(weight);
+        if bucket < weight {
+            return kind;
+        }
+        bucket -= weight;
     }
+    unreachable!("positive weights cover the bucket")
 }
 
 /// A persistent `SpawnId`-ordered list of drops.
@@ -218,6 +219,7 @@ fn reap_dead(
     appointments: &mut MinibossSchedule,
     dead: &mut Vec<(u64, Entity)>,
     luck: f32,
+    tuning: &crate::tuning::Tuning,
 ) {
     // Only the corpses matter, so collect and sort just those: the per-enemy
     // rng draws below (death burst, then the drop roll) depend on this order.
@@ -273,23 +275,28 @@ fn reap_dead(
         }
         // Drop XP gem(s). A named miniboss carries its own appointment XP
         // (§1: 25/40/55/70), so it does not use the body kind's value.
-        let xp = minibosses.get(entity).map(|mb| mb.xp).unwrap_or_else(|_| e.kind.xp());
-        let gem = Gem::new(e.pos, xp);
-        commands.spawn((gem, next_id.take()));
+        let xp = minibosses.get(entity).map_or_else(|_| tuning.enemies.kinds[&e.kind].xp, |mb| mb.xp);
+        // Independent of the pickup roll, even when the drop chance changes.
+        const XP_SALT: u64 = 0x2ae7_ae3c_10af_8f03;
+        if tuning.xp.drop_chance >= 1.0
+            || crate::game::shop::gold_roll(level.seed ^ XP_SALT, id) < tuning.xp.drop_chance
+        {
+            let tier = GemTier::for_value_with(xp, &tuning.xp.gem_tier_min);
+            let mult = tuning.xp.drop_mult * tuning.xp.gem_tier_mult[tier as usize];
+            let dropped_xp = crate::game::shop::scaled(xp, mult);
+            let mut gem = Gem::new(e.pos, dropped_xp);
+            gem.color = GemTier::for_value_with(dropped_xp, &tuning.xp.gem_tier_min).color();
+            commands.spawn((gem, next_id.take()));
+        }
         // Rare pickup drops. The nest's Luck track scales the **chance** this
         // roll is compared against (never the number of draws), so a lucky run
         // makes the same rng calls in the same order as an unlucky one.
         if rare_drops_open || e.kind == EnemyKind::Boss {
-            let drop_chance = if e.kind == EnemyKind::Boss {
-                1.0
-            } else if big {
-                0.12
-            } else {
-                0.012
-            };
+            let bucket = if e.kind == EnemyKind::Boss { 2 } else { usize::from(big) };
+            let drop_chance = tuning.loot.pickup_chances[bucket];
             let drop_chance = (drop_chance * luck).min(1.0);
             if rng.random::<f32>() < drop_chance {
-                let kind = roll_pickup_kind(rng);
+                let kind = pickup_from_word(rand::Rng::next_u32(rng), &tuning.loot.pickup_weights);
                 let pickup = Pickup {
                     pos: e.pos,
                     kind,
@@ -314,9 +321,10 @@ fn reap_dead(
                 counters.elapsed,
                 e.pos,
                 &mut mb,
+                crate::game::shop::scaled(tuning.loot.miniboss_gold, tuning.loot.gold_value_mult),
             );
             counters.kills += 1;
-            counters.score += xp * 10;
+            counters.score = counters.score.saturating_add(xp.saturating_mul(10));
             continue;
         }
         // Gold: the design's chance x value table (`shop::gold_for`), rolled
@@ -324,17 +332,18 @@ fn reap_dead(
         // victim's `SpawnId` — never from the simulation's rng, so adding gold
         // cannot shift the pickup roll above (one coin per eligible kill,
         // carrying its whole value).
-        let gold = crate::game::shop::gold_for(level.seed, id, e.kind, e.elite);
+        let gold = crate::game::shop::gold_for_with(level.seed, id, e.kind, e.elite, tuning);
         if gold > 0 {
             commands.spawn((Gold::new(e.pos, gold), next_id.take()));
         }
         counters.kills += 1;
-        counters.score += e.kind.xp() * 10;
+        counters.score = counters.score.saturating_add(xp.saturating_mul(10));
     }
 }
 
 pub fn reap_enemies_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     level: Res<Level>,
     mut counters: ResMut<RunCounters>,
     mut rng: ResMut<RngRes>,
@@ -385,6 +394,7 @@ pub fn reap_enemies_system(
             &mut appointments,
             &mut dead,
             player.loadout.stats.luck_mult,
+            &tuning,
         );
         for (entity, _, e) in enemies.iter() {
             if e.alive() {
@@ -407,6 +417,7 @@ pub fn reap_enemies_system(
         &mut appointments,
         &mut dead,
         player.loadout.stats.luck_mult,
+        &tuning,
     );
 }
 
@@ -417,6 +428,7 @@ pub fn reap_enemies_system(
 /// those kills count in the same tick.
 pub fn nuke_reap_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     mut nuke: ResMut<NukeTick>,
     level: Res<Level>,
     mut counters: ResMut<RunCounters>,
@@ -448,6 +460,7 @@ pub fn nuke_reap_system(
         &mut appointments,
         &mut dead,
         player.loadout.stats.luck_mult,
+        &tuning,
     );
     nuke.0 = false;
 }
@@ -526,7 +539,7 @@ pub fn gems_system(
         // Collect on the post-move distance, so a gem that just arrived this
         // tick is picked up rather than waiting an extra frame.
         if g.pos.dist_sq(ppos) < collect_r * collect_r {
-            gained += g.value;
+            gained = gained.saturating_add(g.value);
             commands.entity(entity).despawn();
         }
     }
@@ -549,7 +562,7 @@ pub fn gems_system(
             vfx::emit_level_up(&mut particles, &mut rng.0, p);
             sfx.0.push(Sfx::LevelUp);
         }
-        counters.pending_levelups += ups;
+        counters.pending_levelups = counters.pending_levelups.saturating_add(ups);
     }
 }
 
@@ -579,21 +592,22 @@ pub struct GemMergeScratch {
 /// Between those passes, cap pressure takes the farthest cells first.
 pub fn gem_merge_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     counters: Res<RunCounters>,
     viewport: Res<Viewport>,
     player: Res<Player>,
     mut gems: Query<(Entity, &SpawnId, &mut Gem)>,
     mut scratch: Local<GemMergeScratch>,
 ) {
-    let period = (counters.elapsed / MERGE_EVERY) as u32;
+    let period = (counters.elapsed / tuning.xp.merge_every) as u32;
     let periodic = period != scratch.period;
     scratch.period = period;
     let mut count = gems.iter().len();
-    if count < 2 || (!periodic && count <= GEM_SOFT_CAP) {
+    if count < 2 || (!periodic && count <= tuning.xp.merge_soft_cap) {
         return;
     }
 
-    let merge_from_sq = (widest_view(viewport.0) * (MERGE_FROM * 0.5)).len_sq();
+    let merge_from_sq = (widest_view(viewport.0) * (tuning.xp.merge_from * 0.5)).len_sq();
     let rat = player.pos;
     let GemMergeScratch { members, cells, .. } = &mut *scratch;
     members.clear();
@@ -604,8 +618,8 @@ pub fn gem_merge_system(
         }
         members.push(MergeMember {
             cell: (
-                (gem.pos.x / MERGE_CELL).floor() as i32,
-                (gem.pos.y / MERGE_CELL).floor() as i32,
+                (gem.pos.x / tuning.xp.merge_cell).floor() as i32,
+                (gem.pos.y / tuning.xp.merge_cell).floor() as i32,
             ),
             id: id.0,
             entity,
@@ -620,7 +634,7 @@ pub fn gem_merge_system(
         if group.len() > 1 {
             let first = &group[0];
             let (x, y) = first.cell;
-            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * MERGE_CELL;
+            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * tuning.xp.merge_cell;
             cells.push(MergeCell {
                 members: start..end,
                 first_id: first.id,
@@ -638,7 +652,7 @@ pub fn gem_merge_system(
     }
 
     for cell in cells.iter() {
-        if !periodic && count <= GEM_SOFT_CAP {
+        if !periodic && count <= tuning.xp.merge_soft_cap {
             break;
         }
         let group = &members[cell.members.clone()];
@@ -660,7 +674,7 @@ pub fn gem_merge_system(
             survivor.pos = Vec2::new((x / weight) as f32, (y / weight) as f32);
         }
         survivor.value = value;
-        survivor.color = GemTier::for_value(value).color();
+        survivor.color = GemTier::for_value_with(value, &tuning.xp.gem_tier_min).color();
         survivor.merged = true;
         for member in &group[1..] {
             commands.entity(member.entity).despawn();
@@ -746,7 +760,7 @@ pub fn treasure_system(
 /// signals it through [`NukeTick`] instead (consumed by `nuke_reap_system`).
 pub fn pickups_system(
     mut commands: Commands,
-    input: Res<TickInput>,
+    (input, tuning): (Res<TickInput>, Res<crate::tuning::RunTuning>),
     mut player: ResMut<Player>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
@@ -800,7 +814,7 @@ pub fn pickups_system(
         match k {
             PickupKind::Heal => {
                 let h = player.max_hp()
-                    * 0.35
+                    * tuning.loot.heal_pickup_fraction
                     * crate::game::shop::heal_mult(&player.loadout.splices);
                 player.heal(h);
                 // Neon hooks: heal burst + its own sting (was `Sfx::Pickup`).
@@ -1007,6 +1021,7 @@ fn pull_speed(dist: f32, closeness: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::game::gem::{GEM_SOFT_CAP, MERGE_EVERY};
     use super::*;
     use crate::game::director;
     use crate::game::ecs::resources::{spawn_with_id, PickupScratch};

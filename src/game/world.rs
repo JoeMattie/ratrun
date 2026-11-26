@@ -66,7 +66,7 @@ use crate::render::zoom;
 use super::bullet::{Bullet, Faction};
 use super::campaign::{self, CampaignState, CampaignTotals, Keepable};
 use super::collision::{SizeClass, SpatialGrid, TileKind, TileMap};
-use super::director::{self, Director};
+use super::director::Director;
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
 use super::ecs::components::{
@@ -338,6 +338,14 @@ impl World {
     ///
     /// Use [`World::new_level`] (level index + carried loadout) or
     /// [`World::from_campaign`] to start any other level of a campaign.
+    pub fn with_tuning(theme: Theme, seed: u64, tuning: crate::tuning::RunTuning) -> World {
+        Self::new_level_tuned(0, theme, seed, Loadout::starting(), CampaignTotals::default(), tuning)
+    }
+
+    pub fn tuning(&self) -> &crate::tuning::RunTuning {
+        self.ecs.resource::<crate::tuning::RunTuning>()
+    }
+
     pub fn new(theme: Theme, seed: u64) -> World {
         World::new_level_with_theme(
             0,
@@ -388,12 +396,17 @@ impl World {
     /// world = campaign.world();
     /// ```
     pub fn from_campaign(campaign: &CampaignState) -> World {
-        World::new_level_with_theme(
+        Self::from_campaign_tuned(campaign, crate::tuning::RunTuning::default())
+    }
+
+    pub fn from_campaign_tuned(campaign: &CampaignState, tuning: crate::tuning::RunTuning) -> World {
+        Self::new_level_tuned(
             campaign.level,
             campaign.theme(),
             campaign.level_seed(),
             campaign.loadout.clone(),
             campaign.totals,
+            tuning,
         )
     }
 
@@ -405,10 +418,17 @@ impl World {
         carried: Loadout,
         carried_totals: CampaignTotals,
     ) -> World {
+        Self::new_level_tuned(level_index, theme, seed, carried, carried_totals, crate::tuning::RunTuning::default())
+    }
+
+    pub fn new_level_tuned(
+        level_index: usize, theme: Theme, seed: u64, carried: Loadout,
+        carried_totals: CampaignTotals, tuning: crate::tuning::RunTuning,
+    ) -> World {
         // The level is generated from the level seed (same seed + theme = same
         // map, always). `Level::new` is the seed-0 convenience wrapper.
         let level = Level::generate(theme, seed);
-        World::with_level(level_index, level, seed, carried, carried_totals)
+        World::with_level_tuned(level_index, level, seed, carried, carried_totals, tuning)
     }
 
     /// [`World::new_level_with_theme`] over a level the caller already built.
@@ -419,11 +439,22 @@ impl World {
     /// its level and lands here.
     pub fn with_level(
         level_index: usize,
-        mut level: Level,
+        level: Level,
         seed: u64,
         carried: Loadout,
         carried_totals: CampaignTotals,
     ) -> World {
+        Self::with_level_tuned(level_index, level, seed, carried, carried_totals, crate::tuning::RunTuning::default())
+    }
+
+    fn with_level_tuned(
+        level_index: usize, mut level: Level, seed: u64, mut carried: Loadout,
+        carried_totals: CampaignTotals, tuning: crate::tuning::RunTuning,
+    ) -> World {
+        if tuning.changed {
+            carried.tuning = Some(tuning.clone());
+            carried.rebuild_stats();
+        }
         if level_index != 0 {
             level.objects.sewer_opening = None;
         }
@@ -445,6 +476,10 @@ impl World {
         let fog_spare = fog.empty_like();
 
         let mut ecs = EcsWorld::new();
+        if tuning.changed {
+            ecs.register_component_hooks::<Enemy>().on_add(Enemy::apply_spawn_tuning);
+        }
+        ecs.insert_resource(tuning);
         ecs.insert_resource(NextSpawnId(0));
         ecs.insert_resource(NeighborScratch::default());
         ecs.insert_resource(PickupScratch::default());
@@ -623,13 +658,13 @@ impl World {
     /// level lasts until the boss or the player dies, so the HUD's countdown
     /// saturates at `0` and `boss_time_reached()` takes over.
     pub fn time_left(&self) -> f32 {
-        (director::BOSS_TIME - self.elapsed).max(0.0)
+        (self.tuning().director.boss_time - self.elapsed).max(0.0)
     }
 
     /// Has the level reached the boss time (the horde now fights on until the
     /// boss or the player dies)?
     pub fn boss_time_reached(&self) -> bool {
-        !self.testbed && self.elapsed >= director::BOSS_TIME
+        !self.testbed && self.elapsed >= self.tuning().director.boss_time
     }
 
     /// Spend from the run's wallet. A failed purchase leaves the balance intact.
@@ -755,7 +790,7 @@ impl World {
     /// The director's curve clock at a given elapsed time, including the
     /// difficulty override used by practice runs.
     pub(crate) fn curve_clock_at(&self, elapsed: f32) -> f32 {
-        director::curve_clock(self.difficulty_override.unwrap_or(self.level_index), elapsed)
+        self.tuning().director.curve_clock(self.difficulty_override.unwrap_or(self.level_index), elapsed)
     }
 
     /// Render-side fixture outage on the director's clock.
@@ -982,7 +1017,8 @@ impl World {
         }
         self.ecs
             .resource::<super::ecs::systems::miniboss::MinibossSchedule>()
-            .next_appointment()
+            .next_appointment(&self.tuning().minibosses.times)
+            .filter(|&at| at < self.tuning().director.boss_time)
     }
 
     /// Is a boss-phase cleanup pace in effect? (The director reads this through
@@ -1651,18 +1687,18 @@ impl World {
         appointment: usize,
         pos: Vec2,
     ) -> Entity {
-        use super::ecs::systems::miniboss::{appointment_hp_for, Miniboss};
+        use super::ecs::systems::miniboss::Miniboss;
         let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, 1.0, &mut self.rng);
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
-        enemy.hp = appointment_hp_for(difficulty, appointment);
+        enemy.hp = self.tuning().minibosses.hp[difficulty.min(3)][appointment.min(3)];
         enemy.max_hp = enemy.hp;
         enemy.radius = kind.body_radius();
-        enemy.damage = crate::game::ecs::systems::miniboss::MINIBOSS_CONTACT_DAMAGE;
+        enemy.damage = self.tuning().minibosses.contact_damage;
         enemy.speed_scale = kind.speed_scale();
         enemy.named = true;
         enemy.id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
-        let mb = Miniboss::new(kind, appointment);
+        let mb = Miniboss::with_tuning(kind, appointment, &self.tuning().minibosses);
         spawn_with_id(&mut self.ecs, (enemy, mb))
     }
 
@@ -2061,6 +2097,7 @@ impl World {
         // The same books as the scheduled arrival (`boss::open_fight`): HP,
         // facing, a fresh fight on the boss's own rng stream, the horde parted.
         let accent = self.level.palette.accent;
+        let tuning = self.tuning().clone();
         let boss = {
             let mut fight = self.ecs.resource_mut::<BossFight>();
             let boss = super::ecs::systems::boss::open_fight(
@@ -2076,6 +2113,7 @@ impl World {
                     seed: self.level.seed,
                 },
                 &self.player.loadout.weapons,
+                &tuning,
             );
             // The arrival's burst draws from the boss's own stream, exactly as
             // the scheduled spawn's does, so it never perturbs the run rng.
@@ -3103,7 +3141,7 @@ impl World {
                     .map_or(5.0, |(a, b)| a.dist(b))
                     .clamp(3.0, 8.0);
                 let comb_len = (track.legs.max(1) as f32 * step_len).clamp(10.0, 52.0);
-                let dash_frac = (self.player.dash_active / super::ecs::systems::player::DASH_SECS)
+                let dash_frac = (self.player.dash_active / self.player.dash_base_duration())
                     .clamp(0.0, 1.0);
                 art_wave3a::draw_super_dash_comb(
                     pb,
@@ -4456,6 +4494,7 @@ fn carried_player(center: Vec2, carried: Loadout) -> Player {
     let mut player = Player::new(center, Loadout::START_WEAPON);
     player.hp = carried.stats.max_hp;
     player.loadout = carried;
+    player.xp_to_next = player.next_xp_cost();
     player
 }
 

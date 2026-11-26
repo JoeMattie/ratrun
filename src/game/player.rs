@@ -247,7 +247,12 @@ pub fn level_damage_mult(level: u32) -> f32 {
 /// The same bonus as a whole percentage, for the screens (`+44` at level 12,
 /// `+152` at level 39). Read from the constant, never from the level alone.
 pub fn level_damage_percent(level: u32) -> u32 {
-    (level_damage_mult(level) * 100.0).round() as u32 - 100
+    level_damage_percent_with(level, LEVEL_DAMAGE_PER_LEVEL)
+}
+
+pub(crate) fn level_damage_percent_with(level: u32, per_level: f32) -> u32 {
+    let mult = 1.0 + per_level * level.saturating_sub(1) as f32;
+    ((mult * 100.0).round() as u32).saturating_sub(100)
 }
 
 pub const XP_BASE: f64 = 6.0;
@@ -290,8 +295,12 @@ pub const OLD_LEVELS_PER_LEVEL: u32 = 4;
 /// It is also the measuring stick the batch reports use through
 /// [`xp_to_reach`], so the old level a run would have reached stays readable.
 pub fn base_xp_for_level(level: u32) -> u32 {
+    base_xp_for_level_with(level, &crate::tuning::Xp::default())
+}
+
+fn base_xp_for_level_with(level: u32, tuning: &crate::tuning::Xp) -> u32 {
     let n = level.max(1).saturating_sub(1) as i32;
-    let cost = XP_BASE * XP_GROWTH.dpowi(n);
+    let cost = tuning.base * tuning.growth.dpowi(n);
     cost.round().clamp(1.0, u32::MAX as f64) as u32
 }
 
@@ -306,19 +315,19 @@ pub fn base_xp_for_level(level: u32) -> u32 {
 pub const OPENING_OLD_LEVELS: [u32; 3] = [1, 2, 3];
 
 /// The first old level `level`'s card is charged from, and how many it costs.
-fn old_level_block(level: u32) -> (u32, u32) {
+fn old_level_block(level: u32, tuning: &crate::tuning::Xp) -> (u32, u32) {
     let level = level.max(1);
-    let ramp = OPENING_OLD_LEVELS.len() as u32;
+    let ramp = tuning.opening_steps.len() as u32;
     if level <= ramp {
-        let before: u32 = OPENING_OLD_LEVELS[..(level - 1) as usize].iter().sum();
-        (before + 1, OPENING_OLD_LEVELS[(level - 1) as usize])
+        let before: u32 = tuning.opening_steps[..(level - 1) as usize].iter().sum();
+        (before + 1, tuning.opening_steps[(level - 1) as usize])
     } else {
-        let before: u32 = OPENING_OLD_LEVELS.iter().sum();
+        let before: u32 = tuning.opening_steps.iter().sum();
         (
-            OLD_LEVELS_PER_LEVEL
+            tuning.steps_per_level
                 .saturating_mul(level - ramp - 1)
                 .saturating_add(before + 1),
-            OLD_LEVELS_PER_LEVEL,
+            tuning.steps_per_level,
         )
     }
 }
@@ -335,9 +344,13 @@ fn old_level_block(level: u32) -> (u32, u32) {
 /// ~16 (`xp_to_reach(16)` is 10 254 XP and level 17 needs 15 040; a
 /// fifteen-minute floor pays about 12 300).
 pub fn xp_for_level(level: u32) -> u32 {
-    let (first, count) = old_level_block(level);
+    xp_for_level_with(level, &crate::tuning::Xp::default())
+}
+
+fn xp_for_level_with(level: u32, tuning: &crate::tuning::Xp) -> u32 {
+    let (first, count) = old_level_block(level, tuning);
     (first..first.saturating_add(count))
-        .map(base_xp_for_level)
+        .map(|level| base_xp_for_level_with(level, tuning))
         .fold(0u32, |acc, cost| acc.saturating_add(cost))
 }
 
@@ -455,17 +468,56 @@ impl Player {
     /// carries the damage it was fired with, so nothing downstream multiplies
     /// again.
     pub fn damage_mult(&self) -> f32 {
-        self.loadout.stats.damage_mult * level_damage_mult(self.level)
+        self.loadout.stats.damage_mult * self.level_damage_mult()
+            * self.loadout.tuning.as_ref().map_or(1.0, |t| t.weapons.damage_mult)
+    }
+
+    pub fn level_damage_mult(&self) -> f32 {
+        let per_level = self.loadout.tuning.as_ref().map_or(LEVEL_DAMAGE_PER_LEVEL, |t| t.xp.damage_per_level);
+        1.0 + per_level * self.level.saturating_sub(1) as f32
+    }
+
+    pub fn level_damage_percent(&self) -> u32 {
+        ((self.level_damage_mult() * 100.0).round() as u32).saturating_sub(100)
+    }
+
+    pub(crate) fn next_xp_cost(&self) -> u32 {
+        self.loadout.tuning.as_ref().map_or_else(|| xp_for_level(self.level),
+            |t| xp_for_level_with(self.level, &t.xp))
+    }
+
+    pub(crate) fn total_xp(&self) -> u32 {
+        let tuning = self.loadout.tuning.as_ref();
+        (1..self.level).fold(self.xp, |total, level| {
+            total.saturating_add(tuning.map_or_else(|| xp_for_level(level), |t| xp_for_level_with(level, &t.xp)))
+        })
+    }
+
+    pub(crate) fn dash_cooldown(&self) -> f32 {
+        let mult = if self.loadout.has(WeaponKind::SuperDash) && !self.buffs.weapons_suspended() {
+            self.loadout.weapon_cooldown_mult(WeaponKind::SuperDash)
+        } else {
+            1.0
+        };
+        self.loadout.stats.dash_cd * mult
+    }
+
+    pub(crate) fn dash_base_duration(&self) -> f32 {
+        self.loadout.tuning.as_ref().map_or(super::ecs::systems::player::DASH_SECS, |t| t.player.dash_duration)
+    }
+
+    fn hit_iframes(&self) -> f32 {
+        self.loadout.tuning.as_ref().map_or(0.9, |t| t.player.hit_iframes)
     }
 
     /// Add XP; returns how many level-ups were triggered.
     pub fn add_xp(&mut self, amount: u32) -> u32 {
-        self.xp += amount;
+        self.xp = self.xp.saturating_add(amount);
         let mut levels = 0;
         while self.xp >= self.xp_to_next {
             self.xp -= self.xp_to_next;
             self.level += 1;
-            self.xp_to_next = xp_for_level(self.level);
+            self.xp_to_next = self.next_xp_cost();
             levels += 1;
         }
         levels
@@ -505,7 +557,7 @@ impl Player {
         }
         if self.buffs.shield > 0.0 {
             self.buffs.shield = 0.0;
-            self.iframes = 0.9 + super::shop::iframe_extra(&self.loadout.splices);
+            self.iframes = self.hit_iframes() + super::shop::iframe_extra(&self.loadout.splices);
             self.hurt_flash = 0.25;
             return true;
         }
@@ -515,7 +567,7 @@ impl Player {
         let raw = raw * self.buffs.damage_taken_scale();
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
         self.hp -= dmg;
-        self.iframes = 0.9 + super::shop::iframe_extra(&self.loadout.splices);
+        self.iframes = self.hit_iframes() + super::shop::iframe_extra(&self.loadout.splices);
         self.hurt_flash = 0.25;
         true
     }

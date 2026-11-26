@@ -64,6 +64,7 @@ pub struct OpeningSpawns {
 #[allow(clippy::too_many_arguments)] // Independent ECS queries and resources.
 pub fn sewer_opening_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     level: Res<Level>,
     level_index: Res<LevelIndex>,
     counters: Res<RunCounters>,
@@ -81,7 +82,7 @@ pub fn sewer_opening_system(
     };
     let elapsed = counters.elapsed;
     if !spawned.pillbugs
-        && (OPENING_PILLBUGS_AT..crate::game::director::BOSS_TIME).contains(&elapsed)
+        && (OPENING_PILLBUGS_AT..tuning.director.boss_time).contains(&elapsed)
         && !debug.peace
     {
         let cap = if cvars.enemy_cap == 0 {

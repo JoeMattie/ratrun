@@ -302,7 +302,13 @@ impl Director {
 /// longer spawns one, shakes the screen or plays `Sfx::Boss`; those belong to
 /// the boss's arrival).
 pub fn raise_boss_due(director: &mut Director, due: &mut BossDue, elapsed: f32, level: usize) -> bool {
-    if director.boss_spawned || elapsed < BOSS_TIME {
+    raise_boss_due_at(director, due, elapsed, level, BOSS_TIME)
+}
+
+pub fn raise_boss_due_at(
+    director: &mut Director, due: &mut BossDue, elapsed: f32, level: usize, boss_time: f32,
+) -> bool {
+    if director.boss_spawned || elapsed < boss_time {
         return false;
     }
     director.boss_spawned = true;
@@ -365,7 +371,7 @@ pub fn hp_mult_at(curve: f32) -> f32 {
 /// horde and the boss through [`hp_mult_at`], the named minibosses through
 /// their own table), so the per-level damage reads as the rat getting
 /// stronger without shortening a fight that was tuned by length.
-const LEVEL_BONUS_HP: [(f32, f32); 8] = [
+pub(crate) const LEVEL_BONUS_HP: [(f32, f32); 8] = [
     (0.0, 1.0),
     (60.0, 1.04),
     (120.0, 1.12),
@@ -401,7 +407,7 @@ pub fn level_bonus_hp_at(curve: f32) -> f32 {
 /// 3:00 against 332): from 5:00 on its ordinary bodies are already one or two
 /// bites each, so a lower pool no longer buys anything there; what is left is
 /// the bite's reach and the missing defensive stacks, which are not hp.
-const BUILD_HP: [(f32, f32); 7] = [
+pub(crate) const BUILD_HP: [(f32, f32); 7] = [
     (0.0, 0.60),
     (60.0, 0.45),
     (180.0, 0.30),
@@ -452,7 +458,7 @@ pub fn hp_mult(elapsed: f32) -> f32 {
 
 /// Ordinary bodies attempted per second, by curve clock. Row endpoints are the
 /// §1 table's "Bodies/s" column.
-const BODIES_PER_SECOND: [(f32, f32); 7] = [
+pub(crate) const BODIES_PER_SECOND: [(f32, f32); 7] = [
     (0.0, 0.8),
     (60.0, 1.5),
     (180.0, 3.0),
@@ -464,7 +470,7 @@ const BODIES_PER_SECOND: [(f32, f32); 7] = [
 
 /// Live ordinary-enemy budget by curve clock (the §1 "Live budget" column).
 /// A step table: each row holds from its clock until the next row's clock.
-const LIVE_BUDGET: [(f32, usize); 7] = [
+pub(crate) const LIVE_BUDGET: [(f32, usize); 7] = [
     (0.0, 18),
     (60.0, 42),
     (180.0, 72),
@@ -476,7 +482,7 @@ const LIVE_BUDGET: [(f32, usize); 7] = [
 
 /// Elite chance per ordinary spawn by curve clock (the §1 column), as a
 /// fraction. Linear within a row.
-const ELITE_CHANCE: [(f32, f32); 7] = [
+pub(crate) const ELITE_CHANCE: [(f32, f32); 7] = [
     (0.0, 0.0),
     (180.0, 0.0),
     (360.0, 0.01),
@@ -789,13 +795,13 @@ pub const ELITE_INTERVAL_MAX: f32 = 45.0;
 /// armour stacks (a flat point off every hit). Stages two and three reach
 /// ×1.6 / ×1.9 at the boss; stage one stays at base, as the design asks.
 /// **Batch twelve** adds the ride: ×2.1, one step further up the same ramp.
-const LEVEL_DAMAGE_TOP: [f32; 4] = [1.0, 1.6, 1.9, 2.1];
+pub(crate) const LEVEL_DAMAGE_TOP: [f32; 4] = [1.0, 1.6, 1.9, 2.1];
 
 /// The horde's speed multiplier at the top of a level's ramp. The Lab's swarm
 /// stays the quickest of the facility floors, but only just: a faster horde
 /// walks into melee-range weapons on the merged build, so the measured cliff
 /// lives well above this. The ride's row (×1.2) is the fourth stage's step.
-const LEVEL_SPEED_TOP: [f32; 4] = [1.0, 1.08, 1.15, 1.2];
+pub(crate) const LEVEL_SPEED_TOP: [f32; 4] = [1.0, 1.08, 1.15, 1.2];
 
 /// Shape of the ramp: `t^exp` over the level, so a lower exponent bites sooner.
 const LEVEL_RAMP_EXP: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -812,6 +818,98 @@ pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMo
     EnemyMods {
         damage: 1.0 + (LEVEL_DAMAGE_TOP[slot] - 1.0) * t,
         speed: 1.0 + (LEVEL_SPEED_TOP[slot] - 1.0) * t,
+    }
+}
+
+impl crate::tuning::Director {
+    pub fn curve_clock(&self, level: usize, elapsed: f32) -> f32 {
+        elapsed.min(self.boss_time) * self.curve_speed + LEVEL_CLOCK_OFFSET[level_slot(level)]
+    }
+
+    pub fn horde_speed_mult(&self, elapsed: f32) -> f32 {
+        elapsed.min(self.horde_speed_ramp_end)
+            / (self.horde_speed_ramp_end / (self.horde_speed_top - 1.0)) + 1.0
+    }
+
+    fn hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
+        let curve = self.curve_clock(level, elapsed);
+        (1.0 + curve / RUN_SECONDS)
+            * lerp_table(&self.level_bonus_hp, curve)
+            * lerp_table(&self.build_hp, curve)
+            * self.build_hp_level[level_slot(level)]
+    }
+
+    pub fn horde_hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
+        let top = self.level_hp_extra[level_slot(level)];
+        let grace = self.level_hp_extra_after;
+        let span = self.boss_time - grace;
+        let progress = if span > 0.0 {
+            ((elapsed.min(self.boss_time) - grace) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.hp_mult_for(level, elapsed) * (1.0 + (top.max(1.0) - 1.0) * progress)
+    }
+
+    pub fn boss_hp_mult_for(&self, level: usize, build_level: &[f32; 4]) -> f32 {
+        self.hp_mult_for(level, self.boss_time) * BOSS_POOL_SCALE * build_level[level_slot(level)]
+    }
+
+    pub fn enemy_mods_for(&self, level: usize, elapsed: f32) -> crate::game::enemy::EnemyMods {
+        let slot = level_slot(level);
+        let t = (elapsed / self.boss_time).clamp(0.0, 1.0).dpowf(LEVEL_RAMP_EXP[slot]);
+        crate::game::enemy::EnemyMods {
+            damage: 1.0 + (self.level_damage_top[slot] - 1.0) * t,
+            speed: 1.0 + (self.level_speed_top[slot] - 1.0) * t,
+        }
+    }
+
+    fn spawn_interval_at(&self, curve: f32) -> f32 {
+        let base = (1.6 - curve / 900.0).max(0.35);
+        if curve < self.opening_secs { base * self.opening_interval_mult } else { base }
+    }
+
+    pub fn horde_interval(&self, elapsed: f32, boss_phase: bool) -> f32 {
+        if boss_phase {
+            self.cleanup_interval
+        } else {
+            self.spawn_interval_at(self.curve_clock(0, elapsed)) * self.spawn_interval_mult
+        }
+    }
+
+    pub fn horde_pulse(&self, elapsed: f32, boss_phase: bool) -> usize {
+        if boss_phase {
+            self.cleanup_pulse
+        } else {
+            let curve = self.curve_clock(0, elapsed);
+            let n = (lerp_table(&self.bodies_per_second, curve) * self.spawn_interval_at(curve)).round();
+            (n as usize).max(1)
+        }
+    }
+
+    pub fn horde_live_budget(&self, elapsed: f32, boss_phase: bool) -> usize {
+        if boss_phase {
+            return self.cleanup_live_budget;
+        }
+        let curve = self.curve_clock(0, elapsed);
+        let mut budget = self.live_budget[0].1;
+        for &(time, count) in &self.live_budget {
+            if curve >= time {
+                budget = count;
+            }
+        }
+        budget
+    }
+
+    pub fn elite_interval_at(&self, curve: f32) -> f32 {
+        let chance = lerp_table(&self.elite_chance, curve);
+        let interval = if chance <= 0.0 {
+            60.0
+        } else {
+            (1.0 / (chance * lerp_table(&self.bodies_per_second, curve).max(0.1)))
+                .clamp(6.0, ELITE_INTERVAL_MAX)
+        };
+        interval * self.elite_interval_mult
     }
 }
 

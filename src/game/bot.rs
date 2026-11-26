@@ -768,7 +768,7 @@ impl Bot {
             // treatment run should not leave HP on the table).
             while let Some(reward) = w.claim_chest() {
                 if let ChestReward::Gold(_) = reward {
-                    let heal = crate::game::loadout::CHEST_HEAL_FRAC * w.player.max_hp();
+                    let heal = w.tuning().loot.chest_heal_fraction * w.player.max_hp();
                     w.player.heal(heal);
                 }
             }

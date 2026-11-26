@@ -95,7 +95,11 @@ const SUPER_DASH_SHAKE: f32 = 7.0;
 
 /// Travel time for a dash with a charge between zero and one.
 pub fn dash_duration(charge: f32) -> f32 {
-    DASH_SECS * (1.0 + (SUPER_DASH_DISTANCE - 1.0) * charge)
+    dash_duration_from(DASH_SECS, charge)
+}
+
+pub fn dash_duration_from(base: f32, charge: f32) -> f32 {
+    base * (1.0 + (SUPER_DASH_DISTANCE - 1.0) * charge)
 }
 
 /// Seconds of holding that fill the Super Dash meter at weapon `level`
@@ -271,8 +275,8 @@ pub fn player_system(
             }
             // Up to `SUPER_DASH_DISTANCE` times the ordinary travel: the boost
             // is unchanged, the dash simply lasts longer.
-            player.dash_active = dash_duration(charge);
-            player.dash_cd = stats.dash_cd;
+            player.dash_active = dash_duration_from(player.dash_base_duration(), charge);
+            player.dash_cd = player.dash_cooldown();
             player.iframes = player.iframes.max(player.dash_active + DASH_IFRAME_PAD);
             let pos = player.pos;
             let face = player.face;

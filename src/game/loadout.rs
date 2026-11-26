@@ -222,7 +222,7 @@ pub fn open_chest(loadout: &mut Loadout, _rng: &mut impl Rng) -> ChestReward {
         }
         return ChestReward::PassiveLevel { kind, stacks: loadout.stacks(kind) };
     }
-    ChestReward::Gold(CHEST_GOLD)
+    ChestReward::Gold(loadout.tuning.as_ref().map_or(CHEST_GOLD, |t| t.loot.chest_gold))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -415,15 +415,21 @@ pub struct Stats {
 
 impl Default for Stats {
     fn default() -> Self {
+        Self::with_player_base(&crate::tuning::Player::default())
+    }
+}
+
+impl Stats {
+    fn with_player_base(base: &crate::tuning::Player) -> Self {
         Stats {
-            max_hp: 130.0,
-            move_speed: 58.0,
+            max_hp: base.max_hp,
+            move_speed: base.move_speed,
             damage_mult: 1.0,
             fire_rate_mult: 1.0,
-            magnet: 22.0,
-            regen: 0.4,
-            armor: 0.0,
-            dash_cd: 2.0,
+            magnet: base.magnet_radius,
+            regen: base.regen,
+            armor: base.armor,
+            dash_cd: base.dash_cooldown,
             reach_mult: 1.0,
             melee_reach_mult: 1.0,
             zone_life_mult: 1.0,
@@ -576,6 +582,7 @@ fn apply_passive_stack(stats: &mut Stats, p: PassiveKind) -> f32 {
 
 #[derive(Clone)]
 pub struct Loadout {
+    pub(crate) tuning: Option<crate::tuning::RunTuning>,
     pub weapons: Vec<Weapon>,
     /// Owned passive stacks, in **first-acquisition order**, one entry per
     /// `PassiveKind`, each count `>= 1`.
@@ -653,6 +660,7 @@ impl Loadout {
     pub fn with_caps(start: WeaponKind, caps: SlotCaps) -> Self {
         let caps = SlotCaps::new(caps.weapons, caps.passives);
         Loadout {
+            tuning: None,
             weapons: vec![Weapon::new(start)],
             passives: Vec::new(),
             stats: Stats::default(),
@@ -759,6 +767,7 @@ impl Loadout {
             }
         }
         Loadout {
+            tuning: None,
             weapons: kept_weapons,
             passives: kept_passives,
             stats,
@@ -778,7 +787,7 @@ impl Loadout {
     /// run start can never disagree. With no profile (`meta` neutral) the new
     /// first step is bit-exact identity, so every existing number is unchanged.
     pub fn rebuild_stats(&mut self) {
-        let mut stats = Stats::default();
+        let mut stats = self.tuning.as_ref().map_or_else(Stats::default, |t| Stats::with_player_base(&t.player));
         crate::meta::apply(&mut stats, &self.meta);
         for &(kind, stacks) in &self.passives {
             for _ in 0..stacks {
@@ -789,8 +798,22 @@ impl Loadout {
         self.stats = stats;
     }
 
-    /// Index of the earliest weapon in rack order that a chest could evolve
-    /// (L5, has a table row, partner passive owned, not already evolved).
+    pub(crate) fn weapon_damage_mult(&self, kind: WeaponKind) -> f32 {
+        self.tuning.as_ref().map_or(1.0, |t| t.weapons.kinds[&kind].damage_mult)
+    }
+
+    pub(crate) fn weapon_cooldown_mult(&self, kind: WeaponKind) -> f32 {
+        self.tuning.as_ref().map_or(1.0, |t| t.weapons.kinds[&kind].cooldown_mult)
+    }
+
+    pub(crate) fn purse_gold(&self) -> u32 {
+        self.tuning.as_ref().map_or(PURSE_GOLD, |t| t.loot.purse_gold)
+    }
+
+    fn bandage_fraction(&self) -> f32 {
+        self.tuning.as_ref().map_or(BANDAGE_HEAL_FRAC, |t| t.loot.bandage_heal_fraction)
+    }
+
     pub fn evolvable(&self) -> Option<usize> {
         self.weapons.iter().position(|weapon| self.can_evolve(weapon))
     }
@@ -805,7 +828,7 @@ impl Loadout {
 
     fn can_evolve(&self, weapon: &Weapon) -> bool {
         !weapon.evolved && weapon.is_max()
-            && weapon.kind.evolution().is_some_and(|e| self.stacks(e.passive) > 0)
+            && weapon.kind.evolution().is_some_and(|e| self.stacks(e.passive) >= self.tuning.as_ref().map_or(1, |t| t.loot.chest_partner_stacks))
     }
 
     /// Highest-rank unfinished weapon, ties by rack order (chest rule 2).
@@ -928,12 +951,12 @@ impl Loadout {
             }
             Upgrade::Bandage => (
                 "Bandage".to_string(),
-                format!("Restores {:.0}% of max HP.", BANDAGE_HEAL_FRAC * 100.0),
+                format!("Restores {:.0}% of max HP.", self.bandage_fraction() * 100.0),
                 "Clean enough. Mostly.".to_string(),
             ),
             Upgrade::Purse => (
                 "Purse".to_string(),
-                format!("+{PURSE_GOLD} gold."),
+                format!("+{} gold.", self.purse_gold()),
                 "Found in the lining.".to_string(),
             ),
             Upgrade::Passive(p) => {
@@ -943,7 +966,7 @@ impl Loadout {
                         format!(
                             "Max stacks ({}): heals {:.0}% max HP.",
                             p.max_stacks(),
-                            BANDAGE_HEAL_FRAC * 100.0
+                            self.bandage_fraction() * 100.0
                         ),
                         p.flavor().to_string(),
                     )
@@ -1145,7 +1168,7 @@ impl Loadout {
                 if self.stacks(*p) >= p.max_stacks() {
                     // Every card must stay useful: a passive at its cap is
                     // played as a bandage instead of a dead stack.
-                    return BANDAGE_HEAL_FRAC * self.stats.max_hp;
+                    return self.bandage_fraction() * self.stats.max_hp;
                 }
                 if self.passives.len() >= self.max_passives() && self.stacks(*p) == 0 {
                     return 0.0;
@@ -1160,7 +1183,7 @@ impl Loadout {
                 heal
             }
             // Consumables leave every rack slot untouched.
-            Upgrade::Bandage => BANDAGE_HEAL_FRAC * self.stats.max_hp,
+            Upgrade::Bandage => self.bandage_fraction() * self.stats.max_hp,
             // Gold is credited by the caller (`App::apply_levelup`), which owns
             // the wallet; the loadout has no gold field.
             Upgrade::Purse => 0.0,

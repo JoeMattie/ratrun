@@ -142,6 +142,7 @@ const PIT_AVOID_PUSH: f32 = 1.0;
 #[allow(clippy::too_many_arguments)]
 pub fn enemy_steering_system(
     input: Res<TickInput>,
+    tuning: Res<crate::tuning::RunTuning>,
     counters: Res<RunCounters>,
     player: Res<Player>,
     flow: Res<FlowField>,
@@ -175,11 +176,11 @@ pub fn enemy_steering_system(
     let ppos = player.pos;
     // The horde's own speed ramp: ×1.0 → ×1.75 over the first five minutes,
     // then frozen at that ceiling to the boss (see
-    // `director::horde_speed_mult`; the legacy `1.0 + elapsed / 400.0` reached
+    // `tuning.director.horde_speed_mult`; the legacy `1.0 + elapsed / 400.0` reached
     // ×3.25 by the boss on a 900 s level), times the per-stage
     // `EnemyMods::speed` already baked into every body at spawn — so stage
     // three's own top is ×1.925.
-    let speed_mult = crate::game::director::horde_speed_mult(counters.elapsed);
+    let speed_mult = tuning.director.horde_speed_mult(counters.elapsed);
     // The Wind-up Mouse's key, if one is spinning (at most one at a time). The
     // lure is a straight line at the key, not a second flow field: it only
     // reaches `WINDUP_MOUSE_RADIUS` (48 px, three tiles), it is refused when a

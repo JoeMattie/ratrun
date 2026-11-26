@@ -361,6 +361,8 @@ pub fn laser_eyes_system(
         return;
     }
     let dt = input.dt;
+    let cooldown_mult = player.loadout.weapon_cooldown_mult(WeaponKind::LaserEyes);
+    let damage_mult = player.loadout.weapon_damage_mult(WeaponKind::LaserEyes);
     let (dmg_mult, fire_rate) = (player.damage_mult(), player.loadout.stats.fire_rate_mult.max(0.1));
 
     // 1. Charge (and trigger). Only one sweep is in flight at a time, and a
@@ -374,11 +376,11 @@ pub fn laser_eyes_system(
         if w.timer > 0.0 || fx.active() {
             continue;
         }
-        w.timer += (w.cooldown() / fire_rate).max(0.05);
+        w.timer += (w.cooldown() * cooldown_mult / fire_rate).max(0.05);
         trigger = Some(SweepCast {
             pulses: w.laser_pulses().max(1),
             full_damage_radius: w.laser_full_damage_radius(),
-            dmg: w.laser_hit_damage() * dmg_mult,
+            dmg: w.laser_hit_damage() * dmg_mult * damage_mult,
             evolved: w.evolved,
             half: w.laser_half_arc(),
             secs: w.laser_sweep_secs(),
@@ -667,7 +669,7 @@ pub fn super_dash_system(
     else {
         return;
     };
-    let dmg = w.damage() * player.damage_mult();
+    let dmg = w.damage() * player.damage_mult() * player.loadout.weapon_damage_mult(w.kind);
     // A charged dash (the player held the dash input and released it) is wider
     // and hits harder. A tap dash (`charge = 0`) uses the base radius and
     // damage along its travelled path.

@@ -11,7 +11,7 @@ use crate::math::Vec2;
 use crate::render::palette::Rgb;
 use rand::{Rng, RngExt};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum EnemyKind {
     Skitterer,
     Bat,
@@ -1157,6 +1157,7 @@ pub(crate) struct OutfallState {
 
 #[derive(Clone)]
 pub struct Enemy {
+    speed_base: f32,
     /// Monotonic runtime identifier assigned on spawn (0 if constructed outside `World`).
     pub id: u32,
     pub kind: EnemyKind,
@@ -1242,6 +1243,7 @@ impl Enemy {
             wander,
             contact_cd: 0.0,
             speed_scale: 1.0,
+            speed_base: kind.speed(),
             anim,
             facing: Vec2::new(1.0, 0.0),
             // No extra rng draws: a freshly spawned body is neither stunned nor
@@ -1262,6 +1264,37 @@ impl Enemy {
             outfall: OutfallState::default(),
             crab_pot_held: false,
         }
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.speed_base
+    }
+
+    /// All ordinary spawn sources, including authored and summoned bodies,
+    /// install their own variant scales before this hook applies run balance.
+    pub(crate) fn apply_spawn_tuning(
+        mut world: bevy_ecs::world::DeferredWorld,
+        context: bevy_ecs::lifecycle::HookContext,
+    ) {
+        let tuning = world.resource::<crate::tuning::RunTuning>().clone();
+        let Some(mut enemy) = world.get_mut::<Self>(context.entity) else { return };
+        if enemy.named {
+            return;
+        }
+        let row = &tuning.enemies.kinds[&enemy.kind];
+        let base_hp = enemy.kind.base_hp();
+        let hp_scale = if row.hp == base_hp { 1.0 } else { row.hp / base_hp };
+        let base_damage = enemy.kind.damage();
+        enemy.hp *= hp_scale * tuning.enemies.hp_mult;
+        enemy.max_hp *= hp_scale * tuning.enemies.hp_mult;
+        enemy.damage = if row.contact_damage == base_damage {
+            enemy.damage
+        } else if base_damage > 0.0 {
+            enemy.damage * (row.contact_damage / base_damage)
+        } else {
+            row.contact_damage
+        } * tuning.enemies.contact_damage_mult;
+        enemy.speed_base = row.speed * tuning.enemies.speed_mult;
     }
 
     /// Decay the crowd-control timers and stop a stunned body dead.
@@ -1396,7 +1429,7 @@ impl Enemy {
         } else {
             direct
         };
-        let speed = self.kind.speed() * self.speed_scale * speed_mult * self.slow_mult;
+        let speed = self.speed() * self.speed_scale * speed_mult * self.slow_mult;
         // Steering and gait are the **archetype's**: a registration flies, kites
         // or walks exactly as the base body it names, until its own batch.
         let archetype = self.kind.archetype();
@@ -1455,7 +1488,7 @@ impl Enemy {
             return;
         }
         if !self.position_locked && self.targetable() {
-            let speed = self.kind.speed() * self.speed_scale * gait * self.slow_mult;
+            let speed = self.speed() * self.speed_scale * gait * self.slow_mult;
             crate::game::ecs::systems::crab::scuttle(self, level, target, flow_dir, dt, speed);
         }
         self.flash = (self.flash - dt).max(0.0);

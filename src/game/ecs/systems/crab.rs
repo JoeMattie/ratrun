@@ -6,7 +6,9 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::art_crab::{CrabState, CrabView, CLAW_HALF, CLAW_REACH, CRAB_RADIUS};
 use crate::game::collision::SizeClass;
-use crate::game::director::{self, Director};
+#[cfg(test)]
+use crate::game::director;
+use crate::game::director::Director;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::{ENEMY_CAP, PLAYER_RADIUS};
 use crate::game::ecs::resources::{
@@ -79,11 +81,19 @@ pub fn release_pot_crab(
     live_crabs: usize,
     blocked: bool,
 ) -> Option<Enemy> {
+    release_pot_crab_with(level, at, rat, difficulty, elapsed, live_crabs, blocked, &crate::tuning::Director::default())
+}
+
+#[allow(clippy::too_many_arguments)] // The pot's existing gate plus the run-local curve.
+pub fn release_pot_crab_with(
+    level: &Level, at: Vec2, rat: Vec2, difficulty: usize, elapsed: f32,
+    live_crabs: usize, blocked: bool, tuning: &crate::tuning::Director,
+) -> Option<Enemy> {
     let clear_rat = PLAYER_RADIUS + CRAB_RADIUS;
     if level.theme != Theme::Outfall
         || blocked
-        || elapsed >= director::BOSS_TIME
-        || live_crabs >= live_cap(director::curve_clock(difficulty, elapsed))
+        || elapsed >= tuning.boss_time
+        || live_crabs >= live_cap(tuning.curve_clock(difficulty, elapsed))
         || at.dist_sq(rat) <= clear_rat * clear_rat
         || !outfall_sand_clear(level, at, CRAB_RADIUS, SizeClass::of_enemy(KIND))
     {
@@ -92,8 +102,8 @@ pub fn release_pot_crab(
     Some(fixed_crab(
         at,
         rat,
-        director::horde_hp_mult_for(difficulty, elapsed),
-        director::enemy_mods_for(difficulty, elapsed),
+        tuning.horde_hp_mult_for(difficulty, elapsed),
+        tuning.enemy_mods_for(difficulty, elapsed),
         0.0,
     ))
 }
@@ -148,6 +158,7 @@ fn group_positions(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn spawn_crabs_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     level: Res<Level>,
     player: Res<Player>,
     viewport: Res<Viewport>,
@@ -183,7 +194,7 @@ pub fn spawn_crabs_system(
         enemies.iter().filter(|(_, e)| e.kind == KIND && e.alive()).map(|(id, _)| id),
     );
 
-    let curve = director::curve_clock(difficulty.0, elapsed);
+    let curve = tuning.director.curve_clock(difficulty.0, elapsed);
     let room = group_room(curve, elapsed, spawner.last_change, spawner.live.len());
     let (debug, cvars, director, due, appointments) = spawn_rules;
     if room < 2 {
@@ -191,7 +202,7 @@ pub fn spawn_crabs_system(
     }
     if debug.peace
         || appointments.suppress(elapsed)
-        || elapsed >= director::BOSS_TIME
+        || elapsed >= tuning.director.boss_time
         || director.boss_spawned
         || due.due
         || due.claimed
@@ -221,8 +232,8 @@ pub fn spawn_crabs_system(
     if count < 2 {
         return;
     }
-    let hp_mult = director::horde_hp_mult_for(difficulty.0, elapsed);
-    let mods = director::enemy_mods_for(difficulty.0, elapsed);
+    let hp_mult = tuning.director.horde_hp_mult_for(difficulty.0, elapsed);
+    let mods = tuning.director.enemy_mods_for(difficulty.0, elapsed);
     let (mut next_spawn, mut next_enemy) = ids;
     for (i, &at) in points[..count].iter().enumerate() {
         let mut crab = if i == 0 {

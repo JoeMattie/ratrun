@@ -1436,6 +1436,7 @@ pub fn ripcord_system(
     let radius = super::weapons_wave3b::super_dash_radius(weapon.dash_radius(), charge, scale);
     let dmg = weapon.damage()
         * player.damage_mult()
+        * player.loadout.weapon_damage_mult(weapon.kind)
         * (1.0 + crate::game::ecs::systems::weapons_wave3b::SUPER_DASH_DAMAGE_PER_CHARGE * charge);
     let kind = WeaponKind::SuperDash;
     let taut = !track.live_this_tick;
