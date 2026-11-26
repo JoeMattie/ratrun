@@ -1166,7 +1166,7 @@ impl LightMap {
                     air::composite(&self.grid, &mut canvas, &frame);
                 }
                 if !fx::skip("motes") {
-                    motes::draw(&self.grid, &mut canvas, &frame);
+                    motes::draw(&self.grid, &mut canvas, &frame, scene.elapsed);
                 }
             } else {
                 self.grid.composite(pb, scene.depth);

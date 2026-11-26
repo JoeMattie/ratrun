@@ -2483,12 +2483,12 @@ impl LightMap {
                 if in_range(sx, sy, bulb.radius) {
                     let steady_energy = (1.35 * bulb.gain).clamp(0.0, 2.4);
                     let steady_scatter = (0.30 * bulb.gain).clamp(0.0, 0.45);
-                    // 3 Hz held-step surface modulation during feint tells;
-                    // air scatter and `FxLight::steady` remain strictly steady.
-                    let flick = if bulb.flicker_phase > 0.0 {
+                    // 3 Hz held-step surface modulation during feint tells (gameplay
+                    // cue); air scatter and `FxLight::steady` remain strictly steady.
+                    let flick = if bulb.flicker > 0.0 {
                         let held = (elapsed * 3.0).floor() / 3.0;
                         0.76 + 0.24
-                            * (held * std::f32::consts::TAU * 1.5 + bulb.flicker_phase)
+                            * (held * std::f32::consts::TAU * 1.5 + bulb.flicker)
                                 .sin()
                                 .abs()
                     } else {
@@ -2497,7 +2497,7 @@ impl LightMap {
                     let mut light =
                         Light::radial(bulb.pos, bulb.radius, LURE_CYAN, steady_energy * flick);
                     light.scatter = steady_scatter * flick;
-                    light.height = if bulb.radius >= 48.0 { 10.0 } else { 12.0 };
+                    light.height = if bulb.planted { 10.0 } else { 12.0 };
                     light.falloff = Falloff::Smooth;
                     light.casts_shadow = false;
                     let lure_air = bulb.gain.clamp(0.0, 1.35);
