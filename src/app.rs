@@ -8174,6 +8174,7 @@ mod tests {
                 hh.enter_playing();
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
+                w.player.pos += Vec2::new(-21.0, -13.0);
                 let pos = w.player.pos;
                 if target == "gem-flash" {
                     // A smaller simulation viewport makes the merge eligible
@@ -8203,8 +8204,10 @@ mod tests {
             "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet" => {
                 use crate::game::weapon::{LASER_ARC_DEG, LASER_SWEEP_SECS};
                 hh.enter_playing();
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
+                w.player.pos += Vec2::new(-25.0, -15.0);
                 let (kind, rank, ticks, evolved) = match target.as_str() {
                     "lava-volley" => (WeaponKind::LavaBreath, 5, 118, false),
                     "lava-pools" => (WeaponKind::LavaBreath, 5, 137, true),
@@ -8225,7 +8228,7 @@ mod tests {
                     });
                     let half = LASER_ARC_DEG[4].to_radians() * 0.5;
                     let phase = ticks as f32 / (60.0 * LASER_SWEEP_SECS[4]);
-                    aim = pos + Vec2::from_angle(half * (1.0 - 2.0 * phase)) * 100.0;
+                    aim = pos + Vec2::from_angle(half * (2.0 * phase - 1.0)) * 100.0;
                     w.shake_scale = 0.0;
                 }
                 w.player.face = Vec2::new(1.0, 0.0);
@@ -8235,8 +8238,13 @@ mod tests {
                 weapon.level = rank;
                 weapon.timer = 0.0;
                 weapon.evolved = evolved;
-                for _ in 0..ticks {
-                    w.update_with_aim(1.0 / 60.0, Vec2::ZERO, false, false, Some(aim));
+                for tick in 0..ticks {
+                    let dir = if kind == WeaponKind::Hantavirus && tick >= 15 {
+                        Vec2::new(1.0, 0.0)
+                    } else {
+                        Vec2::ZERO
+                    };
+                    w.update_with_aim(1.0 / 60.0, dir, false, false, Some(aim));
                 }
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
@@ -8253,6 +8261,7 @@ mod tests {
                     hh.app.start_practice(theme);
                     hh.frame(&[KeyCode::Enter]);
                 }
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
                 let w = hh.app.world.as_mut().unwrap();
                 w.configure_testbed();
                 w.elapsed = 186.0;
@@ -9359,24 +9368,45 @@ mod tests {
                 }
             }
             "map" | "map-corner" => {
+                use crate::game::collision::{cell_of, SizeClass, TileMap};
+                use std::collections::{HashSet, VecDeque};
                 hh.enter_playing();
-                for tick in 0..600u32 {
-                    let mv = match (tick / 90) % 4 {
-                        0 => KeyCode::Right,
-                        1 => KeyCode::Down,
-                        2 => KeyCode::Left,
-                        _ => KeyCode::Up,
-                    };
-                    let text = hh.frame(&[mv]);
-                    if text.contains("LEVEL UP") {
-                        hh.frame(&[KeyCode::Enter]);
+                let w = hh.app.world.as_mut().unwrap();
+                let start = cell_of(w.player.pos);
+                let mut queue = VecDeque::from([start]);
+                let mut visited = HashSet::from([start]);
+                let mut last = start;
+                // Reveal connected floor in a limited radius from the start.
+                // The fog flood itself still decides where exploration ends.
+                for i in 0..430 {
+                    let Some((x, y)) = queue.pop_front() else { break };
+                    last = (x, y);
+                    if i % 7 == 0 {
+                        w.fog.reveal_cell(&w.level, last);
                     }
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        if w.level.tiles.get(nx, ny).passable(SizeClass::Small)
+                            && visited.insert((nx, ny))
+                        {
+                            queue.push_back((nx, ny));
+                        }
+                    }
+                }
+                w.player.pos = TileMap::tile_rect(last.0, last.1).center();
+                w.fog.reveal_cell(&w.level, last);
+                if target == "map" {
+                    hh.frame(&[KeyCode::Tab]);
+                } else {
+                    hh.frame(&[]);
+                }
+                // Stamp the newly revealed cells, then settle their 0.4 s
+                // reveal wipe before capturing the bright phase of the rat.
+                let fog = &mut hh.app.world.as_mut().unwrap().fog;
+                for _ in 0..minimap::REVEAL_WIPE_TICKS {
+                    fog.tick();
                 }
                 hh.app.map_animation_start =
                     std::time::Instant::now() - std::time::Duration::from_millis(312);
-                if target == "map" {
-                    hh.frame(&[KeyCode::Tab]);
-                }
                 hh.frame(&[]);
             }
             t if t.starts_with("cobra") => {
@@ -10029,6 +10059,16 @@ mod tests {
                     eprintln!("dump sky: t={t:.2} {kind:?}");
                     w.elapsed = t;
                     w.clear_enemies();
+                    if let Ok(n) = std::env::var("RATRUN_DUMP_FORE_HORDE") {
+                        let count = n.parse::<usize>().unwrap_or(0);
+                        for k in 0..count {
+                            let angle = k as f32 * std::f32::consts::TAU / count as f32;
+                            let pos = w.player.pos + Vec2::from_angle(angle) * 30.0;
+                            if w.level.tiles.get_at(pos).is_open() && w.level.pit_at(pos).is_none() {
+                                w.spawn_enemy(crate::game::enemy::EnemyKind::Skitterer, pos, 8.0);
+                            }
+                        }
+                    }
                     hh.app.foreground = hh.app.foreground_env.unwrap_or(true);
                     hh.app.picture_dirty = true;
                     hh.app.console_paused = true;
