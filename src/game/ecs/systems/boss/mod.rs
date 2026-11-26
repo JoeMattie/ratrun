@@ -161,6 +161,7 @@ use crate::game::art_boss_magpie::{self, MagpieState, MagpieView};
 use crate::game::art_boss_megarat::{self, MegaRatState, MegaRatView};
 use crate::game::art_boss_mower::{self, MowerState, MowerView};
 use crate::game::art_boss_night_edition::{self, NightEditionState, NightEditionView};
+use crate::game::art_boss_lantern::{self, LanternState, LanternView};
 use crate::game::art_traps::{
     local_box_contains, MousetrapState, MOUSETRAP_DAMAGE_ENEMY, MOUSETRAP_HIT_PROGRESS_MAX,
     MOUSETRAP_HIT_PROGRESS_MIN, MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
@@ -196,6 +197,7 @@ pub mod mangle;
 pub mod megarat;
 pub mod mower;
 pub mod night_edition;
+pub mod lantern;
 
 // ============================================================================
 // Kind, rng, resource
@@ -240,6 +242,8 @@ pub enum BossKind {
     /// last third it lays the whole room out as a spiral lane and comes down it.
     /// See [`cobra`] and [`crate::game::art_boss_cobra`].
     Cobra,
+    /// The Outfall's anglerfish.
+    Lantern,
 }
 
 /// The boss the getaway ride fields: **The Magpie**.
@@ -261,6 +265,7 @@ const LAB_POOL: &[BossKind] = &[BossKind::Mower, BossKind::Cobra];
 const LAUNDRY_POOL: &[BossKind] = &[BossKind::Mangle];
 const PRINTWORKS_POOL: &[BossKind] = &[BossKind::NightEdition];
 const TRAILER_POOL: &[BossKind] = &[BossKind::Magpie, BossKind::Hawk];
+const OUTFALL_POOL: &[BossKind] = &[BossKind::Lantern];
 
 impl BossKind {
     /// The floor's **original** boss — the pinned, seedless choice.
@@ -302,6 +307,7 @@ impl BossKind {
             Theme::Laundry => LAUNDRY_POOL,
             Theme::Printworks => PRINTWORKS_POOL,
             Theme::Trailer => TRAILER_POOL,
+            Theme::Outfall => OUTFALL_POOL,
         }
     }
 
@@ -360,6 +366,7 @@ impl BossKind {
             BossKind::MegaRat => art_boss_megarat::BOSS_BASE_HP,
             BossKind::Hawk => art_boss_hawk::BOSS_BASE_HP,
             BossKind::Cobra => art_boss_cobra::BOSS_BASE_HP,
+            BossKind::Lantern => art_boss_lantern::BOSS_BASE_HP,
         }
     }
 
@@ -377,6 +384,7 @@ impl BossKind {
             BossKind::MegaRat => art_boss_megarat::BODY_RADIUS,
             BossKind::Hawk => art_boss_hawk::BODY_RADIUS,
             BossKind::Cobra => art_boss_cobra::BODY_RADIUS,
+            BossKind::Lantern => art_boss_lantern::HEAD_RADIUS,
         }
     }
 
@@ -576,6 +584,7 @@ impl BossKind {
             // was tuned against. Scaled linearly to a ~60 s fight; the next
             // batch run owns the final number.
             BossKind::Cobra => 1.0,
+            BossKind::Lantern => art_boss_lantern::BOSS_HP_SCALE,
         }
     }
 
@@ -599,6 +608,7 @@ impl BossKind {
             BossKind::MegaRat => art_boss_megarat::CONTACT_DAMAGE,
             BossKind::Hawk => art_boss_hawk::CONTACT_DAMAGE,
             BossKind::Cobra => art_boss_cobra::CONTACT_DAMAGE,
+            BossKind::Lantern => art_boss_lantern::CONTACT_DAMAGE,
         }
     }
 
@@ -616,6 +626,7 @@ impl BossKind {
             BossKind::MegaRat => art_boss_megarat::DEATH_DURATION,
             BossKind::Hawk => art_boss_hawk::DEATH_DURATION,
             BossKind::Cobra => art_boss_cobra::DEATH_DURATION,
+            BossKind::Lantern => art_boss_lantern::DEATH_DURATION,
         }
     }
 
@@ -713,6 +724,15 @@ impl BossKind {
                     1
                 }
             }
+            BossKind::Lantern => {
+                if hp_frac <= art_boss_lantern::PHASE3_HP_FRAC {
+                    3
+                } else if hp_frac <= art_boss_lantern::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -731,6 +751,7 @@ impl BossKind {
             // It arrives as a shadow: the first state is the circling overhead.
             BossKind::Hawk => BossState::Hawk(HawkState::Circle),
             BossKind::Cobra => BossState::Cobra(CobraState::Rear),
+            BossKind::Lantern => BossState::Lantern(LanternState::ArrivalLure),
         }
     }
 
@@ -749,6 +770,7 @@ impl BossKind {
             BossKind::MegaRat => art_boss_megarat::GROOM_DURATION[0],
             BossKind::Hawk => art_boss_hawk::CIRCLE_DURATION[0],
             BossKind::Cobra => art_boss_cobra::REAR_DURATION[0],
+            BossKind::Lantern => art_boss_lantern::ARRIVAL_DURATION,
         }
     }
 
@@ -766,6 +788,7 @@ impl BossKind {
             BossKind::MegaRat => BossState::MegaRat(MegaRatState::Death),
             BossKind::Hawk => BossState::Hawk(HawkState::Death),
             BossKind::Cobra => BossState::Cobra(CobraState::Death),
+            BossKind::Lantern => BossState::Lantern(LanternState::Death),
         }
     }
 
@@ -783,6 +806,7 @@ impl BossKind {
             BossKind::MegaRat => 0x3F2A_8D71_C6B4_05E9,
             BossKind::Hawk => 0x8D4C_2F91_B7A3_6E52,
             BossKind::Cobra => 0xA17C_5E93_0BD4_62E8,
+            BossKind::Lantern => 0xB40E_61AD_17AF_0953,
         }
     }
 
@@ -800,6 +824,7 @@ impl BossKind {
             BossKind::MegaRat => art_boss_megarat::CULL_MARGIN,
             BossKind::Hawk => art_boss_hawk::CULL_MARGIN,
             BossKind::Cobra => art_boss_cobra::CULL_MARGIN,
+            BossKind::Lantern => art_boss_lantern::CULL_MARGIN,
         }
     }
 
@@ -827,6 +852,7 @@ impl BossKind {
             BossKind::MegaRat => 132.0,
             BossKind::Hawk => 118.0,
             BossKind::Cobra => 116.0,
+            BossKind::Lantern => 76.0,
         }
     }
 
@@ -856,12 +882,13 @@ impl BossKind {
             BossKind::MegaRat => &megarat::MegaRatController,
             BossKind::Hawk => &hawk::HawkController,
             BossKind::Cobra => &cobra::CobraController,
+            BossKind::Lantern => &lantern::LanternController,
         }
     }
 
     /// Every boss, in enum order. The console's `boss` command and its Tab
     /// completion read this table rather than a retyped list.
-    pub fn all() -> [BossKind; 10] {
+    pub fn all() -> [BossKind; 11] {
         [
             BossKind::Cat,
             BossKind::Broom,
@@ -873,6 +900,7 @@ impl BossKind {
             BossKind::MegaRat,
             BossKind::Hawk,
             BossKind::Cobra,
+            BossKind::Lantern,
         ]
     }
 
@@ -889,6 +917,7 @@ impl BossKind {
             BossKind::MegaRat => "megarat",
             BossKind::Hawk => "hawk",
             BossKind::Cobra => "cobra",
+            BossKind::Lantern => "lantern",
         }
     }
 }
@@ -1045,6 +1074,7 @@ pub enum BossState {
     Hawk(HawkState),
     /// The Lab's second fight: the King Cobra.
     Cobra(CobraState),
+    Lantern(LanternState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -1253,6 +1283,7 @@ pub enum BossArtView {
     MegaRat(MegaRatView),
     Hawk(HawkView),
     Cobra(CobraView),
+    Lantern(LanternView),
 }
 
 // ============================================================================
@@ -1396,6 +1427,8 @@ pub struct BossHazard {
     /// that fraction of the tick's step, so it costs no i-frames and no new
     /// player state: the blue blood pools use it. Damage-free by construction.
     pub slow: f32,
+    /// The rat's overlap padding. The Lantern's mouth stamp tests its centre.
+    pub(super) player_radius: f32,
 }
 
 impl BossHazard {
@@ -1415,6 +1448,7 @@ impl BossHazard {
             fired_enemies: false,
             drag: Vec2::ZERO,
             slow: 0.0,
+            player_radius: PLAYER_RADIUS,
         }
     }
 
@@ -1695,6 +1729,7 @@ pub struct Boss {
     /// Seconds before the fight rectangle may be recentred again.
     pub recentre_cd: f32,
     pub hazards: Vec<BossHazard>,
+    lantern: lantern::LanternRuntime,
 }
 
 impl Boss {
@@ -1717,7 +1752,7 @@ impl Boss {
             invuln: 0.0,
             damage_mult: 1.0,
             contact_cd: 0.0,
-            contact_damage: kind.contact_damage(),
+            contact_damage: if kind == BossKind::Lantern { 0.0 } else { kind.contact_damage() },
             slow_t: 0.0,
             dead: false,
             death_announced: false,
@@ -1743,6 +1778,7 @@ impl Boss {
             leap_cd: 0.0,
             recentre_cd: RECENTRE_COOLDOWN,
             hazards: Vec::with_capacity(16),
+            lantern: lantern::LanternRuntime::default(),
         }
     }
 
@@ -1789,6 +1825,14 @@ impl Boss {
         )
     }
 
+    /// Neutral beats share pursuit, rejoining and the control budget.
+    pub fn is_neutral(&self) -> bool {
+        match self.state {
+            BossState::Lantern(state) => state.is_neutral(),
+            _ => self.state == self.kind.initial_state(),
+        }
+    }
+
     /// Is the boss inside a committed beat — a tell, a wind-up, the strike or
     /// the recovery after it?
     ///
@@ -1799,7 +1843,7 @@ impl Boss {
     pub fn committed(&self) -> bool {
         !self.dead
             && !self.is_stagger_state()
-            && self.state != self.kind.initial_state()
+            && !self.is_neutral()
             && self.state != self.kind.death_state()
     }
 
@@ -1864,7 +1908,13 @@ impl Boss {
             return 0.0;
         }
         let radius = self.kind.body_radius();
-        if level.tiles.circle_clear(self.pos + step, radius, SizeClass::Large) {
+        let next = self.pos + step;
+        let fits = if self.kind == BossKind::Lantern {
+            lantern::head_path_fits(level, self.pos, next)
+        } else {
+            level.tiles.circle_clear(next, radius, SizeClass::Large)
+        };
+        if fits {
             self.pos += step;
             granted
         } else {
@@ -2216,23 +2266,32 @@ impl Boss {
                 ];
                 BossHitShapes::from_slice(&shapes)
             }
+            BossKind::Lantern => {
+                if self.dead {
+                    return BossHitShapes::empty();
+                }
+                BossHitShapes::from_slice(&[BossHitShape::Circle {
+                    center: self.pos,
+                    radius: art_boss_lantern::HEAD_RADIUS,
+                    grounded: true,
+                }])
+            }
         }
     }
 
     /// The damage multiplier for a hit arriving at `at` along `dir` (unit
     /// travel direction; `Vec2::ZERO` = from underneath, e.g. a pool).
     ///
-    /// `1.0` for every boss but the horseshoe crab, whose shell **deflects**
-    /// shots arriving over the dome from the front or top (`0.0`, the shot is
-    /// spent and sparks) and whose exposed gills take
-    /// [`art_boss_horseshoe_crab::GILL_DAMAGE_MULT`]. The crab's own art owns
-    /// the rule; the damage system only applies it.
+    /// The Horseshoe's shell deflects shots from the front or top and its
+    /// exposed gills take [`art_boss_horseshoe_crab::GILL_DAMAGE_MULT`].
+    /// The Lantern takes half from the front while its jaw recovers.
     #[inline]
     pub fn incoming_multiplier(&self, dir: Vec2, at: Vec2) -> f32 {
         match self.kind {
             BossKind::HorseshoeCrab => {
                 art_boss_horseshoe_crab::incoming_multiplier(&self.crab_view(), dir, at)
             }
+            BossKind::Lantern => lantern::feint_armor(self, -dir),
             _ => 1.0,
         }
     }
@@ -2272,6 +2331,17 @@ impl Boss {
             BossKind::MegaRat => BossArtView::MegaRat(self.megarat_view()),
             BossKind::Hawk => BossArtView::Hawk(self.hawk_view()),
             BossKind::Cobra => BossArtView::Cobra(self.cobra_view()),
+            BossKind::Lantern => BossArtView::Lantern(
+                self.lantern_view().expect("Lantern state for Lantern boss"),
+            ),
+        }
+    }
+
+    /// One snapshot for art, lighting and bot. Neither bulb is an aim point.
+    pub fn lantern_view(&self) -> Option<LanternView> {
+        match self.state {
+            BossState::Lantern(state) => Some(lantern::view(self, state)),
+            _ => None,
         }
     }
 
@@ -2886,6 +2956,8 @@ pub enum BossCue {
     CobraSpiral,
     /// The `Death` beat: the body unspools.
     CobraDeath,
+    LanternTell,
+    LanternStrike,
 }
 
 impl BossCue {
@@ -3009,6 +3081,8 @@ impl BossCue {
             BossCue::CobraLoosen => Sfx::CobraLoosen,
             BossCue::CobraSpiral => Sfx::CobraSpiral,
             BossCue::CobraDeath => Sfx::CobraDeath,
+            BossCue::LanternTell => Sfx::Splash,
+            BossCue::LanternStrike => Sfx::SplashBig,
         }
     }
 }
@@ -3078,19 +3152,26 @@ pub fn move_boss(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) 
         return false;
     }
     let radius = boss.kind.body_radius();
+    let fits = |from, to| {
+        if boss.kind == BossKind::Lantern {
+            lantern::head_path_fits(ctx.level, from, to)
+        } else {
+            ctx.footprint_fits(to, radius)
+        }
+    };
     let next = boss.pos + step;
-    if ctx.footprint_fits(next, radius) {
+    if fits(boss.pos, next) {
         boss.pos = next;
         return true;
     }
     // Axis slide: try x then y so a body grazes a wall instead of sticking.
     let try_x = Vec2::new(step.x, 0.0);
-    if try_x.len_sq() > 0.0 && ctx.footprint_fits(boss.pos + try_x, radius) {
+    if try_x.len_sq() > 0.0 && fits(boss.pos, boss.pos + try_x) {
         boss.pos += try_x;
         return false;
     }
     let try_y = Vec2::new(0.0, step.y);
-    if try_y.len_sq() > 0.0 && ctx.footprint_fits(boss.pos + try_y, radius) {
+    if try_y.len_sq() > 0.0 && fits(boss.pos, boss.pos + try_y) {
         boss.pos += try_y;
         return false;
     }
@@ -3117,7 +3198,7 @@ pub fn resolve_hazards(
         if !hazard.is_active() {
             continue;
         }
-        if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, PLAYER_RADIUS) {
+        if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, hazard.player_radius) {
             if hazard.damage <= 0.0 {
                 // Push-only hazard (the cat's damage-free outer roar ring and
                 // the Mangle's intake lane): the knockback is a sustained shove
@@ -3769,6 +3850,7 @@ fn emit_cues(
                 let blood = level_blood();
                 vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
             }
+            BossCue::LanternTell | BossCue::LanternStrike => {}
         }
     }
 }
@@ -3893,16 +3975,33 @@ pub fn boss_spawn_system(
     // The horde's scratch buffer is a resource the director owns; an arrival is
     // once a floor, so its own is built here rather than borrowed.
     let mut scratch = SpawnScratch::default();
-    let pos = crate::game::ecs::systems::spawn::spawn_point_reachable(
+    let spawn_point_reachable = crate::game::ecs::systems::spawn::spawn_point_reachable;
+    let landing = spawn_point_reachable(
         &mut boss_rng,
         &level,
         &player,
         viewport.0,
         &mut scratch,
-    )
-    // A rat holed up where the ring is solid still gets its fight, beside
-    // itself, exactly like a console `boss here`.
-    .unwrap_or_else(|| arrival_beside(&level, player.pos, radius, &arena));
+    );
+    let pos = if kind == BossKind::Lantern {
+        let landing = landing.filter(|&p| lantern::head_fits(&level, p)).or_else(|| {
+            (0..7).find_map(|_| {
+                spawn_point_reachable(&mut boss_rng, &level, &player, viewport.0, &mut scratch)
+                    .filter(|&p| lantern::head_fits(&level, p))
+            })
+        });
+        let Some(pos) = landing.or_else(|| lantern_arrival_beside(&level, player.pos)) else {
+            // A temporarily blocked map can retry once the rat moves.
+            due.claimed = false;
+            override_kind.0 = Some(kind);
+            return;
+        };
+        pos
+    } else {
+        // A rat holed up where the ring is solid still gets its fight beside
+        // itself, exactly like a console `boss here`.
+        landing.unwrap_or_else(|| arrival_beside(&level, player.pos, radius, &arena))
+    };
     let boss = open_fight(
         &mut fight,
         Arrival {
@@ -3942,6 +4041,20 @@ fn arrival_beside(level: &Level, rat: Vec2, radius: f32, arena: &TileRect) -> Ve
         .unwrap_or_else(|| arena.center_world())
 }
 
+/// Legal Lantern placement for the scheduled fallback and `boss here`.
+pub(crate) fn lantern_arrival_beside(level: &Level, rat: Vec2) -> Option<Vec2> {
+    for distance in [48.0, 44.0, 52.0, 40.0, 56.0, 60.0] {
+        for i in 0..16 {
+            let dir = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0);
+            let p = rat + dir * distance;
+            if lantern::head_fits(level, p) {
+                return Some(p);
+            }
+        }
+    }
+    nearest_body_clear(level, rat, art_boss_lantern::HEAD_RADIUS, SizeClass::Large, 24, true)
+}
+
 /// Apply player damage to the boss through its art-defined hit shapes.
 ///
 /// Sources: player bullets (including orbit), acid pools and mousetraps.
@@ -3956,6 +4069,7 @@ fn arrival_beside(level: &Level, rat: Vec2, radius: f32, arena: &TileRect) -> Ve
 pub fn boss_damage_system(
     tick: Res<TickInput>,
     level: Res<Level>,
+    player: Res<Player>,
     mut fight: ResMut<BossFight>,
     mut bosses: Query<&mut Boss>,
     mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,
@@ -3989,6 +4103,14 @@ pub fn boss_damage_system(
             if bullet.faction != Faction::Player || bullet.hit_cd > 0.0 || bullet.lob.is_some() {
                 continue;
             }
+            if boss.kind == BossKind::Lantern
+                && boss.hp > 0.0
+                && lantern::try_pop_decoy(&mut boss, &bullet, player.pos)
+            {
+                spend_boss_bullet(&mut bullet);
+                sfx.0.push(Sfx::Splash);
+                continue;
+            }
             if !shapes.segment_hits_grounded(bullet.prev_pos, bullet.pos, bullet.radius) {
                 continue;
             }
@@ -4013,16 +4135,11 @@ pub fn boss_damage_system(
                     false,
                 );
                 sfx.0.push(Sfx::CrabShell);
-                if bullet.pierce > 0 {
-                    bullet.pierce -= 1;
-                    bullet.hit_cd = 0.12;
-                } else {
-                    bullet.life = 0.0;
-                    bullet.hit_cd = 0.12;
-                }
+                spend_boss_bullet(&mut bullet);
                 continue;
             }
-            let amount = bullet.damage * boss.damage_mult * armour;
+            let damage_mult = if boss.kind == BossKind::Lantern { 1.0 } else { boss.damage_mult };
+            let amount = bullet.damage * damage_mult * armour;
             if !boss.take_damage(amount) {
                 continue;
             }
@@ -4060,13 +4177,7 @@ pub fn boss_damage_system(
             // keep resolving the part of its sweep that did connect), so
             // without it one dart could be spent on the boss and an enemy at
             // once.
-            if bullet.pierce > 0 {
-                bullet.pierce -= 1;
-                bullet.hit_cd = 0.12;
-            } else {
-                bullet.life = 0.0;
-                bullet.hit_cd = 0.12;
-            }
+            spend_boss_bullet(&mut bullet);
             sfx.0.push(Sfx::Hit);
         }
         // Acid pools (DPS through the hit shapes).
@@ -4109,8 +4220,9 @@ pub fn boss_damage_system(
             if shapes.iter().any(|s| {
                 s.grounded() && in_mouse_kill_rect(trap.pos, trap.facing, s.center(), s_radius(s))
             }) {
+                let damage_mult = if boss.kind == BossKind::Lantern { 1.0 } else { boss.damage_mult };
                 let amount = MOUSETRAP_DAMAGE_ENEMY
-                    * boss.damage_mult
+                    * damage_mult
                     * boss.incoming_multiplier(Vec2::ZERO, trap.pos);
                 if boss.take_damage(amount) {
                     fight.scratch.dmg.traps += amount;
@@ -4148,6 +4260,15 @@ pub fn boss_damage_system(
             shake.amount = shake.amount.max(1.5);
         }
     }
+}
+
+fn spend_boss_bullet(bullet: &mut Bullet) {
+    if bullet.pierce > 0 {
+        bullet.pierce -= 1;
+    } else {
+        bullet.life = 0.0;
+    }
+    bullet.hit_cd = 0.12;
 }
 
 /// Distance (px) beyond which a live boss counts as "not in the fight" for
@@ -4223,15 +4344,19 @@ fn rat_left_the_fight(arena: TileRect, rat: Vec2) -> bool {
 /// of that test matter: the boss and the rat can be 50 px apart on opposite
 /// sides of a wall (the stalemate this exists to break), and a line through a
 /// rat-hole is not a walk. Falls back to the closest clear cell to the rat.
-fn rejoin_spot(level: &Level, player: Vec2, radius: f32) -> Option<Vec2> {
+fn rejoin_spot(level: &Level, player: Vec2, radius: f32, lantern: bool) -> Option<Vec2> {
     let class = SizeClass::Large;
     for step in 0..24 {
         let angle = step as f32 * std::f32::consts::TAU / 24.0;
         for r in REJOIN_RADII {
             let p = player + Vec2::from_angle(angle) * r;
-            if level.tiles.circle_clear(p, radius, class)
-                && walkable_line(level, p, player, radius, class)
-            {
+            let fits = if lantern {
+                lantern::head_fits(level, p) && lantern::head_path_fits(level, p, player)
+            } else {
+                level.tiles.circle_clear(p, radius, class)
+                    && walkable_line(level, p, player, radius, class)
+            };
+            if fits {
                 return Some(p);
             }
         }
@@ -4240,7 +4365,7 @@ fn rejoin_spot(level: &Level, player: Vec2, radius: f32) -> Option<Vec2> {
     // walk to (a maze pocket, behind a rat-hole). Still bring the boss *near*
     // it — the siege rule below breaks the last wall — but never into one.
     let p = player + Vec2::new(REJOIN_RADII[0], 0.0);
-    nearest_body_clear(level, p, radius, class, 24)
+    nearest_body_clear(level, p, radius, class, 24, lantern)
 }
 
 /// The nearest cell centre to `p` where a body of `radius` actually fits (a
@@ -4252,6 +4377,7 @@ fn nearest_body_clear(
     radius: f32,
     class: SizeClass,
     max_cells: i32,
+    lantern: bool,
 ) -> Option<Vec2> {
     let (pcx, pcy) = collision::cell_of(p);
     for r in 0..=max_cells {
@@ -4265,7 +4391,12 @@ fn nearest_body_clear(
                     continue;
                 }
                 let centre = Vec2::new((cx as f32 + 0.5) * collision::TILE_F, (cy as f32 + 0.5) * collision::TILE_F);
-                if level.tiles.circle_clear(centre, radius, class) {
+                let fits = if lantern {
+                    lantern::head_fits(level, centre)
+                } else {
+                    level.tiles.circle_clear(centre, radius, class)
+                };
+                if fits {
                     return Some(centre);
                 }
             }
@@ -4336,7 +4467,7 @@ fn smash_wall(level: &mut Level, at: (i32, i32)) {
 /// ([`RECENTRE_COOLDOWN`]), and "the rat is not already in reach" — a rat the
 /// boss can attack is a fight, not a departure.
 fn recentre_the_fight(boss: &mut Boss, level: &Level, rat: Vec2) {
-    if boss.recentre_cd > 0.0 || boss.state != boss.kind.initial_state() {
+    if boss.recentre_cd > 0.0 || !boss.is_neutral() {
         return;
     }
     if (rat - boss.pos).len() <= boss.kind.engage_range() {
@@ -4377,7 +4508,7 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
     } else {
         boss.out_of_reach += dt;
     }
-    if boss.state != boss.kind.initial_state() {
+    if !boss.is_neutral() {
         // A committed beat never moves under the pursuit rule.
         boss.leap_t = 0.0;
         return;
@@ -4397,9 +4528,16 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         return;
     }
     let radius = boss.kind.body_radius();
+    let has_leap_lane = || {
+        if boss.kind == BossKind::Lantern {
+            lantern::head_path_fits(ctx.level, boss.pos, ctx.player_pos)
+        } else {
+            walkable_line(ctx.level, boss.pos, ctx.player_pos, radius, SizeClass::Large)
+        }
+    };
     if boss.leap_cd <= 0.0
         && !boss.kind.own_gap_closer()
-        && walkable_line(ctx.level, boss.pos, ctx.player_pos, radius, SizeClass::Large)
+        && has_leap_lane()
     {
         boss.leap_t = LEAP_SECS;
         boss.leap_cd = LEAP_COOLDOWN;
@@ -4524,6 +4662,9 @@ pub fn boss_update_system(
                 };
                 boss.kind.controller().death_tick(&mut ctx, &mut boss, &mut out);
             }
+            if boss.kind == BossKind::Lantern && level.objects.outfall_boss_snuff.is_some() {
+                level.objects.outfall_boss_snuff = None;
+            }
             emit_cues(
                 &out.cues,
                 &boss,
@@ -4614,7 +4755,7 @@ pub fn boss_update_system(
         fight.since_sample += dt;
         if fight.since_sample >= 0.5 {
             let moved = boss.pos.dist(fight.last_pos);
-            fight.stuck = boss.state == boss.kind.initial_state() && moved < 1.5;
+            fight.stuck = boss.is_neutral() && moved < 1.5;
             fight.last_pos = boss.pos;
             fight.since_sample = 0.0;
         }
@@ -4629,14 +4770,22 @@ pub fn boss_update_system(
             // the Mower's `Docking` transit every five seconds. Every attack
             // chain returns to the neutral state, so the rule still cannot
             // strand a level; it just lands on the first neutral tick.
-            if boss.lost >= RELOCATE_AFTER_SECS && boss.state == boss.kind.initial_state() {
-                if let Some(spot) = rejoin_spot(&level, player.pos, boss.kind.body_radius()) {
+            if boss.lost >= RELOCATE_AFTER_SECS && boss.is_neutral() {
+                if let Some(spot) = rejoin_spot(
+                    &level,
+                    player.pos,
+                    boss.kind.body_radius(),
+                    boss.kind == BossKind::Lantern,
+                ) {
                     boss.lost = 0.0;
                     boss.pos = spot;
                     boss.target = player.pos;
                     let to = player.pos - spot;
                     if to.len_sq() > 1e-6 {
                         boss.facing = to.normalized();
+                    }
+                    if boss.kind == BossKind::Lantern {
+                        lantern::relocate(&mut boss, &level);
                     }
                     let accent = level.palette.accent;
                     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, spot, accent);
@@ -4735,6 +4884,23 @@ pub fn boss_update_system(
                 rng: &mut fight.rng.0,
             };
             boss.kind.controller().tick(&mut ctx, &mut boss, &mut out);
+        }
+        if boss.kind == BossKind::Lantern {
+            if let BossState::Lantern(state) = boss.state {
+                if !art_boss_lantern::has_body_contact(state) {
+                    boss.no_contact();
+                }
+            }
+            if level.objects.outfall_boss_snuff != boss.lantern.snuff {
+                level.objects.outfall_boss_snuff = boss.lantern.snuff;
+            }
+            // Existing melee and area passes read the shared multiplier
+            // without a source direction. Point-blank serum stomps stay 40.
+            boss.damage_mult = if player.buffs.is_giant() {
+                1.0
+            } else {
+                lantern::feint_armor(&boss, player.pos - boss.pos)
+            };
         }
 
         // The controller's feedback requests, mapped to sound and particles.
@@ -4909,7 +5075,7 @@ impl BossTrace {
     /// Is this state the kind's neutral/approach beat (the one the boss is
     /// supposed to *leave* the moment it can attack)?
     fn neutral(&self, boss: &Boss) -> bool {
-        boss.state == boss.kind.initial_state()
+        boss.is_neutral()
     }
 
     /// Is the boss in a window its signature counter opens (the designed
@@ -4931,6 +5097,10 @@ impl BossTrace {
                 )
                 | BossState::Hawk(HawkState::TalonBury)
                 | BossState::Cobra(CobraState::FangsStuck | CobraState::SpiralEnd)
+                | BossState::Lantern(
+                    LanternState::FeintRecover | LanternState::DecoyRecover
+                        | LanternState::DarkRecover | LanternState::GapeRecover
+                )
         )
     }
 
