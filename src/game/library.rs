@@ -1260,9 +1260,8 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::TailWhip => (
             "Level-up card · any floor",
-            "Forty grams of pure indignation, delivered as a quick low swipe across the \
-             half-circle in front of you. No travel time, no mercy for anything that \
-             chose to stand where you were looking.",
+            "A quick, low swipe behind you, centred opposite your aim when aiming. \
+             Forty grams of pure indignation.",
         ),
         WeaponKind::AcidSpit => (
             "Level-up card · any floor",
@@ -1343,9 +1342,9 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::TailWhip => (
             "Chest · Tail Whip L5 + Quick Paws",
-            "The whip hooks the nearest ordinary body and swings it a quarter turn \
-             through everything beside you, then lets go. Heavy targets just take the \
-             hit. Give the room a turn.",
+            "The whip hooks the nearest light foe it hits and throws it the way \
+             you face, striking light foes in its path. Heavy targets take the \
+             swipe. Redirected for further testing.",
         ),
         WeaponKind::AcidSpit => (
             "Chest · Acid Spit L5 + Thick Hide",

@@ -1509,8 +1509,6 @@ pub fn draw_spike_shard(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2) {
 mod tests {
     use super::*;
     use crate::game::particle::{vfx, Particles};
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
 
     /// A dotted ring lights each pixel at most once, at every radius: the
     /// additive plot used to land twice on some pixels.
@@ -1611,11 +1609,14 @@ mod tests {
             draw_fairy_ring(pb, &ring, Vec2::ZERO, 2.2);
         });
 
-        // 4: Ratchet Tail (pink hook + brown body on bright quarter arc)
+        // 4: Ratchet Tail (pink hook + brown body thrown forward)
         render(4, &mut |pb| {
             let mut ps = Particles::new(256);
-            let mut rng = StdRng::seed_from_u64(7);
-            vfx::emit_ratchet_swing(&mut ps, &mut rng, center + Vec2::new(-6.0, 10.0), 26.0, -1.65, 1.57);
+            vfx::emit_ratchet_throw(
+                &mut ps,
+                center + Vec2::new(-24.0, 0.0),
+                center + Vec2::new(18.0, 0.0),
+            );
             ps.update(0.05);
             ps.draw(pb, Vec2::ZERO);
         });

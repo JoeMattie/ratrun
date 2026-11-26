@@ -28,7 +28,7 @@
 //! | Gnaw | a homing dart (a projectile) | a frontal **bite**: no projectile, a 20-24 px jaw, single target |
 //! | Cheese Spray | a long fan of darts | a short fan of **slow, fat wedges** whose cone slows |
 //! | Squeak Nova | a ring of radial darts | one **expanding ring** that damages what its front passes |
-//! | Tail Whip | a melee aura all round | a **frontal half-circle swipe** (180°, 30-42 px) |
+//! | Tail Whip | a melee aura all round | a **rear swipe** (160°, 30-42 px) |
 //! | Sonic Squeak | an expanding ring all round | a forward **cone** of 38° |
 //! | Laser Eyes | a fan of timed pulses | one continuous **sweep** across an arc |
 //!
@@ -118,7 +118,7 @@ use crate::audio::Sfx;
 use crate::detmath::DetF32;
 use crate::game::bullet::{Bullet, Faction, Lob, Orbit};
 // Wave 3: Counterweight's melee nudge keeps its body on legal floor.
-use crate::game::collision::SizeClass;
+use crate::game::collision::{SizeClass, segment_circle_hit, segment_rect_hit};
 use crate::game::ecs::systems::weapons_wave3b::MELEE_NUDGE_COOLDOWN;
 use crate::game::weapon::{
     BITE_SECS, CHEESE_SLOW_MULT, CHEESE_SLOW_SECS, CHEESE_WEDGE_LIFE, CHEESE_WEDGE_SPEED,
@@ -140,7 +140,7 @@ use crate::game::ecs::systems::projectiles::los_clear;
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::Level;
+use crate::game::level::{Level, Rectf};
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
@@ -336,7 +336,7 @@ pub fn fire_weapons_system(
     }
 
     // A weapon moved a body this tick (Counterweight's nudge or Ratchet Tail's
-    // swing): re-file the buckets from the still-valid `EnemyIndex` so every
+    // throw): re-file the buckets from the still-valid `EnemyIndex` so every
     // later reader (`bullets`, `pools`, `boss_damage`, `player_bullet_hits`,
     // `contact`) sees the body where it actually is. One grid fill, and only on
     // a tick that moved something; `SpawnId` order is unchanged, so the index
@@ -656,7 +656,7 @@ pub struct FireScratch<'w, 's> {
     /// `enemy_move::grid_refresh_system` files every enemy under the cell it
     /// stood in at the end of the movement phase. Two weapons then write
     /// `Enemy::pos` themselves: Counterweight's melee nudge (the whip) and
-    /// Ratchet Tail's quarter-arc swing. `EnemyIndex` stays valid (nothing
+    /// Ratchet Tail's forward throw. `EnemyIndex` stays valid (nothing
     /// spawned or despawned), so the debug guard passes, but the grid still
     /// lists the body in its *old* cell: a bullet that sweeps it later this
     /// tick asks the grid at the new position, gets the old bucket and misses
@@ -1888,21 +1888,16 @@ fn fire_one(
             fired = true;
         }
         WeaponKind::TailWhip => {
-            // Batch 12 (corrected): a **quick low swipe in front of the rat** —
-            // a 180° arc centred on the aim (mouse/pad) or the rat's facing
-            // (keyboard), short reach, fast cadence. Every body in that front
-            // half-circle takes the hit, so the whip is the rat's near guard;
-            // Tail Thrash is the full-circle spin and the Spiked Tail is the
-            // one that targets a single body. Damage per body per cycle is
-            // unchanged: the same `dmg` on the same cooldown.
+            // A 160° swipe centred opposite the aim or facing. The same
+            // rear direction drives hits, the drawn crescent and its sparks.
             let i = (wlevel.clamp(1, 5) as usize) - 1;
             let reach = stats.melee_reach(WHIP_REACH[i]);
-            let dir = cast_dir(ppos, pface, aim);
+            let dir = -cast_dir(ppos, pface, aim);
+            let mut hook: Option<(Entity, f32)> = None;
             for &entity in order {
                 let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                     continue;
                 };
-                // A swipe, not an aura: only the front half-circle.
                 if !e.alive()
                     || !cone_hits_circle(ppos, dir, reach, WHIP_ARC_HALF, e.pos, e.radius)
                 {
@@ -1921,6 +1916,14 @@ fn fire_one(
                 let pos = e.pos;
                 let enemy_radius = e.radius;
                 let enemy_id = e.id;
+                // Ratchet Tail can only hook a surviving body the swipe hit.
+                // The first body in SpawnId order wins a distance tie.
+                if evolved && !killed && !e.elite && !e.named && !e.kind.heavy() {
+                    let distance = pos.dist(ppos);
+                    if distance > 1.0 && hook.is_none_or(|(_, nearest)| distance < nearest) {
+                        hook = Some((entity, distance));
+                    }
+                }
                 // Counterweight: +2 px of outward shove per stack on a melee
                 // hit that has no native knockback (the whip), once per body
                 // per 0.4 s. `resolve_circle` keeps the nudge on legal floor
@@ -1973,7 +1976,7 @@ fn fire_one(
                 if !shapes.iter().any(|s| s.grounded()) {
                     continue;
                 }
-                // Inside the front half-circle: the boss's own body radius is
+                // Inside the rear arc: the boss's own body radius is
                 // the slack, so standing against it always counts.
                 if !cone_hits_circle(
                     ppos,
@@ -2002,16 +2005,14 @@ fn fire_one(
                     DamageSource::TailWhip,
                 );
             }
-            if evolved {
-                // Ratchet Tail hooks one of the bodies the swipe actually cut
-                // and swings it a quarter turn around the rat, so the grid has
-                // to follow it (below).
-                if ratchet_swing(
+            if let Some((hooked, _)) = hook {
+                // The throw follows the rat's facing even on an aimed swipe.
+                let forward = cast_dir(ppos, pface, None);
+                *moved |= ratchet_throw(
                     level,
                     ppos,
-                    pface,
-                    dir,
-                    reach,
+                    hooked,
+                    forward,
                     order,
                     enemies,
                     dmg,
@@ -2019,9 +2020,7 @@ fn fire_one(
                     particles,
                     damage_numbers,
                     ledger,
-                ) {
-                    *moved = true;
-                }
+                );
             }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, reach);
             fired = true;
@@ -2209,19 +2208,14 @@ fn fire_one(
 }
 
 
-/// **Ratchet Tail**: hook the nearest ordinary body the whip hit and swing it a
-/// quarter turn around the rat, one base hit into everything the arc crosses.
-/// Heavy bodies (elites, Brutes, the boss) never get hooked — they took the
-/// whip hit and nothing more.
+/// **Ratchet Tail** throws a hooked body along the rat's facing. The swept
+/// body deals one extra hit to each ordinary foe it reaches before cover.
 #[allow(clippy::too_many_arguments)]
-fn ratchet_swing(
+fn ratchet_throw(
     level: &Level,
-    ppos: Vec2,
-    pface: Vec2,
-    // The swipe's arc: Ratchet Tail hooks the nearest foe the whip actually
-    // cut, which since batch 12 means inside the front half-circle.
-    swipe_dir: Vec2,
-    reach: f32,
+    rat: Vec2,
+    hooked: Entity,
+    forward: Vec2,
     order: &[Entity],
     enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
     dmg: f32,
@@ -2230,120 +2224,36 @@ fn ratchet_swing(
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
 ) -> bool {
-    let kind = WeaponKind::TailWhip;
-    // 1. The hook: nearest ordinary body inside the arc, ties by `SpawnId`.
-    let mut hook: Option<(Entity, Vec2, f32, f32)> = None; // entity, pos, dist, radius
-    for &entity in order {
-        let Ok((_, _, e)) = enemies.get(entity) else {
-            continue;
-        };
-        // Heavy targets take the whip hit only (§3): elites, named
-        // minibosses and every `EnemyKind::heavy()` body, a Pillbug included
-        // (curled or not, it is never hooked or swung into).
-        if !e.alive() || e.elite || e.named || e.kind.heavy() {
-            continue;
-        }
-        let d = e.pos.dist(ppos);
-        if d > reach + e.radius || d <= 1.0 {
-            continue;
-        }
-        if !cone_hits_circle(ppos, swipe_dir, reach, WHIP_ARC_HALF, e.pos, e.radius) {
-            continue;
-        }
-        if !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS) {
-            continue;
-        }
-        if hook.is_none_or(|(_, _, best, _)| d < best) {
-            hook = Some((entity, e.pos, d, e.radius));
-        }
-    }
-    let Some((hooked, from, radius_from_rat, hooked_radius)) = hook else {
+    let Ok((_, _, body)) = enemies.get(hooked) else {
         return false;
     };
-    // 2. Which way round? Sweep into more bodies; an exact tie follows the
-    //    facing side of the hook (and clockwise when that is zero too).
-    let offset = from - ppos;
-    let start_angle = offset.angle();
-    // The swung body travels the arc at `radius_from_rat`; a body behind
-    // masonry is not on the arc's path even when both endpoints of the quarter
-    // turn are open floor (the review's "a 90° arc can cross a blocked
-    // intermediate point"). Sampled at 8 samples per quarter turn — a 1 px
-    // tile test per sample, and only for the handful of bodies that already
-    // matched the radius band.
-    let arc_clear = |delta: f32| -> bool {
-        let steps = ((delta.abs() / (std::f32::consts::FRAC_PI_2 / 8.0)).ceil() as u32).max(1);
-        (0..=steps).all(|i| {
-            let a = start_angle + delta * (i as f32 / steps as f32);
-            los_clear(
-                level,
-                ppos,
-                ppos + Vec2::from_angle(a) * radius_from_rat,
-                MELEE_LOS_RADIUS,
-            )
-        })
-    };
-    let count_in = |turn: f32| -> u32 {
-        let mut n = 0;
-        for &entity in order {
-            let Ok((_, _, e)) = enemies.get(entity) else {
-                continue;
-            };
-            if entity == hooked || !e.alive() {
-                continue;
+    let from = body.pos;
+    let radius = body.radius;
+    // Keep the travel distance of the old quarter-turn swing.
+    let distance = from.dist(rat) * std::f32::consts::FRAC_PI_2;
+    let end = from + forward * distance;
+    // Sweep the body against walls and closed gates before moving it or
+    // damaging the crowd. Leave a small gap so it lands clear of the wall.
+    let margin = radius + 1.0;
+    let area = Rectf::new(
+        from.x.min(end.x) - margin,
+        from.y.min(end.y) - margin,
+        (end.x - from.x).abs() + 2.0 * margin,
+        (end.y - from.y).abs() + 2.0 * margin,
+    );
+    let mut travel = distance;
+    level
+        .tiles
+        .for_each_collider_in(area, SizeClass::of_enemy(body.kind), None, |wall| {
+            if let Some(t) = segment_rect_hit(from, end, radius, &wall) {
+                travel = travel.min((distance * t - 0.5).max(0.0));
             }
-            let rel = e.pos - ppos;
-            let d = rel.len();
-            if (d - radius_from_rat).abs() > hooked_radius + e.radius + 2.0 {
-                continue;
-            }
-            let mut delta = (rel.angle() - start_angle) % std::f32::consts::TAU;
-            if delta < 0.0 {
-                delta += std::f32::consts::TAU;
-            }
-            let in_arc = if turn >= 0.0 {
-                delta <= turn + 0.12
-            } else {
-                delta >= std::f32::consts::TAU + turn - 0.12
-            };
-            if !in_arc {
-                continue;
-            }
-            // Only a body the hook can actually reach counts toward the
-            // swing's direction (it samples the same cover rule as the hit).
-            // The signed sweep to this body, held inside the quarter turn (the
-            // `in_arc` test above admits a 0.12 rad overshoot): `[0, turn]`
-            // counter-clockwise, `[turn, 0]` clockwise.
-            let swing = if turn >= 0.0 {
-                delta.min(turn)
-            } else {
-                (delta - std::f32::consts::TAU).max(turn)
-            };
-            if !arc_clear(swing) {
-                continue;
-            }
-            n += 1;
-        }
-        n
-    };
-    let half_pi = std::f32::consts::FRAC_PI_2;
-    let cw = count_in(-half_pi);
-    let ccw = count_in(half_pi);
-    let cross = offset.x * pface.y - offset.y * pface.x;
-    let turn = if ccw > cw {
-        half_pi
-    } else if cw > ccw || cross < 0.0 {
-        -half_pi
-    } else {
-        half_pi
-    };
-    // 3. The release point must be open floor; a hook that cannot swing just
-    //    keeps the whip hit.
-    let dest = ppos + Vec2::from_angle(start_angle + turn) * radius_from_rat;
-    let class = crate::game::collision::SizeClass::of_enemy(EnemyKind::Skitterer);
-    if !level.tiles.circle_clear(dest, hooked_radius, class) {
+        });
+    if travel <= 0.0 {
         return false;
     }
-    // 4. One base hit each into everything the quarter arc crosses.
+    let dest = from + forward * travel;
+
     for &entity in order {
         if entity == hooked {
             continue;
@@ -2354,55 +2264,28 @@ fn ratchet_swing(
         if !e.alive() || e.elite || e.named || e.kind.heavy() {
             continue;
         }
-        let rel = e.pos - ppos;
-        let d = rel.len();
-        if (d - radius_from_rat).abs() > hooked_radius + e.radius + 2.0 {
+        if !segment_circle_hit(from, dest, radius, e.pos, e.radius) {
             continue;
         }
-        let mut delta = (rel.angle() - start_angle) % std::f32::consts::TAU;
-        if delta < 0.0 {
-            delta += std::f32::consts::TAU;
-        }
-        let in_arc = if turn >= 0.0 {
-            delta <= turn
-        } else {
-            delta >= std::f32::consts::TAU + turn
-        };
-        if !in_arc {
-            continue;
-        }
-        // The hook has to reach this body: sample the sub-arc it travels to
-        // get there against the tile map. Both endpoints being open is not
-        // enough — a corner in the middle of the quarter turn is cover.
-        let swing = if turn >= 0.0 {
-            delta
-        } else {
-            delta - std::f32::consts::TAU
-        };
-        if !arc_clear(swing) {
+        let nearest = from + forward * (e.pos - from).dot(forward).clamp(0.0, travel);
+        if !los_clear(level, nearest, e.pos, MELEE_LOS_RADIUS) {
             continue;
         }
         let hp_before = e.hp.max(0.0);
-        // Directional armour: the swung body arrives from the rat's side,
-        // like the whip itself.
-        let applied = e.hurt_from(dmg, ppos);
+        let applied = e.hurt_from(dmg, from);
         let killed = !e.alive();
-        ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
-        let pos = e.pos;
-        let radius = e.radius;
-        let id = e.id;
-        vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
-        damage_numbers.record(id, pos, radius, applied, killed, DamageSource::TailWhip);
+        ledger.add(WeaponKind::TailWhip, (hp_before - e.hp.max(0.0)).max(0.0));
+        vfx::emit_tail_whip_hit(particles, &mut rng.0, e.pos, forward, killed);
+        damage_numbers.record(e.id, e.pos, e.radius, applied, killed, DamageSource::TailWhip);
     }
-    // 5. Release: the body lands a quarter turn around the rat.
-    let mut moved = false;
-    if let Ok((_, _, mut e)) = enemies.get_mut(hooked) {
-        e.pos = dest;
-        e.vel = Vec2::ZERO;
-        moved = true;
-    }
-    vfx::emit_ratchet_swing(particles, &mut rng.0, ppos, radius_from_rat, start_angle, turn);
-    moved
+
+    let Ok((_, _, mut body)) = enemies.get_mut(hooked) else {
+        return false;
+    };
+    body.pos = dest;
+    body.vel = Vec2::ZERO;
+    vfx::emit_ratchet_throw(particles, from, dest);
+    true
 }
 
 #[cfg(test)]
@@ -2613,10 +2496,12 @@ mod tests {
         use crate::game::ecs::systems::boss::{Boss, BossKind};
         let build = || {
             let mut w = World::new(Theme::Sewer, 41);
+            open_map(&mut w);
             w.clear_enemies();
             arm(&mut w, WeaponKind::TailWhip);
             let mid = w.level.arena * 0.5;
-            w.player.pos = mid + Vec2::new(-12.0, 0.0);
+            w.player.pos = mid + Vec2::new(20.0, 0.0);
+            w.player.face = Vec2::new(1.0, 0.0);
             let arena = w
                 .level
                 .boss_room()
@@ -2652,7 +2537,7 @@ mod tests {
     }
 
     /// A weapon that **moved** a body (Counterweight's melee nudge, Ratchet
-    /// Tail's swing) re-files the spatial grid, so this tick's bullet sweep
+    /// Tail's throw) re-files the spatial grid, so this tick's bullet sweep
     /// still finds the body where it now stands.
     ///
     /// White-box on purpose: the bucket contents are what the sweep reads, and
@@ -2664,9 +2549,10 @@ mod tests {
         use crate::game::ecs::resources::{EnemyIndex, NeighborScratch};
         use crate::game::loadout::PassiveKind;
         let mut w = World::new(Theme::Sewer, 43);
+        open_map(&mut w);
         w.clear_enemies();
-        // The whip swipes the half-circle in front of the rat, so face it.
         w.player.face = Vec2::new(1.0, 0.0);
+        w.player.pos = Vec2::new(151.0, 168.0);
         arm(&mut w, WeaponKind::TailWhip);
         // Counterweight: +2 px of outward shove per stack on the whip, once per
         // body per 0.4 s.
@@ -2674,7 +2560,7 @@ mod tests {
         w.player.loadout.rebuild_stats();
         let ppos = w.player.pos;
         // Right at the whip's inner reach, so the nudge of 8 px moves it.
-        let body = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(18.0, 0.0), 400.0);
+        let body = w.spawn_enemy(EnemyKind::Brute, ppos - Vec2::new(18.0, 0.0), 400.0);
         let before = w.ecs.get::<Enemy>(body).unwrap().pos;
         // The schedule's order: grid build, then the weapon pass.
         w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
@@ -2916,13 +2802,10 @@ mod tests {
         );
     }
 
-    /// The Tail Whip is a **frontal half-circle swipe**: every body in the
-    /// 180° arc in front of the rat takes the hit in place (`Enemy::hurt`, no
-    /// projectile) — including one off to the side at 70° — while a body behind
-    /// the rat, or one past the short reach, is never touched.
+    /// The 160° swipe hits bodies behind the rat out to its short reach.
     #[test]
-    fn tail_whip_swipes_the_half_circle_in_front() {
-        use crate::game::weapon::WHIP_ARC_HALF;
+    fn tail_whip_swipes_behind_the_rat() {
+        use crate::game::weapon::{WHIP_ARC_HALF, WHIP_REACH};
         let mut w = World::new(Theme::Sewer, 5);
         open_map(&mut w);
         w.clear_enemies();
@@ -2930,34 +2813,31 @@ mod tests {
         w.sfx.clear();
         let ppos = w.player.pos;
         w.player.face = Vec2::new(1.0, 0.0);
-        // Dead ahead, inside the L1 30 px reach.
-        let ahead = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(18.0, 0.0), 1.0);
-        // 70° off the axis at 22 px: still inside the half-circle (90°).
+        let ahead = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(18.0, 0.0), 5.0);
+        let behind = w.spawn_enemy(EnemyKind::Skitterer, ppos - Vec2::new(18.0, 0.0), 5.0);
+        // 70° from the rear axis hits. At 90° the whole body clears the arc.
         let off_axis = w.spawn_enemy(
-            EnemyKind::Cat,
-            ppos + Vec2::from_angle(70.0f32.to_radians()) * 22.0,
-            1.0,
+            EnemyKind::Skitterer,
+            ppos - Vec2::from_angle(70.0f32.to_radians()) * 22.0,
+            5.0,
         );
-        // Behind the rat (and inside the reach): the swipe is not an aura.
-        let behind = w.spawn_enemy(EnemyKind::Cat, ppos - Vec2::new(18.0, 0.0), 1.0);
-        // Past the reach.
-        let far = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(80.0, 0.0), 1.0);
+        let side = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(0.0, 22.0), 5.0);
+        let far = w.spawn_enemy(EnemyKind::Skitterer, ppos - Vec2::new(80.0, 0.0), 5.0);
         arm(&mut w, WeaponKind::TailWhip);
+        let damage = w.player.loadout.weapons[0].damage();
 
         run_weapons(&mut w, 1.0 / 60.0);
 
         let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
-        let base = EnemyKind::Cat.base_hp();
-        assert!(hp(&w, ahead) < base, "the body ahead was not swiped");
-        assert!(
-            hp(&w, off_axis) < base,
-            "a body inside the front half-circle was missed"
-        );
-        assert_eq!(hp(&w, behind), base, "the swipe reached behind the rat");
+        let base = EnemyKind::Skitterer.base_hp() * 5.0;
+        assert_eq!(hp(&w, behind), base - damage, "the body behind was missed");
+        assert_eq!(hp(&w, off_axis), base - damage, "the rear arc missed at 70°");
+        assert_eq!(hp(&w, ahead), base, "the swipe reached in front");
+        assert_eq!(hp(&w, side), base, "the swipe reached 90° from the rear");
         assert_eq!(hp(&w, far), base, "a body past the reach was swiped");
         assert_eq!(w.sfx.iter().filter(|s| **s == Sfx::ShootWhip).count(), 1);
         assert!(w.bullets().is_empty(), "Tail Whip must not spawn bullets");
-        // The drawn swipe: one crescent, centred on the aim at the reach.
+        // The drawn swipe uses the same rear direction and reach.
         let cracks: Vec<WhipCrack> = w
             .ecs
             .query::<&WhipCrack>()
@@ -2967,17 +2847,42 @@ mod tests {
         assert_eq!(cracks.len(), 1, "the swipe must be drawn once");
         let arc = cracks[0];
         assert!(
-            (arc.to - ppos).normalized().dot(Vec2::new(1.0, 0.0)) > 0.999,
-            "the crescent must be centred on the facing"
+            (arc.to - ppos).normalized().dot(Vec2::new(-1.0, 0.0)) > 0.999,
+            "the crescent must be centred opposite the facing"
         );
         assert!(
-            (arc.to - ppos).len() > 20.0,
+            ((arc.to - ppos).len() - WHIP_REACH[0]).abs() < 1e-3,
             "the crescent's centre line is the swipe's reach"
         );
         assert!(
-            (WHIP_ARC_HALF - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
-            "the swipe is a half-circle"
+            (2.0 * WHIP_ARC_HALF.to_degrees() - 160.0).abs() < 1e-3,
+            "the swipe spans 160°"
         );
+    }
+
+    #[test]
+    fn aimed_tail_whip_swipes_opposite_the_reticle() {
+        let mut w = World::new(Theme::Sewer, 5);
+        open_map(&mut w);
+        w.clear_enemies();
+        arm(&mut w, WeaponKind::TailWhip);
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        let aim = Vec2::new(0.0, 20.0);
+        let behind_aim = w.spawn_enemy(EnemyKind::Skitterer, p - aim, 5.0);
+        let in_aim = w.spawn_enemy(EnemyKind::Skitterer, p + aim, 5.0);
+        let behind_face = w.spawn_enemy(EnemyKind::Skitterer, p - Vec2::new(20.0, 0.0), 5.0);
+
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + aim));
+
+        let hp = |e| w.ecs.get::<Enemy>(e).unwrap().hp;
+        let base = EnemyKind::Skitterer.base_hp() * 5.0;
+        assert!(hp(behind_aim) < base);
+        assert_eq!(hp(in_aim), base);
+        assert_eq!(hp(behind_face), base);
+        let mut cracks = w.ecs.query::<&WhipCrack>();
+        let crack = cracks.iter(&w.ecs).next().unwrap();
+        assert!((crack.to - p).normalized().dot(-aim.normalized()) > 0.999);
     }
 
     /// Gnaw is a **bite**: a very short reach, single target, no projectile, and
@@ -3042,22 +2947,19 @@ mod tests {
     }
 
     /// The three recognisable **groups** now have three different hit regions:
-    /// the whip is a front crescent and the thrash a whole disc; the nova is a ring all
+    /// the whip is a rear crescent and the thrash a whole disc; the nova is a ring all
     /// the way round and the squeak a forward cone; Gnaw is a bite (no
     /// projectile) and Cheese Spray a fan of wedges that slows.
     #[test]
     fn the_look_alike_groups_have_different_hit_shapes() {
         let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
-        // --- the tails: whip = the front half-circle, thrash = the full disc
+        // --- the tails: whip = the rear arc, thrash = the full disc
         let mut w = World::new(Theme::Sewer, 31);
         open_map(&mut w);
         w.clear_enemies();
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
-        // 20 px directly behind the rat: inside both reaches, but only the
-        // thrash's disc covers it.
         let behind = w.spawn_enemy(EnemyKind::Brute, p - Vec2::new(20.0, 0.0), 400.0);
-        // …and one 40° off the front axis: the whip's half-circle takes it.
         let in_front = w.spawn_enemy(
             EnemyKind::Brute,
             p + Vec2::from_angle(40.0f32.to_radians()) * 20.0,
@@ -3066,13 +2968,8 @@ mod tests {
         let (behind_hp, front_hp) = (hp(&w, behind), hp(&w, in_front));
         arm(&mut w, WeaponKind::TailWhip);
         run_weapons(&mut w, 1.0 / 60.0);
-        assert!(hp(&w, in_front) < front_hp, "the whip must swipe in front");
-        assert_eq!(
-            hp(&w, behind),
-            behind_hp,
-            "the whip is a front half-circle, not a disc"
-        );
-        // The thrash's full disc takes the body behind the rat.
+        assert!(hp(&w, behind) < behind_hp, "the whip must swipe behind");
+        assert_eq!(hp(&w, in_front), front_hp, "the rear whip missed the front");
         w.player.loadout.weapons = vec![Weapon {
             kind: WeaponKind::TailThrash,
             level: 1,
@@ -3080,7 +2977,7 @@ mod tests {
             evolved: false,
         }];
         tick_active(&mut w, true);
-        assert!(hp(&w, behind) < behind_hp, "the thrash sweeps the whole disc");
+        assert!(hp(&w, in_front) < front_hp, "the thrash sweeps the whole disc");
 
         // --- the squeaks: nova = a ring all round, squeak = a cone --------
         let mut w = World::new(Theme::Sewer, 32);
@@ -3243,7 +3140,7 @@ mod tests {
         open_map(&mut w);
         w.clear_enemies();
         w.clear_bullets();
-        let at = w.player.pos + Vec2::new(10.0, 0.0);
+        let at = w.player.pos - Vec2::new(10.0, 0.0);
         let body = w.spawn_enemy(EnemyKind::Brute, at, 400.0);
         let before = w.ecs.get::<Enemy>(body).unwrap().hp;
         w.player.face = Vec2::new(1.0, 0.0);
@@ -3327,10 +3224,11 @@ mod tests {
     #[test]
     fn tail_whip_records_damage_numbers_and_hit_vfx() {
         let mut w = World::new(Theme::Sewer, 4242);
+        open_map(&mut w);
         w.clear_enemies();
         w.clear_bullets();
         let ppos = w.player.pos;
-        let enemy = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(10.0, 0.0), 1.0);
+        let enemy = w.spawn_enemy(EnemyKind::Cat, ppos - Vec2::new(10.0, 0.0), 1.0);
         w.player.face = Vec2::new(1.0, 0.0);
         arm(&mut w, WeaponKind::TailWhip);
         let hp_before = w.ecs.get::<Enemy>(enemy).unwrap().hp;
@@ -4027,14 +3925,15 @@ mod tests {
         assert!(realistic < 2000.0, "{realistic:.1} us/tick is out of budget");
     }
 
-    /// An enemy outside the aura records no damage number.
+    /// An enemy past the rear swipe's reach records no damage number.
     #[test]
     fn tail_whip_records_nothing_for_far_enemies() {
         let mut w = World::new(Theme::Sewer, 1717);
         w.clear_enemies();
         w.clear_bullets();
         let ppos = w.player.pos;
-        w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(80.0, 0.0), 1.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.spawn_enemy(EnemyKind::Cat, ppos - Vec2::new(80.0, 0.0), 1.0);
         arm(&mut w, WeaponKind::TailWhip);
 
         run_weapons(&mut w, 1.0 / 60.0);
@@ -4228,7 +4127,7 @@ mod tests {
         open_map(&mut w);
         w.clear_enemies();
         w.player.pos = Vec2::new(170.0, 168.0);
-        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.face = Vec2::new(-1.0, 0.0);
         let p = w.player.pos;
         let body = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x + 30.0, p.y), 1.0);
         arm(&mut w, WeaponKind::TailWhip);
@@ -4600,6 +4499,7 @@ mod tests {
         }
         // An evolution: Ratchet Tail (Tail Whip, evolved).
         let ratchet = |w: &mut World| {
+            w.player.face = Vec2::new(-1.0, 0.0);
             let kind = WeaponKind::TailWhip;
             let mut weapon = Weapon::new(kind);
             weapon.level = kind.max_level();

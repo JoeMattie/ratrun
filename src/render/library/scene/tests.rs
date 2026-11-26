@@ -719,7 +719,7 @@ fn the_bosses_run_their_attack_states() {
     }
 }
 
-/// Six weapons hit the standing dummies the scene keeps in front of the rat.
+/// Six weapons hit the standing dummies on their plates.
 #[test]
 fn the_weapons_fire_at_the_dummies() {
     for kind in [
@@ -739,13 +739,14 @@ fn the_weapons_fire_at_the_dummies() {
     }
 }
 
-/// Three evolutions behave, not just draw.
+/// The sampled evolutions hit the standing dummies on their plates.
 #[test]
 fn the_evolutions_run() {
     for kind in [
         WeaponKind::Gnaw,
         WeaponKind::CheeseSpray,
         WeaponKind::SqueakNova,
+        WeaponKind::TailWhip,
     ] {
         let key = Key::Evolution(kind);
         assert!(plate_moves(key), "{key:?} never changed its plate");

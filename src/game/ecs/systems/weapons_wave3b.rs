@@ -1610,9 +1610,8 @@ mod tests {
                 }
             }
             let p = w.player.pos;
-            // The swipe's plain reach plus the body's own radius: the rat faces
-            // +x, so both bodies stand in the front half-circle.
-            w.player.face = Vec2::new(1.0, 0.0);
+            // Both bodies stand behind the rat, along the swipe's centre.
+            w.player.face = Vec2::new(-1.0, 0.0);
             let cat_r = {
                 let probe = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(900.0, 0.0), 9.0);
                 w.ecs.get::<Enemy>(probe).unwrap().radius
@@ -1627,14 +1626,14 @@ mod tests {
             w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
             w.ecs.run_system_cached(fire_weapons_system).unwrap();
             w.end_tick();
-            assert!(enemy_hp(&w, inside) < inside_hp, "the plain aura missed");
+            assert!(enemy_hp(&w, inside) < inside_hp, "the plain swipe missed");
             if lens {
                 assert!(
                     enemy_hp(&w, edge) < edge_hp,
                     "Lens Cap did not widen the whip"
                 );
             } else {
-                assert_eq!(enemy_hp(&w, edge), edge_hp, "the plain aura reached too far");
+                assert_eq!(enemy_hp(&w, edge), edge_hp, "the plain swipe reached too far");
             }
         }
 
@@ -1800,6 +1799,7 @@ mod tests {
                 crate::game::loadout::PassiveKind::Counterweight,
             ));
         let p = w.player.pos;
+        w.player.face = Vec2::new(-1.0, 0.0);
         let body = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 20.0);
         let start = w.ecs.get::<Enemy>(body).unwrap().pos;
         // Fire the whip twice inside one 0.4 s window: only the first nudges.

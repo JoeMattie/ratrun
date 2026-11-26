@@ -1066,7 +1066,7 @@ fn arm_weapon(w: &mut World, kind: crate::game::weapon::WeaponKind, evolved: boo
 /// Directional armour reaches every damage source the other wave-3 branches
 /// added: Acid Rain, Laser Eyes, Super Dash and the evolutions' own hit paths
 /// (Milk Teeth, Fondue string, Fairy Ring, Drain Cleaner front and runoff,
-/// Roll Call, Ratchet swing) and the last four evolutions (a Downspout tread
+/// Roll Call, Ratchet Tail's swipe) and the last four evolutions (a Downspout tread
 /// and its runoff from the gutter's axis, a Carbon Copy beam from its recorded
 /// origin, a Ripcord snap along the cord toward the departure point). Echo
 /// Chamber spokes and Flywheel pellets are `Bullet`s, so
@@ -1333,13 +1333,12 @@ fn the_shell_reaches_every_later_damage_source() {
         },
     );
     shell_case(
-        "ratchet swing",
-        Vec2::new(0.0, 20.0),
-        Vec2::new(0.0, -1.0),
+        "ratchet swipe",
+        -ahead,
+        -west,
         true,
-        |w, p, _| {
+        |w, _, _| {
             arm_weapon(w, WeaponKind::TailWhip, true);
-            w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(16.0, 0.0), 400.0);
         },
         |w| run(w, weapons::fire_weapons_system),
     );

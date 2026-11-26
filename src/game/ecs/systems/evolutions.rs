@@ -11,7 +11,7 @@
 //! | Fondue Fork (Cheese Spray) | [`CheeseString`] spawned in `fire_one`, cut in [`fondue_string_system`] |
 //! | Echo Chamber (Squeak Nova) | the ring's returning pass, run by `weapons::nova_ring` (`ActiveFx::nova_echo`) |
 //! | Fairy Ring (Spore Orbit) | [`FairyRing`] left on every second cast, ticked here |
-//! | Ratchet Tail (Tail Whip) | resolved immediately in `fire_one` (a swing, no state) |
+//! | Ratchet Tail (Tail Whip) | resolved immediately in `fire_one` (a forward throw, no state) |
 //! | Drain Cleaner (Acid Spit) | [`CorrosiveChannel`] built where the lob lands, ticked here |
 //! | Flywheel (Tail Thrash) | caught/flung inside `active_weapons_system` (`ActiveFx`) |
 //! | Roll Call (Sonic Squeak) | tags set in `squeak_ring`, answered in [`roll_call_system`] |
@@ -2206,39 +2206,65 @@ mod tests {
         );
     }
 
-    /// Ratchet Tail: the whip hooks the nearest ordinary body, swings it a
-    /// quarter turn into what the arc crosses, and an elite only takes the whip.
+    /// The swipe follows aim. The throw follows the rat's facing and damages
+    /// the crowd in front. A closer elite takes the swipe and stays put.
     #[test]
-    fn ratchet_tail_hooks_and_swings_but_only_whips_heavies() {
+    fn ratchet_tail_throws_along_the_rats_facing() {
         use crate::game::ecs::systems::weapons;
         let mut w = evolved_world(WeaponKind::TailWhip);
         let origin = w.player.pos;
-        let hooked = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(20.0, 0.0), 400.0);
-        let swept = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(0.0, 20.0), 400.0);
-        // The whip is a **frontal half-circle** (batch 12), so the elite has to
-        // stand in front to take the whip hit; it is still never hooked.
-        let elite = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(0.0, -20.0), 400.0);
+        let hook_pos = origin + Vec2::new(-20.0, -12.0);
+        let elite_pos = origin + Vec2::new(-10.0, -14.0);
+        let hooked = w.spawn_enemy(EnemyKind::Skitterer, hook_pos, 400.0);
+        let crowd = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(17.0, -12.0), 400.0);
+        let elite = w.spawn_enemy(EnemyKind::Skitterer, elite_pos, 400.0);
         w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
-        let swept_hp = hp_of(&w, swept);
+        let crowd_hp = hp_of(&w, crowd);
         let hooked_hp = hp_of(&w, hooked);
         let elite_hp = hp_of(&w, elite);
         w.player.face = Vec2::new(1.0, 0.0);
-        w.player.loadout.weapons[0].timer = 0.0;
-        run(&mut w, weapons::fire_weapons_system);
+        let weapon = &mut w.player.loadout.weapons[0];
+        weapon.timer = 0.0;
+        let damage = weapon.damage();
+        // Deliberately aim off the facing. Run only the weapon pass so the
+        // player system does not turn the rat toward the reticle first.
+        let aim = origin + Vec2::new(30.0, 30.0);
+        w.begin_tick_with_aim(DT, Vec2::ZERO, false, false, Some(aim));
+        w.ecs.run_system_cached(weapons::fire_weapons_system).unwrap();
+        w.end_tick();
 
-        assert!(hp_of(&w, swept) < swept_hp, "the swing hits what it crosses");
+        assert_eq!(hp_of(&w, crowd), crowd_hp - damage, "the throw hits the crowd once");
         assert!(hp_of(&w, hooked) < hooked_hp, "the whip hit lands on the hook");
         assert!(hp_of(&w, elite) < elite_hp, "the elite takes the whip hit");
         let moved = w.ecs.get::<Enemy>(hooked).unwrap().pos;
         assert!(
-            (moved - (origin + Vec2::new(0.0, 20.0))).len() < 4.0,
-            "the hooked body ends a quarter turn away: {moved:?}"
+            moved.x > origin.x && (moved.y - hook_pos.y).abs() < 1e-3,
+            "the hooked body lands forward along the facing: {moved:?}"
         );
-        let elite_moved = w.ecs.get::<Enemy>(elite).unwrap().pos;
-        assert!(
-            (elite_moved - (origin + Vec2::new(0.0, -20.0))).len() < 0.5,
-            "a heavy body is never hooked: {elite_moved:?}"
-        );
+        assert_eq!(w.ecs.get::<Enemy>(elite).unwrap().pos, elite_pos);
+    }
+
+    #[test]
+    fn ratchet_tail_throw_stops_at_masonry() {
+        use crate::game::art_walls::WallKind;
+        use crate::game::ecs::systems::weapons;
+        let mut w = evolved_world(WeaponKind::TailWhip);
+        let origin = Vec2::new(170.0, 168.0);
+        w.player.pos = origin;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        w.level.tiles.fill_cells(11, 9, 1, 3, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let hook_pos = origin - Vec2::new(40.0, 0.0);
+        let hooked = w.spawn_enemy(EnemyKind::Skitterer, hook_pos, 400.0);
+        let crowd = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(25.0, 0.0), 400.0);
+        let crowd_hp = hp_of(&w, crowd);
+
+        run(&mut w, weapons::fire_weapons_system);
+
+        let body = w.ecs.get::<Enemy>(hooked).unwrap();
+        assert!(body.pos.x > hook_pos.x && body.pos.x + body.radius < 176.0);
+        assert_eq!(hp_of(&w, crowd), crowd_hp);
     }
 
     /// Drain Cleaner: the channel runs forward, ticks the stripe and stops at
@@ -2707,6 +2733,7 @@ mod tests {
             }
             BossHitter::TailWhip => {
                 w.player.pos = aim + Vec2::new(-6.0, 0.0);
+                w.player.face = Vec2::new(-1.0, 0.0);
                 run(&mut w, weapons::fire_weapons_system);
             }
             BossHitter::FairyRing => {

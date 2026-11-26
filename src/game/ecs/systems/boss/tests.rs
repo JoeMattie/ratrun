@@ -1056,16 +1056,16 @@ fn tail_whip_damages_the_boss() {
 
     let mut w = World::new(Theme::Sewer, 35);
     open_arena(&mut w);
-    // Level 8: `fire_one`'s aura is 26 + 3 * 8 = 50 px, so a body at 45 px is
-    // inside the whip (and outside the old 30 px melee reach).
+    // At max rank the boss's rim is within the rear swipe's 42 px reach.
     w.player.loadout.weapons = vec![Weapon {
         kind: WeaponKind::TailWhip,
-        level: 8,
+        level: WeaponKind::TailWhip.max_level(),
         timer: 0.0,
         evolved: false,
     }];
     let ppos = w.player.pos;
-    spawn_boss_at(&mut w, BossKind::Cat, ppos + Vec2::new(45.0, 0.0), 5000.0);
+    w.player.face = Vec2::new(1.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, ppos - Vec2::new(45.0, 0.0), 5000.0);
     let expected = w.player.loadout.weapons[0].damage();
     let hp_before = w.boss_hp().expect("boss alive").0;
 

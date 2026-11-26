@@ -280,11 +280,9 @@ pub fn emit_weapon_fire(
             }
         }
         WeaponKind::TailWhip => {
-            // Frontal pink half-circle crescent swipe in front of the rat only
-            // (`dir ± WHIP_ARC_HALF`, drawn by `art_rat::draw_tail_whip_crack`)
-            // plus a few dust motes at both ±90° horn ends — never a full ring!
+            // The cast supplies the rear direction of the crescent.
+            let half = crate::game::weapon::WHIP_ARC_HALF;
             let r = radius.max(24.0);
-            let perp = dir.perp();
             ps.push_shockwave(Shockwave {
                 pos,
                 start_r: r * 0.58,
@@ -296,14 +294,15 @@ pub fn emit_weapon_fire(
                 thick: 1.4,
                 additive: true,
                 arc_dir: Some(dir),
-                arc_half_angle: crate::game::weapon::WHIP_ARC_HALF,
+                arc_half_angle: half,
             });
-            // Dust motes kicked off both ±90° ends of the frontal crescent.
+            // Dust motes kicked off the two ends of the crescent.
             let dust = ps.budget_count(4, false);
             for k in 0..dust {
                 let side = if k % 2 == 0 { 1.0 } else { -1.0 };
-                let horn = pos + perp * (side * r * 0.92) + dir * rng.random_range(0.0..4.0);
-                let out = (perp * side + dir * 0.45).normalized();
+                let horn_dir = dir.rotate(side * half);
+                let horn = pos + horn_dir * (r * 0.92) + dir * rng.random_range(0.0..4.0);
+                let out = (horn_dir + dir * 0.45).normalized();
                 let life = rng.random_range(0.18..0.28);
                 ps.push(Particle {
                     pos: horn,
@@ -560,7 +559,7 @@ pub fn emit_weapon_hit(
     }
 }
 
-/// Crisp pink/white swipe sparks on a body clipped by `TailWhip`'s frontal crescent.
+/// Crisp pink/white swipe sparks on a body clipped by `TailWhip`.
 pub fn emit_tail_whip_hit(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -5667,38 +5666,13 @@ pub fn emit_fairy_ring_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, ki
     );
 }
 
-/// **Ratchet Tail**: pink hook, one brown body slung along a bright quarter arc.
-pub fn emit_ratchet_swing(
-    ps: &mut Particles,
-    rng: &mut impl Rng,
-    rat: Vec2,
-    radius: f32,
-    start_angle: f32,
-    turn: f32,
-) {
-    let mid_dir = Vec2::from_angle(start_angle + turn * 0.5);
-    let sign = if turn >= 0.0 { 1.0 } else { -1.0 };
-    // 1. Bright hot-pink quarter-arc shockwave carving the 90-degree sweep.
-    ps.push_shockwave(Shockwave {
-        pos: rat,
-        start_r: (radius - 1.5).max(3.0),
-        end_r: radius + 2.2,
-        life: 0.30,
-        max_life: 0.30,
-        color: RATCHET_PINK,
-        core: (255, 248, 254),
-        thick: 2.0,
-        additive: true,
-        arc_dir: Some(mid_dir),
-        arc_half_angle: (turn.abs() * 0.54).max(0.45),
-    });
-
-    // 2. Curved pink hook at the start of the arc (`start_angle`).
-    let hook_dir = Vec2::from_angle(start_angle);
-    let hook_tan = Vec2::from_angle(start_angle + sign * std::f32::consts::FRAC_PI_2);
-    let hook_pos = rat + hook_dir * radius;
+/// **Ratchet Tail**: pink hook and a streak of brown afterimages along the throw.
+pub fn emit_ratchet_throw(ps: &mut Particles, from: Vec2, to: Vec2) {
+    let path = to - from;
+    let forward = path.normalized();
+    let side = forward.perp();
     ps.push(Particle {
-        pos: hook_pos,
+        pos: from,
         vel: Vec2::ZERO,
         life: 0.28,
         max_life: 0.28,
@@ -5708,10 +5682,10 @@ pub fn emit_ratchet_swing(
         additive: true,
         shape: Shape::Cross,
     });
-    for &(r_off, t_off) in &[(-2.0f32, 0.0f32), (0.0, 2.0), (1.8, 1.5), (2.2, -0.5)] {
+    for &(side_offset, forward_offset) in &[(-2.0, 0.0), (0.0, 2.0), (1.8, 1.5), (2.2, -0.5)] {
         ps.push(Particle {
-            pos: hook_pos + hook_dir * r_off + hook_tan * t_off,
-            vel: hook_tan * 14.0,
+            pos: from + side * side_offset + forward * forward_offset,
+            vel: forward * 14.0,
             life: 0.24,
             max_life: 0.24,
             drag: 7.0,
@@ -5722,21 +5696,17 @@ pub fn emit_ratchet_swing(
         });
     }
 
-    // 3. The quarter arc + brown swung-body motion trail riding along it.
     let brown_hi: Rgb = (196, 134, 78);
     let brown_lo: Rgb = (104, 62, 32);
-    let steps = 15usize;
+    let steps = 15;
     let budget = ps.budget_count(steps, false);
     for k in 0..budget {
-        let t = k as f32 / (steps - 1).max(1) as f32;
-        let a = start_angle + turn * t;
-        let p = rat + Vec2::from_angle(a) * radius;
-        let tan = Vec2::from_angle(a + sign * std::f32::consts::FRAC_PI_2);
+        let t = k as f32 / (steps - 1) as f32;
+        let p = from + path * t;
         let life = 0.24 + 0.16 * t;
-        // Bright pink leading arc streak.
         ps.push(Particle {
             pos: p,
-            vel: tan * 32.0,
+            vel: forward * 32.0,
             life,
             max_life: life,
             drag: 6.5,
@@ -5745,11 +5715,10 @@ pub fn emit_ratchet_swing(
             additive: true,
             shape: Shape::Streak,
         });
-        // Every 3rd step: warm brown body-afterimage riding the quarter arc!
         if k % 3 == 1 {
             ps.push(Particle {
                 pos: p,
-                vel: tan * 18.0,
+                vel: forward * 18.0,
                 life: 0.22 + 0.14 * t,
                 max_life: 0.22 + 0.14 * t,
                 drag: 7.0,
@@ -5760,7 +5729,6 @@ pub fn emit_ratchet_swing(
             });
         }
     }
-    let _ = rng;
 }
 
 /// **Flywheel**: copper pips sliding onto the tail as a sweep catches pellets.
