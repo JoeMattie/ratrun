@@ -53,8 +53,7 @@ pub fn draw_floor(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) 
         Theme::Printworks => printworks(&mut floor, &level.palette, elapsed),
         Theme::Trailer => unreachable!("the flatbed draws its own floor"),
     }
-    // The wave 3 floor hazards sit on the floor layer: they are walkable, so
-    // they must read as paint and grate plates, never as obstacles.
+    // Walkable hazard surfaces sit on the floor layer.
     hazards(&mut floor, &level.palette, &level.objects, elapsed);
     kerb(&mut floor, level, width, height);
 }
@@ -596,9 +595,9 @@ fn printworks(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
     }
 }
 
-/// Steam grates and ink pads: the two floors' own hazards.
+/// Floor-layer art for steam grates, ink pads and the drip shaft.
 ///
-/// Both must read immediately as hazards *before* they hurt or slow:
+/// The surfaces must read before their effects engage.
 /// - **Ink pads** are glossy, velvety dried-ink pools with an organic scalloped
 ///   silhouette, deliberate halftone stipple clusters, a slow-shimmering wet
 ///   specular crescent, and crisp plum/cyan registration corner ticks marking
@@ -607,6 +606,7 @@ fn printworks(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
 ///   slots even while resting, three distinct rising billowy puffs + a pulsing
 ///   1-tile floor border during the 1 s warning, and a boiling white-hot steam
 ///   column during the 0.7 s active plume.
+/// - **Drip shaft** leaves a small wet patch below the hostile-layer warning.
 fn hazards(
     floor: &mut Floor<'_>,
     pal: &Palette,
@@ -703,6 +703,14 @@ fn hazards(
                 floor.fill(x0 + dx, y0 + h + 1, 1, 1, ink_body);
             }
         }
+    }
+
+    if let Some(opening) = &objects.sewer_opening {
+        let pos = opening.drip_shaft.pos;
+        let (x, y) = (pos.x as i32, pos.y as i32);
+        floor.fill(x - 6, y - 2, 12, 4, (16, 26, 31));
+        floor.fill(x - 4, y - 3, 8, 6, (19, 31, 36));
+        floor.fill(x - 3, y - 1, 5, 1, (42, 61, 62));
     }
 
     for grate in &objects.steam_grates {
@@ -956,6 +964,35 @@ pub fn draw_hazards(
         y,
     };
     hazards(&mut floor, &Palette::for_theme(theme), objects, elapsed);
+}
+
+/// Draw the ceiling drop and its exact floor footprint above the lights.
+pub fn draw_drip_shaft(pb: &mut PixelBuffer, shaft: &super::hazards::DripShaft, cam: Vec2) {
+    use super::hazards::{DripPhase, DRIP_HALF, DRIP_SPLASH_SECS, DRIP_WARN_SECS};
+    let x = (shaft.pos.x - cam.x).round() as i32;
+    let y = (shaft.pos.y - cam.y).round() as i32;
+    match shaft.phase {
+        DripPhase::Warning => {
+            let rim = (240, 202, 124);
+            let half = DRIP_HALF as i32;
+            let (left, right, top, bottom) = (x - half, x + half - 1, y - half, y + half - 1);
+            pb.line(left, top, right, top, rim);
+            pb.line(left, bottom, right, bottom, rim);
+            pb.line(left, top, left, bottom, rim);
+            pb.line(right, top, right, bottom, rim);
+            let drop_y = y - 20 + (shaft.timer / DRIP_WARN_SECS * 20.0) as i32;
+            pb.rect_fill(x, drop_y - 3, 1, 4, (117, 202, 218));
+            pb.rect_fill(x - 1, drop_y, 3, 2, (213, 247, 240));
+        }
+        DripPhase::Splash => {
+            let spread = 2 + (shaft.timer / DRIP_SPLASH_SECS * 5.0) as i32;
+            let color = (134, 214, 221);
+            pb.line(x - spread, y, x - 1, y - 2, color);
+            pb.line(x + 1, y - 2, x + spread, y, color);
+            pb.line(x - spread + 1, y + 2, x + spread - 1, y + 2, color);
+        }
+        DripPhase::Idle | DripPhase::Resting => {}
+    }
 }
 
 /// Draw one floor pickup at screen position `s` (already `w2s`-mapped).
@@ -1621,6 +1658,31 @@ pub fn draw_chest(pb: &mut PixelBuffer, s: (i32, i32), elapsed: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drip_shaft_warning_outlines_one_tile_and_the_drop_falls() {
+        use crate::game::hazards::{DripShaft, DRIP_WARN_SECS};
+        let mut shaft = DripShaft::new((1, 1));
+        let mut pb = PixelBuffer::new(48, 48);
+        let bg = (1, 2, 3);
+        pb.clear(bg);
+        draw_drip_shaft(&mut pb, &shaft, Vec2::ZERO);
+        assert!(pb.pixels().iter().all(|&pixel| pixel == bg));
+
+        shaft.tick(0.1, true);
+        draw_drip_shaft(&mut pb, &shaft, Vec2::ZERO);
+        for (x, y) in [(16, 16), (31, 16), (16, 31), (31, 31)] {
+            assert_eq!(pb.pixel_at(x, y), (240, 202, 124));
+        }
+        assert_eq!(pb.pixel_at(24, 4), (213, 247, 240));
+        assert_eq!(pb.pixel_at(15, 16), bg);
+
+        shaft.tick(DRIP_WARN_SECS * 0.5, true);
+        pb.clear(bg);
+        draw_drip_shaft(&mut pb, &shaft, Vec2::ZERO);
+        assert_eq!(pb.pixel_at(24, 4), bg);
+        assert_eq!(pb.pixel_at(24, 14), (213, 247, 240));
+    }
 
     /// Every pickup paints a different silhouette (the set of pixels it
     /// touches), not just a different colour, and stays inside a 13 px box.

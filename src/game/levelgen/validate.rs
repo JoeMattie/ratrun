@@ -275,7 +275,7 @@ pub fn validate(level: &Level) -> Result<(), Vec<String>> {
     // 7b. Shop holes: a solid wall cell with reachable floor in front of it.
     check_shop_holes(level, &small, &mut errors);
 
-    // 8. The side routes' floor hazards (§11): on public, reachable floor, off
+    // 8. Floor hazards: on public, reachable floor, off
     // every arena/start/maze reservation, and never without a dry way past.
     check_hazards(level, &small, &mut errors);
 
@@ -295,10 +295,10 @@ fn prop_cells(rect: crate::game::level::Rectf) -> TileRect {
     TileRect::new(x, y, w, h)
 }
 
-/// The wave 3 floor hazards: steam grates (Laundry) and ink pads (Printworks).
+/// The drip shaft (Sewer), steam grates (Laundry) and ink pads (Printworks).
 ///
-/// Both are walkable floor, so the danger is not connectivity but fairness:
-/// every one needs a dry route at least two cells wide past it, and none may
+/// Each is walkable. Every hazard needs a dry route at least two cells wide
+/// past it, and none may
 /// sit on the start room, a maze section or a threshold.
 fn check_hazards(level: &Level, small: &[bool], errors: &mut Vec<String>) {
     let tiles = &level.tiles;
@@ -368,6 +368,14 @@ fn check_hazards(level: &Level, small: &[bool], errors: &mut Vec<String>) {
         }
     } else if !level.objects.steam_grates.is_empty() || !level.objects.ink_pads.is_empty() {
         errors.push(format!("{theme:?} has hazards it should not have"));
+    }
+
+    if theme == Theme::Sewer {
+        if let Some(opening) = &level.objects.sewer_opening {
+            clear(opening.drip_shaft.cell, "drip shaft", errors);
+        } else {
+            errors.push("Sewer is missing its opening encounters".to_owned());
+        }
     }
 }
 

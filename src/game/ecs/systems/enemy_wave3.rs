@@ -502,6 +502,13 @@ fn pillbug_tick(
         return;
     }
     e.w3.curl_cd = (e.w3.curl_cd - dt).max(0.0);
+    if e.w3.opening_curl {
+        e.vel = Vec2::ZERO;
+        if e.pos.dist(ppos) > PILLBUG_TRIGGER_RANGE {
+            return;
+        }
+        e.w3.opening_curl = false;
+    }
     if e.w3.curl_t > 0.0 {
         e.w3.curl_t -= dt;
         e.vel = Vec2::ZERO;

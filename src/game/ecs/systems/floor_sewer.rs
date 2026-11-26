@@ -37,12 +37,84 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::ecs::components::SpawnId;
-use crate::game::ecs::constants::PLAYER_RADIUS;
-use crate::game::ecs::resources::{SfxQueue, TickInput};
+use crate::game::ecs::constants::{ENEMY_CAP, PLAYER_RADIUS};
+use crate::game::ecs::resources::{
+    Cvars, DebugFlags, LevelIndex, NextEnemyId, NextSpawnId, RunCounters, SfxQueue, TickInput,
+    Viewport,
+};
+use crate::game::ecs::systems::{enemy_wave3::PILLBUG_CURL_SECS, spawn::off_screen};
 use crate::game::enemy::{Enemy, EnemyKind};
+use crate::game::gem::{Pickup, PickupKind};
 use crate::game::level::Level;
 use crate::game::player::Player;
 use crate::math::Vec2;
+
+const OPENING_PILLBUGS_AT: f32 = 22.0;
+pub(super) const OPENING_BOTTLE_CAP_AT: f32 = 90.0;
+
+#[derive(Default)]
+pub struct OpeningSpawns {
+    pillbugs: bool,
+    bottle_cap: bool,
+}
+
+/// Fixed Sewer encounters, with no director roll and no run rng draws.
+/// If the room is on-screen at 0:22, hold the pair until both can enter unseen.
+pub fn sewer_opening_system(
+    mut commands: Commands,
+    level: Res<Level>,
+    level_index: Res<LevelIndex>,
+    counters: Res<RunCounters>,
+    player: Res<Player>,
+    viewport: Res<Viewport>,
+    debug: Res<DebugFlags>,
+    cvars: Res<Cvars>,
+    enemies: Query<&Enemy>,
+    mut next_id: ResMut<NextSpawnId>,
+    mut next_enemy_id: ResMut<NextEnemyId>,
+    mut spawned: Local<OpeningSpawns>,
+) {
+    let Some(opening) = level.objects.sewer_opening.as_ref().filter(|_| level_index.0 == 0) else {
+        return;
+    };
+    let elapsed = counters.elapsed;
+    if !spawned.pillbugs && elapsed >= OPENING_PILLBUGS_AT && !debug.peace {
+        let cap = if cvars.enemy_cap == 0 {
+            ENEMY_CAP
+        } else {
+            cvars.enemy_cap
+        };
+        if enemies.iter().count() + 2 < cap {
+            let mut hidden = opening
+                .pillbug_cells
+                .iter()
+                .copied()
+                .filter(|&p| off_screen(p, player.pos, viewport.0));
+            if let (Some(a), Some(b)) = (hidden.next(), hidden.next()) {
+                for pos in [a, b] {
+                    let mut enemy = Enemy::spawn_fixed(EnemyKind::Pillbug, pos, 1.0);
+                    enemy.id = next_enemy_id.take();
+                    enemy.facing = (player.pos - pos).normalized();
+                    enemy.w3.curl_t = PILLBUG_CURL_SECS;
+                    enemy.w3.opening_curl = true;
+                    commands.spawn((enemy, next_id.take()));
+                }
+                spawned.pillbugs = true;
+            }
+        }
+    }
+    if !spawned.bottle_cap && elapsed >= OPENING_BOTTLE_CAP_AT {
+        commands.spawn((
+            Pickup {
+                pos: opening.bottle_cap,
+                kind: PickupKind::BottleCap,
+                bob: 0.0,
+            },
+            next_id.take(),
+        ));
+        spawned.bottle_cap = true;
+    }
+}
 
 // ---- Pipe Eel -------------------------------------------------------------
 
@@ -435,9 +507,93 @@ mod tests {
     use crate::game::collision::TileMap;
     use crate::game::level::{Theme, MAP_COLS, MAP_ROWS};
     use crate::game::world::World;
-    use rand::SeedableRng;
+    use rand::{RngExt, SeedableRng};
 
     const DT: f32 = 1.0 / 60.0;
+
+    fn tick_opening(w: &mut World, elapsed: f32) {
+        w.elapsed = elapsed;
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.run_system_cached(sewer_opening_system).unwrap();
+        w.end_tick();
+    }
+
+    #[test]
+    fn sewer_opening_pillbugs_spawn_curled_at_22_seconds_without_rng() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.viewport = Vec2::new(40.0, 40.0);
+        let cells = &w.level.objects.sewer_opening.as_ref().unwrap().pillbug_cells;
+        let expected = [cells[0], cells[1]];
+        let next_rng = w.rng.clone().random::<u64>();
+        tick_opening(&mut w, 22.0 - DT);
+        assert_eq!(w.enemy_count(), 0);
+        tick_opening(&mut w, 22.0);
+        let enemies = w.enemies();
+        assert_eq!(enemies.len(), 2);
+        for (e, pos) in enemies.iter().zip(expected) {
+            assert_eq!(e.kind, EnemyKind::Pillbug);
+            assert_eq!(e.pos, pos);
+            assert!(off_screen(e.pos, w.player.pos, w.viewport));
+            assert!(e.w3.opening_curl);
+            assert_eq!(e.w3.curl_t, PILLBUG_CURL_SECS);
+        }
+        tick_opening(&mut w, 23.0);
+        assert_eq!(w.enemy_count(), 2);
+        assert_eq!(w.rng.clone().random::<u64>(), next_rng);
+    }
+
+    #[test]
+    fn sewer_opening_waits_until_both_pillbugs_are_off_screen() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.viewport = w.level.arena;
+        tick_opening(&mut w, 22.0);
+        assert_eq!(w.enemy_count(), 0);
+        w.viewport = Vec2::new(40.0, 40.0);
+        tick_opening(&mut w, 22.0 + DT);
+        assert_eq!(w.enemy_count(), 2);
+    }
+
+    #[test]
+    fn sewer_opening_places_one_bottle_cap_at_90_seconds() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.difficulty_override = Some(0); // Sewer practice uses this override.
+        let pos = w.level.objects.sewer_opening.as_ref().unwrap().bottle_cap;
+        tick_opening(&mut w, 90.0 - DT);
+        assert!(w.pickups().is_empty());
+        tick_opening(&mut w, 90.0);
+        tick_opening(&mut w, 91.0);
+        let caps = w.pickups();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].kind, PickupKind::BottleCap);
+        assert_eq!(caps[0].pos, pos);
+
+        w.player.pos = pos;
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.run_system_cached(super::super::loot::pickups_system).unwrap();
+        w.end_tick();
+        assert_eq!(w.last_pickups(), &[PickupKind::BottleCap]);
+        assert!(w.player.buffs.shield > 0.0);
+        tick_opening(&mut w, 92.0);
+        assert!(w.pickups().is_empty());
+    }
+
+    #[test]
+    fn sewer_opening_is_absent_on_later_levels_and_other_themes() {
+        let mut later = World::new_level_with_theme(
+            1,
+            Theme::Sewer,
+            7,
+            crate::game::loadout::Loadout::starting(),
+            Default::default(),
+        );
+        let mut other = World::new(Theme::Kitchen, 7);
+        for w in [&mut later, &mut other] {
+            assert!(w.level.objects.sewer_opening.is_none());
+            tick_opening(w, 90.0);
+            assert_eq!(w.enemy_count(), 0);
+            assert!(w.pickups().is_empty());
+        }
+    }
 
     fn open_floor(w: &mut World) {
         w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);

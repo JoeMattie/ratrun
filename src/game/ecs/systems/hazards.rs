@@ -1,4 +1,4 @@
-//! The wave 3 floor hazards: steam grates (Laundry) and ink pads (Printworks).
+//! Walkable floor hazards: drip shaft (Sewer), steam grates and ink pads.
 //!
 //! Both hazards are **walkable floor** and live in
 //! [`LevelObjects`](crate::game::level::LevelObjects) as
@@ -51,7 +51,7 @@ use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::hazards::{INK_SLOW, STEAM_DAMAGE};
+use crate::game::hazards::{DripPhase, DRIP_ARM_PX, DRIP_DAMAGE, DRIP_HALF, INK_SLOW, STEAM_DAMAGE};
 use crate::game::level::Level;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::vfx;
@@ -94,7 +94,7 @@ fn apply_player_slow(input: &mut TickInput, player: &mut Player, mult: f32) {
     player.vel = player.vel.clamp_len(cap);
 }
 
-/// Advance every steam grate and apply the ink pads for one tick.
+/// Advance the drip shaft and steam grates and apply the ink pads for one tick.
 pub fn hazards_system(
     mut input: ResMut<TickInput>,
     mut player: ResMut<Player>,
@@ -112,16 +112,35 @@ pub fn hazards_system(
     let dt = input.dt;
     let pads_exist = !level.objects.ink_pads.is_empty();
     let grates_exist = !level.objects.steam_grates.is_empty();
-    if !pads_exist && !grates_exist {
+    if !pads_exist && !grates_exist && level.objects.sewer_opening.is_none() {
         return;
     }
 
     let player_pos = player.pos;
     let player_alive = player.alive();
-    // Exactly `player_system`'s dash condition: a dash that will happen this
-    // tick, or one in progress, ignores both hazards.
+    // Match the ordinary dash condition so the drip and ink leave a dash
+    // alone on the same tick it begins.
     let player_dash_now = input.dash && player.dash_cd <= 0.0;
     let player_dashing = player.dash_active > 0.0;
+
+    if let Some(opening) = &mut level.objects.sewer_opening {
+        let shaft = &mut opening.drip_shaft;
+        let offset = player_pos - shaft.pos;
+        shaft.tick(dt, player_alive && offset.len_sq() <= DRIP_ARM_PX * DRIP_ARM_PX);
+        // Test the rat's centre against the exact square drawn for the tell.
+        if shaft.phase == DripPhase::Splash
+            && !shaft.player_struck
+            && player_alive
+            && !player_dashing
+            && !player_dash_now
+            && (-DRIP_HALF..DRIP_HALF).contains(&offset.x)
+            && (-DRIP_HALF..DRIP_HALF).contains(&offset.y)
+            && player.take_damage(DRIP_DAMAGE)
+        {
+            shaft.player_struck = true;
+            sfx.0.push(Sfx::Hurt);
+        }
+    }
 
     // ---- ink: the rat -----------------------------------------------------
     //
@@ -589,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_theme_without_hazards_draws_nothing_and_does_nothing() {
-        let mut world = World::new(Theme::Sewer, 3);
+        let mut world = World::new(Theme::Kitchen, 3);
         assert!(world.level.objects.steam_grates.is_empty());
         assert!(world.level.objects.ink_pads.is_empty());
         // Nothing to step and nothing to draw: a tick with no hazards must not
@@ -598,6 +617,49 @@ mod tests {
         tick(&mut world, 1.0 / 60.0);
         assert_eq!(world.player.hp, hp);
         assert_eq!(ink_multiplier_at(&world.level, world.player.pos, 3.0), 1.0);
+    }
+
+    #[test]
+    fn sewer_drip_shaft_arms_warns_hits_one_tile_and_repeats() {
+        use crate::game::hazards::{DRIP_REST_SECS, DRIP_SPLASH_SECS, DRIP_WARN_SECS};
+        let mut w = World::new(Theme::Sewer, 7);
+        let shaft = |w: &World| w.level.objects.sewer_opening.as_ref().unwrap().drip_shaft;
+        let tick = |w: &mut World, dt| {
+            w.begin_tick(dt, Vec2::ZERO, false);
+            w.ecs.run_system_cached(hazards_system).unwrap();
+            w.end_tick();
+        };
+        let pos = shaft(&w).pos;
+        let hp = w.player.hp;
+        w.player.pos = pos + Vec2::new(DRIP_ARM_PX + 1.0, 0.0);
+        tick(&mut w, 0.1);
+        assert_eq!(shaft(&w).phase, DripPhase::Idle);
+        w.player.pos = pos + Vec2::new(DRIP_ARM_PX, 0.0);
+        tick(&mut w, 0.1);
+        assert_eq!(shaft(&w).phase, DripPhase::Warning);
+        tick(&mut w, DRIP_WARN_SECS - 0.125);
+        assert_eq!(shaft(&w).phase, DripPhase::Warning);
+        assert_eq!(w.player.hp, hp);
+
+        w.player.pos = pos + Vec2::new(DRIP_HALF, 0.0);
+        tick(&mut w, 0.125);
+        assert_eq!(shaft(&w).phase, DripPhase::Splash);
+        assert_eq!(w.player.hp, hp);
+        w.player.pos = pos;
+        tick(&mut w, 0.01);
+        assert_eq!(w.player.hp, hp - DRIP_DAMAGE);
+        w.player.iframes = 0.0;
+        tick(&mut w, 0.01);
+        assert_eq!(w.player.hp, hp - DRIP_DAMAGE);
+
+        tick(&mut w, DRIP_SPLASH_SECS);
+        assert_eq!(shaft(&w).phase, DripPhase::Resting);
+        tick(&mut w, DRIP_REST_SECS - 0.125);
+        assert_eq!(shaft(&w).phase, DripPhase::Resting);
+        tick(&mut w, 0.125);
+        assert_eq!(shaft(&w).phase, DripPhase::Warning);
+        tick(&mut w, DRIP_WARN_SECS);
+        assert_eq!(w.player.hp, hp - 2.0 * DRIP_DAMAGE);
     }
 
     #[test]

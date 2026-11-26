@@ -1949,7 +1949,7 @@ fn last_resort(level: &Level, player: &Player, viewport: Vec2, base: f32) -> Vec
 /// the *widest* box, so a spawn is out of sight at every rung of the zoom
 /// ladder instead of only at the unzoomed one.
 #[inline]
-fn off_screen(p: Vec2, player: Vec2, viewport: Vec2) -> bool {
+pub(super) fn off_screen(p: Vec2, player: Vec2, viewport: Vec2) -> bool {
     let view = widest_view(viewport);
     let d = p - player;
     let hw = view.x * 0.5 + OFF_SCREEN_MARGIN;

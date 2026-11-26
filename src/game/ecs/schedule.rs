@@ -12,17 +12,18 @@
 //! |---|--------|-------------|
 //! | -1 | `powerups::powerups_system` | wave-3 pocket-find timers (new) |
 //! | 0 | `traps::traps_system` | floor traps (sticky boards, mousetraps); before the player |
-//! | 0b | `hazards::hazards_system` | steam grates + ink pads (Laundry / Printworks only); explicitly after 0 and before 1 |
+//! | 0b | `hazards::hazards_system` | drip shaft, steam grates and ink pads; explicitly after 0 and before 1 |
 //! | 0c | `floor_sewer::floor_sewer_slow_system` | the Sump Leech's tongue slow folded into this tick's throttle (Sewer); explicitly after 0b and before 1 |
 //! | 1 | `player::player_system` | `update_player` |
 //! | 1a | `miniboss_shapes::record_rat_track` | sample the post-move rat into the Wake/Drip history; no rng |
-//! | 1b | `puddles::puddle_steps_system` | wet-floor footsteps + ripples; reads this tick's rat position and `dash_active` and writes only `SfxQueue` and the cosmetic `PuddleSteps` |
+//! | 1b | `puddles::puddle_steps_system` | trench puddle expiry, wet-floor footsteps and ripples; explicitly after 1a and before 2 |
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
 //! | 2a | `gates::{passage,cache,door}_system` | rat-holes, the maze cache, one-way doors (new); explicitly after 2 and before 3 |
 //! | 2b | `shop::threshold_system` | the mouse-hole shops' thresholds (new); chained right after the doors |
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
 //! | 4 | `spawn::director_system` | `run_director` |
-//! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); explicitly after 4 and before 4b |
+//! | 4 | `floor_sewer::sewer_opening_system` | fixed Sewer encounters; after the director and before 4a |
+//! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); before 4b |
 //! | 4b | `boss::boss_spawn_system` | boss hand-off (reads `BossDue`) |
 //! | 4c | `boss::megarat::boss_summon_system` | a boss's `Call` spawns its rats here, outside the `EnemyIndex` window |
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
@@ -170,11 +171,8 @@ pub fn build_tick_schedule() -> Schedule {
             .before(player::player_system),
     );
 
-    // 1b: wet-floor footsteps, chained immediately after the rat recorder. It reads
-    // this tick's rat position, `dash_active` and the puddle test and writes
-    // **only** the `SfxQueue` and the cosmetic `PuddleSteps` resource: no rng, no
-    // entity, no simulated number (the rat is not slowed). Before the fog
-    // reveal so its order against the rest of the tick is fixed and obvious.
+    // 1b: expire temporary puddles, then use this tick's rat position and
+    // `dash_active` after the rat recorder for wet-floor footsteps. Before the fog reveal.
     schedule.add_systems(
         puddles::puddle_steps_system
             .after(super::systems::miniboss_shapes::record_rat_track)
@@ -293,7 +291,8 @@ pub fn build_tick_schedule() -> Schedule {
     // its chest is dropped by the reap itself (rows 17 and 20). That is what
     // makes the chest path-independent: whatever killed it, it is reaped.
     schedule.add_systems(
-        miniboss::miniboss_system
+        (floor_sewer::sewer_opening_system, miniboss::miniboss_system)
+            .chain()
             .after(spawn::director_system)
             .before(boss::boss_spawn_system),
     );

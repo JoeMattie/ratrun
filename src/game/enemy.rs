@@ -866,6 +866,8 @@ pub struct W3 {
     pub bar_dir: Vec2,
     /// The crossbar has already taken its one bite out of the rat.
     pub bar_spent: bool,
+    /// The Sewer's two opening Pillbugs hold their first curl until approached.
+    pub opening_curl: bool,
 }
 
 impl Default for W3 {
@@ -889,6 +891,7 @@ impl Default for W3 {
             bar_pos: Vec2::ZERO,
             bar_dir: Vec2::ZERO,
             bar_spent: false,
+            opening_curl: false,
         }
     }
 }
@@ -1104,6 +1107,11 @@ impl Enemy {
             rng.random_range(0.0..std::f32::consts::TAU),
             rng.random_range(0.0..std::f32::consts::TAU),
         )
+    }
+
+    /// An authored body with fixed initial gait and firing phases.
+    pub(crate) fn spawn_fixed(kind: EnemyKind, pos: Vec2, hp_mult: f32) -> Self {
+        Self::spawn_with_phases(kind, pos, hp_mult, 1.0, 0.0, 0.0)
     }
 
     pub(crate) fn spawn_with_phases(

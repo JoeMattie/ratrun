@@ -233,6 +233,10 @@ fn reap_dead(
             .map(|(entity, id, _)| (id.0, entity)),
     );
     dead.sort_unstable_by_key(|&(id, _)| id);
+    // The first Sewer sector puts its guaranteed Bottle Cap on the floor
+    // before any enemy can roll a rare pickup.
+    let rare_drops_open = level.objects.sewer_opening.is_none()
+        || counters.elapsed >= super::floor_sewer::OPENING_BOTTLE_CAP_AT;
 
     for &(id, entity) in dead.iter() {
         let Ok((_, _, e)) = enemies.get(entity) else {
@@ -278,23 +282,24 @@ fn reap_dead(
         // Rare pickup drops. The nest's Luck track scales the **chance** this
         // roll is compared against (never the number of draws), so a lucky run
         // makes the same rng calls in the same order as an unlucky one.
-        let drop_chance = if e.kind == EnemyKind::Boss {
-            1.0
-        } else if big {
-            0.12
-        } else {
-            0.012
-        };
-        let drop_chance = (drop_chance * luck).min(1.0);
-        let loot_roll = rng.random::<f32>();
-        if loot_roll < drop_chance {
-            let kind = roll_pickup_kind(rng);
-            let pickup = Pickup {
-                pos: e.pos,
-                kind,
-                bob: 0.0,
+        if rare_drops_open || e.kind == EnemyKind::Boss {
+            let drop_chance = if e.kind == EnemyKind::Boss {
+                1.0
+            } else if big {
+                0.12
+            } else {
+                0.012
             };
-            commands.spawn((pickup, next_id.take()));
+            let drop_chance = (drop_chance * luck).min(1.0);
+            if rng.random::<f32>() < drop_chance {
+                let kind = roll_pickup_kind(rng);
+                let pickup = Pickup {
+                    pos: e.pos,
+                    kind,
+                    bob: 0.0,
+                };
+                commands.spawn((pickup, next_id.take()));
+            }
         }
         // A miniboss's 12 gold is queued with its chest (section 6), so it
         // skips the ordinary gold roll.
@@ -1190,6 +1195,27 @@ mod tests {
         assert_eq!(w.gems()[0].value, 1);
         assert_eq!(w.gems()[0].pos, pos, "the gem drops at the corpse");
         assert!(w.sfx.contains(&Sfx::Kill));
+    }
+
+    #[test]
+    fn sewer_opening_bottle_cap_precedes_rare_enemy_drop_rolls() {
+        for (theme, elapsed, drops) in [
+            (Theme::Sewer, 89.0, 0),
+            (Theme::Sewer, 90.0, 1),
+            (Theme::Kitchen, 89.0, 1),
+        ] {
+            let mut w = World::new(theme, 7);
+            w.elapsed = elapsed;
+            w.player.loadout.stats.luck_mult = 100.0;
+            let pos = w.player.pos;
+            let corpse = w.spawn_enemy(EnemyKind::Skitterer, pos, 1.0);
+            w.ecs.get_mut::<Enemy>(corpse).unwrap().hp = 0.0;
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(reap_enemies_system).unwrap();
+            w.end_tick();
+            assert_eq!(w.pickups().len(), drops);
+            assert_eq!(w.gems().len(), 1);
+        }
     }
 
     /// A Nuke clears the ordinary horde but only *chunks* a named miniboss

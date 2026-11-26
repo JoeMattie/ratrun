@@ -419,11 +419,14 @@ impl World {
     /// its level and lands here.
     pub fn with_level(
         level_index: usize,
-        level: Level,
+        mut level: Level,
         seed: u64,
         carried: Loadout,
         carried_totals: CampaignTotals,
     ) -> World {
+        if level_index != 0 {
+            level.objects.sewer_opening = None;
+        }
         let theme = level.theme;
         let center = level.start;
         // Captured **before** `carried` is moved into the player below: the nest
@@ -3173,6 +3176,13 @@ impl World {
     fn draw_hostile_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
         let viewport = self.render_viewport;
 
+        if let Some(opening) = &self.level.objects.sewer_opening {
+            let shaft = &opening.drip_shaft;
+            if on_screen(self.w2s(shaft.pos, cam), 24.0, viewport) {
+                art_floor::draw_drip_shaft(pb, shaft, cam);
+            }
+        }
+
         // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground
         // hazard the rat steps out of, so the ring is a warning, not decor.
         {
@@ -3808,7 +3818,7 @@ impl World {
     /// cut out of it. Render-only — nothing here writes an entity, an rng or a
     /// simulated value.
     fn draw_puddles(&mut self, pb: &mut PixelBuffer, cam: Vec2, viewport: Vec2) {
-        if self.level.puddles.is_empty() {
+        if self.level.standing_water().next().is_none() {
             return;
         }
         let pen = pb.set_pen(crate::render::lighting::pool_pen());
@@ -3829,14 +3839,14 @@ impl World {
             seed: 0,
         }; PUDDLES_IN_VIEW];
         let mut count = 0;
-        for puddle in &self.level.puddles {
+        for puddle in self.level.standing_water() {
             let margin = puddle.rx.max(puddle.ry) + 2.0;
             if on_screen(self.w2s(puddle.pos, cam), margin, viewport) && count < PUDDLES_IN_VIEW {
                 seen[count] = *puddle;
                 count += 1;
             }
         }
-        for puddle in &self.level.puddles {
+        for puddle in self.level.standing_water() {
             let margin = puddle.rx.max(puddle.ry) + 2.0;
             if !on_screen(self.w2s(puddle.pos, cam), margin, viewport) {
                 continue;

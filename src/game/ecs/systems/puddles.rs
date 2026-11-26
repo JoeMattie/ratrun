@@ -3,9 +3,9 @@
 //!
 //! The owner's brief: *"the rat should make little splashing sounds when walking
 //! over \[very wet floor\]"*. This system is the whole of the gameplay half of
-//! standing water — it reads [`Level::wet_at`] and the rat's movement and writes
-//! only [`SfxQueue`] and the cosmetic [`PuddleSteps`] resource the renderer
-//! reads.
+//! standing water. It expires Corkscrew's temporary puddles, then reads
+//! [`Level::wet_at`] and the rat's movement to write [`SfxQueue`] and the
+//! cosmetic [`PuddleSteps`] resource the renderer reads.
 //!
 //! ## What makes a sound (and what does not)
 //!
@@ -32,12 +32,8 @@
 //!
 //! ## Determinism
 //!
-//! No rng draw, no entity spawn or despawn, no write to any simulated number —
-//! the rat is **not** slowed, no body is moved, nothing is read back. The
-//! golden traces fold the rat, the enemies, the counters and the entity
-//! populations; they do not fold [`SfxQueue`] or [`PuddleSteps`], so the
-//! goldens cannot move for this system (pinned by
-//! `puddle_steps_change_no_simulated_state`).
+//! This step draws no rng, changes no entities and never slows the rat. The
+//! temporary water first appears with Corkscrew, beyond the golden window.
 //!
 //! The slot table is keyed by `SpawnId` order rather than by a component, so a
 //! body that leaves the first six hands its slot back and the cooldowns can
@@ -54,7 +50,7 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{
-    EnemyRippleSlot, PuddleSteps, Ripple, SfxQueue, TickInput, Viewport,
+    EnemyRippleSlot, PuddleSteps, Ripple, RunCounters, SfxQueue, TickInput, Viewport,
 };
 use crate::game::ecs::systems::approach::in_sim_view;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -98,7 +94,8 @@ pub fn on_the_floor(theme: Theme, kind: EnemyKind) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn puddle_steps_system(
     input: Res<TickInput>,
-    level: Res<Level>,
+    counters: Res<RunCounters>,
+    mut level: ResMut<Level>,
     player: Res<Player>,
     viewport: Res<Viewport>,
     mut sfx: ResMut<SfxQueue>,
@@ -107,6 +104,9 @@ pub fn puddle_steps_system(
     mut order: Local<Vec<(u64, Vec2)>>,
 ) {
     let dt = input.dt.max(0.0);
+    if !level.objects.trench_puddles.is_empty() {
+        level.objects.trench_puddles.retain(|scar| scar.expires_at > counters.elapsed);
+    }
 
     // Ripples age (and die) every tick, wet floor or not: they are cosmetic
     // and must not freeze when the rat walks off the puddle.
@@ -120,7 +120,7 @@ pub fn puddle_steps_system(
         }
     }
 
-    if level.puddles.is_empty() {
+    if level.standing_water().next().is_none() {
         // A dry floor: nothing to accumulate and no state worth keeping.
         steps.dist = 0.0;
         steps.last_wet = false;
