@@ -329,6 +329,11 @@ pub struct World {
     /// the App). Render-only: read where `draw_scene` builds the camera and
     /// nowhere else, so no system can see it and no golden can move.
     pub shake_scale: f32,
+    /// Remaining seconds (`0.0..=hud::LEVEL_RING_SECS`) of the render-only
+    /// golden ring + star burst around the rat on a character level-up. Driven
+    /// by `HudState` via `App::draw_game` and included in `PictureKey`; never
+    /// touched by the simulation schedule or RNG.
+    pub level_up_ring: f32,
     pub smoke_enabled: bool,
     light_map: LightMap,
     smoke: SmokeLayer,
@@ -642,6 +647,7 @@ impl World {
             lighting: LightingMode::default_for_depth(crate::term::color_depth()),
             lighting_depth: crate::term::color_depth(),
             shake_scale: SHAKE_SCALE,
+            level_up_ring: 0.0,
             smoke_enabled: true,
             light_map: LightMap::new(),
             smoke: SmokeLayer::new(seed, theme),
@@ -3229,6 +3235,14 @@ impl World {
             }
         }
 
+        // Render-only level-up ring + star glints around the rat: self-lit
+        // (after `apply_lighting` so dark floors and blackouts never dim it)
+        // and under the foreground + hostile layers so enemy shots and tells
+        // always win the pixel.
+        if !self.hide_rat && self.level_up_ring > 0.0 {
+            self.draw_level_up_ring(pb, cam);
+        }
+
         // Parallax foreground layer: overhead things nearer the eye than the
         // floor, drawn at world resolution (so it works at every zoom) after
         // the lighting pass — a fixed darkening instead of a per-pixel light —
@@ -3262,6 +3276,107 @@ impl World {
         // collision shapes the simulation actually uses. Nothing may hide it.
         if self.hitboxes {
             self.draw_hitboxes(pb, cam);
+        }
+    }
+
+    /// Render-only level-up burst around the rat: a crisp, hollow expanding
+    /// golden ring with a trailing inner harmonic ring and eight tiny star
+    /// glints. Pure math from `self.level_up_ring` (no RNG, no particles, no
+    /// allocation) so the determinism goldens cannot see it, and drawn with
+    /// additive blending so floor detail and the rat stay clear.
+    #[allow(clippy::disallowed_methods)]
+    fn draw_level_up_ring(&self, pb: &mut PixelBuffer, cam: Vec2) {
+        let total = crate::render::hud::LEVEL_RING_SECS;
+        let u = (1.0 - self.level_up_ring / total).clamp(0.0, 1.0);
+        if u >= 1.0 {
+            return;
+        }
+        // Align with the floating diver body on the Outfall seabed.
+        let diver_lift = if self.level.theme == Theme::Outfall
+            && !self.level.objects.rat_in_crab_pot()
+        {
+            art_rat::DIVER_LIFT * self.player.buffs.draw_scale().clamp(0.45, 3.2)
+        } else {
+            0.0
+        };
+        let center = self.player.pos - Vec2::new(0.0, diver_lift);
+        let (cx, cy) = self.w2s(center, cam);
+        let base_r = self.player.buffs.hurt_radius().clamp(2.5, 16.0);
+        if !on_screen((cx, cy), base_r + 22.0, self.render_viewport) {
+            return;
+        }
+
+        let ease = 1.0 - (1.0 - u).powi(3);
+        let r_main = base_r + 2.2 + ease * 13.5;
+        let fade = (1.0 - u).powf(1.35);
+        let ring_rgb = palette::ramp(
+            &[
+                (0.0, (255, 252, 220)),
+                (0.35, (255, 214, 88)),
+                (0.75, (244, 172, 54)),
+                (1.0, (186, 112, 32)),
+            ],
+            u,
+        );
+
+        let inner_active = (0.06..0.78).contains(&u);
+        let u2 = ((u - 0.06) / 0.72).clamp(0.0, 1.0);
+        let r_inner = base_r + 1.4 + (1.0 - (1.0 - u2).powi(2)) * 8.8;
+        let inner_fade = (1.0 - u2).powi(2) * 0.52;
+
+        let reach = (r_main.ceil() as i32) + 2;
+        let min_r = (base_r + 0.5).max(2.0);
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                let d = ((dx * dx + dy * dy) as f32).sqrt();
+                if d < min_r || d > r_main + 1.3 {
+                    continue;
+                }
+                let mut add = (0u8, 0u8, 0u8);
+                let dm = (d - r_main).abs();
+                if dm <= 1.15 {
+                    let w = (1.0 - dm / 1.15) * fade * 0.92;
+                    add = palette::add(add, palette::scale(ring_rgb, w));
+                }
+                if inner_active {
+                    let di = (d - r_inner).abs();
+                    if di <= 1.0 {
+                        let w = (1.0 - di) * inner_fade;
+                        add = palette::add(add, palette::scale((255, 206, 152), w));
+                    }
+                }
+                if add != (0, 0, 0) {
+                    pb.plot_add(cx + dx, cy + dy, add);
+                }
+            }
+        }
+
+        // Eight crisp radial star glints riding the ring front without hiding
+        // adjacent floor cells.
+        if u < 0.78 {
+            let glint_fade = ((0.78 - u) / 0.78).clamp(0.0, 1.0);
+            for k in 0..8u8 {
+                let major = k.is_multiple_of(2);
+                if !major && u > 0.55 {
+                    continue;
+                }
+                let angle = f32::from(k) * (std::f32::consts::TAU / 8.0) + u * 0.32;
+                let dist = if major {
+                    r_main + 1.4 * (1.0 - u)
+                } else {
+                    r_main * 0.84
+                };
+                let gx = cx + (angle.cos() * dist).round() as i32;
+                let gy = cy + (angle.sin() * dist).round() as i32;
+                let core = palette::scale((255, 252, 228), glint_fade * if major { 0.95 } else { 0.65 });
+                pb.plot_add(gx, gy, core);
+                if major && u < 0.36 {
+                    let arm = palette::scale((255, 214, 96), glint_fade * 0.55);
+                    for &(ox, oy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        pb.plot_add(gx + ox, gy + oy, arm);
+                    }
+                }
+            }
         }
     }
 
