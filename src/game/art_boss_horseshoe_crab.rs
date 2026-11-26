@@ -65,10 +65,14 @@
 //! ## The burrow
 //!
 //! `BurrowTell` marks a circle under the rat; at [`BURROW_LOCK_PROGRESS`] the
-//! circle freezes and the crab goes under (it is **ungrounded** for the whole
-//! dive and takes no contact at all). It comes up under the mark
-//! ([`burrow_circle`]) for [`EMERGE_DAMAGE`], then spends [`RECOVER`] s dazed in
-//! its own crater, which is the second punish.
+//! circle freezes and the shell goes down into the spoil. The dive is **visible
+//! travel**: a mound of wet spoil with the crown of the dome and the gill fans
+//! breaking out of it is drawn at the shell's true position and moves to the mark
+//! at [`BURROW_TRAVEL_SPEED`], never faster than the crab's own sprint. It takes
+//! no contact while it travels (nothing is above the swell), but the shell under
+//! the mound keeps its grounded hit box, so a dive is no free escape. It comes up
+//! under the mark ([`burrow_circle`]) for [`EMERGE_DAMAGE`], then spends
+//! [`RECOVER`] s dazed in its own crater, which is the second punish.
 //!
 //! ## The flip
 //!
@@ -280,11 +284,17 @@ pub const BURROW_TELL: [f32; 3] = [1.15, 1.05, 0.95];
 /// The mark freezes here.
 pub const BURROW_LOCK_PROGRESS: f32 = 0.55;
 
-/// The dive: it sinks out of sight.
+/// The dive: it sinks into the spoil.
 pub const BURROW_SINK: f32 = 0.50;
 
-/// The run under the floor.
+/// Formerly the fixed run under the floor. The dive is now **visible**: the
+/// ground it covers is timed at [`BURROW_TRAVEL_SPEED`] instead, so this is only
+/// the shortest the mound may spend down there.
 pub const BURROW_TRAVEL: f32 = 0.50;
+
+/// Top speed of the travelling spoil mound (px/s): the crab's own bulldoze
+/// speed, so a dive can never outrun a sprint, let alone teleport.
+pub const BURROW_TRAVEL_SPEED: [f32; 3] = BULLDOZE_SPEED;
 
 /// The eruption.
 pub const EMERGE: f32 = 0.40;
@@ -486,20 +496,16 @@ pub fn is_exposed(state: CrabState) -> bool {
     matches!(state, CrabState::Wedged | CrabState::Flipped | CrabState::Death)
 }
 
-/// Is the crab under the floor (unhittable)?
-#[inline]
-pub fn is_underground(state: CrabState) -> bool {
-    matches!(state, CrabState::Burrow)
-}
-
 /// The exact world-space hit shapes: `[dome box, gill circle]`.
 ///
-/// The dome is ungrounded while the crab is under the floor; the gill circle
-/// only exists while the shell is off, which is what makes auto-aim and every
-/// ground weapon turn to it in the punish window.
+/// Every shape is grounded: even mid-burrow the shell is right under the mound
+/// the renderer draws, and a drawn body must be a hittable body (a dive used to
+/// be a free, invisible escape; it no longer is). The gill circle only exists
+/// while the shell is off, which is what makes auto-aim and every ground weapon
+/// turn to it in the punish window.
 pub fn hit_shapes(view: &CrabView) -> [CrabHit; 2] {
     let f = unit_facing(view);
-    let grounded = !is_underground(view.state);
+    let grounded = true;
     let (center, facing, half, half_perp) = dome_box(view);
     [
         CrabHit {
@@ -951,7 +957,8 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
     // Drop shadow under the dome (wider than tall: the shell is flat).
     let shadow_a = match view.state {
         CrabState::Death => 0.10,
-        CrabState::Burrow => 0.0,
+        // The mound is above the floor, so it still casts.
+        CrabState::Burrow => 0.20,
         _ => 0.34,
     };
     if shadow_a > 0.0 {
@@ -1182,8 +1189,9 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
         }
     }
 
-    // The diegetic ground HP arc (centred, like the other bosses).
-    if !matches!(view.state, CrabState::Death | CrabState::Burrow) && view.hp_frac > 0.0 {
+    // The diegetic ground HP arc (centred, like the other bosses). It follows the
+    // mound through a dive too: the body is drawn (and hittable) there.
+    if !matches!(view.state, CrabState::Death) && view.hp_frac > 0.0 {
         let hp = view.hp_frac.clamp(0.0, 1.0);
         let col = if hp <= CRITICAL_HP_FRAC {
             WARN_RED
@@ -1212,6 +1220,63 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
     // A faint rim tying the crab to the floor's palette.
     if !matches!(view.state, CrabState::Death | CrabState::Burrow) {
         ring(pb, c, DOME_HALF_PERP + 5.0 * BODY_SCALE, mix(accent, SHELL_MID, 0.6), 0.08, 1.0);
+    }
+}
+
+/// The dive, on screen: a mound of wet spoil at the shell's true position, with
+/// the crown of the dome and the rear gill fans breaking out of it and a trail
+/// of thrown grit behind. Painted from `view.pos` every tick, so the whole
+/// travel is readable and the crab can never leave at A and appear at B.
+fn draw_spoil_mound(pb: &mut PixelBuffer, view: &CrabView, c: &Vec2, f: Vec2, p: f32) {
+    let perp = f.perp();
+    let anim = view.anim;
+    let pulse = 0.5 + 0.5 * (anim * 8.5).sin();
+    let settle = smoothstep(p);
+    let hump = (0.85 + 0.15 * settle) * BODY_SCALE;
+    let spoil = (96, 82, 56);
+    let spoil_hi = (140, 122, 84);
+    let spoil_lo = (52, 42, 28);
+
+    // The swell: overlapping discs along the travel bearing (front and back
+    // differ a little so it reads as a mound, not a ball).
+    for (along, across, r) in [
+        (5.5, 0.0, 7.0),
+        (0.0, 3.0, 9.5),
+        (0.0, -3.0, 9.5),
+        (-4.5, 0.0, 8.0),
+    ] {
+        let q = *c + f * (along * hump) + perp * (across * hump);
+        fill_disc(pb, q, r * hump, spoil_lo, 0.92);
+        fill_disc(pb, q, (r - 1.2) * hump, spoil, 0.92);
+    }
+    // Lit crest of the mound, up-left like every other body.
+    let crest = *c + Vec2::new(-1.5, -2.2) * BODY_SCALE;
+    fill_disc(pb, crest, 6.5 * hump, spoil_hi, 0.40);
+
+    // The crown of the shell, just breaking the surface at the front.
+    let crown = *c + f * (3.0 * hump);
+    fill_disc(pb, crown, 5.4 * BODY_SCALE, SHELL_MID, 0.85);
+    fill_disc(pb, crown + Vec2::new(-1.0, -1.0) * BODY_SCALE, 3.2 * BODY_SCALE, SHELL_HI, 0.55);
+    // Two eye glints over the crest: always this body, never a blank patch.
+    for side in [-1.0f32, 1.0] {
+        let e = crown + f * (2.6 * BODY_SCALE) + perp * (side * 2.6 * BODY_SCALE);
+        blend_px(pb, e.x.round() as i32, e.y.round() as i32, (18, 22, 20), 0.85);
+        blend_px(pb, e.x.round() as i32, e.y.round() as i32 - 1, (206, 218, 196), 0.55);
+    }
+
+    // The wet blue of the exposed gills at the rear, under the spoil.
+    let g = *c - f * (5.0 * hump);
+    band(pb, g, 0.0, 3.4 * BODY_SCALE, BLOOD_MID, 0.42 + 0.10 * pulse);
+    ring(pb, g, 3.8 * BODY_SCALE, BLOOD_HI, 0.34, 1.0);
+
+    // Grit thrown out behind it, on the state clock (deterministic).
+    for k in 0..7 {
+        let a = anim * 5.0 + k as f32 * 0.9;
+        let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+        let q = *c - f * ((8.0 + 3.0 * (a.sin() * 0.5 + 0.5)) * BODY_SCALE)
+            + perp * (side * (4.5 + (a * 1.3).sin() * 1.6) * BODY_SCALE);
+        blend_px(pb, q.x.round() as i32, q.y.round() as i32, spoil_lo, 0.60);
+        blend_px(pb, q.x.round() as i32, q.y.round() as i32 - 1, spoil_hi, 0.32);
     }
 }
 
@@ -1342,9 +1407,12 @@ pub fn draw(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, _accent: Rgb) {
 
     match view.state {
         CrabState::Burrow => {
-            // A ring of disturbed floor where it went down, then nothing.
-            let t = smoothstep(p);
-            ring(pb, c, (6.0 + 10.0 * t) * BODY_SCALE, BLOOD_MID, 0.25 * (1.0 - t), 1.2);
+            // The dive, drawn: a travelling mound of spoil with the crown of the
+            // shell breaking out of it and the gill fans' wet blue showing at
+            // the rear. It is painted at `view.pos` — where the body really is
+            // this tick — so the crab can be followed the whole way and never
+            // blinks out of one place to appear in another.
+            draw_spoil_mound(pb, view, &c, f, p);
             return;
         }
         CrabState::Flipped | CrabState::Righting => {

@@ -1764,8 +1764,13 @@ pub struct Boss {
     pub call_kind: EnemyKind,
     /// Seconds the boss has been too far away to fight (see
     /// [`BossKind::REJOIN_DIST`] and [`RELOCATE_AFTER_SECS`]): the framework
-    /// walks an off-screen, stranded boss back into the fight.
+    /// calls an off-screen, stranded boss back into the fight.
     pub lost: f32,
+    /// Seconds left on that call (see [`RECALL_SECS`]): while it runs the shared
+    /// pursuit rule sprints and leaps, and the siege may smash a wall in the way
+    /// from any distance. The body always walks itself home; nothing is ever
+    /// placed.
+    pub recall: f32,
     /// Seconds of stagger spent in the current control window, and the window's
     /// remaining length (0 = the next [`Boss::grant_control`] opens a fresh
     /// one). See [`CONTROL_BUDGET_SECS`].
@@ -1825,6 +1830,7 @@ impl Boss {
             call_at: pos,
             call_kind: EnemyKind::Skitterer,
             lost: 0.0,
+            recall: 0.0,
             control_used: 0.0,
             control_window: 0.0,
             shove_used: 0.0,
@@ -2252,7 +2258,8 @@ impl Boss {
             BossKind::HorseshoeCrab => {
                 // The dome is the body; the gill fans are the one clear weak
                 // point and they only exist while the shell is off (wedged,
-                // flipped). Under the floor it has no grounded shape at all.
+                // flipped). Mid-burrow the shell is right under the mound the
+                // renderer draws, so its shapes stay grounded and hittable.
                 let view = self.crab_view();
                 let shapes = art_boss_horseshoe_crab::hit_shapes(&view);
                 let out: [BossHitShape; 2] = [
@@ -4403,7 +4410,8 @@ fn spend_boss_bullet(bullet: &mut Bullet) {
 /// the rejoin rule below.
 pub const REJOIN_DIST: f32 = 260.0;
 /// How long a boss may spend out of the fight — further than [`REJOIN_DIST`]
-/// from the rat, or with no line to him — before it is walked back into range.
+/// from the rat, or with no line to him, or unable to move at all — before it
+/// is **called back** into range.
 ///
 /// The boss is an objective and a level cannot end until it dies, but the
 /// horde's flow field is coarse far from the rat, and a rat that keeps kiting
@@ -4411,22 +4419,17 @@ pub const REJOIN_DIST: f32 = 260.0;
 /// ladder (seed 900): 3 of 13 boss fights dealt **zero damage for 1 100-2 137 s**
 /// with the boss 200-2 300 px away and stuck in `Cat(Stalk)` / `Broom(Idle)` /
 /// `Mower(Patrol)`, plus one broom Idle-looping at 51 px with a wall in
-/// between; those levels were uncompletable. The boss is only relocated when it
-/// is off screen (or cannot see the rat) and has failed to close for this long,
-/// with a full arrival cue, so a player never sees a pop-in.
-pub const RELOCATE_AFTER_SECS: f32 = 5.0;
-/// Where a rejoin puts the boss, in px from the rat, tried in order.
+/// between; those levels were uncompletable.
 ///
-/// The ring starts inside the Cat's pounce band (`45..95 px`) on purpose. The
-/// old single 130 px radius put the boss *outside* every one of its own attack
-/// bands: measured on the bot ladder, the one Casual fight that stalled did so
-/// for 16 s while the boss was teleported again and again to exactly 130 px
-/// from a rat that had tucked itself into the Sewer's escape rat-hole — close
-/// enough to see, too far to pounce, and unable to walk in because a rat-hole
-/// is Small-class only. A rejoin is an emergency, so it lands the boss where
-/// it can immediately act; the farther rings are the fallback for a room whose
-/// inner ring is all wall.
-const REJOIN_RADII: [f32; 6] = [95.0, 75.0, 55.0, 130.0, 175.0, 220.0];
+/// The call is **travel, never a teleport**: it wakes the shared pursuit rule
+/// (sprint + leap, [`PURSUIT_SPEED`] / [`LEAP_SPEED`] — both already visible
+/// every frame) and lifts the siege's `near` gate so a wall in the way can be
+/// smashed from any distance. Nothing is ever drawn at A and then at B: the
+/// old `boss.pos = spot` relocation is gone, along with its arrival flash.
+pub const RELOCATE_AFTER_SECS: f32 = 5.0;
+/// How long a called-back boss keeps the pursuit sprint and the lifted siege
+/// gate before both go back to their ordinary distance-gated rules.
+pub const RECALL_SECS: f32 = 12.0;
 
 /// Can a large body walk the straight line from `from` to `to`?
 ///
@@ -4465,62 +4468,6 @@ fn rat_left_the_fight(arena: TileRect, rat: Vec2) -> bool {
     let dx = (world.x - rat.x).max(rat.x - world.right()).max(0.0);
     let dy = (world.y - rat.y).max(rat.y - world.bottom()).max(0.0);
     dx.max(dy) > half
-}
-
-/// Where a rejoining boss is put: a large-clear cell within [`REJOIN_RADII`] of
-/// the rat **with a walkable line to him**, nearest bearing first. Both halves
-/// of that test matter: the boss and the rat can be 50 px apart on opposite
-/// sides of a wall (the stalemate this exists to break), and a line through a
-/// rat-hole is not a walk. Falls back to the closest clear cell to the rat.
-fn rejoin_spot(level: &Level, player: Vec2, radius: f32) -> Option<Vec2> {
-    let class = SizeClass::Large;
-    for step in 0..24 {
-        let angle = step as f32 * std::f32::consts::TAU / 24.0;
-        for r in REJOIN_RADII {
-            let p = player + Vec2::from_angle(angle) * r;
-            if level.tiles.circle_clear(p, radius, class)
-                && walkable_line(level, p, player, radius, class)
-            {
-                return Some(p);
-            }
-        }
-    }
-    // Nothing reachable on any ring: the rat is somewhere a large body cannot
-    // walk to (a maze pocket, behind a rat-hole). Still bring the boss *near*
-    // it — the siege rule below breaks the last wall — but never into one.
-    let p = player + Vec2::new(REJOIN_RADII[0], 0.0);
-    nearest_body_clear(level, p, radius, class, 24)
-}
-
-/// The nearest cell centre to `p` where a body of `radius` actually fits (a
-/// *body* check, not just a class-passable cell: a 13.5 px radius is 27 px
-/// across and a single passable 16 px cell does not hold it).
-fn nearest_body_clear(
-    level: &Level,
-    p: Vec2,
-    radius: f32,
-    class: SizeClass,
-    max_cells: i32,
-) -> Option<Vec2> {
-    let (pcx, pcy) = collision::cell_of(p);
-    for r in 0..=max_cells {
-        for dy in -r..=r {
-            for dx in -r..=r {
-                if dx.abs() != r && dy.abs() != r {
-                    continue; // ring only, the inside was already tried
-                }
-                let (cx, cy) = (pcx + dx, pcy + dy);
-                if !level.tiles.passable(cx, cy, class) {
-                    continue;
-                }
-                let centre = Vec2::new((cx as f32 + 0.5) * collision::TILE_F, (cy as f32 + 0.5) * collision::TILE_F);
-                if level.tiles.circle_clear(centre, radius, class) {
-                    return Some(centre);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// How long a boss that is walled off from the rat — the straight line between
@@ -4649,7 +4596,13 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         }
         return;
     }
-    if gap <= boss.kind.engage_range() || boss.out_of_reach < OUT_OF_REACH_SECS {
+    // A recall (see [`RECALL_SECS`]) keeps the sprint live between leaps; the
+    // ordinary rule only opens after `OUT_OF_REACH_SECS` and would otherwise go
+    // quiet for those seconds after every leap.
+    let recalling = boss.recall > 0.0;
+    if gap <= boss.kind.engage_range()
+        || (boss.out_of_reach < OUT_OF_REACH_SECS && !recalling)
+    {
         return;
     }
     let radius = boss.kind.body_radius();
@@ -4665,10 +4618,20 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         move_boss(ctx, boss, dir, LEAP_SPEED);
         return;
     }
-    // No lane for a leap (a corner, a doorway): sprint along the flow field.
+    // No lane for a leap (a corner, a doorway, or the far side of the map where
+    // the field is coarse): sprint along the flow field, or straight at the rat
+    // when the field has no direction at all. `move_boss` slides the step along
+    // walls, so this is always visible travel and never a placement.
     let seek = ctx.seek(boss);
-    if move_boss(ctx, boss, seek, PURSUIT_SPEED) && seek.len_sq() > 1e-6 {
-        boss.facing = seek.normalized();
+    let dir = if seek.len_sq() > 1e-6 {
+        seek
+    } else if gap > 1e-3 {
+        to * (1.0 / gap)
+    } else {
+        boss.facing
+    };
+    if move_boss(ctx, boss, dir, PURSUIT_SPEED) && dir.len_sq() > 1e-6 {
+        boss.facing = dir.normalized();
     }
 }
 
@@ -4738,6 +4701,7 @@ pub fn boss_update_system(
         }
         boss.leap_cd = (boss.leap_cd - dt).max(0.0);
         boss.recentre_cd = (boss.recentre_cd - dt).max(0.0);
+        boss.recall = (boss.recall - dt).max(0.0);
         boss.elapsed += dt;
 
         // Lethal hit: the damage system runs before this one, so the death
@@ -4869,10 +4833,13 @@ pub fn boss_update_system(
         recentre_the_fight(&mut boss, &level, player.pos);
 
         // Rejoin rule: a boss that is off screen and has not closed on the rat
-        // for [`RELOCATE_AFTER_SECS`] is walked back into the fight. A level
-        // cannot end until the boss dies, so a boss that the horde flow field
-        // cannot route back (or cannot outrun a kiting rat) must not be able
-        // to strand the level. See [`RELOCATE_AFTER_SECS`].
+        // for [`RELOCATE_AFTER_SECS`] is **called back** — the pursuit sprint
+        // and leap wake up and the siege's `near` gate lifts, so it walks
+        // itself home over the floor. A level cannot end until the boss dies, so
+        // a boss that the horde flow field cannot route back (or cannot outrun a
+        // kiting rat) must not be able to strand the level. Nothing is ever
+        // placed: a boss is only ever where its own body travelled to. See
+        // [`RELOCATE_AFTER_SECS`] and [`RECALL_SECS`].
         let to_player = player.pos - boss.pos;
         let floats = boss.kind == BossKind::Lantern;
         let no_los = !floats && level
@@ -4904,19 +4871,18 @@ pub fn boss_update_system(
             // chain returns to the neutral state, so the rule still cannot
             // strand a level; it just lands on the first neutral tick.
             if boss.lost >= RELOCATE_AFTER_SECS && boss.is_neutral() {
-                if let Some(spot) = rejoin_spot(&level, player.pos, boss.kind.body_radius()) {
-                    boss.lost = 0.0;
-                    boss.pos = spot;
-                    boss.target = player.pos;
-                    let to = player.pos - spot;
-                    if to.len_sq() > 1e-6 {
-                        boss.facing = to.normalized();
-                    }
-                    let accent = level.palette.accent;
-                    emit_arrival_fx(boss.kind, &mut particles, &mut fight.rng.0, spot, accent);
-                    shake.amount = shake.amount.max(8.0);
-                    sfx.0.push(Sfx::Boss);
+                boss.lost = 0.0;
+                // The call itself: no position change of any kind. The pursuit
+                // rule below runs every tick and does the walking, and the
+                // siege rule lifts its distance gate while the call is live.
+                boss.recall = RECALL_SECS;
+                boss.out_of_reach = boss.out_of_reach.max(OUT_OF_REACH_SECS);
+                boss.leap_cd = 0.0;
+                boss.target = player.pos;
+                if to_player.len_sq() > 1e-6 {
+                    boss.facing = to_player.normalized();
                 }
+                sfx.0.push(Sfx::Boss);
             }
         } else {
             boss.lost = 0.0;
@@ -4946,7 +4912,7 @@ pub fn boss_update_system(
         // the siege timer. Being walled off and near for four uninterrupted
         // seconds is the condition the siege was written for, whether or not
         // the pacing looks like motion.
-        let near = to_player.len() < 220.0;
+        let near = to_player.len() < 220.0 || boss.recall > 0.0;
         let walled_off = !floats
             && !walkable_line(&level, boss.pos, player.pos, boss.kind.body_radius(), SizeClass::Large);
         if near && walled_off {

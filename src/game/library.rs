@@ -1168,7 +1168,7 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
         ),
         MinibossKind::SudsBailiff => (
             "Laundry · 9:00 — named miniboss",
-            "All delicates report to rinse. A soap dome slips under the floor and \
+            "All delicates report to rinse. A soap mound slides along the floor and \
              pushes a bar of foam across it. Watch where the gap settles.",
         ),
         MinibossKind::WringerBoy => (
