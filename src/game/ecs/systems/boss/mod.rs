@@ -1677,6 +1677,27 @@ pub const LEAP_COOLDOWN: f32 = 3.0;
 /// `boss_update_system`): one is plenty, since the rectangle is 34 x 28 cells.
 pub const RECENTRE_COOLDOWN: f32 = 6.0;
 
+#[derive(Clone, Copy, Debug)]
+struct BossAttackTuning {
+    damage_mult: f32,
+    tell_time_mult: f32,
+    swipe_damage: f32,
+    swipe_windup_mult: f32,
+    swipe_chain_gap: f32,
+}
+
+impl From<&crate::tuning::Boss> for BossAttackTuning {
+    fn from(row: &crate::tuning::Boss) -> Self {
+        Self {
+            damage_mult: row.attack_damage_mult.unwrap_or(1.0),
+            tell_time_mult: row.tell_time_mult.unwrap_or(1.0),
+            swipe_damage: row.swipe_damage.unwrap_or(art_boss_cat::SWIPE_DAMAGE),
+            swipe_windup_mult: row.swipe_windup_mult.unwrap_or(1.0),
+            swipe_chain_gap: row.swipe_chain_gap.unwrap_or(0.0),
+        }
+    }
+}
+
 /// The boss entity's authoritative state.
 #[derive(Component, Clone, Debug)]
 pub struct Boss {
@@ -1761,6 +1782,7 @@ pub struct Boss {
     /// Seconds before the fight rectangle may be recentred again.
     pub recentre_cd: f32,
     pub hazards: Vec<BossHazard>,
+    attack_tuning: BossAttackTuning,
     lantern: lantern::LanternRuntime,
 }
 
@@ -1810,6 +1832,7 @@ impl Boss {
             leap_cd: 0.0,
             recentre_cd: RECENTRE_COOLDOWN,
             hazards: Vec::with_capacity(16),
+            attack_tuning: BossAttackTuning::from(&crate::tuning::Boss::default()),
             lantern: lantern::LanternRuntime::default(),
         }
     }
@@ -1991,8 +2014,13 @@ impl Boss {
 
     /// Queue a hazard. Returns false when the ring is full.
     #[inline]
-    pub fn push_hazard(&mut self, hazard: BossHazard) -> bool {
+    pub fn push_hazard(&mut self, mut hazard: BossHazard) -> bool {
         if self.hazards.len() < self.hazards.capacity() {
+            hazard.warn *= self.attack_tuning.tell_time_mult;
+            if hazard.damage > 0.0 && self.attack_tuning.damage_mult != 1.0 {
+                // Zero damage denotes a sustained push instead of a one-shot hit.
+                hazard.damage = (hazard.damage * self.attack_tuning.damage_mult).max(f32::MIN_POSITIVE);
+            }
             self.hazards.push(hazard);
             true
         } else {
@@ -4669,6 +4697,8 @@ pub fn boss_update_system(
     fight.scratch.dt = dt;
     out.trace.init();
     for (entity, mut boss) in bosses.iter_mut() {
+        let balance = &tuning.bosses.kinds[&boss.kind];
+        boss.attack_tuning = BossAttackTuning::from(balance);
         if out.trace.on {
             out.trace.flow_hint = flow.dir_at(SizeClass::Large, boss.pos).normalized();
             out.trace
@@ -5018,7 +5048,7 @@ pub fn boss_update_system(
         // damage at all (`contact_damage == 0` is the art's "blades stopped" /
         // "safe pocket" state).
         let contact = boss.contact_damage * tuning.bosses.contact_damage_mult
-            * tuning.bosses.kinds[&boss.kind].contact_damage_mult;
+            * balance.contact_damage_mult;
         if !boss.is_airborne() && boss.contact_cd <= 0.0 && contact > 0.0 {
             let shapes = boss.hit_shapes();
             if shapes.circle_hits_grounded(player.pos, player.buffs.hurt_radius())

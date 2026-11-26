@@ -542,12 +542,16 @@ pub fn elite_chance_at(curve: f32) -> f32 {
 /// level (floor 0.35 s) so a late pulse is a handful of bodies rather than a
 /// wall of them.
 pub fn spawn_interval_at(curve: f32) -> f32 {
-    let base = (1.6 - curve / 900.0).max(0.35);
+    let base = base_spawn_interval_at(curve);
     if curve < OPENING_SECS {
         base * OPENING_INTERVAL_MULT
     } else {
         base
     }
+}
+
+pub(crate) fn base_spawn_interval_at(curve: f32) -> f32 {
+    (1.6 - curve / 900.0).max(0.35)
 }
 
 /// The opening's quicker pulse: for the first [`OPENING_SECS`] of the curve the
@@ -864,36 +868,55 @@ impl crate::tuning::Director {
         }
     }
 
-    fn spawn_interval_at(&self, curve: f32) -> f32 {
-        let base = (1.6 - curve / 900.0).max(0.35);
+    fn sector(&self, level: usize) -> Option<&crate::tuning::DirectorSector> {
+        self.sectors.get(crate::tuning::SECTOR_KEYS[level_slot(level)])
+    }
+
+    fn body_rate_at(&self, level: usize, curve: f32) -> f32 {
+        let knots = self.sector(level)
+            .and_then(|row| row.bodies_per_second.as_ref())
+            .unwrap_or(&self.bodies_per_second);
+        lerp_table(knots, curve)
+    }
+
+    fn opening_interval(&self, base: f32, curve: f32) -> f32 {
         if curve < self.opening_secs { base * self.opening_interval_mult } else { base }
     }
 
-    pub fn horde_interval(&self, elapsed: f32, boss_phase: bool) -> f32 {
+    pub fn horde_interval(&self, level: usize, elapsed: f32, boss_phase: bool) -> f32 {
         if boss_phase {
             self.cleanup_interval
         } else {
-            self.spawn_interval_at(self.curve_clock(0, elapsed)) * self.spawn_interval_mult
+            let curve = self.curve_clock(level, elapsed);
+            let base = self.sector(level)
+                .and_then(|row| row.spawn_interval.as_ref())
+                .map_or_else(|| base_spawn_interval_at(curve), |knots| lerp_table(knots, curve));
+            self.opening_interval(base, curve) * self.spawn_interval_mult
         }
     }
 
-    pub fn horde_pulse(&self, elapsed: f32, boss_phase: bool) -> usize {
+    pub fn horde_pulse(&self, level: usize, elapsed: f32, boss_phase: bool) -> usize {
         if boss_phase {
             self.cleanup_pulse
         } else {
-            let curve = self.curve_clock(0, elapsed);
-            let n = (lerp_table(&self.bodies_per_second, curve) * self.spawn_interval_at(curve)).round();
+            let curve = self.curve_clock(level, elapsed);
+            // Cadence changes leave the pulse size alone, like spawn_interval_mult.
+            let quantum = self.opening_interval(base_spawn_interval_at(curve), curve);
+            let n = (self.body_rate_at(level, curve) * quantum).round();
             (n as usize).max(1)
         }
     }
 
-    pub fn horde_live_budget(&self, elapsed: f32, boss_phase: bool) -> usize {
+    pub fn horde_live_budget(&self, level: usize, elapsed: f32, boss_phase: bool) -> usize {
         if boss_phase {
             return self.cleanup_live_budget;
         }
-        let curve = self.curve_clock(0, elapsed);
-        let mut budget = self.live_budget[0].1;
-        for &(time, count) in &self.live_budget {
+        let curve = self.curve_clock(level, elapsed);
+        let steps = self.sector(level)
+            .and_then(|row| row.live_budget.as_ref())
+            .unwrap_or(&self.live_budget);
+        let mut budget = steps[0].1;
+        for &(time, count) in steps {
             if curve >= time {
                 budget = count;
             }
@@ -901,15 +924,21 @@ impl crate::tuning::Director {
         budget
     }
 
-    pub fn elite_interval_at(&self, curve: f32) -> f32 {
-        let chance = lerp_table(&self.elite_chance, curve);
+    pub fn elite_start_for(&self, level: usize) -> f32 {
+        self.sector(level).and_then(|row| row.elite_start).unwrap_or(self.elite_start)
+    }
+
+    pub fn elite_interval_at(&self, level: usize, curve: f32) -> f32 {
+        let row = self.sector(level);
+        let knots = row.and_then(|row| row.elite_chance.as_ref()).unwrap_or(&self.elite_chance);
+        let chance = lerp_table(knots, curve);
         let interval = if chance <= 0.0 {
             60.0
         } else {
-            (1.0 / (chance * lerp_table(&self.bodies_per_second, curve).max(0.1)))
+            (1.0 / (chance * self.body_rate_at(level, curve).max(0.1)))
                 .clamp(6.0, ELITE_INTERVAL_MAX)
         };
-        interval * self.elite_interval_mult
+        interval * row.and_then(|row| row.elite_interval_mult).unwrap_or(self.elite_interval_mult)
     }
 }
 
@@ -922,6 +951,58 @@ pub fn pick_kind(elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_tuning_director_matches_the_shared_curves_in_every_sector() {
+        let tuning = crate::tuning::Director::default();
+        for level in 0..4 {
+            for elapsed in [0.0, 0.1, 11.99, 12.0, 180.0, 255.5, 600.0, BOSS_TIME, BOSS_TIME + 5.0] {
+                for boss_phase in [false, true] {
+                    assert_eq!(tuning.horde_interval(level, elapsed, boss_phase).to_bits(),
+                        horde_interval(elapsed, boss_phase).to_bits());
+                    assert_eq!(tuning.horde_pulse(level, elapsed, boss_phase),
+                        horde_pulse(elapsed, boss_phase));
+                    assert_eq!(tuning.horde_live_budget(level, elapsed, boss_phase),
+                        horde_live_budget(elapsed, boss_phase));
+                }
+                let curve = curve_clock(level, elapsed);
+                assert_eq!(tuning.elite_start_for(level), ELITE_START);
+                assert_eq!(tuning.elite_interval_at(level, curve).to_bits(),
+                    elite_interval_at(curve).to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn tuning_overrides_only_the_selected_director_sector() {
+        let tuned = crate::tuning::Tuning::parse(r#"
+            [director.sectors.1]
+            live_budget = [[0, 5], [240, 12], [270, 15], [400, 20], [500, 25], [600, 30], [900, 40]]
+            bodies_per_second = [[0, 8.0], [240, 8.0], [270, 8.0], [400, 8.0], [500, 8.0], [600, 8.0], [900, 8.0]]
+            spawn_interval = [[0, 1.6], [240, 1.6], [270, 2.6], [400, 2.6], [500, 2.6], [600, 2.6], [900, 2.6]]
+            elite_start = 240.0
+            elite_chance = [[0, 0.25], [240, 0.25], [270, 0.25], [400, 0.25], [500, 0.25], [600, 0.25], [900, 0.25]]
+            elite_interval_mult = 2.0
+        "#).unwrap().director;
+        let at = 255.0;
+        assert!((tuned.horde_interval(0, at, false) - 2.1).abs() < 1e-6);
+        assert_eq!(tuned.horde_pulse(0, at, false), 11);
+        assert_eq!(tuned.horde_live_budget(0, at, false), 12);
+        assert_eq!(tuned.horde_live_budget(0, 270.0, false), 15);
+        assert_eq!(tuned.elite_start_for(0), 240.0);
+        assert_eq!(tuned.elite_interval_at(0, at), 12.0);
+        assert_eq!(tuned.horde_interval(0, at, true), CLEANUP_INTERVAL);
+        assert_eq!(tuned.horde_pulse(0, at, true), CLEANUP_PULSE);
+        assert_eq!(tuned.horde_live_budget(0, at, true), CLEANUP_LIVE_BUDGET);
+
+        for level in 1..4 {
+            assert_eq!(tuned.horde_interval(level, at, false), horde_interval(at, false));
+            assert_eq!(tuned.horde_pulse(level, at, false), horde_pulse(at, false));
+            assert_eq!(tuned.horde_live_budget(level, at, false), horde_live_budget(at, false));
+            assert_eq!(tuned.elite_start_for(level), ELITE_START);
+            assert_eq!(tuned.elite_interval_at(level, at), elite_interval_at(at));
+        }
+    }
 
     /// The elite timer is reset once per elite, so a huge interval read while
     /// the chance is still tiny must not silence elites for minutes.

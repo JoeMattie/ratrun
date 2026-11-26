@@ -405,8 +405,8 @@ pub fn director_system(
         } else {
             0.01
         };
-        director.spawn_timer = tuning.director.horde_interval(elapsed, boss_phase) * grace / rate;
-        let count = tuning.director.horde_pulse(elapsed, boss_phase);
+        director.spawn_timer = tuning.director.horde_interval(difficulty.0, elapsed, boss_phase) * grace / rate;
+        let count = tuning.director.horde_pulse(difficulty.0, elapsed, boss_phase);
         // The fixed opening pair arrives after this pass and spends the same budget.
         let reserved = if elapsed < tuning.director.boss_time
             && level.objects.sewer_opening.is_some()
@@ -416,7 +416,8 @@ pub fn director_system(
         } else {
             0
         };
-        let budget = tuning.director.horde_live_budget(elapsed, boss_phase).saturating_sub(reserved);
+        let budget = tuning.director.horde_live_budget(difficulty.0, elapsed, boss_phase)
+            .saturating_sub(reserved);
         let live = enemies.iter_mut().count();
         let guests = if level.theme == Theme::Outfall {
             enemies.iter_mut().filter(|(_, e)| e.kind == EnemyKind::ShoreCrab).count()
@@ -607,10 +608,10 @@ pub fn director_system(
     // appointment (one named threat at a time): a due elite waits, with its
     // timer left spent and no rng drawn, and fires when the window closes.
     if director.elite_timer <= 0.0
-        && curve > tuning.director.elite_start
+        && curve > tuning.director.elite_start_for(difficulty.0)
         && !tuning.minibosses.times.iter().any(|&at| (elapsed - at).abs() < tuning.director.elite_appointment_gap)
     {
-        director.elite_timer = tuning.director.elite_interval_at(curve);
+        director.elite_timer = tuning.director.elite_interval_at(difficulty.0, curve);
         let elites = enemies.iter_mut().filter(|(_, e)| e.elite).count();
         if enemies.iter_mut().count() + queued < cap && elites < 3 {
             if let Some(pos) = spawn_point_reachable(
@@ -2246,6 +2247,32 @@ mod tests {
             .run_system_cached(director_system)
             .expect("director system must run");
         w.end_tick();
+    }
+
+    #[test]
+    fn practice_director_uses_sector_one_overrides_on_a_later_floor() {
+        let tuning = crate::tuning::Tuning::parse(r#"
+            [director.sectors.1]
+            live_budget = [[0, 0], [150, 0], [300, 0], [450, 0], [600, 0], [750, 0], [900, 0]]
+            spawn_interval = [[0, 2.5], [150, 2.5], [300, 2.5], [450, 2.5], [600, 2.5], [750, 2.5], [900, 2.5]]
+            elite_start = 300.0
+        "#).unwrap();
+        let run = crate::tuning::RunTuning::new(tuning);
+        let make_world = |tuning| World::new_level_tuned(
+            3, Theme::Trailer, 61, Loadout::starting(), Default::default(), tuning,
+        );
+        let mut campaign = make_world(run.clone());
+        let mut practice = make_world(run);
+        practice.difficulty_override = Some(0);
+
+        let at = 255.0;
+        director_tick(&mut campaign, 0.1, at);
+        director_tick(&mut practice, 0.1, at);
+        assert_eq!(campaign.director.spawn_timer, director::horde_interval(at, false));
+        assert!(campaign.director.elite_timer > 0.0);
+        assert_eq!(practice.director.spawn_timer, 2.5);
+        assert!(practice.director.elite_timer <= 0.0);
+        assert!(practice.enemies().is_empty());
     }
 
     /// Legacy `spawn_point_stays_in_bounds_clear_of_walls_and_player`: the ring

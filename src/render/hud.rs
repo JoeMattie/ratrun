@@ -68,15 +68,14 @@ const BOSS_STAGE: u8 = 7;
 
 /// Is the elite warning badge due?
 ///
-/// The director's elite gate is on the *curve* clock, which each campaign
-/// level shifts by `director::LEVEL_CLOCK_OFFSET` (the first elite arrives at
-/// 60 s on the Sewer, 40 s on the Kitchen and 15 s on the Lab). Reading the
-/// wall clock here announced the Sewer's schedule on every level.
+/// The warning reads the director's curve clock and the same difficulty row
+/// as its elite gate. Practice uses sector one's row on the selected floor.
 pub fn elite_badge_due(world: &World) -> bool {
+    let difficulty = world.difficulty_override.unwrap_or(world.level_index);
     !(world.testbed && world.peace)
         && !world.director.boss_spawned
         && world.curve_clock_at(world.elapsed)
-            >= world.tuning().director.elite_start - 5.0
+            >= world.tuning().director.elite_start_for(difficulty) - 5.0
         && world.director.elite_timer <= 4.0
 }
 

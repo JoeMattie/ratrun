@@ -9,15 +9,16 @@ use bevy_ecs::resource::Resource;
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 
+use crate::game::art_boss_cat::SWIPE_DAMAGE;
 use crate::game::ecs::systems::{boss::BossKind, miniboss, player::DASH_SECS};
 use crate::game::{director as d, enemy::EnemyKind, gem, loadout, player, shop, weapon::WeaponKind};
 
 macro_rules! section {
-    ($name:ident { $($key:ident: $ty:ty = $value:expr; $doc:literal),* $(,)? }) => {
+    ($name:ident { $($(#[$attr:meta])* $key:ident: $ty:ty = $value:expr; $doc:literal),* $(,)? }) => {
         #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
         #[serde(deny_unknown_fields)]
         pub struct $name {
-            $(pub $key: $ty),*
+            $($(#[$attr])* pub $key: $ty),*
         }
 
         impl Default for $name {
@@ -85,6 +86,25 @@ section!(Director {
     cleanup_interval: f32 = d::CLEANUP_INTERVAL; "Seconds between horde cleanup pulses during the boss fight",
     cleanup_pulse: usize = d::CLEANUP_PULSE; "Bodies per cleanup pulse",
     cleanup_live_budget: usize = d::CLEANUP_LIVE_BUDGET; "Live ordinary body budget during the boss fight",
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sectors: BTreeMap<String, DirectorSector> = BTreeMap::new(); "Optional overrides by campaign sector (1–4, practice uses 1)",
+});
+
+pub(crate) const SECTOR_KEYS: [&str; 4] = ["1", "2", "3", "4"];
+
+section!(DirectorSector {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_budget: Option<[(f32, usize); 7]> = None; "Live ordinary body budget steps [curve seconds, bodies]",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bodies_per_second: Option<[(f32, f32); 7]> = None; "Spawn-rate knots used for pulse size and elite cadence [curve seconds, bodies/s]",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn_interval: Option<[(f32, f32); 7]> = None; "Base pulse interval knots [curve seconds, seconds]. Omit to use max(0.35, 1.6 - curve seconds / 900)",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elite_start: Option<f32> = None; "Earliest timed elite arrival (curve seconds)",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elite_chance: Option<[(f32, f32); 7]> = None; "Elite cadence knots [curve seconds, fraction of body rate]",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elite_interval_mult: Option<f32> = None; "Multiplier on the interval between timed elite arrivals, replacing the shared multiplier",
 });
 
 section!(Enemy {
@@ -116,6 +136,16 @@ section!(Boss {
     hp_scale: f32 = 1.0; "HP multiplier on sectors two to four",
     first_sector_hp_scale: f32 = 1.0; "HP multiplier on sector-one difficulty (including bare practice)",
     contact_damage_mult: f32 = 1.0; "Multiplier on grounded contact damage in every attack state",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attack_damage_mult: Option<f32> = None; "Damage multiplier on timed boss hazards (default 1.0)",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tell_time_mult: Option<f32> = None; "Multiplier on timed hazard warnings and the Cat's raised-paw tell (default 1.0)",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swipe_damage: Option<f32> = None; "Cat only: base swipe hazard damage before attack_damage_mult (HP before armor)",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swipe_windup_mult: Option<f32> = None; "Cat only: multiplier on the raised-paw tell in both phases, compounded with tell_time_mult",
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swipe_chain_gap: Option<f32> = None; "Cat only: extra recovery between the first swipe and the chained windup (s)",
 });
 
 section!(Bosses {
@@ -170,7 +200,7 @@ fn boss_defaults() -> BTreeMap<BossKind, Boss> {
         base_hp: kind.base_hp(),
         hp_scale: kind.hp_scale(),
         first_sector_hp_scale: kind.hp_scale_for(0),
-        contact_damage_mult: 1.0,
+        ..Boss::default()
     })).collect()
 }
 
@@ -255,10 +285,60 @@ impl Tuning {
     pub fn parse(source: &str) -> Result<Self> {
         let overrides = source.parse::<Table>()?;
         let mut values = Table::try_from(Self::default())?;
-        merge(&mut values, overrides, "")?;
-        let tuning: Self = values.try_into()?;
+        let schema = Table::try_from(Self::schema())?;
+        merge(&mut values, &schema, overrides, "")?;
+        let mut tuning: Self = values.try_into()?;
         tuning.validate()?;
+        tuning.omit_inherited_values();
         Ok(tuning)
+    }
+
+    /// Example values for optional keys, also used to validate their paths.
+    fn schema() -> Self {
+        let mut schema = Self::default();
+        let director = &mut schema.director;
+        let row = DirectorSector {
+            live_budget: Some(director.live_budget),
+            bodies_per_second: Some(director.bodies_per_second),
+            spawn_interval: Some(director.bodies_per_second.map(|(time, _)| {
+                (time, d::base_spawn_interval_at(time))
+            })),
+            elite_start: Some(director.elite_start),
+            elite_chance: Some(director.elite_chance),
+            elite_interval_mult: Some(director.elite_interval_mult),
+        };
+        director.sectors = SECTOR_KEYS.into_iter()
+            .map(|key| (key.to_owned(), row.clone())).collect();
+        for boss in schema.bosses.kinds.values_mut() {
+            boss.attack_damage_mult = Some(1.0);
+            boss.tell_time_mult = Some(1.0);
+        }
+        let cat = schema.bosses.kinds.get_mut(&BossKind::Cat).expect("Cat tuning row");
+        cat.swipe_damage = Some(SWIPE_DAMAGE);
+        cat.swipe_windup_mult = Some(1.0);
+        cat.swipe_chain_gap = Some(0.0);
+        schema
+    }
+
+    fn omit_inherited_values(&mut self) {
+        let Director {
+            live_budget, bodies_per_second, elite_start, elite_chance, elite_interval_mult, sectors, ..
+        } = &mut self.director;
+        sectors.retain(|_, row| {
+            omit_if_default(&mut row.live_budget, *live_budget);
+            omit_if_default(&mut row.bodies_per_second, *bodies_per_second);
+            omit_if_default(&mut row.elite_start, *elite_start);
+            omit_if_default(&mut row.elite_chance, *elite_chance);
+            omit_if_default(&mut row.elite_interval_mult, *elite_interval_mult);
+            *row != DirectorSector::default()
+        });
+        for boss in self.bosses.kinds.values_mut() {
+            omit_if_default(&mut boss.attack_damage_mult, 1.0);
+            omit_if_default(&mut boss.tell_time_mult, 1.0);
+            omit_if_default(&mut boss.swipe_damage, SWIPE_DAMAGE);
+            omit_if_default(&mut boss.swipe_windup_mult, 1.0);
+            omit_if_default(&mut boss.swipe_chain_gap, 0.0);
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -308,6 +388,43 @@ impl Tuning {
         if director.live_budget.windows(2).any(|rows| rows[0].0 > rows[1].0) {
             bail!("director.live_budget times must be in ascending order");
         }
+        for (sector, row) in &director.sectors {
+            let path = format!("director.sectors.{sector}");
+            if row.live_budget.is_some_and(|steps| steps.windows(2).any(|w| w[0].0 > w[1].0)) {
+                bail!("{path}.live_budget times must be in ascending order");
+            }
+            for (key, knots) in [
+                ("bodies_per_second", row.bodies_per_second),
+                ("elite_chance", row.elite_chance),
+            ] {
+                if knots.is_some_and(|knots| knots.windows(2).any(|w| w[0].0 > w[1].0)) {
+                    bail!("{path}.{key} times must be in ascending order");
+                }
+            }
+            if let Some(knots) = row.spawn_interval {
+                if knots.windows(2).any(|w| w[0].0 >= w[1].0) {
+                    bail!("{path}.spawn_interval times must be strictly increasing");
+                }
+                if knots.iter().any(|&(_, interval)| interval <= 0.0) {
+                    bail!("{path}.spawn_interval values must be positive");
+                }
+            }
+            if row.elite_interval_mult == Some(0.0) {
+                bail!("{path}.elite_interval_mult must be positive");
+            }
+        }
+        for (kind, boss) in &self.bosses.kinds {
+            for (key, value) in [
+                ("attack_damage_mult", boss.attack_damage_mult),
+                ("tell_time_mult", boss.tell_time_mult),
+                ("swipe_damage", boss.swipe_damage),
+                ("swipe_windup_mult", boss.swipe_windup_mult),
+            ] {
+                if value == Some(0.0) {
+                    bail!("bosses.kinds.{kind:?}.{key} must be positive");
+                }
+            }
+        }
         if self.xp.drop_chance > 1.0 {
             bail!("xp.drop_chance must be in 0..=1");
         }
@@ -331,15 +448,23 @@ impl Tuning {
     }
 
     pub fn commented_defaults() -> String {
-        let values = readable_table(&Self::default().canonical());
+        let defaults = readable_table(&Self::default().canonical());
+        let schema = readable_table(&Self::schema().canonical());
         let mut output = String::from("# Rat Run balance defaults. Omitted fields use the shipped game values.\n");
         for (section, comments) in [
             ("player", Player::COMMENTS), ("xp", Xp::COMMENTS), ("director", Director::COMMENTS),
             ("enemies", Enemies::COMMENTS), ("minibosses", Minibosses::COMMENTS),
             ("bosses", Bosses::COMMENTS), ("loot", Loot::COMMENTS), ("weapons", Weapons::COMMENTS),
         ] {
-            let table = values[section].as_table().expect("tuning section");
-            write_section(&mut output, section, table, comments);
+            let table = schema[section].as_table().expect("tuning section");
+            let base = defaults[section].as_table().expect("default tuning section");
+            write_section(&mut output, section, table, Some(base), comments);
+            if let Some(sectors) = table.get("sectors").and_then(Value::as_table) {
+                for (sector, values) in sectors {
+                    write_section(&mut output, &format!("{section}.sectors.{sector}"),
+                        values.as_table().expect("sector table"), None, DirectorSector::COMMENTS);
+                }
+            }
             if let Some(kinds) = table.get("kinds").and_then(Value::as_table) {
                 let kind_comments = match section {
                     "enemies" => Enemy::COMMENTS,
@@ -347,12 +472,20 @@ impl Tuning {
                     _ => Weapon::COMMENTS,
                 };
                 for (kind, values) in kinds {
+                    let default = base["kinds"].get(kind.as_str()).and_then(Value::as_table)
+                        .expect("default kind table");
                     write_section(&mut output, &format!("{section}.kinds.{kind}"),
-                        values.as_table().expect("kind table"), kind_comments);
+                        values.as_table().expect("kind table"), Some(default), kind_comments);
                 }
             }
         }
         output
+    }
+}
+
+fn omit_if_default<T: PartialEq>(value: &mut Option<T>, default: T) {
+    if *value == Some(default) {
+        *value = None;
     }
 }
 
@@ -361,28 +494,41 @@ fn readable_table(canonical: &[u8]) -> Table {
     serde_json::from_slice(canonical).expect("convert numeric tuning tables")
 }
 
-fn write_section(output: &mut String, path: &str, values: &Table, comments: &[(&str, &str)]) {
+fn write_section(
+    output: &mut String,
+    path: &str,
+    values: &Table,
+    defaults: Option<&Table>,
+    comments: &[(&str, &str)],
+) {
     use std::fmt::Write;
 
     writeln!(output, "\n[{path}]").expect("write to string");
     for &(key, comment) in comments {
-        match &values[key] {
+        let Some(value) = values.get(key) else { continue };
+        match value {
             Value::Table(_) => writeln!(output, "# {comment} follow below."),
-            value => writeln!(output, "# {comment}. Default {value}.\n{key} = {value}"),
+            value if defaults.is_some_and(|base| base.contains_key(key)) => {
+                writeln!(output, "# {comment}. Default {value}.\n{key} = {value}")
+            }
+            value => writeln!(output, "# {comment}. Optional override.\n# {key} = {value}"),
         }.expect("write to string");
     }
 }
 
-fn merge(defaults: &mut Table, overrides: Table, prefix: &str) -> Result<()> {
+fn merge(defaults: &mut Table, schema: &Table, overrides: Table, prefix: &str) -> Result<()> {
     for (key, value) in overrides {
         let path = format!("{prefix}{key}");
-        let old = defaults.get_mut(&key).with_context(|| format!("unknown key {path}"))?;
-        match (old, value) {
-            (Value::Table(base), Value::Table(extra)) => merge(base, extra, &format!("{path}."))?,
+        let expected = schema.get(&key).with_context(|| format!("unknown key {path}"))?;
+        match (expected, value) {
+            (Value::Table(shape), Value::Table(extra)) => {
+                let base = defaults.entry(key).or_insert_with(|| Value::Table(Table::new()));
+                merge(base.as_table_mut().expect("default table"), shape, extra, &format!("{path}."))?;
+            }
             (Value::Table(_), _) => bail!("{path} must be a table"),
-            (old, mut value) => {
+            (_, mut value) => {
                 numbers(&mut value, &path)?;
-                *old = value;
+                defaults.insert(key, value);
             }
         }
     }
@@ -409,10 +555,10 @@ fn numbers(value: &mut Value, path: &str) -> Result<()> {
 fn differences(defaults: &Table, current: &Table, prefix: &str, diff: &mut BTreeMap<String, Value>) {
     for (key, value) in current {
         let path = format!("{prefix}{key}");
-        let default = &defaults[key];
-        match (default, value) {
-            (Value::Table(base), Value::Table(active)) => differences(base, active, &format!("{path}."), diff),
-            (base, active) if base != active => {
+        match (defaults.get(key), value) {
+            (Some(Value::Table(base)), Value::Table(active)) => differences(base, active, &format!("{path}."), diff),
+            (None, Value::Table(active)) => differences(&Table::new(), active, &format!("{path}."), diff),
+            (base, active) if base != Some(active) => {
                 diff.insert(path, active.clone());
             }
             _ => {}
@@ -490,6 +636,41 @@ mod tests {
 
     #[test]
     fn dumped_defaults_round_trip() {
-        assert_eq!(Tuning::parse(&Tuning::commented_defaults()).unwrap(), Tuning::default());
+        let dump = Tuning::commented_defaults();
+        assert!(dump.contains("[director.sectors.4]"));
+        assert!(dump.contains("# spawn_interval = "));
+        assert!(dump.contains("# swipe_damage = "));
+        assert_eq!(Tuning::parse(&dump).unwrap(), Tuning::default());
+    }
+
+    #[test]
+    fn inherited_overrides_keep_the_shared_tuning_hash() {
+        let shared = "[director]\nelite_interval_mult = 1.5";
+        let explicit = format!("{shared}\n[director.sectors.1]\nelite_interval_mult = 1.5\n\
+            [bosses.kinds.Cat]\nattack_damage_mult = 1\ntell_time_mult = 1\n\
+            swipe_damage = {SWIPE_DAMAGE}\nswipe_windup_mult = 1\nswipe_chain_gap = 0");
+        let report = |source| Selection {
+            run: RunTuning::new(Tuning::parse(source).unwrap()), path: None,
+        }.report();
+        assert_eq!(report(shared).hash, report(&explicit).hash);
+        assert_eq!(report(shared).diff, report(&explicit).diff);
+    }
+
+    #[test]
+    fn optional_overrides_report_leaf_paths_and_reject_unknown_rows() {
+        let tuning = Tuning::parse(
+            "[director.sectors.2]\nelite_interval_mult = 2.0\n[bosses.kinds.Cat]\nswipe_chain_gap = 0.25",
+        ).unwrap();
+        let report = Selection { run: RunTuning::new(tuning), path: None }.report();
+        assert_eq!(report.diff.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["bosses.kinds.Cat.swipe_chain_gap", "director.sectors.2.elite_interval_mult"]);
+        for (source, path) in [
+            ("[director.sectors.5]\nelite_start = 0", "director.sectors.5"),
+            ("[director.sectors.1]\nelite_intervl_mult = 1", "director.sectors.1.elite_intervl_mult"),
+            ("[bosses.kinds.Lantern]\nswipe_damage = 12", "bosses.kinds.Lantern.swipe_damage"),
+            ("[bosses.kinds.Cat]\nswipe_windup_mult = 0", "bosses.kinds.Cat.swipe_windup_mult"),
+        ] {
+            assert!(Tuning::parse(source).unwrap_err().to_string().contains(path));
+        }
     }
 }
