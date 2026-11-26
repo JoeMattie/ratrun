@@ -441,7 +441,7 @@ fn target_range(kind: WeaponKind) -> f32 {
         // body); this is the longest reach any level of it has.
         WeaponKind::SpikedTail => crate::game::weapon::LASH_REACH[4],
         WeaponKind::LavaBreath => 0.0,
-        WeaponKind::GlassBead | WeaponKind::PlumbBob | WeaponKind::HoldPoint => 0.0,
+        WeaponKind::GlassBead | WeaponKind::PlumbBob => 0.0,
     }
 }
 
@@ -2196,8 +2196,8 @@ fn fire_one(
             );
             fired = true;
         }
-        // These two own their timers in weapons_wave5.
-        WeaponKind::PlumbBob | WeaponKind::HoldPoint => {}
+        // Plumb Bob owns its timer in weapons_wave5.
+        WeaponKind::PlumbBob => {}
     }
     // Only announce a shot when the weapon actually produced something
     // (Gnaw with no target in range fires nothing). A weapon whose cue belongs
@@ -2231,7 +2231,6 @@ fn fire_one(
             WeaponKind::LavaBreath => Sfx::ShootAcid,
             WeaponKind::GlassBead => Sfx::Shoot,
             WeaponKind::PlumbBob => Sfx::ShootWhip,
-            WeaponKind::HoldPoint => Sfx::ShootNova,
         };
         sfx.0.push(sound);
     }

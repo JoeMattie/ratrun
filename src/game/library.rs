@@ -1417,11 +1417,6 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
             "The weight swings across 150 degrees and comes back. From rank four, \
              the chain reaches 42px. Hung to find the true floor.",
         ),
-        WeaponKind::HoldPoint => (
-            "Level-up card · any floor",
-            "Stand still to charge a circle that knocks foes back. Moving early \
-             cracks it. Growth Serum suppresses it. Procedure says do not move.",
-        ),
     }
 }
 
@@ -1513,11 +1508,6 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
             "Chest · Plumb Bob L5 + Counterweight",
             "At the end of the swing, the weight rolls 48px off the chain and \
              reels back. The weight was let out.",
-        ),
-        WeaponKind::HoldPoint => (
-            "Chest · Hold Point L5 + Thick Hide",
-            "The fired circle stays for 1.4s. The horde inside moves at 45% speed. \
-             The procedure was extended.",
         ),
     }
 }
@@ -2292,7 +2282,7 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
         },
     );
     f.push("DAMAGE 1→5", damage);
-    if matches!(k, WeaponKind::PlumbBob | WeaponKind::HoldPoint) {
+    if k == WeaponKind::PlumbBob {
         f.push("COOLDOWN", format!("{}s", k.base_cooldown()));
     } else {
         f.push("CYCLE 1→5", format!("{cycle}s"));
@@ -2308,7 +2298,6 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
     match k {
         WeaponKind::GlassBead => f.push("FLIGHT", "3 bounces · up to 1.8s"),
         WeaponKind::PlumbBob => f.push("SWING", "0.55s each way"),
-        WeaponKind::HoldPoint => f.push("CHARGE", "0.45s still · 28px radius"),
         _ => {}
     }
     f.push(
@@ -2853,15 +2842,52 @@ pub struct SavedRecord {
     pub record: Record,
 }
 
+/// Current schema version of [`LibrarySave`].
+///
+/// * `0` (implicit when `version` is absent): pre-removal saves where retired
+///   slot `16` (`LEGACY_RETIRED_WEAPON_INDEX`) in [`Category::Weapon`] and
+///   [`Category::Evolution`] belonged to the removed weapon; loading drops slot
+///   `16` and shifts any higher indices down by one.
+/// * `1`: current weapon discriminant layout.
+pub const LIBRARY_SAVE_VERSION: u32 = 1;
+const LEGACY_RETIRED_WEAPON_INDEX: usize = 16;
+
+fn migrate_legacy_weapon_word(word: u64) -> u64 {
+    let low_mask = (1u64 << LEGACY_RETIRED_WEAPON_INDEX) - 1;
+    let low = word & low_mask;
+    let high = (word >> (LEGACY_RETIRED_WEAPON_INDEX + 1)) << LEGACY_RETIRED_WEAPON_INDEX;
+    low | high
+}
+
+fn migrate_legacy_weapon_kind(kind: usize) -> Option<usize> {
+    match kind.cmp(&LEGACY_RETIRED_WEAPON_INDEX) {
+        std::cmp::Ordering::Less => Some(kind),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(kind - 1),
+    }
+}
+
 /// The on-disk shape. `seen` is a fixed bitset per category; the counters are
 /// sparse (only non-zero rows are written), so a fresh install has a tiny file
 /// and an old one keeps loading.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibrarySave {
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub seen: [[u64; 1]; CATEGORY_COUNT],
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stats: Vec<SavedRecord>,
+}
+
+impl Default for LibrarySave {
+    fn default() -> Self {
+        LibrarySave {
+            version: LIBRARY_SAVE_VERSION,
+            seen: [[0; 1]; CATEGORY_COUNT],
+            stats: Vec::new(),
+        }
+    }
 }
 
 /// Which counters a caller is bumping ([`Library::bump`]).
@@ -2929,13 +2955,29 @@ impl Default for Library {
 }
 
 impl From<LibrarySave> for Library {
-    fn from(save: LibrarySave) -> Library {
+    fn from(mut save: LibrarySave) -> Library {
+        let migrate_retired_weapon = save.version < LIBRARY_SAVE_VERSION;
+        if migrate_retired_weapon {
+            for cat in [Category::Weapon as usize, Category::Evolution as usize] {
+                save.seen[cat][0] = migrate_legacy_weapon_word(save.seen[cat][0]);
+            }
+        }
         let mut lib = Library {
             seen: save.seen,
             ..Library::default()
         };
         for row in save.stats {
-            let (c, k) = (row.category as usize, row.kind as usize);
+            let c = row.category as usize;
+            let k = if migrate_retired_weapon
+                && (c == Category::Weapon as usize || c == Category::Evolution as usize)
+            {
+                let Some(mapped) = migrate_legacy_weapon_kind(row.kind as usize) else {
+                    continue;
+                };
+                mapped
+            } else {
+                row.kind as usize
+            };
             if c < CATEGORY_COUNT && k < MAX_KINDS {
                 lib.stats[c][k] = row.record;
             }
@@ -2959,6 +3001,7 @@ impl From<Library> for LibrarySave {
             }
         }
         LibrarySave {
+            version: LIBRARY_SAVE_VERSION,
             seen: lib.seen,
             stats,
         }

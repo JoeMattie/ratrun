@@ -8870,8 +8870,7 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
-            "tail-whip" | "glass-bead" | "plumb-bob"
-            | "hold-charge" | "hold-fired" | "hold-cracked" => {
+            "tail-whip" | "glass-bead" | "plumb-bob" => {
                 use crate::game::enemy::EnemyKind;
                 use crate::game::ecs::systems::weapons_wave5::GlassBead;
                 hh.enter_playing();
@@ -8882,10 +8881,7 @@ mod tests {
                 let (kind, ticks) = match target.as_str() {
                     "tail-whip" => (WeaponKind::TailWhip, 5),
                     "glass-bead" => (WeaponKind::GlassBead, 16),
-                    "plumb-bob" => (WeaponKind::PlumbBob, 11),
-                    "hold-fired" => (WeaponKind::HoldPoint, 35),
-                    "hold-cracked" => (WeaponKind::HoldPoint, 21),
-                    _ => (WeaponKind::HoldPoint, 17),
+                    _ => (WeaponKind::PlumbBob, 11),
                 };
                 let mut facing = Vec2::new(1.0, 0.0);
                 if kind == WeaponKind::GlassBead {
@@ -8920,9 +8916,8 @@ mod tests {
                         );
                     }
                 }
-                for tick in 0..ticks {
-                    let movement = if target == "hold-cracked" && tick > 14 { facing } else { Vec2::ZERO };
-                    world.update_with_aim(1.0 / 60.0, movement, false, false, Some(rat + facing * 100.0));
+                for _ in 0..ticks {
+                    world.update_with_aim(1.0 / 60.0, Vec2::ZERO, false, false, Some(rat + facing * 100.0));
                 }
                 if kind == WeaponKind::GlassBead {
                     let mut query = world.ecs.query::<&GlassBead>();

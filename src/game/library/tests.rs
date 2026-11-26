@@ -876,3 +876,111 @@ fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
         assert!((0.0..=1.0).contains(&hp.bar), "{kind:?}: bar {}", hp.bar);
     }
 }
+
+/// Pre-v1 saves drop retired weapon index 16 and shift any later weapon/evolution
+/// indices down by one without disturbing earlier weapons, passives, or re-saved
+/// v1 records.
+#[test]
+fn legacy_save_drops_retired_weapon_and_shifts_later_weapon_intact() {
+    use crate::scores::ScoreTable;
+
+    let plumb_idx = WeaponKind::PlumbBob.index();
+    assert_eq!(plumb_idx, 15);
+    let retired_idx = LEGACY_RETIRED_WEAPON_INDEX; // 16 in v0 saves
+    let later_old_idx = retired_idx + 1; // 17 in v0 saves -> 16 after migration
+
+    let w_cat = Category::Weapon as usize;
+    let e_cat = Category::Evolution as usize;
+    let p_cat = Category::Passive as usize;
+    let armor_idx = PassiveKind::Armor as usize;
+
+    let mut seen = [[0u64; 1]; CATEGORY_COUNT];
+    seen[w_cat][0] = (1 << plumb_idx) | (1 << retired_idx) | (1 << later_old_idx);
+    seen[e_cat][0] = (1 << plumb_idx) | (1 << retired_idx) | (1 << later_old_idx);
+    seen[p_cat][0] = 1 << armor_idx;
+
+    let plumb_rec = Record { seen: 3, picked: 4, owned: 2, evolved: 1, ..Record::default() };
+    let retired_rec = Record { seen: 9, picked: 9, owned: 9, evolved: 9, ..Record::default() };
+    let later_rec = Record { seen: 5, picked: 7, owned: 4, evolved: 2, ..Record::default() };
+    let armor_rec = Record { seen: 6, picked: 8, owned: 5, ..Record::default() };
+
+    // Build an unversioned (v0) save JSON, matching pre-removal `scores.json`.
+    let old_json = serde_json::json!({
+        "entries": [{"score": 1400, "time": 210.0, "level": 6, "map": "Sewer", "won": false}],
+        "library": {
+            "seen": seen,
+            "stats": [
+                {"category": w_cat, "kind": plumb_idx, "seen": 3, "picked": 4, "owned": 2, "evolved": 1},
+                {"category": w_cat, "kind": retired_idx, "seen": 9, "picked": 9, "owned": 9, "evolved": 9},
+                {"category": w_cat, "kind": later_old_idx, "seen": 5, "picked": 7, "owned": 4, "evolved": 2},
+                {"category": e_cat, "kind": plumb_idx, "seen": 3, "evolved": 1},
+                {"category": e_cat, "kind": retired_idx, "seen": 9, "evolved": 9},
+                {"category": e_cat, "kind": later_old_idx, "seen": 5, "evolved": 2},
+                {"category": p_cat, "kind": armor_idx, "seen": 6, "picked": 8, "owned": 5}
+            ]
+        }
+    })
+    .to_string();
+
+    let table = ScoreTable::parse(&old_json);
+    assert_eq!(table.best(), 1_400);
+    let lib = &table.library;
+
+    // Plumb Bob (15) and Thick Hide are intact.
+    assert!(lib.is_seen(Key::Weapon(WeaponKind::PlumbBob)));
+    assert_eq!(lib.record(Key::Weapon(WeaponKind::PlumbBob)), plumb_rec);
+    assert!(lib.is_seen(Key::Evolution(WeaponKind::PlumbBob)));
+    assert_eq!(lib.record(Key::Evolution(WeaponKind::PlumbBob)).evolved, 1);
+    assert!(lib.is_seen(Key::Passive(PassiveKind::Armor)));
+    assert_eq!(lib.record(Key::Passive(PassiveKind::Armor)), armor_rec);
+
+    // Retired index 16's data (`retired_rec`) was dropped and old index 17 shifted into slot 16.
+    assert_eq!(
+        lib.seen[w_cat][0],
+        (1 << plumb_idx) | (1 << retired_idx),
+        "retired bit 16 dropped and later bit 17 shifted to 16"
+    );
+    assert_eq!(lib.seen[e_cat][0], (1 << plumb_idx) | (1 << retired_idx));
+    assert_eq!(lib.stats[w_cat][retired_idx], later_rec);
+    assert_ne!(lib.stats[w_cat][retired_idx], retired_rec);
+    assert_eq!(lib.stats[w_cat][later_old_idx], Record::default());
+    assert_eq!(lib.stats[e_cat][retired_idx].evolved, 2);
+    assert_eq!(lib.stats[e_cat][later_old_idx], Record::default());
+    if let Some(&later_weapon) = WeaponKind::all().get(retired_idx) {
+        assert!(lib.is_seen(Key::Weapon(later_weapon)));
+        assert_eq!(lib.record(Key::Weapon(later_weapon)), later_rec);
+    }
+
+    // Re-saving stamps `version: 1`, so loading again does NOT drop or shift slot 16.
+    let resaved_json = table.to_json();
+    let reloaded = ScoreTable::parse(&resaved_json);
+    assert_eq!(reloaded.library.seen[w_cat][0], (1 << plumb_idx) | (1 << retired_idx));
+    assert_eq!(reloaded.library.stats[w_cat][retired_idx], later_rec);
+    let save_struct = LibrarySave::from(reloaded.library);
+    assert_eq!(save_struct.version, LIBRARY_SAVE_VERSION);
+
+    // Also verify a v0 save with ONLY Plumb Bob (15) and the retired weapon (16) leaves slot 16 clean.
+    let only_retired_json = serde_json::json!({
+        "library": {
+            "seen": [
+                [0], [0], [0],
+                [(1u64 << plumb_idx) | (1u64 << retired_idx)],
+                [1u64 << retired_idx],
+                [0], [0], [0], [0], [0], [0]
+            ],
+            "stats": [
+                {"category": w_cat, "kind": plumb_idx, "owned": 2},
+                {"category": w_cat, "kind": retired_idx, "owned": 9},
+                {"category": e_cat, "kind": retired_idx, "evolved": 4}
+            ]
+        }
+    })
+    .to_string();
+    let clean = ScoreTable::parse(&only_retired_json);
+    assert!(clean.library.is_seen(Key::Weapon(WeaponKind::PlumbBob)));
+    assert_eq!(clean.library.record(Key::Weapon(WeaponKind::PlumbBob)).owned, 2);
+    assert_eq!(clean.library.seen[w_cat][0], 1u64 << plumb_idx);
+    assert_eq!(clean.library.seen[e_cat][0], 0);
+    assert_eq!(clean.library.stats[w_cat][retired_idx], Record::default());
+    assert_eq!(clean.library.stats[e_cat][retired_idx], Record::default());
+}

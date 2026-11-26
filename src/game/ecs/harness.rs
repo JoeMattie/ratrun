@@ -319,19 +319,24 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// Wander Lab, Evade Sewer and Evade Lab. The intermediate Laser Eyes build
 /// matched all six original rows. No trace hit the 400-gem soft cap.
 ///
-/// **Regenerated for the Sewer opening and the three new weapon cards.**
+/// **Regenerated for the Sewer opening and the wave-five weapon cards.**
 /// The opening changed the two Sewer traces through the early rare-drop gate
 /// and the authored encounters. Reserving room for the pair in the director
 /// budget changed the integrated Evade/Sewer trace again. Glass Bead, Plumb
-/// Bob and Hold Point joined the shuffled upgrade pool and moved all six
-/// traces relative to the opening stage. The three pickups left those traces
-/// unchanged.
+/// Bob and the retired seventeenth weapon joined the shuffled upgrade pool and
+/// moved all six traces relative to the opening stage. The three pickups left
+/// those traces unchanged.
+///
+/// **Regenerated after retiring the seventeenth weapon.** Dropping that card
+/// from the shuffled upgrade pool changed the draft order in four of the six
+/// traces (all three Wander runs and `Evade/Kitchen/29`); `Evade/Sewer/11` and
+/// `Evade/Lab/1234` did not draft past the removed slot inside 60 s.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 17025260782478789895),
-    (Script::Wander, Theme::Kitchen, 29, 12233205193706444105),
-    (Script::Wander, Theme::Lab, 1234, 14555140171925699943),
+    (Script::Wander, Theme::Sewer, 11, 1138040202691256706),
+    (Script::Wander, Theme::Kitchen, 29, 15229459848873066996),
+    (Script::Wander, Theme::Lab, 1234, 15714745584404642204),
     (Script::Evade, Theme::Sewer, 11, 2784913122960156366),
-    (Script::Evade, Theme::Kitchen, 29, 15668702812670542744),
+    (Script::Evade, Theme::Kitchen, 29, 3096653348709803258),
     (Script::Evade, Theme::Lab, 1234, 8669835692121009913),
 ];
 

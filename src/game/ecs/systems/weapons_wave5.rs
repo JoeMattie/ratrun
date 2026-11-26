@@ -1,4 +1,4 @@
-//! Deterministic ricochet, chain swing, and stillness pulse.
+//! Deterministic ricochet and chain swing.
 //!
 //! Plumb Bob uses a cosine swing over each 150° pass. The weight leaves each
 //! extreme at rest and peaks in speed on the aim line. Hit sweeps and art share
@@ -12,20 +12,17 @@ use bevy_ecs::system::SystemParam;
 
 use crate::audio::Sfx;
 use crate::detmath::DetF32;
-use crate::game::art_wave5::HOLD_RADIUS;
-use crate::game::collision::{segment_circle_hit, SizeClass, SpatialGrid};
+use crate::game::collision::segment_circle_hit;
 use crate::game::ecs::components::SpawnId;
-use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::resources::{
-    BeadHitClock, Cvars, DamageLedger, EnemyIndex, HoldPhase, HoldPointFx, NextSpawnId, SfxQueue,
-    TickInput,
+    BeadHitClock, Cvars, DamageLedger, EnemyIndex, NextSpawnId, SfxQueue, TickInput,
 };
 use crate::game::enemy::Enemy;
 use crate::game::level::Level;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::{vfx, Particles, Shockwave};
 use crate::game::player::Player;
-use crate::game::weapon::{WeaponKind, THRASH_BOSS_KNOCKBACK};
+use crate::game::weapon::WeaponKind;
 use crate::math::Vec2;
 
 use super::boss::Boss;
@@ -49,14 +46,6 @@ const BOB_HALF: f32 = 75.0 * PI / 180.0;
 pub(crate) const BOB_PASS: f32 = 0.55;
 const SHED_REACH: f32 = 48.0;
 pub(crate) const SHED_PASS: f32 = 0.30;
-
-const HOLD: WeaponKind = WeaponKind::HoldPoint;
-const HOLD_SPEED: f32 = 10.0;
-const HOLD_CHARGE: f32 = 0.45;
-const HOLD_CRACK: f32 = 0.6;
-const HOLD_SHOVE: f32 = 50.0;
-const HOLD_FLASH: f32 = 0.30;
-const CLAMP_LIFE: f32 = 1.4;
 
 #[derive(Component)]
 pub(crate) struct GlassBead {
@@ -118,33 +107,6 @@ impl PlumbBob {
 
     pub(crate) fn endpoint_at(&self, level: &Level, age: f32) -> Vec2 {
         bob_endpoint(level, self, self.pivot, age)
-    }
-}
-
-impl HoldPointFx {
-    pub(crate) fn visual(&self) -> Option<(f32, f32, bool)> {
-        match self.phase {
-            HoldPhase::Ready => None,
-            HoldPhase::Charging(t) => Some(((t / HOLD_CHARGE).clamp(0.0, 1.0), -1.0, false)),
-            HoldPhase::Cracked(_) => Some((0.0, -1.0, true)),
-            HoldPhase::Spent { age, evolved, .. } => {
-                let duration = if evolved { CLAMP_LIFE } else { HOLD_FLASH };
-                let fired = (age / HOLD_FLASH).clamp(f32::EPSILON, 1.0);
-                (age < duration).then_some((0.0, fired, false))
-            }
-        }
-    }
-
-    pub(crate) fn gait_at(&self, player: &Player, level: &Level, pos: Vec2) -> f32 {
-        if matches!(self.phase, HoldPhase::Spent { age, evolved: true, .. } if age < CLAMP_LIFE)
-            && !player.buffs.is_giant()
-            && self.centre.dist_sq(pos) <= HOLD_RADIUS * HOLD_RADIUS
-            && los_clear(level, self.centre, pos, 0.0)
-        {
-            0.45
-        } else {
-            1.0
-        }
     }
 }
 
@@ -430,161 +392,14 @@ fn advance_bob(bob: &mut PlumbBob, pivot: Vec2, dt: f32, hits: &mut Wave5Hits) -
     bob.age >= end
 }
 
-pub(crate) fn hold_point_system(
-    input: Res<TickInput>,
-    mut player: ResMut<Player>,
-    cvars: Res<Cvars>,
-    mut fx: ResMut<HoldPointFx>,
-    mut grid: ResMut<SpatialGrid>,
-    mut sfx: ResMut<SfxQueue>,
-    mut hits: Wave5Hits,
-) {
-    let damage_mult = player.damage_mult() * cvars.damage_mult.max(0.0)
-        * player.loadout.weapon_damage_mult(WeaponKind::HoldPoint);
-    let cooldown_mult = player.loadout.weapon_cooldown_mult(WeaponKind::HoldPoint);
-    let shove = player.loadout.stats.shove(HOLD_SHOVE);
-    let centre = player.pos;
-    let giant = player.buffs.is_giant();
-    let suspended = player.buffs.weapons_suspended();
-    let step = HOLD_SPEED * input.dt;
-    let moving = player.vel.len_sq() >= HOLD_SPEED * HOLD_SPEED
-        || (input.dt > 0.0 && centre.dist_sq(input.previous_pos) >= step * step);
-    let Some(weapon) = player.loadout.weapons.iter_mut().find(|w| w.kind == HOLD) else {
-        fx.phase = HoldPhase::Ready;
-        return;
-    };
-    match &mut fx.phase {
-        HoldPhase::Spent { age, .. } => {
-            *age += input.dt;
-            if !suspended {
-                weapon.timer = (weapon.timer - input.dt).max(0.0);
-            }
-            if weapon.timer <= 1e-6 {
-                fx.phase = HoldPhase::Ready;
-            }
-            return;
-        }
-        HoldPhase::Cracked(remaining) => {
-            *remaining -= input.dt;
-            if !suspended {
-                weapon.timer = (weapon.timer - input.dt).max(0.0);
-            }
-            if *remaining <= 1e-6 || giant {
-                fx.phase = HoldPhase::Ready;
-            }
-            return;
-        }
-        _ => {}
-    }
-    if suspended {
-        fx.phase = HoldPhase::Ready;
-        return;
-    }
-    if weapon.timer > 1e-6 {
-        weapon.timer = (weapon.timer - input.dt).max(0.0);
-        return;
-    }
-    if giant {
-        weapon.timer = 0.0;
-        fx.phase = HoldPhase::Ready;
-        return;
-    }
-    if moving {
-        if matches!(fx.phase, HoldPhase::Charging(t) if t > 0.0) {
-            fx.phase = HoldPhase::Cracked(HOLD_CRACK);
-            weapon.timer = HOLD_CRACK;
-            sfx.0.push(Sfx::TrapSnap);
-        } else {
-            weapon.timer = 0.0;
-            fx.phase = HoldPhase::Ready;
-        }
-        return;
-    }
-    let previous = match fx.phase {
-        HoldPhase::Charging(t) => t,
-        _ => 0.0,
-    };
-    fx.centre = centre;
-    let charge = previous + input.dt;
-    if charge + 1e-6 < HOLD_CHARGE {
-        weapon.timer = 0.0;
-        fx.phase = HoldPhase::Charging(charge);
-        return;
-    }
-
-    weapon.timer = weapon.cooldown() * cooldown_mult;
-    fx.phase = HoldPhase::Spent { age: 0.0, evolved: weapon.evolved };
-    sfx.0.push(Sfx::ShootNova);
-    hold_pulse(centre, weapon.damage() * damage_mult, shove, &mut grid, &mut hits);
-}
-
-fn hold_pulse(
-    centre: Vec2, damage: f32, shove: f32, grid: &mut SpatialGrid, hits: &mut Wave5Hits,
-) {
-    let order = enemy_order(&hits.index, &hits.enemies, &mut hits.order);
-    let mut moved = false;
-    for &entity in order {
-        let Ok((_, _, mut enemy)) = hits.enemies.get_mut(entity) else { continue };
-        let pos = enemy.pos;
-        if !enemy.targetable() || !segment_circle_hit(centre, centre, HOLD_RADIUS, pos, enemy.radius)
-            || !los_clear(&hits.level, centre, pos, 0.0)
-        {
-            continue;
-        }
-        let killed = hit_body(
-            &mut enemy, damage, centre, HOLD, &mut hits.ledger, &mut hits.numbers, DamageSource::Normal,
-        );
-        vfx::emit_weapon_contact(&mut hits.particles, pos, pos - centre, HOLD, killed);
-        if killed || enemy.crab_pot_held {
-            continue;
-        }
-        let distance = shove * if enemy.kind.heavy() { THRASH_BOSS_KNOCKBACK } else { 1.0 };
-        let class = SizeClass::of_enemy(enemy.kind);
-        let dir = (pos - centre).normalized();
-        // Test the whole shove so a body cannot skip a wall or a closed gate.
-        let steps = (distance / 2.0).ceil() as usize;
-        for i in 1..=steps {
-            let to = pos + dir * (distance * i as f32 / steps as f32);
-            if to != enemy.pos && hits.level.tiles.circle_clear(to, enemy.radius, class) {
-                enemy.pos = to;
-                moved = true;
-            } else {
-                break;
-            }
-        }
-    }
-    for (_, mut boss) in hits.bosses.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) {
-        if boss.dead || !boss.hit_shapes().iter().any(|shape| {
-            shape.grounded() && shape.overlaps_circle(centre, HOLD_RADIUS)
-                && los_clear(&hits.level, centre, shape.center(), 0.0)
-        }) || !damage_boss(
-            &mut boss, damage * 0.5, HOLD, DamageSource::Normal, &mut hits.ledger, &mut hits.numbers,
-        ) {
-            continue;
-        }
-        let away = boss.pos - centre;
-        if boss.hp > 0.0 {
-            boss.shove(&hits.level, away, 4.0);
-        }
-        vfx::emit_weapon_contact(&mut hits.particles, boss.pos, away, HOLD, boss.hp <= 0.0);
-    }
-    if moved && hits.index.0.len() == order.len() {
-        // EnemyIndex still names the same bodies. Update only their buckets.
-        grid.reset(hits.level.arena, GRID_CELL);
-        grid.fill(order.iter().filter_map(|&entity| hits.enemies.get(entity).ok().map(|(_, _, e)| e.pos)));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::art_walls::WallKind;
-    use crate::game::collision::{TileKind, TileMap};
-    use crate::game::ecs::resources::spawn_with_id;
-    use crate::game::ecs::systems::boss::BossKind;
+    use crate::game::collision::{SizeClass, TileKind, TileMap};
     use crate::game::ecs::systems::weapons::fire_weapons_system;
     use crate::game::enemy::EnemyKind;
-    use crate::game::level::{Theme, TileRect, MAP_COLS, MAP_ROWS};
+    use crate::game::level::{Theme, MAP_COLS, MAP_ROWS};
     use crate::game::weapon::Weapon;
     use crate::game::world::World;
     use rand::RngExt;
@@ -616,12 +431,6 @@ mod tests {
     fn step_bob(world: &mut World, dt: f32) {
         world.begin_tick(dt, Vec2::ZERO, false);
         world.ecs.run_system_cached(plumb_bob_system).unwrap();
-        world.end_tick();
-    }
-
-    fn step_hold(world: &mut World, dt: f32) {
-        world.begin_tick(dt, Vec2::ZERO, false);
-        world.ecs.run_system_cached(hold_point_system).unwrap();
         world.end_tick();
     }
 
@@ -694,12 +503,6 @@ mod tests {
         let mut bobs = bob.ecs.query::<&PlumbBob>();
         assert_eq!(bobs.iter(&bob.ecs).len(), 0);
         assert_eq!(bob.player.loadout.weapons[0].timer, recovery);
-
-        let mut hold = arena(HOLD, 1, false);
-        step_hold(&mut hold, 0.2);
-        hold.player.buffs.white_coat = 5.0;
-        step_hold(&mut hold, 0.4);
-        assert!(hold.ecs.resource::<HoldPointFx>().visual().is_none());
 
         let mut bead = arena(BEAD, 3, false);
         fire(&mut bead);
@@ -863,68 +666,5 @@ mod tests {
         step_bob(&mut world, SHED_PASS);
         assert!(query.iter(&world.ecs).next().unwrap().pos.dist(tip) < 1e-3);
         assert_eq!(world.ecs.get::<Enemy>(body).unwrap().hp, hp - 19.0);
-    }
-
-    #[test]
-    fn hold_point_cracks_then_fires_after_a_full_still_beat() {
-        let mut world = arena(HOLD, 1, false);
-        let pos = ORIGIN + Vec2::new(12.0, 0.0);
-        let body = world.spawn_enemy(EnemyKind::Skitterer, pos, 10.0);
-        let hp = world.ecs.get::<Enemy>(body).unwrap().hp;
-        step_hold(&mut world, 0.20);
-        world.player.vel = Vec2::new(10.0, 0.0);
-        step_hold(&mut world, 0.01);
-        let fx = world.ecs.resource::<HoldPointFx>();
-        assert!(matches!(fx.phase, HoldPhase::Cracked(t) if t == HOLD_CRACK));
-        assert_eq!(world.ecs.get::<Enemy>(body).unwrap().hp, hp);
-
-        world.player.vel = Vec2::ZERO;
-        step_hold(&mut world, HOLD_CRACK);
-        step_hold(&mut world, 0.44);
-        assert_eq!(world.ecs.get::<Enemy>(body).unwrap().hp, hp);
-        step_hold(&mut world, 0.01);
-        let enemy = world.ecs.get::<Enemy>(body).unwrap();
-        assert_eq!(enemy.hp, hp - 26.0);
-        assert_eq!(enemy.pos, pos + Vec2::new(HOLD_SHOVE, 0.0));
-        assert_eq!(world.player.loadout.weapons[0].timer, 2.2);
-    }
-
-    #[test]
-    fn hold_point_shove_cannot_cross_a_wall() {
-        let mut world = arena(HOLD, 1, false);
-        let wall = TileKind::Wall(WallKind::Solid);
-        world.level.tiles.fill_cells(18, 15, 1, 4, wall);
-        world.level.tiles.rebuild_masks();
-        let pos = ORIGIN + Vec2::new(20.0, 0.0);
-        let body = world.spawn_enemy(EnemyKind::Skitterer, pos, 10.0);
-        step_hold(&mut world, HOLD_CHARGE);
-        let body = world.ecs.get::<Enemy>(body).unwrap();
-        assert!(body.pos.x > pos.x);
-        assert!(body.pos.x + body.radius <= 288.0);
-    }
-
-    #[test]
-    fn clamp_slows_the_circle_and_preserves_the_boss_shove_cap() {
-        let mut world = arena(HOLD, 1, true);
-        let pos = ORIGIN + Vec2::new(20.0, 0.0);
-        let boss = Boss::new(BossKind::Cat, pos, 500.0, TileRect::new(0, 0, 32, 32), pos, false);
-        let boss = spawn_with_id(&mut world.ecs, boss);
-        step_hold(&mut world, HOLD_CHARGE);
-        let b = world.ecs.get::<Boss>(boss).unwrap();
-        assert_eq!(b.hp, 500.0 - 13.0);
-        assert_eq!(b.pos, pos + Vec2::new(4.0, 0.0));
-        let gait = |world: &World, pos| {
-            world.ecs.resource::<HoldPointFx>().gait_at(&world.player, &world.level, pos)
-        };
-        assert_eq!(gait(&world, ORIGIN), 0.45);
-        assert_eq!(gait(&world, ORIGIN + Vec2::new(29.0, 0.0)), 1.0);
-        step_hold(&mut world, CLAMP_LIFE);
-        assert_eq!(gait(&world, ORIGIN), 1.0);
-
-        step_hold(&mut world, 2.2);
-        world.player.buffs.giant = 8.0;
-        step_hold(&mut world, HOLD_CHARGE);
-        assert_eq!(world.ecs.get::<Boss>(boss).unwrap().hp, 500.0 - 13.0);
-        assert!(world.ecs.resource::<HoldPointFx>().visual().is_none());
     }
 }

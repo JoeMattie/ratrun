@@ -2286,12 +2286,6 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         script.zoom = if evolved { 2.0 } else { 1.6 };
         script.lean = Vec2::new(12.0, 0.0);
     }
-    if kind == WeaponKind::HoldPoint {
-        script.cue = Some(arsenal_hold_cue);
-        script.shrink = 2;
-        script.zoom = 1.7;
-        script.lean = Vec2::ZERO;
-    }
     script.input = match kind {
         // A thrash burst lasts a second, so its presses are 1.4 s apart (three
         // bursts a loop, each with its own sweep and hit flashes); a squeak ring
@@ -2309,10 +2303,6 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
             // does not walk back: the camera is fixed on the lane's midpoint
             // and a rat strolling home across it would leave the frame.
             hold: (0.05..0.9).contains(&t),
-            ..Input::default()
-        },
-        WeaponKind::HoldPoint => |t| Input {
-            mv: if (0.22..0.42).contains(&t) { Vec2::new(1.0, 0.0) } else { Vec2::ZERO },
             ..Input::default()
         },
         _ => idle,
@@ -2347,12 +2337,6 @@ fn arsenal_rear_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
 fn arsenal_bob_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
     let rat = world.player.pos;
     let homes = [-0.8, 0.0, 0.8].map(|a| rat + Vec2::from_angle(a) * 42.0);
-    arsenal_dummies(world, &homes, ARSENAL_HP);
-}
-
-fn arsenal_hold_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
-    let rat = world.level.start;
-    let homes = [-0.9, 0.0, 0.9].map(|a| rat + Vec2::from_angle(a) * 22.0);
     arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 

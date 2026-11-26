@@ -80,7 +80,7 @@ dark.*
   tidal drops and lure traps, then face The Lantern.
 - **56 ordinary enemies and 28 named minibosses** across seven floors. The
   Outfall adds eight ordinary enemies and four named encounters.
-- **Hold-to-charge Super Dash**, seventeen chest evolutions, the gene-splice shop
+- **Hold-to-charge Super Dash**, sixteen chest evolutions, the gene-splice shop
   behind the mouse holes, and the Nest's fifteen permanent tracks.
 - **Remappable controls** for keyboard, mouse and gamepad (27 actions, three
   schemes), and a four-tab Library that fills in as you meet things.
@@ -99,7 +99,7 @@ dark.*
 - **Fifteen minutes a floor**, escalating hordes, **four named minibosses** at
   3:00, 6:00, 9:00 and 12:00 (each leaves a chest), then **the floor's boss** at
   15:00. There is no arena to walk to: the boss comes to wherever you are. Each floor draws its boss from a pool of one or two of the eleven bosses.
-- **17 weapons**, **12 passives**, and **17 evolutions** — a maxed weapon plus
+- **16 weapons**, **12 passives**, and **16 evolutions** — a maxed weapon plus
   the right passive evolves into something else entirely when you open a chest.
   Level-ups are rare (about thirteen a floor) and every one adds 4% weapon
   damage. Each weapon has its own shape: Gnaw bites, the Tail Whip swipes the

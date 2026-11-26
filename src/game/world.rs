@@ -513,7 +513,6 @@ impl World {
         // schedule and any `run_system_cached` copy of the firing pass agree.
         ecs.insert_resource(EvoRuntime::default());
         ecs.insert_resource(super::ecs::resources::BeadHitClock::default());
-        ecs.insert_resource(super::ecs::resources::HoldPointFx::default());
         // Wave 3 weapons A: the Hantavirus mark on the boss (a boss is not an
         // `Enemy`, so its mark cannot be a component on it). Permanent scratch,
         // like `ActiveFx`; a fresh level starts unmarked.
@@ -3347,15 +3346,6 @@ impl World {
     /// single call site: floor/loot/actors first, lighting, then this.
     fn draw_hostile_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
         let viewport = self.render_viewport;
-
-        let hold = self.ecs.resource::<super::ecs::resources::HoldPointFx>();
-        if !self.player.buffs.is_giant()
-            && on_screen(self.w2s(hold.centre, cam), 32.0, viewport)
-        {
-            if let Some((charge, fired, cracked)) = hold.visual() {
-                super::art_wave5::draw_hold(pb, hold.centre, cam, charge, fired, cracked);
-            }
-        }
 
         if let Some(opening) = &self.level.objects.sewer_opening {
             let shaft = &opening.drip_shaft;

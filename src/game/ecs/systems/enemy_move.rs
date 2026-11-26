@@ -154,7 +154,6 @@ pub fn enemy_steering_system(
     ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
     // Console `freeze on`: the horde holds still. Default false = normal.
     debug: Res<DebugFlags>,
-    hold: Res<crate::game::ecs::resources::HoldPointFx>,
     bosses: Query<&Boss>,
     mut outfall_bulbs: Local<Vec<Vec2>>,
 ) {
@@ -302,15 +301,14 @@ pub fn enemy_steering_system(
         } else {
             1.0
         };
-        let clamp = hold.gait_at(&player, &level, e.pos);
-        let mut gait = speed_mult * glue * ink * chase * clamp;
+        let mut gait = speed_mult * glue * ink * chase;
         if outfall && e.kind.has_outfall_state() && e.targetable() {
             gait *= floor_outfall::steering_intent(
                 &mut e, &level, ppos, rat_wet, &outfall_bulbs, &mut target, &mut flow_dir, dt,
             );
         }
         if e.kind == EnemyKind::ShoreCrab {
-            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase * clamp);
+            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase);
         } else {
             e.steer(target, flow_dir, dt, gait);
         }

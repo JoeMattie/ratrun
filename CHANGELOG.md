@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Removed Hold Point and its Clamp evolution.
+
 ## 0.4.2 (2026-11-26)
 
 - **Browser edition.** Play with a keyboard and mouse. The canvas renderer
