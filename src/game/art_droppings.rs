@@ -685,6 +685,7 @@ mod tests {
                     mode: LightingMode::Full,
                     depth: ColorDepth::Truecolor,
                     fx: true,
+                    gi: crate::render::lighting::GlobalLight::Off,
                     blackout: 0.0,
                 };
                 lm.apply_scene(&mut pb, &scene);
@@ -904,6 +905,7 @@ mod tests {
             mode: LightingMode::Full,
             depth: ColorDepth::Truecolor,
             fx: false,
+            gi: crate::render::lighting::GlobalLight::Off,
             blackout: 0.0,
         };
 

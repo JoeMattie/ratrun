@@ -49,8 +49,8 @@
 use super::fx::{self, Canvas, FxFrame, FxLight, LightInfo, LightTag, Normal, SampleHit, ShadowQuery};
 use super::shadow::{Body, Geometry, HardShadows, ShadowProfile, Surface};
 use super::softshadow::SoftProfile;
-use super::{air, motes, overhead, softshadow, specular, surface, underwater, upsample, water};
-use super::{fixtures, LightScene, ThemeAmbient};
+use super::{air, gi, motes, overhead, softshadow, specular, surface, underwater, upsample, water};
+use super::{fixtures, GlobalLight, LightScene, ThemeAmbient};
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{LightFixtureKind, LightZoneKind, Theme};
@@ -454,7 +454,7 @@ pub(super) fn ambient_level_scaled(theme_mul: u16, gain: f32, scale: f32) -> u16
 }
 
 /// The `mul` clamp of [`Sample::light`] with the effects off.
-const MUL_CLAMP: i32 = 350;
+pub(super) const MUL_CLAMP: i32 = 350;
 
 /// What one lighting pass runs with, handed to the grid's methods.
 #[derive(Clone, Copy)]
@@ -1104,7 +1104,27 @@ impl LightMap {
         if fx {
             let _p = crate::prof::scope(crate::prof::Stage::LComposite);
             upsample::bounce(&mut self.grid, &frame);
+            if scene.gi.gi_enabled(scene.mode) && !fx::skip("gi") {
+                gi::apply_indirect(
+                    &mut self.grid,
+                    &self.geometry,
+                    &self.static_shadows,
+                    scene,
+                    &frame,
+                    self.ambient_cap.unwrap_or(1.0),
+                );
+            }
             air::grid_pass(&mut self.grid, &frame);
+        } else if scene.gi.gi_enabled(scene.mode) {
+            let _p = crate::prof::scope(crate::prof::Stage::LComposite);
+            gi::apply_indirect(
+                &mut self.grid,
+                &self.geometry,
+                &self.static_shadows,
+                scene,
+                &frame,
+                self.ambient_cap.unwrap_or(1.0),
+            );
         }
         let hp = (scene.player.hp / scene.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         if hp < 0.35 {
@@ -1132,6 +1152,9 @@ impl LightMap {
                 self.normals.resize(w * h, [0, 0]);
                 let (px, mat) = pb.split_mat();
                 let mut canvas = Canvas { w, h, px, mat };
+                if scene.gi != GlobalLight::Off && !fx::skip("ao") {
+                    gi::capture_crevices(&self.grid, &canvas, &frame, scene.gi);
+                }
                 if !fx::skip("bump") {
                     surface::apply(&self.grid, &mut canvas, &mut self.normals, &frame);
                 }
@@ -1147,6 +1170,9 @@ impl LightMap {
                 }
                 // The overhead light's shadows, rasterised by the scene draw.
                 overhead::apply_lit(&self.grid, &mut canvas);
+                if scene.gi != GlobalLight::Off && !fx::skip("ao") {
+                    gi::apply_ao(&self.grid, &mut canvas, scene, &frame);
+                }
                 if !fx::skip("spec") {
                     specular::apply(&self.grid, &mut canvas, &self.normals, &frame);
                 }
@@ -1182,7 +1208,19 @@ impl LightMap {
                     }
                 }
             } else {
+                if scene.gi.ao_enabled(scene.mode) {
+                    let (w, h) = (pb.w, pb.h);
+                    let (px, mat) = pb.split_mat();
+                    let canvas = Canvas { w, h, px, mat };
+                    gi::capture_crevices(&self.grid, &canvas, &frame, scene.gi);
+                }
                 self.grid.composite(pb, scene.depth);
+                if scene.gi.ao_enabled(scene.mode) {
+                    let (w, h) = (pb.w, pb.h);
+                    let (px, mat) = pb.split_mat();
+                    let mut canvas = Canvas { w, h, px, mat };
+                    gi::apply_ao(&self.grid, &mut canvas, scene, &frame);
+                }
                 if theme == Theme::Outfall {
                     let (w, h) = (pb.w, pb.h);
                     let (px, mat) = pb.split_mat();

@@ -295,6 +295,9 @@ pub struct World {
     /// on by default (`RATRUN_FX=0` pins them off for a session; the
     /// console's read-only `fx on|off` is the in-run A/B).
     pub lighting_fx: bool,
+    /// Optional ambient occlusion + one-bounce global illumination
+    /// (`render::lighting::gi`), off by default (`RATRUN_GI`, console `gi`).
+    pub global_light: crate::render::lighting::GlobalLight,
     /// SFX events emitted this tick; drained by the app after `update`.
     pub sfx: Vec<Sfx>,
 
@@ -617,6 +620,7 @@ impl World {
             foreground_layer: crate::render::foreground::ForeLayer::new(),
             foreground: crate::render::foreground::enabled_from_env(),
             lighting_fx: crate::render::lighting::fx_enabled_from_env(),
+            global_light: crate::render::lighting::gi_from_env(),
             sfx: Vec::new(),
             tail_ready_at: f32::NEG_INFINITY,
             whip_chain: art_rat::WhipChain::new(),
@@ -2499,7 +2503,8 @@ impl World {
         let fx_tier = self.light_map.quality(self.lighting);
         pb.set_pen(0);
         pb.set_materials(
-            self.lighting_fx
+            (self.lighting_fx
+                || self.global_light != crate::render::lighting::GlobalLight::Off)
                 && !self.flat_lit
                 && matches!(fx_tier, LightingMode::Full | LightingMode::Hard),
         );
@@ -3712,6 +3717,7 @@ impl World {
             mode: self.light_map.quality(self.lighting),
             depth: self.lighting_depth,
             fx: self.lighting_fx,
+            gi: self.global_light,
         };
         let started = crate::clock::Instant::now();
         self.light_map.apply_scene(pb, &scene);

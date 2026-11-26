@@ -1120,6 +1120,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         handler: cmd_fx,
     },
     CommandSpec {
+        name: "gi",
+        aliases: &["ao", "globallight"],
+        usage: "gi [off|ao|gi]",
+        summary: "Set ambient occlusion and indirect bounce: off, ao (AO only) or gi (AO + GI).",
+        args: &[ArgKind::Words(&["off", "ao", "gi", "on"])],
+        read_only: true,
+        handler: cmd_gi,
+    },
+    CommandSpec {
         name: "glyphfx",
         aliases: &[],
         usage: "glyphfx [on|off]",
@@ -2353,6 +2362,20 @@ fn cmd_fx(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// `gi` sets ambient occlusion and indirect bounce (`render::lighting::gi`):
+/// render-only, so it never flags the run.
+fn cmd_gi(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    use crate::render::lighting::GlobalLight;
+    let next = match args.first() {
+        None => crate::render::graphics::step_global_light(app.global_light(), 1),
+        Some(word) => GlobalLight::parse(word)
+            .ok_or_else(|| format!("expected off, ao or gi, got `{word}`"))?,
+    };
+    app.set_global_light(next);
+    app.console_line(format!("gi {}", next.as_str()), LineKind::Success);
+    Ok(())
+}
+
 /// `glyphfx` is the round-glyph particle layer (`render::glyphfx`): motes, hit
 /// sparks and rising bubbles drawn into the frame's cells. Render-only, so it
 /// never flags the run — and it does not even dirty the cached picture.
@@ -2981,6 +3004,22 @@ mod tests {
         run_command(&mut app, "glyphfx").expect("glyphfx steps");
         assert!(!app.glyphfx_enabled(), "no argument flips it");
         assert!(scrollback(&app).contains("glyphfx off"));
+    }
+
+    #[test]
+    fn the_gi_command_cycles_modes_without_flagging_cheat() {
+        use crate::render::lighting::GlobalLight;
+        let mut app = fresh_app();
+        assert_eq!(app.global_light(), GlobalLight::Off);
+        run_command(&mut app, "gi").expect("gi steps to ao");
+        assert_eq!(app.global_light(), GlobalLight::AoOnly);
+        run_command(&mut app, "gi").expect("gi steps to ao+gi");
+        assert_eq!(app.global_light(), GlobalLight::AoGi);
+        assert!(scrollback(&app).contains("gi gi"));
+        run_command(&mut app, "ao off").expect("alias resets to off");
+        assert_eq!(app.global_light(), GlobalLight::Off);
+        assert!(run_command(&mut app, "gi bogus").is_err());
+        assert!(!app.console_cheat, "render-only gi command must not flag cheat");
     }
 
     #[test]

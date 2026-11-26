@@ -40,6 +40,7 @@ fn test_scene(world: &World, mode: LightingMode, depth: ColorDepth, cam: Vec2) -
         mode,
         depth,
         fx: false,
+        gi: GlobalLight::Off,
     }
 }
 

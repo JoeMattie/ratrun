@@ -363,6 +363,8 @@ struct PictureKey {
     foreground: bool,
     /// Whether the batch-13 lighting effects run (`render::lighting::fx`).
     fx: bool,
+    /// Ambient occlusion + global illumination setting (`render::lighting::gi`).
+    gi: crate::render::lighting::GlobalLight,
     /// The camera's share of the simulation's shake (`World::shake_scale`,
     /// bits): the Graphics page's SCREEN SHAKE row can change it while the
     /// world is frozen under a plate, and the frozen picture carries the offset.
@@ -384,6 +386,7 @@ impl PictureKey {
             smooth: w.smooth,
             foreground: w.foreground,
             fx: w.lighting_fx,
+            gi: w.global_light,
             shake: w.shake_scale.to_bits(),
             blackout: w.blackout().to_bits(),
         }
@@ -545,6 +548,11 @@ pub struct App {
     fx: bool,
     /// The `RATRUN_FX` session pin (see `smooth_env`).
     fx_env: Option<bool>,
+    /// Optional ambient occlusion + indirect bounce (`render::lighting::gi`),
+    /// off by default (`RATRUN_GI`, console `gi`, Graphics `GLOBAL LIGHT`).
+    global_light: crate::render::lighting::GlobalLight,
+    /// The `RATRUN_GI` session pin (see `smooth_env`).
+    global_light_env: Option<crate::render::lighting::GlobalLight>,
     /// Round-glyph particles over the playfield (`render::glyphfx`): dust motes,
     /// hit sparks and rising bubbles. On by default; the Graphics page's GLYPH
     /// PARTICLES row and the console `glyphfx` command A/B it live
@@ -714,11 +722,13 @@ impl App {
         let smooth_env = crate::render::subcell::smooth_env();
         let foreground_env = env_toggle(FOREGROUND_ENV);
         let fx_env = env_toggle(FX_ENV);
+        let global_light_env = crate::render::lighting::gi_env_pin();
         let glyphfx_env = env_toggle(GLYPHFX_ENV);
         let saved_graphics = scores.graphics.clone();
         let smooth = smooth_env.unwrap_or_else(|| saved_graphics.smooth());
         let foreground = foreground_env.unwrap_or(saved_graphics.foreground);
         let fx = fx_env.unwrap_or(saved_graphics.fx);
+        let global_light = global_light_env.unwrap_or_else(|| saved_graphics.global_light());
         let glyphfx = glyphfx_env.unwrap_or(saved_graphics.glyphfx);
         let shake_scale = saved_graphics.shake();
         let mut app = App {
@@ -788,6 +798,8 @@ impl App {
             foreground_env,
             fx,
             fx_env,
+            global_light,
+            global_light_env,
             glyphfx: {
                 let mut layer = crate::render::glyphfx::GlyphFx::default();
                 layer.set_enabled(glyphfx);
@@ -1323,6 +1335,7 @@ impl App {
         // `draw_game`, and the environment pins have already won their place in
         // `with_options`).
         world.lighting = self.saved_lighting();
+        world.global_light = self.global_light;
         world.shake_scale = self.shake_scale;
         // The simulation's viewport is session input (spawn rings, offscreen
         // placement). `draw_game` writes it every frame, but a floor's first
@@ -2796,6 +2809,10 @@ impl App {
                 self.set_lighting(next);
             }
             graphics::FX_ROW => self.set_fx(!self.fx_enabled()),
+            graphics::GLOBAL_LIGHT_ROW => {
+                let next = graphics::step_global_light(self.global_light(), dir);
+                self.set_global_light(next);
+            }
             graphics::SMOOTH_ROW => {
                 let next = graphics::step_smooth(self.smooth_level(), dir);
                 self.set_smooth_level(next);
@@ -4628,6 +4645,26 @@ impl App {
         self.fx
     }
 
+    /// Set the ambient occlusion + global illumination mode (the console `gi`
+    /// command and the Graphics page's GLOBAL LIGHT row). Render-only,
+    /// persisted, and drops the `RATRUN_GI` session pin.
+    pub(crate) fn set_global_light(&mut self, mode: crate::render::lighting::GlobalLight) {
+        self.global_light_env = None;
+        if self.global_light != mode {
+            self.global_light = mode;
+            self.picture_dirty = true;
+        }
+        if let Some(w) = self.world.as_mut() {
+            w.global_light = mode;
+        }
+        self.save_graphics();
+    }
+
+    /// The ambient occlusion + global illumination mode in force.
+    pub(crate) fn global_light(&self) -> crate::render::lighting::GlobalLight {
+        self.global_light
+    }
+
     /// Turn the round-glyph particle layer on or off (the console `glyphfx`
     /// command and the Graphics page's GLYPH PARTICLES row). Render-only: no run
     /// state, no golden, and no world redraw either — the layer is written into
@@ -4688,6 +4725,9 @@ impl App {
         }
         if self.fx_env.is_none() {
             graphics.fx = self.fx;
+        }
+        if self.global_light_env.is_none() {
+            graphics.set_global_light(self.global_light);
         }
         if self.glyphfx_env.is_none() {
             graphics.glyphfx = self.glyphfx.enabled();
@@ -5423,6 +5463,7 @@ impl App {
         let view = graphics::GraphicsView {
             lighting: self.lighting_mode(),
             fx: self.fx_enabled(),
+            global_light: self.global_light(),
             smooth: self.smooth_level(),
             foreground: self.foreground_enabled(),
             glyphfx: self.glyphfx_enabled(),
@@ -5769,6 +5810,7 @@ impl App {
                 w.smooth = self.smooth;
                 w.foreground = self.foreground;
                 w.lighting_fx = self.fx;
+                w.global_light = self.global_light;
                 w.shake_scale = self.shake_scale;
                 let key = PictureKey::of(w, self.run_counter, &self.pixels);
                 if self.picture_dirty || self.picture_key != Some(key) {
@@ -11926,6 +11968,9 @@ mod tests {
         h.app.set_shake_scale(1.0);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 5, "the shake share must redraw");
+        h.app.set_global_light(crate::render::lighting::GlobalLight::AoGi);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 6, "global light must redraw");
 
         // Any discrete input (it may have changed anything): redraw once.
         let mut h = paused_harness();
@@ -15807,6 +15852,7 @@ mod tests {
         for needle in [
             "LIGHTING",
             "LIGHT EFFECTS",
+            "GLOBAL LIGHT",
             "SMOOTHING",
             "FOREGROUND",
             "GLYPH PARTICLES",
@@ -15985,6 +16031,24 @@ mod tests {
         h.frame(&[KeyCode::Left]);
         assert!(h.app.fx_enabled());
 
+        // GLOBAL LIGHT: OFF -> AO ONLY -> AO + GI -> OFF, synced onto World and saved.
+        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::Off);
+        h.app.graphics_row = graphics::GLOBAL_LIGHT_ROW;
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::AoOnly);
+        assert_eq!(
+            h.app.world.as_ref().unwrap().global_light,
+            crate::render::lighting::GlobalLight::AoOnly
+        );
+        assert_eq!(
+            h.app.scores.graphics.global_light(),
+            crate::render::lighting::GlobalLight::AoOnly
+        );
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::AoGi);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.global_light(), crate::render::lighting::GlobalLight::Off);
+
         // SMOOTHING: the `smooth` levels, left and right.
         assert_eq!(h.app.smooth_level(), Smooth::default());
         h.app.graphics_row = graphics::SMOOTH_ROW;
@@ -16105,6 +16169,7 @@ mod tests {
         table.graphics.set_lighting(LightingMode::Coarse);
         table.graphics.set_smooth(Smooth::Xbr);
         table.graphics.fx = false;
+        table.graphics.set_global_light(crate::render::lighting::GlobalLight::AoGi);
         table.graphics.foreground = false;
         table.graphics.glyphfx = false;
         table.graphics.set_shake(1.0);
@@ -16119,6 +16184,7 @@ mod tests {
         assert_eq!(app.lighting_mode(), LightingMode::Coarse);
         assert_eq!(app.smooth_level(), Smooth::Xbr);
         assert!(!app.fx_enabled());
+        assert_eq!(app.global_light(), crate::render::lighting::GlobalLight::AoGi);
         assert!(!app.foreground_enabled());
         assert!(!app.glyphfx_enabled());
         assert_eq!(app.shake_scale(), 1.0);
@@ -16129,6 +16195,7 @@ mod tests {
         h.enter_playing();
         let w = h.app.world.as_ref().unwrap();
         assert_eq!(w.lighting, LightingMode::Coarse);
+        assert_eq!(w.global_light, crate::render::lighting::GlobalLight::AoGi);
         assert_eq!(w.shake_scale, 1.0);
     }
 
@@ -16145,6 +16212,7 @@ mod tests {
         assert_eq!(table.graphics.smooth(), Smooth::default());
         assert!(table.graphics.foreground);
         assert!(table.graphics.fx && table.graphics.glyphfx);
+        assert_eq!(table.graphics.global_light(), crate::render::lighting::GlobalLight::Off);
         assert_eq!(table.graphics.shake(), crate::game::world::SHAKE_SCALE);
 
         // A partial object keeps the defaults for the fields it omits.
@@ -16194,6 +16262,32 @@ mod tests {
         match saved {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
+        }
+
+        // Same contract for `RATRUN_GI`.
+        let gi_key = "RATRUN_GI";
+        let gi_saved = std::env::var(gi_key).ok();
+        std::env::set_var(gi_key, "ao");
+        let mut gi_table = ScoreTable::default();
+        gi_table
+            .graphics
+            .set_global_light(crate::render::lighting::GlobalLight::AoGi);
+        let mut app = App::with_options(false, None, gi_table, false, Some(TEST_SEED));
+        assert_eq!(app.global_light(), crate::render::lighting::GlobalLight::AoOnly);
+        assert_eq!(
+            app.scores.graphics.global_light(),
+            crate::render::lighting::GlobalLight::AoGi,
+            "RATRUN_GI pin must not overwrite the saved preference"
+        );
+        app.set_global_light(crate::render::lighting::GlobalLight::Off);
+        assert_eq!(app.global_light(), crate::render::lighting::GlobalLight::Off);
+        assert_eq!(
+            app.scores.graphics.global_light(),
+            crate::render::lighting::GlobalLight::Off
+        );
+        match gi_saved {
+            Some(value) => std::env::set_var(gi_key, value),
+            None => std::env::remove_var(gi_key),
         }
     }
 
