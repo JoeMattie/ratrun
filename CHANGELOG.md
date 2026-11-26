@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Five XP gem tiers.** Distant gems combine into larger drops that carry
+  their combined XP. The Field Guide lists each tier's colour and value.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

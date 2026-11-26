@@ -294,6 +294,7 @@ pub fn plan(key: Key) -> Plan {
         Key::Enemy(EnemyKind::Boss) => Plan::Still("the legacy boss body never spawns"),
         Key::Enemy(_) | Key::Miniboss(_) | Key::Boss(_) => Plan::Sandbox,
         Key::Weapon(_) | Key::Evolution(_) => Plan::Sandbox,
+        Key::Object(ObjectKind::Gem) => Plan::Still("a plate comparing the five gem tiers"),
         Key::Pickup(_) | Key::Object(_) | Key::Floor(_) => Plan::Sandbox,
         // A passive moves the plate only where its whole effect is legible
         // from one picture: the rat outrunning its pack, and loot crossing the
@@ -1424,7 +1425,7 @@ fn stage(key: Key) -> Option<Staged> {
         Key::Pickup(kind) => Some(stage_pickup(theme, kind)),
         Key::Floor(theme) => Some(stage_floor(theme)),
         Key::Passive(kind) => stage_passive(theme, kind),
-        Key::Object(kind) => Some(stage_object(theme, kind)),
+        Key::Object(kind) => stage_object(theme, kind),
         // `plan` answers `Still` for everything below, so `build` never gets
         // here; a caller that skipped the plan gets nothing rather than a
         // wrong picture.
@@ -2504,8 +2505,8 @@ enum DeckFeature {
     Wind,
 }
 
-fn stage_object(theme: Theme, kind: ObjectKind) -> Staged {
-    match kind {
+fn stage_object(theme: Theme, kind: ObjectKind) -> Option<Staged> {
+    Some(match kind {
         ObjectKind::Elite => stage_enemy(theme, roster::elite_kind(theme), true),
         ObjectKind::Gold => stage_gold(theme),
         ObjectKind::Chest => stage_chest(theme),
@@ -2520,7 +2521,8 @@ fn stage_object(theme: Theme, kind: ObjectKind) -> Staged {
         ObjectKind::ShopHole => stage_shop_hole(theme),
         ObjectKind::MazeCache => stage_maze_cache(theme),
         ObjectKind::OneWayDoor => stage_one_way_door(theme),
-    }
+        ObjectKind::Gem => return None,
+    })
 }
 
 /// Coins and gems on the floor, swept up by the rat's own pickup pass.

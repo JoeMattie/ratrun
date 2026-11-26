@@ -128,12 +128,10 @@ fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
             if !on(s, 2) {
                 continue;
             }
-            // The tier's own colour keeps the value readable (white → blue →
-            // mint → warm 25); the diamond shape is the constant.
-            let c = brighten(g.color, 0.35);
+            let c = if g.merged { brighten(g.color, 0.6) } else { g.color };
             if small {
                 // One bright pixel in the tier's colour.
-                pb.plot(s.0, s.1, brighten(g.color, 0.6));
+                pb.plot(s.0, s.1, c);
                 continue;
             }
             pb.plot(s.0, s.1 - 1, c);
@@ -928,7 +926,12 @@ mod tests {
             // Gem and coin light their centre pixel; the bracket and the crate
             // frame leave the centre to the sprite, so count their patch.
             let (gx, gy) = at(20.0, 20.0);
-            assert!(lum(&pb, gx, gy) > 300, "z={z}: no gem mark");
+            let tip_y = if z >= LOOT_SMALL_FROM { gy } else { gy - 1 };
+            assert_eq!(
+                pb.pixel_at(gx as usize, tip_y as usize),
+                crate::game::gem::GemTier::Chip.color(),
+                "z={z}: gem mark lost its tier colour"
+            );
             let (cx, cy) = at(40.0, 20.0);
             assert!(lum(&pb, cx, cy) > 300, "z={z}: no coin mark");
             let (px, py) = at(60.0, 40.0);

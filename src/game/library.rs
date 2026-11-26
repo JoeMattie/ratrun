@@ -71,7 +71,7 @@ use crate::game::collision::cell_of;
 use crate::game::ecs::systems::boss::BossKind;
 use crate::game::ecs::systems::miniboss::{self, MinibossKind};
 use crate::game::enemy::EnemyKind;
-use crate::game::gem::PickupKind;
+use crate::game::gem::{Gem, GemTier, PickupKind};
 use crate::game::level::{theme_props, PropKind, Theme};
 use crate::game::loadout::PassiveKind;
 use crate::game::shop::{self, SpliceKind};
@@ -170,10 +170,11 @@ pub enum ObjectKind {
     ShopHole,
     MazeCache,
     OneWayDoor,
+    Gem,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 14] = [
+    pub const ALL: [ObjectKind; 15] = [
         ObjectKind::Elite,
         ObjectKind::Gold,
         ObjectKind::Chest,
@@ -188,6 +189,7 @@ impl ObjectKind {
         ObjectKind::ShopHole,
         ObjectKind::MazeCache,
         ObjectKind::OneWayDoor,
+        ObjectKind::Gem,
     ];
 }
 
@@ -416,6 +418,7 @@ fn object_name(k: ObjectKind) -> &'static str {
         ObjectKind::ShopHole => "Mouse-Hole Shop",
         ObjectKind::MazeCache => "Maze Cache",
         ObjectKind::OneWayDoor => "One-Way Door",
+        ObjectKind::Gem => "XP Gems",
     }
 }
 
@@ -670,7 +673,7 @@ pub fn all_rows() -> Vec<Row> {
             dossier,
         });
     }
-    for k in [ObjectKind::Gold, ObjectKind::Chest] {
+    for k in [ObjectKind::Gold, ObjectKind::Chest, ObjectKind::Gem] {
         let (hint, dossier) = object_text(k);
         rows.push(Row {
             key: Key::Object(k),
@@ -1654,6 +1657,10 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
              and refuses the rat going back in, and it does not care at all about \
              anything following you.",
         ),
+        ObjectKind::Gem => (
+            "Any floor · enemy drops",
+            "Collect gems for XP. Distant drops combine.",
+        ),
     }
 }
 
@@ -2539,6 +2546,16 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             f.push("CLOSE", format!("{:.2}s", traps::ONE_WAY_DOOR_CLOSE_SECS));
             f.push("REFUSES", "trying it backwards");
         }
+        ObjectKind::Gem => {
+            for (i, tier) in GemTier::ALL.into_iter().enumerate() {
+                let min = tier.min_value();
+                let band = match GemTier::ALL.get(i + 1) {
+                    Some(next) => format!("{min}–{} XP", next.min_value() - 1),
+                    None => format!("{min}+ XP"),
+                };
+                f.push(tier.name(), format!("{} {band}", tier.color_name()));
+            }
+        }
     }
 }
 
@@ -3049,6 +3066,11 @@ impl Library {
     }
 
     fn survey_drops(&mut self, w: &crate::game::world::World) {
+        let gem_key = Key::Object(ObjectKind::Gem);
+        // A drop collected on its spawn tick does not reach the survey.
+        if (w.player.xp > 0 || w.player.level > 1) && !self.is_seen(gem_key) {
+            self.mark_seen(gem_key);
+        }
         for entity in w.ecs.iter_entities() {
             if let Some(p) = entity.get::<crate::game::gem::Pickup>() {
                 if !self.is_seen(Key::Pickup(p.kind))
@@ -3069,6 +3091,11 @@ impl Library {
             if let Some(c) = entity.get::<crate::game::gem::Chest>() {
                 if !self.is_seen(Key::Object(ObjectKind::Chest)) && sees(w, c.pos) {
                     self.see_if(Key::Object(ObjectKind::Chest), true);
+                }
+            }
+            if !self.is_seen(gem_key) {
+                if let Some(gem) = entity.get::<Gem>() {
+                    self.see_if(gem_key, sees(w, gem.pos));
                 }
             }
         }

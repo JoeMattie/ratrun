@@ -108,7 +108,7 @@ powerups → traps → hazards → floor_sewer_slow → player → puddles → f
   → roll_call → dead_letter → ripcord → wave3 → wave4
   → [floor_sewer, drake, floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_flatbed]
   → approach_sfx → trailer
-  → hantavirus_death → reap_enemies → gems → treasure → pickups
+  → hantavirus_death → reap_enemies → gems → gem_merge → treasure → pickups
   → nuke_reap → particles → damage_numbers → shake → outcome
 ```
 
@@ -121,6 +121,7 @@ Load-bearing adjacencies (each is commented in the file):
 - The six per-floor roster systems (`systems/floor_<floor>.rs`, one per `Theme`, each a no-op off its own floor) run right after `wave4`, then `approach::approach_sfx_system` (writes only `SfxQueue`); `floor_sewer_slow` sits with `hazards` before `player` so the Sump Leech's tongue slow folds into this tick's throttle. Their tells are drawn on the hostile layer from the same geometry the hit tests read (`World::floor_tell_reach`/`draw_floor_tell`, `art_roster_*.rs`).
 - `powerups::giant_stomp_system` (the Growth Serum) heads the nested chain right after `contact`: a body touching the giant is stomped on the same tick, before every evolved-weapon pass, the Hantavirus death jump and the reap, so a crushed body jumps, is reaped and loots this tick. It spawns nothing and draws no rng.
 - `reap_enemies` right before `gems` (drops collect the same tick); `pickups` right before `nuke_reap` (a Nuke re-reaps); `outcome` last (loss beats win).
+- `gem_merge` follows `gems` so collected drops are gone and magnetized gems are protected. Every 2 s it combines gems in 96 px cells beyond 1.5 times the widest view's half-diagonal. Above 400 live gems it also checks the farthest cells each tick. A merge keeps the oldest `SpawnId`, adds the XP with saturation and moves the survivor to the XP-weighted centre. This can change a golden when two gems in a scripted run are left far enough away to merge, or when their new position changes later pickups. It draws no rng and leaves level generation alone.
 - The chain is split into several tuples only because `IntoScheduleConfigs` stops at 20 entries; later groups are explicitly anchored `.after(...)`. Keep the module-doc order map in sync.
 - `build_settle_schedule()` is the legacy `finished()` path: particles and damage numbers only. `damage_numbers_system` lives in `schedule.rs` because that file owns tick order.
 
