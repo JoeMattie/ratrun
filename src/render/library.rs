@@ -1195,6 +1195,13 @@ fn draw_object_art(
                 crate::game::art_gems::draw_gem(art, pos, &gem, 0.0, i as u32);
             }
         }
+        ObjectKind::CrabPot => {
+            use crate::game::art_crabpot::{draw_crab_pot, draw_crab_pot_front};
+            let mut view = crate::game::ecs::systems::traps::set_crab_pot(centre, Vec2::new(0.0, 1.0));
+            view.anim = t;
+            draw_crab_pot(art, &view, cam);
+            draw_crab_pot_front(art, &view, cam);
+        }
     }
 }
 

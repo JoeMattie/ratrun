@@ -1938,7 +1938,9 @@ fn fire_one(
                 // hit that has no native knockback (the whip), once per body
                 // per 0.4 s. `resolve_circle` keeps the nudge on legal floor
                 // instead of pushing a body into a wall.
-                if !e.position_locked && stats.shove_px > 0.0 && melee_nudge.ready(enemy_id as u64) {
+                if !e.position_locked && !e.crab_pot_held && stats.shove_px > 0.0
+                    && melee_nudge.ready(enemy_id as u64)
+                {
                     let out = (pos - ppos).normalized();
                     melee_nudge.mark(enemy_id as u64, MELEE_NUDGE_COOLDOWN);
                     let shifted = pos + out * stats.shove_px;
@@ -2256,6 +2258,9 @@ fn ratchet_throw(
     let Ok((_, _, body)) = enemies.get(hooked) else {
         return false;
     };
+    if body.crab_pot_held {
+        return false;
+    }
     let from = body.pos;
     let radius = body.radius;
     // Keep the travel distance of the old quarter-turn swing.

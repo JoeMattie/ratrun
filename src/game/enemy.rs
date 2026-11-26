@@ -1193,6 +1193,8 @@ pub struct Enemy {
     /// Appointment fodder carries no kill credit, drops or horde budget.
     pub summoned: bool,
     pub(crate) outfall: OutfallState,
+    /// Physically pinned in a shut Outfall crab pot.
+    pub(crate) crab_pot_held: bool,
 }
 
 impl Enemy {
@@ -1248,6 +1250,7 @@ impl Enemy {
             position_locked: false,
             summoned: false,
             outfall: OutfallState::default(),
+            crab_pot_held: false,
         }
     }
 

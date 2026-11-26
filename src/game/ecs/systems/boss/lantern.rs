@@ -800,7 +800,7 @@ pub fn lantern_gape_system(
             continue;
         };
         let reach = art::GAPE_PULL_SPEED * pull.secs;
-        if player.dash_active <= 0.0 {
+        if player.dash_active <= 0.0 && !level.objects.rat_in_crab_pot() {
             let scale = if player.buffs.is_giant() { 0.5 } else { 1.0 };
             player.pos = pull_point(&level, pull.cone, player.pos, reach * scale, PLAYER_RADIUS);
         }

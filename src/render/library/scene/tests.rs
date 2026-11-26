@@ -775,6 +775,7 @@ fn the_traps_are_sprung_by_fodder_not_the_rat() {
         ObjectKind::SteamGrate,
         ObjectKind::InkPad,
         ObjectKind::Slipstream,
+        ObjectKind::CrabPot,
     ] {
         let scene = LibraryScene::build(Key::Object(kind)).expect("a hazard scene");
         assert!(scene.world.hide_rat, "{kind:?} shows the rat as its subject");
@@ -836,6 +837,24 @@ fn both_traps_spring() {
         ],
         "the mousetrap's cycle is not the art's cycle"
     );
+}
+
+#[test]
+fn crab_pot_plate_is_sprung_by_fodder() {
+    use crate::game::art_crabpot::CrabPotState;
+    let mut scene = LibraryScene::build(Key::Object(ObjectKind::CrabPot)).expect("a crab pot");
+    let mut warned = false;
+    let mut held = false;
+    let mut opened = false;
+    for _ in 0..(scene.loop_secs() / TICK) as u32 {
+        scene.step();
+        let pot = &scene.world().level.objects.crab_pots[0];
+        assert!(!pot.caught_rat);
+        warned |= pot.state == CrabPotState::Closing;
+        held |= pot.state == CrabPotState::Shut && pot.caught > 0;
+        opened |= pot.state == CrabPotState::Open;
+    }
+    assert!(warned && held && opened);
 }
 
 /// The steam grate vents inside one loop (resting → warning → plume).

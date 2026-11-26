@@ -73,7 +73,7 @@ pub fn outfall_motion_system(
         Vec2::ZERO
     };
 
-    if player.alive() {
+    if player.alive() && !level.objects.rat_in_crab_pot() {
         if level.pit_at(player.pos).is_some() {
             if let Some(safe) = recover(&level, player.pos, Some(input.previous_pos), PLAYER_RADIUS, SizeClass::Small) {
                 let damaged = player.take_damage(FALL_PLAYER_DAMAGE);
@@ -93,6 +93,10 @@ pub fn outfall_motion_system(
     origins.positions.clear();
     let mut fell = false;
     for (entity, mut enemy) in &mut enemies {
+        if enemy.crab_pot_held {
+            origins.positions.insert(entity, enemy.pos);
+            continue;
+        }
         let in_drop = level.pit_at(enemy.pos).is_some();
         if in_drop {
             fell |= recover_enemy(&level, &mut enemy, None);
@@ -185,7 +189,7 @@ pub fn outfall_falls_system(
     }
     let mut fell = false;
     for (entity, mut enemy) in &mut enemies {
-        if level.pit_at(enemy.pos).is_some() {
+        if !enemy.crab_pot_held && level.pit_at(enemy.pos).is_some() {
             fell |= recover_enemy(&level, &mut enemy, origins.positions.get(&entity).copied());
         }
     }

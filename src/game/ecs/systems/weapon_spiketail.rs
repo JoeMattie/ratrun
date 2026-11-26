@@ -625,7 +625,7 @@ fn drag(
     let live = enemies
         .get(primary)
         .ok()
-        .and_then(|(_, _, e)| e.alive().then(|| (e.pos, e.radius, unhookable(e))));
+        .and_then(|(_, _, e)| e.alive().then(|| (e.pos, e.radius, unhookable(e) || e.crab_pot_held)));
     let (from, radius, heavy) = live.unwrap_or((lash.target, 0.0, false));
     // The hook slips off anything heavy: only the lash hit stands.
     if heavy {

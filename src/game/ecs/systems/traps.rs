@@ -1,4 +1,9 @@
-//! (h) Floor traps: sticky glue boards and baited mousetraps.
+//! (h) Floor traps: sticky glue boards, baited mousetraps and Outfall crab pots.
+//!
+//! Crab pots replace both legacy traps on the Outfall. Their warning precedes
+//! a single deterministic catch in SpawnId order. The pot's view carries the
+//! rat's hold across the player and Outfall motion passes. A held enemy stays
+//! targetable while movement and contact honour its cage flag.
 //!
 //! The traps are generated into [`LevelObjects`](crate::game::level::LevelObjects)
 //! (`level.objects.sticky_traps` / `.mousetraps`) and drawn by `art_traps.rs`
@@ -125,6 +130,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
+use crate::game::art_crabpot::{CrabPotState, CrabPotView, POT_HALF};
 use crate::game::art_traps::{
     local_box_contains, MousetrapState, MousetrapView, StickyTrapState, StickyVictimKind,
     StickyVictimView, TrapBait, MOUSETRAP_ARMOUR_IGNORED, MOUSETRAP_BAIT_TAKE_RADIUS,
@@ -429,7 +435,7 @@ pub struct Scratch {
 /// The *visible* state lives in the art view structs (that is what the
 /// renderer reads); this only keeps what the views cannot hold: who is glued
 /// and for how long, how much lifetime glue a board has left, and which targets
-/// a snap has already hit.
+/// a snap has already hit, and the occupants and clock of each crab pot.
 #[derive(Resource, Default)]
 pub struct TrapRuntime {
     /// Level identity the lists were built for (`seed`, `theme`).
@@ -445,6 +451,7 @@ pub struct TrapRuntime {
     /// Bodies that carried a *crossing* slow at the end of the last tick, so a
     /// body that walks off a full pad has the glue taken back off it.
     cross_prev: Vec<Entity>,
+    pots: Vec<PotSlot>,
 }
 
 impl TrapRuntime {
@@ -453,12 +460,13 @@ impl TrapRuntime {
     /// Runs every tick but returns immediately in the steady state: the lists
     /// only change on a new level, or when a test edits `level.objects`
     /// directly (the narrow harness does exactly that).
-    fn sync(&mut self, level: &Level) {
+    fn sync(&mut self, level: &Level, enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>) {
         let objects = &level.objects;
         if self.seed == level.seed
             && self.theme == Some(level.theme)
             && self.sticky.len() == objects.sticky_traps.len()
             && self.mice.len() == objects.mousetraps.len()
+            && self.pots.len() == objects.crab_pots.len()
         {
             return;
         }
@@ -489,6 +497,211 @@ impl TrapRuntime {
                 .map(|(i, _)| i),
         );
         self.cross_prev.clear();
+        for entity in self.pots.iter().flat_map(|slot| slot.held.iter().flatten()) {
+            if let Ok((_, _, mut enemy)) = enemies.get_mut(*entity) {
+                enemy.crab_pot_held = false;
+            }
+        }
+        self.pots.clear();
+        self.pots.resize_with(objects.crab_pots.len(), PotSlot::default);
+    }
+}
+
+pub(crate) const POT_WARNING_SECS: f64 = 0.35;
+pub(crate) const POT_RAT_HOLD_SECS: f64 = 0.8;
+pub(crate) const POT_DASH_ESCAPE_SECS: f64 = 0.25;
+pub(crate) const POT_HORDE_HOLD_SECS: f64 = 3.0;
+pub(crate) const POT_OPEN_SECS: f64 = 20.0;
+pub(crate) const POT_RAT_DAMAGE: f32 = 6.0;
+pub(crate) const POT_HORDE_DAMAGE_SHARE: f32 = 0.25;
+pub(crate) const POT_CAPACITY: usize = 4;
+
+#[derive(Default)]
+struct PotSlot {
+    elapsed: f64,
+    held: [Option<Entity>; POT_CAPACITY],
+    caught_any: bool,
+}
+
+impl PotSlot {
+    fn enter(&mut self, pot: &mut CrabPotView, state: CrabPotState) {
+        self.elapsed = 0.0;
+        pot.progress = 0.0;
+        pot.state = state;
+    }
+}
+
+pub fn set_crab_pot(pos: Vec2, facing: Vec2) -> CrabPotView {
+    CrabPotView {
+        pos,
+        facing,
+        state: CrabPotState::Set,
+        progress: 0.0,
+        caught_rat: false,
+        caught: 0,
+        anim: 0.0,
+    }
+}
+
+pub fn in_crab_pot(centre: Vec2, point: Vec2) -> bool {
+    let d = point - centre;
+    d.x.abs() <= POT_HALF && d.y.abs() <= POT_HALF
+}
+
+fn pot_can_catch(e: &Enemy) -> bool {
+    let limit = EnemyKind::Brute.radius();
+    e.targetable() && !e.crab_pot_held && !e.elite && !e.named && e.kind != EnemyKind::Boss
+        && e.radius.max(e.kind.radius()) < limit
+}
+
+impl TrapRuntime {
+    pub(super) fn pot_dash_ready(&self, index: usize) -> bool {
+        self.pots.get(index).is_some_and(|slot| slot.elapsed >= POT_DASH_ESCAPE_SECS)
+    }
+
+    /// Called only when the player system actually starts the escape dash.
+    pub(super) fn dash_out_of_pot(&mut self, index: usize, pot: &mut CrabPotView) {
+        pot.caught_rat = false;
+        if pot.caught == 0 {
+            self.pots[index].enter(pot, CrabPotState::Open);
+        }
+    }
+}
+
+fn prune_pot_bodies(
+    slot: &mut PotSlot,
+    pot: &mut CrabPotView,
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    release: bool,
+) {
+    for held in &mut slot.held {
+        if let Some(entity) = *held {
+            if let Ok((_, _, mut enemy)) = enemies.get_mut(entity) {
+                enemy.vel = Vec2::ZERO;
+                if enemy.alive() && !release {
+                    continue;
+                }
+                enemy.crab_pot_held = false;
+            }
+            *held = None;
+        }
+    }
+    pot.caught = slot.held.iter().flatten().count() as u8;
+}
+
+fn release_empty_pot_crab(_pos: Vec2, _facing: Vec2) {
+    // TODO(outfall-crab integration): replace with
+    // crate::game::ecs::systems::crab::release_pot_crab(...) at the call site.
+}
+
+fn tick_crab_pots(
+    views: &mut [CrabPotView],
+    slots: &mut [PotSlot],
+    dt: f32,
+    player: &mut Player,
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    hits: &mut Vec<(u64, Entity)>,
+    damage_numbers: &mut DamageNumbers,
+    sfx: &mut SfxQueue,
+) {
+    use CrabPotState::*;
+
+    let mut rat_held = views.iter().any(|pot| pot.caught_rat);
+    for (pot, slot) in views.iter_mut().zip(slots) {
+        pot.anim += dt;
+        slot.elapsed += f64::from(dt);
+        let rat_inside = player.alive() && in_crab_pot(pot.pos, player.pos);
+        if pot.state != Open && rat_inside && player.buffs.is_giant() {
+            rat_held &= !pot.caught_rat;
+            pot.caught_rat = false;
+            prune_pot_bodies(slot, pot, enemies, true);
+            slot.enter(pot, Open);
+            sfx.0.push(Sfx::TrapSnap);
+            continue;
+        }
+        match pot.state {
+            Set => {
+                if (rat_inside && !rat_held) || enemies.iter().any(|(_, _, e)| {
+                    in_crab_pot(pot.pos, e.pos) && pot_can_catch(e)
+                }) {
+                    slot.enter(pot, Closing);
+                    sfx.0.push(Sfx::TrapTrigger);
+                }
+            }
+            Closing => {
+                pot.progress = (slot.elapsed / POT_WARNING_SECS).min(1.0) as f32;
+                if slot.elapsed < POT_WARNING_SECS {
+                    continue;
+                }
+                slot.enter(pot, Shut);
+                slot.caught_any = false;
+                sfx.0.push(Sfx::TrapSnap);
+                if rat_inside && !rat_held {
+                    player.vel = Vec2::ZERO;
+                    player.dash_active = 0.0;
+                    if player.take_damage(POT_RAT_DAMAGE) {
+                        sfx.0.push(Sfx::Hurt);
+                    }
+                    pot.caught_rat = player.alive();
+                    rat_held = pot.caught_rat;
+                    slot.caught_any = true;
+                }
+
+                hits.clear();
+                hits.extend(enemies.iter().filter_map(|(entity, id, e)| {
+                    (in_crab_pot(pot.pos, e.pos) && pot_can_catch(e)).then_some((id.0, entity))
+                }));
+                hits.sort_unstable_by_key(|&(id, _)| id);
+                for &(_, entity) in hits.iter().take(POT_CAPACITY) {
+                    let Ok((_, _, mut enemy)) = enemies.get_mut(entity) else { continue };
+                    slot.caught_any = true;
+                    // The door takes a fixed share of the body, including
+                    // through directional armour. The ordinary reap still pays loot.
+                    let damage = enemy.max_hp * POT_HORDE_DAMAGE_SHARE;
+                    enemy.hp -= damage;
+                    enemy.flash = 0.12;
+                    enemy.note_damage();
+                    let killed = !enemy.alive();
+                    damage_numbers.record(
+                        enemy.id, enemy.pos, enemy.radius, damage, killed, DamageSource::Normal,
+                    );
+                    if !killed {
+                        enemy.crab_pot_held = true;
+                        enemy.vel = Vec2::ZERO;
+                        if matches!(enemy.kind, EnemyKind::Skater | EnemyKind::Lampfish) {
+                            super::floor_outfall::cancel_attack(&mut enemy);
+                        }
+                        slot.held[pot.caught as usize] = Some(entity);
+                        pot.caught += 1;
+                    }
+                }
+                if pot.caught > 0 {
+                    sfx.0.push(Sfx::CrabRattle);
+                }
+            }
+            Shut => {
+                if pot.caught_rat && (!player.alive() || slot.elapsed >= POT_RAT_HOLD_SECS) {
+                    pot.caught_rat = false;
+                    rat_held = false;
+                }
+                prune_pot_bodies(slot, pot, enemies, slot.elapsed >= POT_HORDE_HOLD_SECS);
+                if !pot.caught_rat && pot.caught == 0 {
+                    if !slot.caught_any {
+                        release_empty_pot_crab(pot.pos, pot.facing);
+                    }
+                    slot.enter(pot, Open);
+                } else {
+                    let duration = if pot.caught > 0 { POT_HORDE_HOLD_SECS } else { POT_RAT_HOLD_SECS };
+                    pot.progress = (slot.elapsed / duration).min(1.0) as f32;
+                }
+            }
+            Open => {
+                pot.progress = (slot.elapsed / POT_OPEN_SECS).min(1.0) as f32;
+                if slot.elapsed >= POT_OPEN_SECS {
+                    slot.enter(pot, Set);
+                }
+            }
+        }
     }
 }
 
@@ -724,7 +937,7 @@ fn apply_player_slow(input: &mut TickInput, player: &mut Player, mult: f32) {
     player.vel = player.vel.clamp_len(cap);
 }
 
-/// Advance every sticky board and mousetrap by one tick.
+/// Advance the floor traps by one tick.
 #[allow(clippy::too_many_arguments)]
 pub fn traps_system(
     mut input: ResMut<TickInput>,
@@ -741,7 +954,13 @@ pub fn traps_system(
     mut scratch: Local<Scratch>,
 ) {
     let dt = input.dt;
-    traps.sync(&level);
+    traps.sync(&level, &mut enemies);
+    if level.theme == Theme::Outfall && !level.objects.crab_pots.is_empty() {
+        tick_crab_pots(
+            &mut level.objects.crab_pots, &mut traps.pots, dt, &mut player, &mut enemies,
+            &mut scratch.hits, &mut damage_numbers, &mut sfx,
+        );
+    }
 
     // Art `hit_flash`: a short 1 -> 0 flash when the bar strikes. Decayed for
     // every trap — including sprung ones, which drop out of the live list on
@@ -1480,6 +1699,188 @@ mod tests {
     fn has_slow(w: &mut World, e: Entity) -> bool {
         let mut q = w.ecs.query::<&TrapSlow>();
         q.get(&w.ecs, e).is_ok()
+    }
+
+    fn pot_world() -> (World, Vec2) {
+        let mut w = World::with_level(
+            0, Level::empty(Theme::Outfall), 163,
+            crate::game::loadout::Loadout::starting(), Default::default(),
+        );
+        let c = w.player.pos;
+        w.peace = true;
+        w.player.loadout.weapons.clear();
+        w.level.objects.crab_pots.push(set_crab_pot(c, FACING));
+        (w, c)
+    }
+
+    fn pot(w: &World) -> CrabPotView {
+        w.level.objects.crab_pots[0]
+    }
+
+    fn pot_ticks(w: &mut World, ticks: usize) {
+        for _ in 0..ticks {
+            traps_tick(w, Vec2::ZERO, false);
+        }
+    }
+
+    #[test]
+    fn crab_pot_warns_then_snaps_empty_opens_and_resets_without_rng() {
+        use rand::Rng;
+        use CrabPotState::*;
+        let (mut w, c) = pot_world();
+        let mut expected_rng = w.rng.clone();
+        assert_eq!(pot(&w).state, Set);
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, Closing);
+        assert_eq!(pot(&w).progress, 0.0);
+        assert_eq!(sfx_count(&w, Sfx::TrapTrigger), 1);
+        w.player.pos = c + FACING * (POT_HALF + 0.5);
+        pot_ticks(&mut w, 20);
+        assert_eq!(pot(&w).state, Closing);
+        assert!(pot(&w).progress > 0.9);
+        w.sfx.clear();
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, Shut);
+        assert_eq!(sfx_count(&w, Sfx::TrapSnap), 1);
+        assert!(!pot(&w).caught_rat);
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, Open);
+        pot_ticks(&mut w, 1199);
+        assert_eq!(pot(&w).state, Open);
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, Set);
+        assert_eq!(w.rng.next_u64(), expected_rng.next_u64());
+    }
+
+    #[test]
+    fn crab_pot_holds_the_rat_and_an_actual_dash_breaks_free_after_a_quarter_second() {
+        let (mut w, c) = pot_world();
+        let hp = w.player.hp;
+        pot_ticks(&mut w, 22);
+        assert_eq!(w.player.hp, hp - POT_RAT_DAMAGE);
+        assert!(pot(&w).caught_rat);
+        w.update(DT, FACING, true);
+        assert_eq!(w.player.pos, c);
+        assert_eq!(w.player.dash_cd, 0.0, "the early press cannot spend a dash");
+        for _ in 0..13 {
+            w.update(DT, FACING, false);
+        }
+        assert_eq!(w.player.pos, c);
+        w.update(DT, FACING, true);
+        assert!(!pot(&w).caught_rat);
+        assert_eq!(pot(&w).state, CrabPotState::Open);
+        assert!(w.player.pos.x > c.x);
+    }
+
+    #[test]
+    fn crab_pot_respects_damage_protection_and_holds_a_shrunken_rat_for_eight_tenths() {
+        use crate::game::player::Buffs;
+        for (buffs, iframes, expected_damage, expected_shield) in [
+            (Buffs { tiny: 12.0, ..Buffs::default() }, 0.0, POT_RAT_DAMAGE, 0.0),
+            (Buffs { shield: 12.0, ..Buffs::default() }, 0.0, 0.0, 0.0),
+            (Buffs { white_coat: 5.0, shield: 12.0, ..Buffs::default() }, 0.0, 0.0, 12.0),
+            (Buffs { shield: 12.0, ..Buffs::default() }, 1.0, 0.0, 12.0),
+        ] {
+            let (mut w, _) = pot_world();
+            w.player.buffs = buffs;
+            w.player.iframes = iframes;
+            let hp = w.player.hp;
+            pot_ticks(&mut w, 22);
+            assert_eq!(w.player.hp, hp - expected_damage);
+            assert_eq!(w.player.buffs.shield, expected_shield);
+            assert!(pot(&w).caught_rat);
+            pot_ticks(&mut w, 47);
+            assert!(pot(&w).caught_rat);
+            pot_ticks(&mut w, 1);
+            assert_eq!(pot(&w).state, CrabPotState::Open);
+            assert!(!pot(&w).caught_rat);
+        }
+    }
+
+    #[test]
+    fn crab_pot_holds_only_four_bodies_in_spawn_order_and_they_cannot_bite() {
+        let (mut w, c) = pot_world();
+        w.player.pos = c + FACING * 100.0;
+        let bodies: [_; 5] = std::array::from_fn(|_| add_enemy(&mut w, EnemyKind::SandHopper, c, 1.0));
+        pot_ticks(&mut w, 22);
+        assert_eq!(pot(&w).caught, 4);
+        for (i, entity) in bodies.into_iter().enumerate() {
+            let e = w.ecs.get::<Enemy>(entity).unwrap();
+            assert_eq!(e.crab_pot_held, i < 4);
+            assert_eq!(e.hp, if i < 4 { e.max_hp - e.max_hp * POT_HORDE_DAMAGE_SHARE } else { e.max_hp });
+        }
+        // The fifth body is free to bite, so put it beyond contact range.
+        w.ecs.get_mut::<Enemy>(bodies[4]).unwrap().pos = w.player.pos;
+        w.player.pos = c;
+        let hp = w.player.hp;
+        w.update(DT, Vec2::ZERO, false);
+        assert_eq!(w.player.hp, hp);
+        for entity in bodies.into_iter().take(4) {
+            assert_eq!(w.ecs.get::<Enemy>(entity).unwrap().pos, c);
+        }
+        pot_ticks(&mut w, 178);
+        assert_eq!(pot(&w).caught, 4);
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, CrabPotState::Open);
+        for entity in bodies {
+            assert!(!w.ecs.get::<Enemy>(entity).unwrap().crab_pot_held);
+        }
+    }
+
+    #[test]
+    fn crab_pot_excludes_large_elite_named_and_boss_bodies_and_the_giant_crushes_it() {
+        let (mut w, c) = pot_world();
+        w.player.pos = c + FACING * 100.0;
+        let elite = add_enemy(&mut w, EnemyKind::SandHopper, c, 1.0);
+        w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
+        let named = add_enemy(&mut w, EnemyKind::SandHopper, c, 1.0);
+        w.ecs.get_mut::<Enemy>(named).unwrap().named = true;
+        let bodies = [
+            elite, named, add_enemy(&mut w, EnemyKind::Brute, c, 1.0),
+            add_enemy(&mut w, EnemyKind::FrySchool, c, 1.0),
+            add_enemy(&mut w, EnemyKind::Boss, c, 1.0),
+        ];
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, CrabPotState::Set);
+        w.player.pos = c;
+        pot_ticks(&mut w, 22);
+        assert_eq!(pot(&w).caught, 0);
+        assert!(pot(&w).caught_rat);
+        for entity in bodies {
+            let e = w.ecs.get::<Enemy>(entity).unwrap();
+            assert_eq!(e.hp, e.max_hp);
+            assert!(!e.crab_pot_held);
+        }
+        let hp = w.player.hp;
+        w.player.buffs.giant = 20.0;
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, CrabPotState::Open);
+        assert!(!pot(&w).caught_rat);
+        assert_eq!(w.player.hp, hp);
+        // A giant approaching a fresh pot skips the warning too.
+        w.level.objects.crab_pots[0] = set_crab_pot(c, FACING);
+        pot_ticks(&mut w, 1);
+        assert_eq!(pot(&w).state, CrabPotState::Open);
+        assert!(!pot(&w).caught_rat);
+    }
+
+    #[test]
+    fn crab_pot_kill_goes_through_the_normal_loot_path() {
+        use rand::Rng;
+        let (mut w, c) = pot_world();
+        w.player.pos = c + FACING * 100.0;
+        let weak = add_enemy(&mut w, EnemyKind::SandHopper, c, 1.0);
+        w.ecs.get_mut::<Enemy>(weak).unwrap().hp = 0.5;
+        let mut expected_rng = w.rng.clone();
+        pot_ticks(&mut w, 22);
+        assert_eq!(w.rng.next_u64(), expected_rng.next_u64());
+        assert!(!w.ecs.get::<Enemy>(weak).unwrap().alive());
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.run_system_cached(loot::reap_enemies_system).unwrap();
+        w.end_tick();
+        assert_eq!(w.kills, 1);
+        assert!(!w.gems().is_empty());
+        assert!(w.ecs.get::<Enemy>(weak).is_none());
     }
 
     /// How many bodies of `kind` are currently held on board `i`.

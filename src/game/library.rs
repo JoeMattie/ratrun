@@ -171,10 +171,11 @@ pub enum ObjectKind {
     MazeCache,
     OneWayDoor,
     Gem,
+    CrabPot,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 15] = [
+    pub const ALL: [ObjectKind; 16] = [
         ObjectKind::Elite,
         ObjectKind::Gold,
         ObjectKind::Chest,
@@ -190,6 +191,7 @@ impl ObjectKind {
         ObjectKind::MazeCache,
         ObjectKind::OneWayDoor,
         ObjectKind::Gem,
+        ObjectKind::CrabPot,
     ];
 }
 
@@ -435,6 +437,7 @@ fn object_name(k: ObjectKind) -> &'static str {
         ObjectKind::MazeCache => "Maze Cache",
         ObjectKind::OneWayDoor => "One-Way Door",
         ObjectKind::Gem => "XP Gems",
+        ObjectKind::CrabPot => "Crab Pot",
     }
 }
 
@@ -458,6 +461,7 @@ pub fn theme_of(key: Key) -> Theme {
         Key::Prop(k) => prop_theme(k),
         Key::Boss(k) => boss_theme(k),
         Key::Floor(t) => t,
+        Key::Object(ObjectKind::CrabPot) => Theme::Outfall,
         Key::Object(ObjectKind::SteamGrate) => Theme::Laundry,
         Key::Object(ObjectKind::InkPad) => Theme::Printworks,
         Key::Object(ObjectKind::Pit)
@@ -710,7 +714,7 @@ pub fn all_rows() -> Vec<Row> {
         });
     }
     const TRAPS: &str = "TRAPS";
-    for k in [ObjectKind::StickyBoard, ObjectKind::Mousetrap] {
+    for k in [ObjectKind::StickyBoard, ObjectKind::Mousetrap, ObjectKind::CrabPot] {
         let (hint, dossier) = object_text(k);
         rows.push(Row {
             key: Key::Object(k),
@@ -1717,13 +1721,13 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
              patch-up.",
         ),
         ObjectKind::StickyBoard => (
-            "Any floor · the bait beside a doorway",
+            "Pest control · the bait beside a doorway",
             "A glue board from the pest budget. It does not block; it holds, and while it \
              holds you are simply not moving while the room arrives. It grips the horde \
              too, which is the only reason it is ever welcome.",
         ),
         ObjectKind::Mousetrap => (
-            "Any floor · the snap on the approach",
+            "Pest control · the snap on the approach",
             "A spring-loaded bar. It does not kill the rat and it kills nearly everything \
              else: a body on the bar simply stops being a body. The red-barred ones are \
              filed to a hair trigger: no warning, and a heavier bar. Read the plate and \
@@ -1785,6 +1789,10 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
         ObjectKind::Gem => (
             "Any floor · enemy drops",
             "Collect gems for XP. Distant drops combine.",
+        ),
+        ObjectKind::CrabPot => (
+            "Outfall · baited wire cage",
+            "Step clear when the door starts to drop. If caught, dash to break free. +             The cage holds smaller pursuers too. Facility salvage tag still attached.",
         ),
     }
 }
@@ -2773,6 +2781,21 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
                 f.push(tier.name(), format!("{} {band}", tier.color_name()));
             }
         }
+        ObjectKind::CrabPot => {
+            use crate::game::ecs::systems::traps::{
+                POT_CAPACITY, POT_DASH_ESCAPE_SECS, POT_HORDE_DAMAGE_SHARE,
+                POT_HORDE_HOLD_SECS, POT_OPEN_SECS, POT_RAT_DAMAGE, POT_RAT_HOLD_SECS,
+                POT_WARNING_SECS,
+            };
+            f.push("WARNING", format!("{POT_WARNING_SECS:.2}s"));
+            f.push("TO YOU", format!("{POT_RAT_DAMAGE:.0} damage · held {POT_RAT_HOLD_SECS:.1}s"));
+            f.push("ESCAPE", format!("dash after {POT_DASH_ESCAPE_SECS:.2}s"));
+            f.push("TO PURSUERS", format!(
+                "{} max · {:.0}% max HP · held {POT_HORDE_HOLD_SECS:.0}s",
+                POT_CAPACITY, POT_HORDE_DAMAGE_SHARE * 100.0,
+            ));
+            f.push("RESETS", format!("after {POT_OPEN_SECS:.0}s open"));
+        }
     }
 }
 
@@ -3332,6 +3355,10 @@ impl Library {
             if !self.is_seen(key) && sees(w, trap.pos) {
                 self.see_if(key, true);
             }
+        }
+        let pot_key = Key::Object(ObjectKind::CrabPot);
+        if !self.is_seen(pot_key) {
+            self.see_if(pot_key, level.objects.crab_pots.iter().any(|pot| sees(w, pot.pos)));
         }
         for hole in &level.objects.rat_holes {
             let key = Key::Object(ObjectKind::RatHole);

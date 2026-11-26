@@ -157,6 +157,8 @@ pub enum TrapKind {
     Sticky,
     /// Wooden snap trap (`MOUSETRAP_*`): warns, then damages.
     Snap,
+    /// Outfall cage: warns, then holds bodies still inside.
+    CrabPot,
 }
 
 /// One trap placement: world position, orientation, kind and the side the
@@ -1167,7 +1169,8 @@ fn encounter_floor_ok(tiles: &TileMap, cell: (i32, i32)) -> bool {
     true
 }
 
-/// **Stage B (traps).** Scatter sticky traps and mousetraps across the map.
+/// **Stage B (traps).** Scatter traps across the map. The Outfall uses crab
+/// pots at the settled glue and snap sites.
 ///
 /// Up to [`MAX_ENCOUNTER_TRAPS`] of [`MAX_TRAPS`] are room-mouth encounters:
 /// one or two cells inside a hall or room where a corridor fans out, with two
@@ -1255,6 +1258,13 @@ pub fn place_traps(
     // 4. Then the bigger `36 × 28` sticky-trap footprint clearance, the
     //    >= 2-tile-wide bypass, and the fair sticky count.
     refine_sticky_traps(tiles, layout, mazes, &keep_clear, &protected, &mut traps);
+    // Both settled footprints are larger than a pot and its door. Reuse
+    // their sites, approach directions and placement draws on the Outfall.
+    if tiles.theme() == Theme::Outfall {
+        for trap in &mut traps {
+            trap.kind = TrapKind::CrabPot;
+        }
+    }
     traps
 }
 
@@ -2792,7 +2802,8 @@ pub fn placement_stats(level: &Level) -> PlacementStats {
     let mut routes = RouteField::new(&search.walk, &mut search.flood, start, &targets);
     let mut stats = PlacementStats {
         holes: level.objects.rat_holes.len(),
-        traps: level.objects.sticky_traps.len() + level.objects.mousetraps.len(),
+        traps: level.objects.sticky_traps.len() + level.objects.mousetraps.len()
+            + level.objects.crab_pots.len(),
         ..PlacementStats::default()
     };
 
@@ -2814,6 +2825,7 @@ pub fn placement_stats(level: &Level) -> PlacementStats {
         .iter()
         .map(|t| t.pos)
         .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+        .chain(level.objects.crab_pots.iter().map(|t| t.pos))
         .map(validate::cell_of)
         .collect();
     stats.encounter_traps = trap_cells
@@ -3016,6 +3028,7 @@ mod tests {
                 .iter()
                 .map(|t| t.pos)
                 .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+                .chain(level.objects.crab_pots.iter().map(|t| t.pos))
             {
                 traps += 1;
                 let cell = validate::cell_of(pos);
@@ -3403,7 +3416,7 @@ mod tests {
             }
         };
 
-        for theme in Theme::all() {
+        for theme in Theme::all().into_iter().filter(|&theme| theme != Theme::Outfall) {
             let mut counts: Vec<usize> = Vec::with_capacity(200);
             for seed in 0..200u64 {
                 let level = generate_once(theme, seed, 0);

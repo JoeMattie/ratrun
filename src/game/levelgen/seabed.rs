@@ -403,6 +403,7 @@ fn blocked_cells(level: &Level) -> Vec<bool> {
                     .iter()
                     .map(|t| t.pos)
                     .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+                    .chain(level.objects.crab_pots.iter().map(|t| t.pos))
                     .any(|p| p.dist_sq(centre) < trap_sq)
                 || level
                     .objects
@@ -476,6 +477,7 @@ fn is_point_clear(level: &Level, pos: Vec2, kind: PlantKind, blocked: &[bool]) -
         .iter()
         .map(|t| t.pos)
         .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+        .chain(level.objects.crab_pots.iter().map(|t| t.pos))
         .any(|p| p.dist_sq(pos) < trap_sq)
     {
         return false;
@@ -597,6 +599,7 @@ mod tests {
                     .iter()
                     .map(|t| t.pos)
                     .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+                    .chain(level.objects.crab_pots.iter().map(|t| t.pos))
                 {
                     assert!(
                         plant.pos.dist(trap) >= TRAP_CLEAR_PX,

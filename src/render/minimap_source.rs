@@ -451,6 +451,11 @@ fn trap_at(level: &Level, p: crate::math::Vec2) -> Option<MinimapCell> {
             });
         }
     }
+    if level.objects.crab_pots.iter().any(|pot| {
+        crate::game::ecs::systems::traps::in_crab_pot(pot.pos, p)
+    }) {
+        return Some(MinimapCell::Trap);
+    }
     None
 }
 
@@ -610,10 +615,14 @@ mod tests {
             TileRect::new(4, 4, 2, 2), PitKind::TidalDrop,
         ));
         level.objects.lure_traps.push(LureTrap::new(TileMap::tile_rect(7, 4).center(), vec![]));
+        level.objects.crab_pots.push(crate::game::ecs::systems::traps::set_crab_pot(
+            TileMap::tile_rect(8, 7).center(), Vec2::new(0.0, 1.0),
+        ));
         assert_eq!(minimap_cell(&level, 4, 4), MinimapCell::TidalDrop);
         assert_eq!(minimap_cell(&level, 7, 4), MinimapCell::Lure);
         level.objects.lure_traps[0].phase = LurePhase::Spent;
         assert_eq!(minimap_cell(&level, 7, 4), MinimapCell::Floor);
+        assert_eq!(minimap_cell(&level, 8, 7), MinimapCell::Trap);
     }
 
     #[test]
