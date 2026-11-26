@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
+  facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
+- **Three new pickups.** Shrink Draught makes you smaller and quicker.
+  White Coat protects you from hits and suspends your weapons. The Collar
+  doubles gem XP while elites and the miniboss close in faster.
+- **Daily run.** A dated title row opens a seeded campaign through the Sewer,
+  Kitchen, Lab and Flatbed. It banks to the Nest and saves a local best for
+  each UTC day. The incident report and victory plate carry the start date.
 - **Blackouts.** Indoor lamps go out for 8s at 5:00 and 11:00. The Lab's
   second outage moves to 7:30 and lasts 18s. Enemy glints, shots and attack
   warnings stay visible.
@@ -44,10 +52,6 @@
 Not signed or notarised on macOS: right-click the app and choose Open the
 first time.
 
-- **Three new pickups.** Shrink Draught makes you smaller and quicker.
-  White Coat protects you from hits and suspends your weapons. The Collar
-  doubles gem XP while elites and the miniboss close in faster.
-
 - **A Graphics page in Options.** Lighting quality, light effects, smoothing,
   the foreground layer, glyph particles and screen shake, all saved between
   sessions.
@@ -64,8 +68,6 @@ first time.
   down the pack as before.
 - **The Drake.** A big duck wanders into the Sewers from 2:30. It winds up,
   shows you the lane, and pecks three times. It is slow to recover.
-- **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
-  facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
 - **The giant rat is drawn properly** at every size, instead of the small
   sprite with its pixels doubled.
 - **Whip and laser reach stop at the screen edge.** Neither hits what you

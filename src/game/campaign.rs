@@ -221,6 +221,12 @@ pub fn level_seed(run_seed: u64, index: usize) -> u64 {
     mix_seed(run_seed, index as u64)
 }
 
+/// The Daily's run seed is one SplitMix64 output from the UTC day number.
+/// The campaign derives each map and boss pool from it as usual.
+pub fn daily_seed(day: u64) -> u64 {
+    mix_seed(day, 0)
+}
+
 /// splitmix64 finaliser over `(run seed, key)`.
 fn mix_seed(run_seed: u64, key: u64) -> u64 {
     let mut h = run_seed ^ key.wrapping_mul(0x9e37_79b9_7f4a_7c15);

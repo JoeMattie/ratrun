@@ -101,6 +101,8 @@ dark.*
   Between sectors you pack up to three powerups and pick which floor the next
   sector plays. The Flatbed is also always open as a practice floor from sector
   select.
+- **Daily run.** The title's Daily follows Sewer → Kitchen → Lab → Flatbed
+  with a seed that changes at midnight UTC. Your best is saved for each day.
 - **Every floor has its own roster**: eight enemy kinds that unlock on the
   clock, from the first fodder to a third trick at 9:45, and its own four
   minibosses — 48 ordinary kinds and 24 named minibosses across the six floors.
