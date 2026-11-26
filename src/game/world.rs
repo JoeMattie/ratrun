@@ -451,8 +451,11 @@ impl World {
         level_index: usize, mut level: Level, seed: u64, mut carried: Loadout,
         carried_totals: CampaignTotals, tuning: crate::tuning::RunTuning,
     ) -> World {
-        let rebuild_carried = tuning.changed || carried.tuning.as_ref().is_some_and(|prior| prior.changed);
+        let sector_hp_mult = tuning.player.sector_hp_mult[crate::game::director::level_slot(level_index)];
+        let rebuild_carried = tuning.changed || carried.tuning.as_ref().is_some_and(|prior| prior.changed)
+            || carried.sector_hp_mult != sector_hp_mult;
         carried.tuning = Some(tuning.clone());
+        carried.sector_hp_mult = sector_hp_mult;
         if rebuild_carried {
             carried.rebuild_stats();
         }
@@ -479,14 +482,15 @@ impl World {
         let mut ecs = EcsWorld::new();
         ecs.register_component_hooks::<Enemy>().on_add(Enemy::apply_spawn_tuning);
         ecs.insert_resource(tuning);
+        ecs.insert_resource(LevelIndex(level_index));
         ecs.insert_resource(NextSpawnId(0));
         ecs.insert_resource(NeighborScratch::default());
         ecs.insert_resource(PickupScratch::default());
         ecs.insert_resource(NukeTick(false));
         ecs.insert_resource(GridScratch::default());
         ecs.insert_resource(EnemyIndex::default());
-        // Per-weapon damage bookkeeping for the batch harness (never read by
-        // the schedule; fresh per level, like the counters below).
+        // Per-weapon damage totals for the batch harness and opt-in director.
+        // Fresh per level, like the counters below.
         ecs.insert_resource(DamageLedger::default());
         // Live state of the two player-triggered weapons (charge bursts and the
         // squeak ring). Permanent scratch: it is written only by

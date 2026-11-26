@@ -43,6 +43,7 @@ section!(Player {
     hit_iframes: f32 = 1.189484; "Immunity after a projectile, boss or hazard hit (s)",
     contact_iframes: f32 = 1.1170288; "Immunity after ordinary enemy contact (s)",
     magnet_radius: f32 = 22.0; "Starting pickup magnet radius (world px)",
+    sector_hp_mult: [f32; 4] = [1.0; 4]; "Multiplier on base player health by campaign sector, before Nest upgrades and passives",
 });
 
 section!(Xp {
@@ -197,6 +198,7 @@ section!(Enemies {
     contact_damage_mult: f32 = 1.0; "Global ordinary enemy contact damage multiplier",
     speed_mult: f32 = 0.85838351; "Global ordinary enemy movement speed multiplier",
     kinds: BTreeMap<EnemyKind, Enemy> = enemy_defaults(); "Per-kind ordinary enemy stats",
+    sector_hp_mult: [f32; 4] = [1.0; 4]; "Ordinary enemy HP multipliers by campaign sector, including scripted arrivals",
 });
 
 section!(Minibosses {
@@ -466,6 +468,9 @@ impl Tuning {
             bail!("xp.gem_tier_min must be in ascending order");
         }
         let director = &self.director;
+        if self.player.sector_hp_mult.contains(&0.0) || self.enemies.sector_hp_mult.contains(&0.0) {
+            bail!("player.sector_hp_mult and enemies.sector_hp_mult must be positive");
+        }
         if director.power_hp_floor <= 0.0 || director.power_hp_floor > 1.0
             || director.power_hp_ceiling < 1.0
         {
@@ -759,6 +764,31 @@ mod tests {
         assert_eq!(speed, kind.speed() * baseline.tuning().enemies.speed_mult);
         assert!(!baseline.tuning().changed);
         assert_eq!(tuned.ecs.get::<crate::game::enemy::Enemy>(hardened).unwrap().hp, kind.base_hp() * 1.5);
+    }
+
+    #[test]
+    fn sector_hp_uses_the_new_floor_through_spawn_and_stat_rebuilds() {
+        use crate::game::{level::Theme, loadout::Loadout, world::World};
+        use crate::math::Vec2;
+
+        let run = RunTuning::new(Tuning::parse(
+            "[player]\nmax_hp = 160.0\nsector_hp_mult = [0.5, 1.0, 1.0, 1.0]\n\
+             [enemies]\nsector_hp_mult = [2.0, 0.75, 1.0, 1.0]",
+        ).unwrap());
+        let mut sewer = World::with_tuning(Theme::Sewer, 16, run.clone());
+        assert_eq!(sewer.player.hp, 80.0);
+        sewer.player.loadout.rebuild_stats();
+        assert_eq!(sewer.player.max_hp(), 80.0);
+        let kind = EnemyKind::Pillbug;
+        let sewer_enemy = sewer.spawn_enemy(kind, Vec2::ZERO, 1.0);
+        assert_eq!(sewer.ecs.get::<crate::game::enemy::Enemy>(sewer_enemy).unwrap().hp, kind.base_hp() * 2.0);
+
+        let carried = crate::game::campaign::next_loadout(&sewer.player.loadout, &[]).unwrap();
+        assert_eq!(carried.weapons[0].kind, Loadout::START_WEAPON);
+        let mut kitchen = World::new_level_tuned(1, Theme::Kitchen, 16, carried, Default::default(), run);
+        assert_eq!(kitchen.player.hp, 160.0);
+        let kitchen_enemy = kitchen.spawn_enemy(kind, Vec2::ZERO, 1.0);
+        assert_eq!(kitchen.ecs.get::<crate::game::enemy::Enemy>(kitchen_enemy).unwrap().hp, kind.base_hp() * 0.75);
     }
 
     #[test]

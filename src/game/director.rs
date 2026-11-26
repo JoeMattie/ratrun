@@ -204,7 +204,7 @@ pub const FLANK_DWELL_SECS: f32 = 8.0;
 
 /// `level` as an index into [`LEVEL_CLOCK_OFFSET`] (out-of-range clamps).
 #[inline]
-fn level_slot(level: usize) -> usize {
+pub(crate) fn level_slot(level: usize) -> usize {
     level.min(LEVEL_CLOCK_OFFSET.len() - 1)
 }
 

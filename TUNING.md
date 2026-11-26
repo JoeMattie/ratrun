@@ -39,6 +39,12 @@ Any effective change marks the run **TUNED** and voids Nest banking, high scores
 
 Use the kind keys printed by the dump. Keep the same number of entries when editing an array. Sector arrays follow campaign order. In a practice run using a bare build, the game uses sector one's difficulty values.
 
+`[player] sector_hp_mult` scales base health by the world's campaign sector
+before the Nest and passive bonuses apply. `[enemies] sector_hp_mult` scales
+ordinary enemy HP by sector after each spawn's own HP calculation. This
+includes authored and summoned ordinary bodies. Both arrays default to four
+`1.0` values. Each new floor applies its own row to the carried build.
+
 ## Sector buildup
 
 Each sector ships with its own live budget, pulse interval and elite interval multiplier. Other sector settings inherit the shared director values unless overridden in `[director.sectors.1]` through `[director.sectors.4]`. The tuning dump prints the shipped rows. Each curve uses seven pairs, with times in curve seconds. Practice uses sector 1 on every floor.
