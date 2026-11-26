@@ -692,6 +692,29 @@ const PAL_LAB: WallPalette = WallPalette {
     thresh_hi: (98, 118, 150),
 };
 
+const PAL_OUTFALL: WallPalette = WallPalette {
+    outline: (8, 16, 22),
+    top_base: (82, 68, 54),     // weathered waterlogged pier timber
+    top_alt: (66, 54, 44),
+    top_hi: (124, 108, 90),     // bleached driftwood highlight
+    top_lo: (36, 30, 26),
+    cornice: (132, 118, 100),   // salt-scoured piling rim
+    front_base: (46, 56, 62),   // riveted sunken-hull iron & seawall slate
+    front_alt: (68, 58, 48),    // vertical pier timber stave
+    front_dark: (18, 28, 36),   // deep wet kelp/silt footing
+    mortar: (14, 24, 30),       // dark creosote & seawater joint
+    trim_hi: (158, 172, 166),   // pale barnacle calcium crust
+    trim_lo: (22, 32, 38),
+    detail_a: (38, 84, 64),     // clinging dark-teal ocean kelp
+    detail_b: (76, 176, 188),   // bioluminescent sea-glass / lure-glint cyan
+    detail_c: (132, 76, 46),    // corroded hull-iron rust patina
+    maze_top: (76, 66, 54),     // slatted breakwater timber bulkhead
+    maze_hi: (128, 116, 100),
+    maze_front: (40, 44, 48),
+    thresh_base: (36, 46, 50),  // wet driftwood & iron dock sill
+    thresh_hi: (106, 126, 124),
+};
+
 #[inline]
 const fn theme_palette(theme: Theme) -> &'static WallPalette {
     match theme {
@@ -704,6 +727,7 @@ const fn theme_palette(theme: Theme) -> &'static WallPalette {
         Theme::Trailer => &PAL_KITCHEN,
         Theme::Laundry => &PAL_LAUNDRY,
         Theme::Printworks => &PAL_PRINTWORKS,
+        Theme::Outfall => &PAL_OUTFALL,
     }
 }
 
@@ -1068,6 +1092,203 @@ fn draw_wave3_solid_interior(
                 printworks_top(wx0 + lx, wy0 + ly, cell_h)
             };
             pb.plot(px, py, c);
+        }
+    }
+}
+
+/// Precomputed compile-time color table for The Outfall's pier pilings and
+/// sunken-hull seawall plates.
+struct OutfallLut {
+    wood_hi: [Rgb; 2],
+    wood_mid: [Rgb; 2],
+    wood_lo: [Rgb; 2],
+    wood_ring: Rgb,
+    joint: Rgb,
+    kelp_dark: Rgb,
+    kelp_mid: Rgb,
+    barnacle_hi: Rgb,
+    barnacle_lo: Rgb,
+    iron_hi: Rgb,
+    iron_mid: Rgb,
+    iron_lo: Rgb,
+    rust: Rgb,
+    footing: Rgb,
+}
+
+const OUTFALL_LUT: OutfallLut = {
+    let p = PAL_OUTFALL;
+    OutfallLut {
+        wood_hi: [mix_c(p.top_base, p.top_hi, 0.56), mix_c(p.top_alt, p.top_hi, 0.44)],
+        wood_mid: [p.top_base, p.top_alt],
+        wood_lo: [mix_c(p.top_base, p.top_lo, 0.54), mix_c(p.top_alt, p.top_lo, 0.62)],
+        wood_ring: mix_c(p.top_base, p.top_lo, 0.36),
+        joint: p.mortar,
+        kelp_dark: scale_c(p.detail_a, 0.70),
+        kelp_mid: p.detail_a,
+        barnacle_hi: p.trim_hi,
+        barnacle_lo: mix_c(p.trim_hi, p.front_base, 0.48),
+        iron_hi: mix_c(p.front_base, p.trim_hi, 0.30),
+        iron_mid: p.front_base,
+        iron_lo: p.trim_lo,
+        rust: p.detail_c,
+        footing: p.front_dark,
+    }
+};
+
+/// The Outfall's top face: 8×8 rounded-cap weathered pier timber pilings set
+/// in dark seawater crevices, with warm end-grain annual rings, iron mooring
+/// bolt heads, and organic 1–2 px kelp flecks tucked only in corner crevices.
+#[inline]
+fn outfall_top(wx: i32, wy: i32, _cell_h: u32) -> Rgb {
+    let px = wx.div_euclid(8);
+    let py = wy.div_euclid(8);
+    let lx = wx.rem_euclid(8);
+    let ly = wy.rem_euclid(8);
+    let n = hash3(px, py, 0x0F41);
+    let wi = (n & 1) as usize;
+
+    // Rounded piling corners expose dark seawater/creosote joints and sparse
+    // corner-crevice kelp flecks (never vertical stripes along flat edges).
+    let is_corner = (lx == 0 || lx == 7) && (ly == 0 || ly == 7);
+    if is_corner {
+        if (n & 3) == 0 && ly == 0 {
+            return OUTFALL_LUT.kelp_dark;
+        }
+        return OUTFALL_LUT.joint;
+    }
+    if lx == 0 || ly == 0 {
+        if (n & 7) == 3 && ly == 1 && (lx == 0 || lx == 7) {
+            return OUTFALL_LUT.kelp_mid;
+        }
+        return OUTFALL_LUT.joint;
+    }
+
+    // Iron drift-bolt head centered on every 4th piling cap.
+    if (n & 3) == 2 && (lx == 3 || lx == 4) && (ly == 3 || ly == 4) {
+        return if lx == 3 && ly == 3 {
+            OUTFALL_LUT.iron_hi
+        } else if lx == 4 && ly == 4 {
+            OUTFALL_LUT.rust
+        } else {
+            OUTFALL_LUT.iron_lo
+        };
+    }
+
+    // Concentric cut end-grain shading around piling center (3.5, 3.5).
+    let dx2 = (lx * 2 - 7).abs();
+    let dy2 = (ly * 2 - 7).abs();
+    let r2 = dx2 * dx2 + dy2 * dy2;
+    if r2 <= 5 {
+        // Inner heartwood ring
+        if (n & 4) != 0 && lx == 3 && ly == 3 {
+            OUTFALL_LUT.wood_hi[wi]
+        } else {
+            OUTFALL_LUT.wood_ring
+        }
+    } else if r2 <= 18 {
+        if ly <= 2 && lx <= 4 {
+            OUTFALL_LUT.wood_hi[wi]
+        } else {
+            OUTFALL_LUT.wood_mid[wi]
+        }
+    } else if ly == 1 || lx == 1 {
+        OUTFALL_LUT.wood_hi[wi]
+    } else {
+        OUTFALL_LUT.wood_lo[wi]
+    }
+}
+
+/// The Outfall's south face: alternates riveted sunken-hull iron plates and
+/// vertical waterlogged pier timber staves above a pale barnacle waterline
+/// crust (`fy == 3`) and dark submerged silt footing (`fy == 4`).
+#[inline]
+fn outfall_front(wx: i32, fy: i32, bay_h: u32, has_w: bool, has_e: bool) -> Rgb {
+    let lx = wx.rem_euclid(16);
+    let is_hull_plate = (bay_h & 1) == 0 && (has_w || has_e);
+    if fy == 4 {
+        return if (wx & 3) == 1 {
+            OUTFALL_LUT.kelp_dark
+        } else {
+            OUTFALL_LUT.footing
+        };
+    }
+    if is_hull_plate {
+        let seam = lx == 0 || lx == 15;
+        match fy {
+            0 => if seam { OUTFALL_LUT.iron_lo } else { OUTFALL_LUT.iron_hi },
+            1 => {
+                if seam {
+                    OUTFALL_LUT.iron_lo
+                } else if lx == 3 || lx == 12 {
+                    OUTFALL_LUT.rust
+                } else {
+                    OUTFALL_LUT.iron_mid
+                }
+            }
+            2 => {
+                if seam {
+                    OUTFALL_LUT.iron_lo
+                } else if lx == 7 || lx == 8 {
+                    OUTFALL_LUT.iron_hi
+                } else {
+                    OUTFALL_LUT.iron_mid
+                }
+            }
+            _ => {
+                // fy == 3: waterline barnacle flecks clinging to hull iron
+                if (wx + (bay_h as i32)).rem_euclid(5) == 0 {
+                    OUTFALL_LUT.barnacle_hi
+                } else if (wx + (bay_h as i32)).rem_euclid(5) == 1 {
+                    OUTFALL_LUT.barnacle_lo
+                } else {
+                    OUTFALL_LUT.iron_lo
+                }
+            }
+        }
+    } else {
+        // Vertical 8-px pier piling staves with pale barnacle waterline collar.
+        let px = wx.rem_euclid(8);
+        let wi = (wx.div_euclid(8) & 1) as usize;
+        if px == 0 {
+            OUTFALL_LUT.joint
+        } else if fy == 3 {
+            if px == 2 || px == 5 {
+                OUTFALL_LUT.barnacle_hi
+            } else if px == 3 || px == 6 {
+                OUTFALL_LUT.barnacle_lo
+            } else {
+                OUTFALL_LUT.wood_lo[wi]
+            }
+        } else if fy == 0 {
+            OUTFALL_LUT.wood_hi[wi]
+        } else if px == 1 || px == 2 {
+            OUTFALL_LUT.wood_hi[wi]
+        } else if px >= 6 {
+            OUTFALL_LUT.wood_lo[wi]
+        } else {
+            OUTFALL_LUT.wood_mid[wi]
+        }
+    }
+}
+
+/// Fill a solid cell's whole 16 x 16 area with The Outfall's pier-piling top
+/// material (fully surrounded bedrock cells).
+fn draw_outfall_solid_interior(pb: &mut PixelBuffer, sx: i32, sy: i32, view: &WallCellView) {
+    let (wx0, wy0) = view.world_origin();
+    let cell_h = hash3(view.cell_x, view.cell_y, view.seed);
+    let bh = pb.h as i32;
+    let bw = pb.w as i32;
+    for ly in 0..CELL_SIZE {
+        let py = sy + ly;
+        if py < 0 || py >= bh {
+            continue;
+        }
+        for lx in 0..CELL_SIZE {
+            let px = sx + lx;
+            if px < 0 || px >= bw {
+                continue;
+            }
+            pb.plot(px, py, outfall_top(wx0 + lx, wy0 + ly, cell_h));
         }
     }
 }
@@ -1835,6 +2056,22 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
+                            Theme::Outfall => {
+                                // Waterlogged driftwood plank sill with corroded bolt heads & barnacles
+                                if (lx == x0 + 1 || lx == x1 - 2) && ly == 8 {
+                                    pal.trim_hi
+                                } else if ly == 9 || ly == 10 {
+                                    if (lx % 4) == 0 {
+                                        pal.outline
+                                    } else if (lx % 4) == 2 && ly == 9 {
+                                        pal.detail_c
+                                    } else {
+                                        pal.top_alt
+                                    }
+                                } else {
+                                    pal.thresh_base
+                                }
+                            }
                             _ => pal.thresh_base,
                         }
                     };
@@ -1932,6 +2169,22 @@ fn draw_doorway_ground(
                                         pal.thresh_hi
                                     } else {
                                         pal.front_dark
+                                    }
+                                } else {
+                                    pal.thresh_base
+                                }
+                            }
+                            Theme::Outfall => {
+                                // Vertical waterlogged driftwood sill with iron bolts & barnacle flecks
+                                if (ly == y0 + 1 || ly == y1 - 2) && lx == 7 {
+                                    pal.trim_hi
+                                } else if lx == 8 || lx == 9 {
+                                    if (ly % 4) == 0 {
+                                        pal.outline
+                                    } else if (ly % 4) == 2 && lx == 8 {
+                                        pal.detail_c
+                                    } else {
+                                        pal.top_alt
                                     }
                                 } else {
                                     pal.thresh_base
@@ -2515,6 +2768,11 @@ fn fill_top_row(
                 row_px[lx as usize] = printworks_top(wx0 + lx, wy, cell_h);
             }
         }
+        Theme::Outfall => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = outfall_top(wx0 + lx, wy, cell_h);
+            }
+        }
         _ => {
             for lx in x_start..x_end {
                 row_px[lx as usize] = (96, 72, 44);
@@ -2689,6 +2947,11 @@ fn fill_front_row(
                 row_px[lx as usize] = printworks_front(wx0 + lx, fy, bay_h, has_w, has_e);
             }
         }
+        Theme::Outfall => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = outfall_front(wx0 + lx, fy, bay_h, has_w, has_e);
+            }
+        }
         _ => {
             for lx in x_start..x_end {
                 row_px[lx as usize] = pal.front_base;
@@ -2730,6 +2993,7 @@ fn draw_solid_cell(
             // wall mass never inherits a donor's bricks.
             Theme::Laundry => draw_wave3_solid_interior(pb, sx, sy, view, true),
             Theme::Printworks => draw_wave3_solid_interior(pb, sx, sy, view, false),
+            Theme::Outfall => draw_outfall_solid_interior(pb, sx, sy, view),
             _ => {}
         }
         return;
@@ -3007,6 +3271,7 @@ fn sample_top_material(
         }
         Theme::Laundry => laundry_top(wx, wy, cell_h),
         Theme::Printworks => printworks_top(wx, wy, cell_h),
+        Theme::Outfall => outfall_top(wx, wy, cell_h),
         _ => (96, 72, 44),
     }
 }
@@ -3133,6 +3398,29 @@ fn draw_front_accents(
                     pb.plot(sx + 13, front_y + 1, palette::scale(pal.detail_b, 0.75 + 0.55 * pulse));
                     pb.plot(sx + 13, front_y + 2, pal.outline);
                 }
+            }
+        }
+        Theme::Outfall => {
+            let is_hull_plate = (bay_h & 1) == 0 && (has_w || has_e);
+            if is_hull_plate {
+                // Corroded iron mooring ring or pulsing bioluminescent barnacle glint
+                if (cell_h & 3) == 0 && has_w && has_e {
+                    pb.plot(sx + 7, front_y + 1, OUTFALL_LUT.iron_hi);
+                    pb.plot(sx + 8, front_y + 1, OUTFALL_LUT.rust);
+                    pb.plot(sx + 7, front_y + 2, pal.outline);
+                    pb.plot(sx + 8, front_y + 2, OUTFALL_LUT.iron_lo);
+                } else if (cell_h & 7) == 5 && has_w && has_e {
+                    let glint = 0.55 + 0.45 * (view.anim_clock * 2.1 + view.cell_x as f32 * 1.4).sin();
+                    pb.plot(sx + 12, front_y + 2, palette::scale(pal.detail_b, 0.65 + 0.35 * glint));
+                    pb.plot(sx + 12, front_y + 3, OUTFALL_LUT.barnacle_hi);
+                }
+            } else if (cell_h & 3) == 1 && (has_w || has_e) {
+                // Clinging dark kelp wisp and pale barnacle cluster on piling stave
+                pb.plot(sx + 4, front_y + 1, OUTFALL_LUT.kelp_mid);
+                pb.plot(sx + 4, front_y + 2, OUTFALL_LUT.kelp_dark);
+                pb.plot(sx + 5, front_y + 3, OUTFALL_LUT.barnacle_hi);
+                pb.plot(sx + 11, front_y + 2, OUTFALL_LUT.barnacle_hi);
+                pb.plot(sx + 12, front_y + 3, OUTFALL_LUT.barnacle_lo);
             }
         }
         _ => {}
@@ -3362,6 +3650,19 @@ fn draw_maze_cell(
                             pal.maze_top
                         }
                     }
+                    Theme::Outfall => {
+                        // Slatted weathered breakwater timber bulkhead with iron tie-bolts
+                        let at_bolt = (wx % 8 == 0) && (ly == MAZE_INSET_Y + 1 || ly == y_front_start - 1);
+                        if at_bolt {
+                            OUTFALL_LUT.rust
+                        } else if (wx & 3) == 0 {
+                            OUTFALL_LUT.wood_lo[0]
+                        } else if ((wx + wy) & 7) == 0 {
+                            OUTFALL_LUT.wood_hi[0]
+                        } else {
+                            pal.maze_top
+                        }
+                    }
                     _ => kitchen_top_hi,
                 };
 
@@ -3430,6 +3731,19 @@ fn draw_maze_cell(
                             PRINTWORKS_LUT.ink_stripe
                         } else if (wx & 7) == 0 {
                             PRINTWORKS_LUT.ream_lo
+                        } else {
+                            pal.maze_front
+                        }
+                    }
+                    Theme::Outfall => {
+                        if fy == 3 {
+                            if (wx % 3) == 0 {
+                                OUTFALL_LUT.barnacle_hi
+                            } else {
+                                OUTFALL_LUT.kelp_dark
+                            }
+                        } else if (wx & 3) == 0 {
+                            OUTFALL_LUT.joint
                         } else {
                             pal.maze_front
                         }
@@ -3649,6 +3963,7 @@ fn draw_jamb_pillar_v(
         Theme::Sewer => pal.trim_hi,
         Theme::Laundry => pal.detail_a,
         Theme::Printworks => pal.detail_b,
+        Theme::Outfall => pal.detail_b,
         _ => pal.detail_a,
     };
     pb.plot(pip_x, y + TOP_FACE_H - 2, pip_col);
@@ -3700,6 +4015,7 @@ fn draw_jamb_pillar_h(
         Theme::Sewer => pal.trim_hi,
         Theme::Laundry => pal.detail_a,
         Theme::Printworks => pal.detail_b,
+        Theme::Outfall => pal.detail_b,
         _ => pal.detail_a,
     };
     pb.plot(x + 3, pip_y, pip_col);
@@ -3725,6 +4041,7 @@ fn draw_oneway_gate(
         Theme::Laundry => pal.cornice,
         Theme::Printworks => pal.maze_top,
         Theme::Trailer => pal.maze_top,
+        Theme::Outfall => pal.maze_top,
     };
     let leaf_hi = pal.trim_hi;
 
@@ -4129,6 +4446,19 @@ pub fn draw_boss_threshold_ground(
                 pal,
             );
         }
+        Theme::Outfall => {
+            draw_boss_threshold_outfall(
+                pb,
+                sx,
+                sy,
+                view.inward,
+                u0,
+                u1,
+                du_off,
+                view.cell.anim_clock,
+                pal,
+            );
+        }
         _ => {}
     }
 }
@@ -4252,6 +4582,26 @@ pub fn draw_boss_threshold_overhang(
                 }
             }
         }
+        Theme::Outfall => {
+            // Sunken hull lintel with twin pulsing cyan lure-glint sea-glass beacons
+            // and pale barnacle clusters framing The Lure's arena mouth.
+            let pulse = 0.55 + 0.45 * (view.cell.anim_clock * 2.8).sin();
+            let lure = scale_c((116, 224, 232), 0.70 + 0.30 * pulse);
+            for u in u0..u1 {
+                let du = u + du_off;
+                let px = sx + u;
+                if du == 3 || du == 28 {
+                    pb.plot(px, sy + 1, lure);
+                    pb.plot(px, sy + 2, pal.detail_b);
+                } else if du == 4 || du == 27 {
+                    pb.plot(px, sy + 1, pal.outline);
+                    pb.plot(px, sy + 2, OUTFALL_LUT.barnacle_hi);
+                } else if (6..=25).contains(&du) && (du % 5) == 0 {
+                    pb.plot(px, sy + 1, OUTFALL_LUT.rust);
+                    pb.plot(px, sy + 2, OUTFALL_LUT.kelp_mid);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -4357,6 +4707,67 @@ fn draw_boss_threshold_printworks(
                 paper
             };
             let a = if lv == 0 || lv == v1 - v0 - 1 { 0.60 } else { 0.86 };
+            blend_px(pb, px, py, c, a);
+        }
+    }
+}
+
+/// **Outfall boss threshold**: sunken shipwreck oak-plank sill studded with
+/// corroded iron rivets, a dark stepped drop-channel grate down the center,
+/// pale barnacle clusters, and faint bioluminescent lure-cyan corner glints
+/// foreshadowing The Lure.
+#[allow(clippy::too_many_arguments)]
+fn draw_boss_threshold_outfall(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    inward: Cardinal,
+    u0: i32,
+    u1: i32,
+    du_off: i32,
+    anim_clock: f32,
+    pal: &WallPalette,
+) {
+    let plank_a = OUTFALL_LUT.wood_mid[0];
+    let plank_b = OUTFALL_LUT.wood_lo[1];
+    let abyss: Rgb = (7, 14, 22);
+    let pulse = 0.60 + 0.40 * (anim_clock * 2.2).sin();
+    let glint = scale_c(pal.detail_b, 0.68 + 0.32 * pulse);
+    let (v0, v1) = match inward {
+        Cardinal::South => (6, 16),
+        Cardinal::North => (1, 11),
+        Cardinal::East | Cardinal::West => (3, 13),
+    };
+    for u in u0..u1 {
+        let du = u + du_off;
+        if !(3..=28).contains(&du) {
+            continue;
+        }
+        for v in v0..v1 {
+            let lv = v - v0;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let in_channel = (10..=21).contains(&du) && (2..=7).contains(&lv);
+            let corner_glint = (du == 4 || du == 27) && (lv == 1 || lv == v1 - v0 - 2);
+            let c = if corner_glint {
+                glint
+            } else if in_channel {
+                if lv == 2 || lv == 7 || du == 10 || du == 21 {
+                    OUTFALL_LUT.iron_hi
+                } else if (du % 3) == 0 {
+                    OUTFALL_LUT.rust
+                } else {
+                    abyss
+                }
+            } else if (du == 6 || du == 25) && (lv == 3 || lv == 6) {
+                OUTFALL_LUT.barnacle_hi
+            } else if (du % 4) == 0 {
+                OUTFALL_LUT.joint
+            } else if ((du / 4) & 1) == 0 {
+                plank_a
+            } else {
+                plank_b
+            };
+            let a = if lv == 0 || lv == v1 - v0 - 1 { 0.56 } else { 0.88 };
             blend_px(pb, px, py, c, a);
         }
     }
@@ -5286,10 +5697,11 @@ mod tests {
         let w = cols * CELL_SIZE as usize;
         let h = rows * CELL_SIZE as usize;
         let sep = 2usize;
-        let total_h = h * 3 + sep * 2;
+        let themes = Theme::all();
+        let total_h = h * themes.len() + sep * themes.len().saturating_sub(1);
         let mut out = format!("P6\n{} {}\n255\n", w, total_h).into_bytes();
 
-        for (ti, theme) in Theme::all().into_iter().enumerate() {
+        for (ti, theme) in themes.into_iter().enumerate() {
             let level = Level::new(theme);
             let accent = level.palette.accent;
             let cam = Vec2::new(64.0, 64.0);
@@ -5355,7 +5767,7 @@ mod tests {
                     out.extend_from_slice(&[c.0, c.1, c.2]);
                 }
             }
-            if ti < 2 {
+            if ti + 1 < themes.len() {
                 for _ in 0..(w * sep) {
                     out.extend_from_slice(&[8, 8, 10]);
                 }
@@ -5570,8 +5982,8 @@ mod tests {
         assert_eq!(right_edge - left_edge, 30.0);
 
         // Render every theme × all 4 inward directions × edge cameras with zero panics
-        let mut theme_hashes = [0u64; 5];
-        for (ti, theme) in Theme::all().into_iter().enumerate() {
+        let mut theme_hashes = Vec::new();
+        for theme in Theme::all() {
             let accent = crate::game::level::Palette::for_theme(theme).accent;
             let bg = crate::game::level::Palette::for_theme(theme).bg;
 
@@ -5650,13 +6062,12 @@ mod tests {
                             before, after,
                             "{theme:?}: boss threshold must visibly change the doorway"
                         );
-                        theme_hashes[ti] = after;
+                        theme_hashes.push(after);
                     }
                 }
             }
         }
-        // Every floor's boss threshold is visibly its own (the wave 3 floors
-        // added two more, so the pairwise check covers all five).
+        // Every floor's boss threshold is visibly its own across all themes.
         for i in 0..theme_hashes.len() {
             for j in i + 1..theme_hashes.len() {
                 assert_ne!(
@@ -5699,7 +6110,8 @@ mod tests {
         let w = cols * CELL_SIZE as usize;
         let h = rows * CELL_SIZE as usize;
         let sep = 2usize;
-        let total_h = h * 3 + sep * 2;
+        let themes = Theme::all();
+        let total_h = h * themes.len() + sep * themes.len().saturating_sub(1);
         let mut out = format!("P6\n{} {}\n255\n", w, total_h).into_bytes();
 
         let cell_at = |x: i32, y: i32| -> Option<WallKind> {
@@ -5731,7 +6143,7 @@ mod tests {
             )
         };
 
-        for (ti, theme) in Theme::all().into_iter().enumerate() {
+        for (ti, theme) in themes.into_iter().enumerate() {
             let level = Level::new(theme);
             let accent = level.palette.accent;
             let cam = Vec2::new(64.0, 64.0);
@@ -5809,13 +6221,87 @@ mod tests {
                     out.extend_from_slice(&[c.0, c.1, c.2]);
                 }
             }
-            if ti < 2 {
+            if ti + 1 < themes.len() {
                 for _ in 0..(w * sep) {
                     out.extend_from_slice(&[8, 8, 10]);
                 }
             }
         }
         std::fs::write("/tmp/ratrun_boss_thresholds.ppm", out).unwrap();
+    }
+
+    #[test]
+    fn outfall_walls_render_all_kinds_distinctly_without_panicking() {
+        let render_theme = |theme: Theme| -> u64 {
+            let accent = crate::game::level::Palette::for_theme(theme).accent;
+            let mut pb = PixelBuffer::new(96, 64);
+            pb.clear((6, 12, 18));
+            let cam = Vec2::ZERO;
+            let cases = [
+                WallCellView::new(1, 1, 77, theme, WallKind::Solid, NeighborMask::ALL),
+                WallCellView::new(
+                    2,
+                    1,
+                    77,
+                    theme,
+                    WallKind::Solid,
+                    NeighborMask::from_cardinals(true, true, false, true),
+                ),
+                WallCellView::new(
+                    3,
+                    1,
+                    77,
+                    theme,
+                    WallKind::Doorway {
+                        axis: WallAxis::Horizontal,
+                    },
+                    NeighborMask::from_cardinals(false, true, false, true),
+                ),
+                WallCellView::new(
+                    4,
+                    1,
+                    77,
+                    theme,
+                    WallKind::Maze,
+                    NeighborMask::from_cardinals(false, true, true, true),
+                ),
+                WallCellView::new(
+                    1,
+                    2,
+                    77,
+                    theme,
+                    WallKind::RatHole {
+                        axis: WallAxis::Horizontal,
+                    },
+                    NeighborMask::from_cardinals(false, true, false, true),
+                ),
+                WallCellView::new(
+                    2,
+                    2,
+                    77,
+                    theme,
+                    WallKind::OneWayGate {
+                        dir: Cardinal::South,
+                    },
+                    NeighborMask::from_cardinals(false, true, false, true),
+                ),
+            ];
+            for v in &cases {
+                draw_wall_ground(&mut pb, v, cam, accent);
+                draw_wall_cell(&mut pb, v, cam, accent);
+                draw_wall_overhang(&mut pb, v, cam, accent);
+            }
+            let painted = pb.pixels().iter().filter(|&&p| p != (6, 12, 18)).count();
+            assert!(painted > 400, "{theme:?}: expected solid wall coverage, got {painted}");
+            fnv1a_pixels(&pb)
+        };
+
+        let outfall_hash = render_theme(Theme::Outfall);
+        let sewer_hash = render_theme(Theme::Sewer);
+        assert_ne!(
+            outfall_hash, sewer_hash,
+            "Outfall walls must render distinct from Sewer"
+        );
     }
 
     /// Shop hole rendered across all four themes (Sewer, Kitchen, Lab, Trailer).

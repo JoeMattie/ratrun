@@ -317,6 +317,7 @@ pub fn draw_floor(
         match pit.kind {
             PitKind::BrokenPlank => broken_planks(&mut c, px, py, pw, ph, scroll_i, bump),
             PitKind::RailGap => rail_gap(&mut c, px, py, pw, ph, scroll_i, bump),
+            PitKind::TidalDrop => {}
         }
     }
 

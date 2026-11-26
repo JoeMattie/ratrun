@@ -36,6 +36,9 @@ pub fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
         PropKind::PressIsland => press_island(pb, x, y, w, h, seed, pal),
         PropKind::PaperReel => paper_reel(pb, x, y, w, h, seed, pal),
         PropKind::TypeBlock => type_block(pb, x, y, w, h, seed, pal),
+        PropKind::OutfallPiling => outfall_piling(pb, x, y, w, h, seed, pal),
+        PropKind::OutfallBallast => outfall_ballast(pb, x, y, w, h, seed, pal),
+        PropKind::OutfallRib => outfall_rib(pb, x, y, w, h, seed, pal),
         // The flatbed's cargo is its own art module (planks, tarps, straps).
         PropKind::Pallet
         | PropKind::TarpLump
@@ -2924,4 +2927,375 @@ fn type_block(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, p
     // Crisp registration-cyan ink dab on the bottom-left corner of the sort.
     pb.rect_fill(x + 3, y + h - 3, 3, 1, cyan);
     pb.plot(x + 3, y + h - 4, palette::mix(cyan, (230, 250, 252), 0.45));
+}
+
+// ---- Outfall Props: Barnacled Piling, Ballast Crate & Broken Hull Ribs -----
+
+/// A freestanding barnacled pier piling (1 × 1 tile): cut end-grain timber top
+/// with concentric annual rings, iron mooring hoop, pale calcified barnacles,
+/// and a dark-emerald kelp wisp at the waterline.
+fn outfall_piling(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    let cx = x as f32 + w as f32 * 0.5;
+    let cy = y as f32 + h as f32 * 0.5;
+    let r = (w.min(h) as f32 * 0.46).max(3.5);
+    shadow_ellipse(pb, cx + 1.5, cy + 2.5, r + 1.5, r * 0.9, 0.52);
+
+    let outline = ambient_shade((8, 15, 21), pal, 0.20);
+    let wood_hi: Rgb = (128, 134, 124);
+    let wood_mid: Rgb = (84, 88, 84);
+    let wood_lo: Rgb = (44, 50, 54);
+    let ring_c: Rgb = (32, 38, 44);
+    let iron: Rgb = (72, 86, 94);
+    let iron_hi: Rgb = (142, 160, 166);
+    let barn_hi: Rgb = (208, 212, 198);
+    let barn_lo: Rgb = (124, 132, 126);
+    let kelp: Rgb = (32, 102, 78);
+
+    let top_cy = y as f32 + h as f32 * 0.38;
+    let top_ry = (r * 0.72).max(2.5);
+    let shaft_y0 = top_cy.floor() as i32;
+
+    // 1. Vertical curved creosote piling shaft with corroded iron mooring band.
+    for py in shaft_y0..(y + h) {
+        let ly = py - shaft_y0;
+        for px in x..(x + w) {
+            let dx = (px as f32 + 0.5 - cx) / r;
+            if dx.abs() > 1.02 {
+                continue;
+            }
+            if dx.abs() > 0.86 || py == y + h - 1 {
+                pb.plot(px, py, outline);
+            } else {
+                let lit = (0.65 - dx * 0.45).clamp(0.0, 1.0);
+                let mut c = if ly == 2 {
+                    if lit > 0.55 { iron_hi } else { iron }
+                } else {
+                    palette::mix(wood_lo, wood_mid, lit)
+                };
+                if py >= y + h - 3 {
+                    c = palette::scale(c, 0.72);
+                }
+                pb.plot(px, py, c);
+            }
+        }
+    }
+
+    // 2. Cut timber end-grain crown with concentric growth rings & split check.
+    let split_side = if (seed & 1) == 0 { 1 } else { -1 };
+    for py in y..(y + h) {
+        for px in x..(x + w) {
+            let nx = (px as f32 + 0.5 - cx) / r;
+            let ny = (py as f32 + 0.5 - top_cy) / top_ry;
+            let d = (nx * nx + ny * ny).sqrt();
+            if d > 1.08 {
+                continue;
+            }
+            if d > 0.88 {
+                pb.plot(px, py, outline);
+            } else {
+                let lit = (0.55 - nx * 0.40 - ny * 0.45).clamp(0.0, 1.0);
+                let is_ring = (0.42..0.58).contains(&d) || d < 0.16;
+                let is_split =
+                    (nx * split_side as f32) > 0.15 && (ny + 0.1).abs() < 0.14 && d < 0.82;
+                let c = if is_ring || is_split {
+                    ring_c
+                } else if lit > 0.65 {
+                    wood_hi
+                } else {
+                    palette::mix(wood_lo, wood_mid, lit)
+                };
+                pb.plot(px, py, c);
+            }
+        }
+    }
+
+    // 3. Pale calcified barnacle clusters & wet emerald kelp wisp near base.
+    let bx = (cx - r * 0.55).round() as i32;
+    let by = y + h - 4;
+    if by > y && bx >= x {
+        pb.plot(bx, by, barn_hi);
+        pb.plot(bx + 1, by, barn_lo);
+        pb.plot(bx, by + 1, barn_lo);
+        pb.plot(bx + 1, by + 1, barn_hi);
+        pb.plot(bx + 2, by + 1, barn_hi);
+    }
+    let kx = (cx + r * 0.35).round() as i32;
+    pb.plot(kx + 1, y + h - 3, barn_hi);
+    pb.plot(kx, y + h - 2, kelp);
+    pb.plot(kx + 1, y + h - 2, kelp);
+    pb.plot(kx + 2, y + h - 1, kelp);
+}
+
+/// A sunken iron-banded ballast crate (2 × 1 tiles): dark waterlogged timber
+/// planks, bolted iron strapping, a broken slat bay exposing heavy cast-iron
+/// ballast ingots, barnacle crusts and clinging algae.
+fn outfall_ballast(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_rect(pb, x, y, w, h);
+
+    let outline = ambient_shade((8, 15, 21), pal, 0.20);
+    let wood_hi: Rgb = (108, 92, 74);
+    let wood_mid: Rgb = (72, 60, 48);
+    let wood_lo: Rgb = (40, 34, 30);
+    let iron_hi: Rgb = (126, 142, 148);
+    let iron_mid: Rgb = (70, 82, 90);
+    let iron_lo: Rgb = (34, 44, 50);
+    let ingot_hi: Rgb = (122, 138, 144);
+    let ingot_mid: Rgb = (76, 90, 98);
+    let ingot_lo: Rgb = (36, 46, 54);
+    let barn: Rgb = (196, 200, 186);
+    let kelp: Rgb = (28, 92, 70);
+
+    let front_h = (h / 3).max(4).min(h - 2);
+    let top_h = (h - front_h).max(2);
+    let mid_x = w / 2;
+    let flip_bay = (seed & 1) != 0;
+
+    for ly in 0..h {
+        let py = y + ly;
+        for lx in 0..w {
+            let px = x + lx;
+            if lx == 0 || lx == w - 1 || ly == 0 || ly == h - 1 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let on_strap = lx <= 2 || lx >= w - 3 || (lx - mid_x).abs() <= 1;
+            if ly >= top_h {
+                let c = if ly == top_h {
+                    if on_strap { iron_lo } else { wood_lo }
+                } else if on_strap {
+                    if (lx & 1) == 0 { iron_mid } else { iron_lo }
+                } else if (ly & 1) == 0 {
+                    palette::scale(wood_mid, 0.68)
+                } else {
+                    wood_lo
+                };
+                pb.plot(px, py, c);
+            } else {
+                let in_bay = if flip_bay {
+                    lx >= mid_x + 3 && lx <= w - 5
+                } else {
+                    lx >= 4 && lx <= mid_x - 3
+                } && ly >= 2 && ly <= top_h - 2;
+
+                let c = if ly == 1 {
+                    if on_strap { iron_hi } else { wood_hi }
+                } else if on_strap {
+                    if lx == 1 || lx == mid_x - 1 || lx == w - 3 {
+                        iron_hi
+                    } else {
+                        iron_mid
+                    }
+                } else if in_bay {
+                    // Chunky cast-iron ballast ingots visible inside the broken slat bay.
+                    let bay_x0 = if flip_bay { mid_x + 3 } else { 4 };
+                    let bx = (lx - bay_x0).rem_euclid(4);
+                    let by = (ly - 2).rem_euclid(3);
+                    if bx == 3 || by == 2 {
+                        outline
+                    } else if by == 0 && bx == 0 {
+                        ingot_hi
+                    } else if by == 0 {
+                        ingot_mid
+                    } else {
+                        ingot_lo
+                    }
+                } else if ly % 3 == 0 {
+                    wood_lo
+                } else if ly % 3 == 1 && lx < w - 5 {
+                    wood_hi
+                } else {
+                    wood_mid
+                };
+                pb.plot(px, py, c);
+            }
+        }
+    }
+
+    // Iron rivets, calcified barnacles, and a trailing dark-emerald kelp frond.
+    if w >= 8 && h >= 8 {
+        for rx in [2, w - 3] {
+            pb.plot(x + rx, y + 2, barn);
+            pb.plot(x + rx, y + top_h - 2, iron_hi);
+        }
+        pb.plot(x + 4, y + h - 2, barn);
+        pb.plot(x + 5, y + h - 2, barn);
+        pb.plot(x + w - 5, y + h - 2, kelp);
+        pb.plot(x + w - 4, y + h - 3, kelp);
+    }
+}
+
+/// Broken shipwreck hull ribs jutting out of the seabed (1 × 2 tiles): a
+/// buried dark-oak keel spine with three curved weathered timber ribs arching
+/// outward to pale splintered heartwood tips, drift-bolts, barnacles and kelp.
+fn outfall_rib(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    let outline = ambient_shade((8, 14, 20), pal, 0.20);
+    let wood_hi: Rgb = (128, 108, 84);
+    let wood_mid: Rgb = (84, 68, 52);
+    let wood_lo: Rgb = (48, 40, 34);
+    let splinter: Rgb = (162, 144, 114);
+    let bolt_hi: Rgb = (156, 166, 168);
+    let barn: Rgb = (196, 200, 188);
+    let kelp: Rgb = (28, 96, 74);
+
+    let mirror = (seed & 1) != 0;
+    let spine_x = if mirror { x + w - 4 } else { x + 3 };
+    let tip_x = if mirror { x + 2 } else { x + w - 3 };
+    let tip_mid_x = if mirror { x + 1 } else { x + w - 2 };
+
+    let ribs: [(f32, f32, f32, f32, f32); 3] = [
+        (spine_x as f32, (y + 6).min(y + h - 2) as f32, tip_x as f32, (y + 2) as f32, 2.2),
+        (
+            spine_x as f32,
+            (y + h / 2 + 1) as f32,
+            tip_mid_x as f32,
+            (y + h / 2 - 4).max(y + 1) as f32,
+            2.4,
+        ),
+        (
+            spine_x as f32,
+            (y + h - 4).max(y + 2) as f32,
+            tip_x as f32,
+            (y + h - 9).max(y + 1) as f32,
+            2.2,
+        ),
+    ];
+
+    let sample_rib = |x0: f32, y0: f32, x1: f32, y1: f32, t: f32| -> (f32, f32) {
+        let omt = 1.0 - t;
+        let mx = x0 + (x1 - x0) * 0.42;
+        let my = y0 + (y1 - y0) * 0.70;
+        (
+            omt * omt * x0 + 2.0 * omt * t * mx + t * t * x1,
+            omt * omt * y0 + 2.0 * omt * t * my + t * t * y1,
+        )
+    };
+
+    // Pass 0: Soft grounded cast shadows curving southeast off each rib.
+    let prev_pen = pb.set_pen(0);
+    for &(x0, y0, x1, y1, _) in &ribs {
+        for i in 0..16 {
+            let t = i as f32 / 15.0;
+            let (cx, cy) = sample_rib(x0, y0, x1, y1, t);
+            let ix = cx.round() as i32;
+            let iy = cy.round() as i32;
+            for dy in -1..=3 {
+                for dx in -1..=3 {
+                    if dx * dx + dy * dy <= 6 {
+                        darken_px(pb, ix + dx + 1, iy + dy + 2, 0.78);
+                    }
+                }
+            }
+        }
+    }
+    pb.set_pen(prev_pen);
+
+    // Buried keel spine linking the three broken frames.
+    let kx = spine_x - 2;
+    for ly in 3..(h - 2).max(3) {
+        pb.plot(kx, y + ly, outline);
+        pb.plot(kx + 1, y + ly, wood_lo);
+        pb.plot(kx + 2, y + ly, wood_mid);
+        pb.plot(kx + 3, y + ly, outline);
+    }
+
+    // Pass 1: Dark outline silhouette for all three ribs (never swallows wood interior).
+    for &(x0, y0, x1, y1, r_base) in &ribs {
+        for i in 0..=26 {
+            let t = i as f32 / 26.0;
+            let (cx, cy) = sample_rib(x0, y0, x1, y1, t);
+            let r = r_base * (1.0 - 0.30 * t) + 0.95;
+            let ir = r.ceil() as i32;
+            let ix = cx.round() as i32;
+            let iy = cy.round() as i32;
+            for py in (iy - ir)..=(iy + ir) {
+                for px in (ix - ir)..=(ix + ir) {
+                    let dx = px as f32 - cx;
+                    let dy = py as f32 - cy;
+                    if dx * dx + dy * dy <= r * r {
+                        pb.plot(px, py, outline);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: Shaded weathered oak body and splintered heartwood tips.
+    for &(x0, y0, x1, y1, r_base) in &ribs {
+        for i in 0..=26 {
+            let t = i as f32 / 26.0;
+            let (cx, cy) = sample_rib(x0, y0, x1, y1, t);
+            let r = r_base * (1.0 - 0.30 * t);
+            let ir = r.ceil() as i32;
+            let ix = cx.round() as i32;
+            let iy = cy.round() as i32;
+            for py in (iy - ir)..=(iy + ir) {
+                for px in (ix - ir)..=(ix + ir) {
+                    let dx = px as f32 - cx;
+                    let dy = py as f32 - cy;
+                    if dx * dx + dy * dy <= r * r {
+                        let col = if t > 0.84 {
+                            splinter
+                        } else if dy < -0.25 {
+                            wood_hi
+                        } else if dy > 0.55 {
+                            wood_lo
+                        } else {
+                            wood_mid
+                        };
+                        pb.plot(px, py, col);
+                    }
+                }
+            }
+        }
+    }
+
+    // Drift-bolts, barnacles at base, and a draped dark-emerald kelp strand.
+    for by in [y + 6, y + h / 2 + 1, y + h - 4] {
+        if by > y && by + 1 < y + h {
+            pb.plot(spine_x, by, bolt_hi);
+            pb.plot(spine_x - 1, by + 1, barn);
+        }
+    }
+    let kelp_dir = if mirror { -1 } else { 1 };
+    for k in 0..5 {
+        let px = spine_x + kelp_dir * (3 + k);
+        let py = y + h / 2 + k;
+        if px > x && px < x + w - 1 && py < y + h - 1 {
+            pb.plot(px, py, kelp);
+        }
+    }
+}
+
+#[cfg(test)]
+mod outfall_prop_tests {
+    use super::*;
+    use crate::game::level::{Palette, Prop, PropKind, Rectf, Theme};
+
+    #[test]
+    fn outfall_props_draw_distinct_silhouettes_without_panicking() {
+        let pal = Palette::for_theme(Theme::Outfall);
+        let bg: Rgb = (14, 22, 30);
+        let cases = [
+            (PropKind::OutfallPiling, 16.0, 16.0),
+            (PropKind::OutfallBallast, 30.0, 16.0),
+            (PropKind::OutfallRib, 16.0, 30.0),
+        ];
+        for (kind, w, h) in cases {
+            let prop = Prop {
+                kind,
+                rect: Rectf::new(16.0, 16.0, w, h),
+            };
+            let mut pb = PixelBuffer::new(64, 64);
+            pb.clear(bg);
+            draw_prop(&mut pb, &prop, Vec2::ZERO, &pal);
+            let changed = pb.pixels().iter().filter(|&&c| c != bg).count();
+            assert!(
+                changed >= 80,
+                "Outfall prop drew too few pixels ({changed})"
+            );
+            // Edge clipping safety.
+            draw_prop(&mut pb, &prop, Vec2::new(60.0, 60.0), &pal);
+            draw_prop(&mut pb, &prop, Vec2::new(-50.0, -50.0), &pal);
+        }
+    }
 }

@@ -343,6 +343,8 @@ pub fn draw_gnaw_mark(
         Theme::Laundry => ((9, 10, 18), (150, 170, 172), (196, 210, 206)),
         // Newsprint scrapings and dried ink.
         Theme::Printworks => ((10, 10, 13), (150, 148, 136), (188, 186, 172)),
+        // Scraped shell-sand dust & dark wet silt furrow.
+        Theme::Outfall => ((6, 12, 18), (94, 126, 132), (146, 184, 188)),
         Theme::Trailer => ((6, 4, 2), (150, 124, 92), (196, 172, 134)),
     };
 
@@ -555,6 +557,10 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
             boss_printworks_floor(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y);
             boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (85, 64, 100), 0.34);
         }
+        Theme::Outfall => {
+            boss_outfall_floor(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y);
+            boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (54, 88, 98), 0.32);
+        }
         // The cab hold is steel plate: only the threshold frame, no mown
         // pattern under a trailer's deck.
         Theme::Trailer => {
@@ -583,6 +589,7 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
                 Theme::Lab => boss_lab_block(pb, clip, sx, sy, bx, by),
                 Theme::Laundry => boss_laundry_block(pb, clip, sx, sy, bx, by),
                 Theme::Printworks => boss_printworks_block(pb, clip, sx, sy, bx, by),
+                Theme::Outfall => boss_outfall_block(pb, clip, sx, sy, bx, by),
                 Theme::Trailer => {}
             }
         }
@@ -846,6 +853,96 @@ fn boss_printworks_block(pb: &mut PixelBuffer, clip: ClipRect, sx: i32, sy: i32,
     if (h >> 13) & 3 == 0 {
         for k in 0..12 {
             blend_clip(pb, clip, ox + 16 + k, oy + 12 + k / 5, ink, 0.20);
+        }
+    }
+}
+
+/// The Outfall's basin boss floor: subtle current-scoured abyssal sand terraces
+/// with concentric low-contrast basin contour rings around the centre. Strictly
+/// capped below the floor contrast limit (`<= 100` peak channel).
+#[allow(clippy::too_many_arguments)]
+fn boss_outfall_floor(
+    pb: &mut PixelBuffer,
+    clip: ClipRect,
+    ax0: i32,
+    ay0: i32,
+    ax1: i32,
+    ay1: i32,
+    cam_x: i32,
+    cam_y: i32,
+) {
+    let basin_deep: Rgb = (12, 22, 32);
+    let basin_mid: Rgb = (20, 34, 46);
+    let ring_hi: Rgb = (44, 66, 76);
+    let cx = ((ax0 + ax1) / 2 - cam_x) as f32;
+    let cy = ((ay0 + ay1) / 2 - cam_y) as f32;
+    let rx = (((ax1 - ax0) as f32) * 0.45).max(16.0);
+    let ry = (((ay1 - ay0) as f32) * 0.45).max(16.0);
+
+    for sy in clip.y0..clip.y1 {
+        let ny = (sy as f32 - cy) / ry;
+        for sx in clip.x0..clip.x1 {
+            let nx = (sx as f32 - cx) / rx;
+            let r = (nx * nx + ny * ny).sqrt();
+            if r < 0.92 {
+                // Subtle current-scoured bowl deepening toward the centre.
+                let depth_a = (0.38 - r * 0.26).clamp(0.08, 0.38);
+                let col = if r < 0.46 { basin_deep } else { basin_mid };
+                blend_px(pb, sx, sy, col, depth_a);
+            }
+            // Faint terraced current contour rings at r ≈ 0.35, 0.62, 0.85.
+            if (r - 0.35).abs() < 0.025 || (r - 0.62).abs() < 0.022 || (r - 0.85).abs() < 0.020 {
+                blend_px(pb, sx, sy, ring_hi, 0.24);
+            }
+        }
+    }
+}
+
+/// One 4×4-cell block of the Outfall boss basin: sunken trawl-anchor drag
+/// furrows, half-buried leviathan rib fragments, and dark mussel-shell pockets
+/// (strictly low-contrast).
+fn boss_outfall_block(pb: &mut PixelBuffer, clip: ClipRect, sx: i32, sy: i32, bx: i32, by: i32) {
+    let h = hash2(bx + 53, by + 97);
+    let trough: Rgb = (7, 14, 22);
+    let lip: Rgb = (52, 74, 82);
+    let bone_lo: Rgb = (38, 52, 58);
+    let bone_hi: Rgb = (68, 86, 90);
+    let kelp: Rgb = (18, 56, 46);
+
+    // 1. Pair of parallel current-dragged anchor/fin furrows across the block.
+    let ox = (sx + 10 + (h & 11) as i32) as f32;
+    let oy = (sy + 14 + ((h >> 4) & 11) as i32) as f32;
+    let a0 = Vec2::new(ox, oy);
+    let b0 = Vec2::new(ox + 20.0, oy + 6.0);
+    draw_floor_gouge(pb, clip, a0, b0, 1.4, trough, 0.68, lip, 0.34);
+    draw_floor_gouge(
+        pb,
+        clip,
+        a0 + Vec2::new(0.0, 5.0),
+        b0 + Vec2::new(0.0, 5.0),
+        1.4,
+        trough,
+        0.58,
+        lip,
+        0.28,
+    );
+
+    // 2. Half-buried bleached fish-rib arc in the opposite quadrant.
+    let rx = sx + if (h >> 8) & 1 == 0 { 42 } else { 14 };
+    let ry = sy + if (h >> 9) & 1 == 0 { 42 } else { 18 };
+    for k in 0..3 {
+        let bx0 = rx + k * 4;
+        let by0 = ry + k * 2;
+        blend_clip(pb, clip, bx0, by0, bone_hi, 0.54);
+        blend_clip(pb, clip, bx0 + 1, by0, bone_hi, 0.50);
+        blend_clip(pb, clip, bx0 + 2, by0 + 1, bone_lo, 0.56);
+        blend_clip(pb, clip, bx0 + 3, by0 + 2, trough, 0.52);
+    }
+
+    // 3. Sparse dark kelp wisp on every other block.
+    if ((bx + by) & 1) == 0 {
+        for k in 0..6 {
+            blend_clip(pb, clip, rx - 4 + k, ry + 7 + (k & 1), kelp, 0.42);
         }
     }
 }
@@ -1370,6 +1467,7 @@ pub fn draw_hall_landmark(
         Theme::Lab => landmark_lab(pb, clip, cx, cy, variant),
         Theme::Laundry => landmark_laundry(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Printworks => landmark_printworks(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
+        Theme::Outfall => landmark_outfall(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         // The bed's own art (straps, bolt heads, scuffed plank ends) is the
         // landmark; a painted floor decal would read as tiling on a truck.
         Theme::Trailer => {}
@@ -2408,6 +2506,143 @@ fn landmark_printworks(pb: &mut PixelBuffer, clip: ClipRect, cx: i32, cy: i32, v
             rect_blend_clip(pb, clip, cx - 10, cy - 4, 20, 1, cyan, 0.52);
             rect_blend_clip(pb, clip, cx - 10, cy + 3, 20, 1, cyan, 0.52);
             rect_blend_clip(pb, clip, cx + 4, cy - 2, 8, 4, ink, 0.58);
+        }
+    }
+}
+
+// ---- Outfall Hall Landmarks: Anchors, Portholes, Storm Grates & Wreckage ---
+
+fn landmark_outfall(pb: &mut PixelBuffer, clip: ClipRect, cx: i32, cy: i32, variant: u8) {
+    let abyss: Rgb = (7, 14, 22);
+    let iron_lo: Rgb = (34, 46, 56);
+    let iron_hi: Rgb = (74, 92, 102);
+    let bronze_lo: Rgb = (66, 58, 40);
+    let bronze_hi: Rgb = (102, 92, 62);
+    let wood_lo: Rgb = (44, 38, 34);
+    let wood_hi: Rgb = (82, 72, 60);
+    let kelp: Rgb = (24, 72, 58);
+    let shell: Rgb = (96, 106, 104);
+    let teal: Rgb = (48, 104, 106);
+
+    match variant {
+        0 => {
+            // Variant 0: Half-buried corroded ship anchor flush in the sand.
+            // Vertical shank + stock crossbar + twin curved flukes.
+            rect_blend_clip(pb, clip, cx - 1, cy - 11, 3, 21, iron_lo, 0.84);
+            rect_blend_clip(pb, clip, cx - 1, cy - 11, 1, 19, iron_hi, 0.76);
+            rect_blend_clip(pb, clip, cx - 8, cy - 8, 17, 2, iron_hi, 0.78);
+            rect_blend_clip(pb, clip, cx - 8, cy - 6, 17, 1, abyss, 0.65);
+            // Eye ring at top of shank.
+            for &(dx, dy) in &[(-2, -13), (-1, -14), (0, -14), (1, -14), (2, -13), (-2, -12), (2, -12)] {
+                blend_clip(pb, clip, cx + dx, cy + dy, iron_hi, 0.80);
+            }
+            // Curved twin flukes rising on left & right.
+            for s in -10i32..=10 {
+                let fy = cy + 9 - (s * s) / 14;
+                blend_clip(pb, clip, cx + s, fy, iron_lo, 0.84);
+                blend_clip(pb, clip, cx + s, fy - 1, iron_hi, 0.62);
+                blend_clip(pb, clip, cx + s, fy + 1, abyss, 0.56);
+            }
+            // Fluke tips + clinging kelp tuft.
+            for &(tx, ty) in &[(-11, 2), (-10, 1), (11, 2), (10, 1)] {
+                blend_clip(pb, clip, cx + tx, cy + ty, iron_hi, 0.78);
+            }
+            rect_blend_clip(pb, clip, cx + 3, cy + 5, 5, 2, kelp, 0.56);
+        }
+        1 => {
+            // Variant 1: Sunken riveted brass porthole ring flush in seabed silt.
+            for dy in -12i32..=12 {
+                for dx in -12i32..=12 {
+                    let d = ((dx * dx + dy * dy) as f32).sqrt();
+                    if d > 11.6 {
+                        continue;
+                    }
+                    let c = if d > 8.6 {
+                        if dx + dy < 0 { bronze_hi } else { bronze_lo }
+                    } else if d > 7.4 {
+                        abyss
+                    } else if dx + dy < -3 && d < 6.0 {
+                        teal
+                    } else {
+                        mix(abyss, iron_lo, 0.35)
+                    };
+                    blend_clip(pb, clip, cx + dx, cy + dy, c, 0.82);
+                }
+            }
+            // 6 bronze dog-clamp lugs around the bezel.
+            for &(lx, ly) in &[(0, -10), (9, -5), (9, 5), (0, 10), (-9, 5), (-9, -5)] {
+                blend_clip(pb, clip, cx + lx, cy + ly, shell, 0.72);
+            }
+        }
+        2 => {
+            // Variant 2: Flush storm-culvert iron grate half-silted by seabed sand.
+            draw_flush_rect_grate(pb, clip, cx - 14, cy - 9, 28, 18, 0, iron_lo, iron_hi);
+            // Silt drift overlapping bottom-right corner + kelp ribbon.
+            for dy in 0..7 {
+                let w = 4 + dy * 2;
+                rect_blend_clip(pb, clip, cx + 14 - w, cy + 2 + dy, w, 1, (36, 52, 62), 0.70);
+            }
+            rect_blend_clip(pb, clip, cx - 15, cy - 6, 3, 11, kelp, 0.58);
+        }
+        3 => {
+            // Variant 3: Half-buried wooden ship's wheel spokes flush in the sand.
+            for dy in -13i32..=13 {
+                for dx in -13i32..=13 {
+                    let d = ((dx * dx + dy * dy) as f32).sqrt();
+                    let on_rim = (7.2..=9.8).contains(&d);
+                    let on_hub = d <= 2.6;
+                    let on_spoke = d <= 12.2
+                        && (dx.abs() <= 0 || dy.abs() <= 0 || (dx.abs() - dy.abs()).abs() <= 0);
+                    if on_rim || on_hub || on_spoke {
+                        let c = if on_hub {
+                            bronze_hi
+                        } else if dx + dy < 0 {
+                            wood_hi
+                        } else {
+                            wood_lo
+                        };
+                        blend_clip(pb, clip, cx + dx, cy + dy, c, 0.80);
+                    }
+                }
+            }
+        }
+        4 => {
+            // Variant 4: Sunken timber keel & 3-plank deck decking patch flush in sand.
+            rect_blend_clip(pb, clip, cx - 17, cy - 9, 34, 18, abyss, 0.55);
+            for plank in 0..3 {
+                let py = cy - 8 + plank * 6;
+                rect_blend_clip(pb, clip, cx - 16, py, 32, 5, wood_lo, 0.78);
+                rect_blend_clip(pb, clip, cx - 16, py, 32, 1, wood_hi, 0.72);
+                // Caulk butt-joint & drift bolts.
+                let jx = cx - 6 + plank * 7;
+                rect_blend_clip(pb, clip, jx, py, 1, 5, abyss, 0.82);
+                blend_clip(pb, clip, jx - 2, py + 2, bronze_hi, 0.74);
+                blend_clip(pb, clip, jx + 2, py + 2, bronze_hi, 0.74);
+            }
+            rect_blend_clip(pb, clip, cx - 15, cy + 7, 10, 2, kelp, 0.54);
+        }
+        _ => {
+            // Variant 5: Tidal rock ring with calcified barnacles & recessed silt hollow.
+            for dy in -10i32..=10 {
+                for dx in -15i32..=15 {
+                    let e = (dx as f32 / 14.5).powi(2) + (dy as f32 / 9.5).powi(2);
+                    if e > 1.0 {
+                        continue;
+                    }
+                    if e < 0.42 {
+                        blend_clip(pb, clip, cx + dx, cy + dy, abyss, 0.64);
+                    } else if e < 0.65 {
+                        blend_clip(pb, clip, cx + dx, cy + dy, teal, 0.40);
+                    } else {
+                        let c = if dx + dy < 0 { iron_hi } else { iron_lo };
+                        blend_clip(pb, clip, cx + dx, cy + dy, c, 0.74);
+                    }
+                }
+            }
+            // Barnacle shell specks around the rock collar.
+            for &(bx, by) in &[(-11, -4), (-7, -7), (6, -7), (11, 2), (-5, 7), (4, 7)] {
+                blend_clip(pb, clip, cx + bx, cy + by, shell, 0.78);
+            }
         }
     }
 }
