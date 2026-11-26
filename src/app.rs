@@ -9034,6 +9034,48 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
+            t if t.starts_with("miniboss-milk-") => {
+                use crate::game::art_walls::WallKind;
+                use crate::game::collision::{cell_of, TileKind};
+                use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
+                hh.app.start_practice(Theme::Kitchen);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.player.loadout.weapons.clear();
+                w.elapsed = 186.0;
+                w.shake_scale = 0.0;
+                let rat = w.player.pos;
+                let (x, y) = cell_of(rat);
+                w.level.tiles.fill_cells(x - 4, y - 3, 9, 7, TileKind::Open);
+                let pose = t.trim_start_matches("miniboss-milk-");
+                if pose == "wall" {
+                    w.level.tiles.set(x + 1, y, TileKind::Wall(WallKind::Solid));
+                }
+                w.level.tiles.rebuild_masks();
+                w.level.props.clear();
+                let pos = rat - Vec2::new(48.0, 0.0);
+                let e = w.spawn_miniboss(MinibossKind::MilkCarton, 0, pos);
+                w.ecs.get_mut::<Miniboss>(e).unwrap().announced = true;
+                let (frames, expected) = match pose {
+                    "track" => (16, MinibossState::Tell),
+                    "tell" => (45, MinibossState::Tell),
+                    "launch" => (65, MinibossState::Active),
+                    "strike" | "wall" => (83, MinibossState::Active),
+                    "tail" => (102, MinibossState::Active),
+                    "splashes" => (111, MinibossState::Recover),
+                    "fade" => (131, MinibossState::Recover),
+                    _ => panic!("unknown milk spray capture {pose}"),
+                };
+                for _ in 0..frames {
+                    w.update(1.0 / 60.0, Vec2::ZERO, false);
+                }
+                assert_eq!(w.ecs.get::<Miniboss>(e).unwrap().state, expected);
+                w.cam_focus = Some(rat + Vec2::new(2.0, 0.0));
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             t if t.starts_with("miniboss-first-") => {
                 use crate::game::collision::SizeClass;
                 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossState};
@@ -11130,7 +11172,7 @@ mod tests {
         // Reframe scripted Outfall poses without ticking their tells.
         let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
         let frozen_pose = posed_outfall || target.starts_with("w6-") || target.starts_with("w8-")
-            || target.starts_with("dropping-");
+            || target.starts_with("dropping-") || target.starts_with("miniboss-milk-");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())

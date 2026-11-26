@@ -19,6 +19,9 @@ use crate::game::ecs::systems::miniboss::{
     Miniboss, MinibossKind, MinibossShape, MinibossState, SignatureShape, RECOVER_TIME,
     RING_GAP_TURN, TELL_TIME,
 };
+use crate::game::ecs::systems::miniboss_shapes::{
+    draw_outline, milk_warning_colour, MilkSplash, MILK_SPEED,
+};
 use crate::game::enemy::Enemy;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
@@ -826,7 +829,13 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
         MinibossKind::Bobbin => draw_bobbin(pb, p, facing, pose, anim, flash),
         MinibossKind::BellDiver => draw_bell_diver(pb, p, facing, bell_gap_dir, pose, anim, flash),
         MinibossKind::Foreman => draw_foreman(pb, p, facing, pose, anim, flash),
-        MinibossKind::MilkCarton => draw_milk_carton(pb, p, facing, pose, anim, flash),
+        MinibossKind::MilkCarton => {
+            let nozzle = match tele {
+                Some(MinibossShape::MilkSpray(spray)) => Some(spray.origin - cam),
+                _ => None,
+            };
+            draw_milk_carton(pb, p, facing, pose, anim, flash, nozzle);
+        }
         MinibossKind::ValveWidow => draw_valve_widow(pb, p, facing, pose, anim, flash),
         MinibossKind::Mudlark => draw_mudlark(pb, p, facing, pose, anim, flash),
         MinibossKind::PastryWheel => draw_pastry_wheel(pb, p, facing, pose, anim, flash),
@@ -2340,6 +2349,7 @@ fn draw_milk_carton(
     pose: Pose,
     anim: f32,
     flash: f32,
+    spray_nozzle: Option<Vec2>,
 ) {
     let wax_spec: Rgb = (255, 255, 246);
     let wax_hi: Rgb = (246, 244, 232);
@@ -2413,6 +2423,14 @@ fn draw_milk_carton(
         Pose::Idle => ((anim * 2.0).sin() * 0.8, (anim * 2.0).cos() * 0.25, 0.0, false, 0.0),
         Pose::Approach | Pose::Retreat(_) => {
             (waddle * 1.4, -waddle * waddle * 0.65, waddle * 0.18, false, 0.0)
+        }
+        Pose::Tell(t) if spray_nozzle.is_some() => {
+            let pressure = t * t * (3.0 - 2.0 * t);
+            (f.x * 5.8 * pressure, -pressure, 1.5 * pressure, true, pressure)
+        }
+        Pose::Strike(t) if spray_nozzle.is_some() => {
+            let squeeze = (PI * t).sin();
+            (f.x * (5.8 + 0.8 * squeeze), -1.0 + 0.8 * squeeze, 1.5 + 2.0 * squeeze, true, 1.0)
         }
         Pose::Tell(t) => {
             let c = tell_coil(t);
@@ -2565,8 +2583,15 @@ fn draw_milk_carton(
 
     // 4. Articulated open triangular pouring spout beak facing `+face_x`!
     let spout_base = Vec2::new((row_cx(top_y - 2) + (face_x as i32) * (hw - 2)) as f32, (top_y - 2) as f32);
-    let spout_tip = spout_base
-        + Vec2::new(face_x * if spout_open { 6.2 } else { 3.2 }, if spout_open { 1.4 } else { -0.5 });
+    let (spout_base, spout_tip) = if let Some(nozzle) = spray_nozzle {
+        (Vec2::new(row_cx(top_y - 2) as f32, (top_y - 2) as f32) + f * 4.0, nozzle)
+    } else {
+        let tip = spout_base + Vec2::new(
+            face_x * if spout_open { 6.2 } else { 3.2 },
+            if spout_open { 1.4 } else { -0.5 },
+        );
+        (spout_base, tip)
+    };
     draw_tapered_capsule(pb, spout_base, spout_tip, 2.4, 1.1, wax_spec, blue_hi, blue_lo, flash);
     // Dark inner open spout mouth when pouring!
     if spout_open {
@@ -2574,7 +2599,7 @@ fn draw_milk_carton(
     }
 
     // Idle & Recover: curling greenish expired sour-milk stink wisps / bubbles!
-    if matches!(pose, Pose::Idle | Pose::Tell(_) | Pose::Recover(_)) {
+    if spray_nozzle.is_none() && matches!(pose, Pose::Idle | Pose::Tell(_) | Pose::Recover(_)) {
         for k in 0..2 {
             let ph = (anim * 1.4 + k as f32 * 0.5).fract();
             let sx = spout_tip.x + (ph * TAU).sin() * 1.8;
@@ -2590,15 +2615,18 @@ fn draw_milk_carton(
         plot_px(pb, drop.x.round() as i32, drop.y.round() as i32, sour_hi);
     }
 
-    // Tell: swelling wobbling pale-yellow curdled milk glob bulging at the spout lip!
     if let Pose::Tell(t) = pose {
-        let c = tell_coil(t);
-        let glob = spout_tip + Vec2::new(face_x * (1.8 + c * 2.2), 1.2 + c * 2.0);
-        draw_shaded_disc(pb, glob.x, glob.y, 1.2 + c * 1.5, (255, 255, 246), sour_mid, sour_curd, 0.0);
+        if let Some(nozzle) = spray_nozzle {
+            draw_shaded_disc(pb, nozzle.x, nozzle.y, 0.7 + t, (255, 255, 250), wax_hi, blue_hi, 0.0);
+        } else {
+            let c = tell_coil(t);
+            let glob = spout_tip + Vec2::new(face_x * (1.8 + c * 2.2), 1.2 + c * 2.0);
+            draw_shaded_disc(pb, glob.x, glob.y, 1.2 + c * 1.5, (255, 255, 246), sour_mid, sour_curd, 0.0);
+        }
     }
 
-    // Strike: thick arcing frothy sour-milk waterfall stream + bouncing foam & curds!
-    if let Pose::Strike(t) = pose {
+    // Secondary: the spout dribbles as the three drops land.
+    if let (Pose::Strike(t), None) = (pose, spray_nozzle) {
         let mid_arc = spout_tip + f * 5.0 + Vec2::new(0.0, 3.8);
         let splash = spout_tip + f * 9.5 + Vec2::new(0.0, 9.5);
         draw_tapered_capsule(pb, spout_tip, mid_arc, 2.0, 2.5, (255, 255, 250), sour_hi, sour_mid, 0.0);
@@ -8644,6 +8672,7 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
                 pb, origin, aim, bulbs, sel, jaw_len, jaw_half, cam, is_active, progress,
             );
         }
+        MinibossShape::MilkSpray(_) => draw_milk_spray(pb, mb, cam),
         shape => crate::game::ecs::systems::miniboss_shapes::draw_telegraph(
             pb, mb, &shape, cam, Vec2::splat(1.0),
         ),
@@ -9463,7 +9492,97 @@ fn draw_stamps_telegraph(
     }
 }
 
-/// Milk Carton: exact oriented 20×32 spill rectangle with animated pour chevrons
+/// The hostile layer shares the live front and wall stops with the hit test.
+/// The fine white centre stream breaks into an angled fan of airborne drops.
+pub fn draw_milk_spray(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2) {
+    let shape = if mb.state == MinibossState::Active { mb.active_shape() } else { mb.telegraph() };
+    let Some(MinibossShape::MilkSpray(spray)) = shape else { return };
+    let telling = mb.state == MinibossState::Tell;
+    let age = mb.timer;
+    let warning = milk_warning_colour(age);
+    let pressure = 0.55 + 0.45 * ((mb.active_duration() - age) / 0.12).clamp(0.0, 1.0);
+    let (lo, hi) = spray.bounds();
+    let lo = lo - cam;
+    let hi = hi - cam;
+    let x0 = (lo.x.floor() as i32).max(0);
+    let y0 = (lo.y.floor() as i32).max(0);
+    let x1 = (hi.x.ceil() as i32).min(pb.w as i32 - 1);
+    let y1 = (hi.y.ceil() as i32).min(pb.h as i32 - 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let at = cam + Vec2::new(x as f32, y as f32);
+            let d = at - spray.origin;
+            let along = d.dot(spray.aim);
+            let across = d.dot(spray.aim.perp()).abs();
+            if telling {
+                if spray.contains(at, 0.0) {
+                    let arrow = (along - across * 1.8 - age * 32.0).rem_euclid(16.0);
+                    let alpha = if arrow < 2.0 { 0.27 } else { 0.08 };
+                    blend_px(pb, x, y, warning, alpha);
+                }
+            } else if spray.contains(at, 0.0) {
+                let ripple = ((along - age * 200.0) * 0.23).sin();
+                let width = (1.2 + along * 0.070) * (0.85 + 0.15 * ripple);
+                let front = ((spray.reach - d.len()) / 6.0).clamp(0.0, 1.0);
+                if across <= width {
+                    let core = (1.0 - across / width).clamp(0.0, 1.0);
+                    let foam = mix((144, 187, 207), (255, 255, 245), core.sqrt());
+                    let breakup = (1.0 - along / 124.0).clamp(0.28, 1.0);
+                    blend_px(pb, x, y, foam, (0.48 + core * 0.52) * breakup.sqrt() * front * pressure);
+                } else {
+                    let filament = ((across / along.max(1.0)) * 100.0 + ripple).sin().powi(4);
+                    blend_px(pb, x, y, (205, 225, 226), (0.09 + 0.18 * filament) * front * pressure);
+                }
+            }
+        }
+    }
+    if telling {
+        draw_outline(pb, &MinibossShape::MilkSpray(spray), cam, Vec2::splat(1.0), warning);
+        return;
+    }
+    // Fixed launch intervals and stable per-drop directions. Every drop moves
+    // continuously, with a short fading tail, until it lands or hits a wall.
+    for slot in 0..52 {
+        let flight = age - slot as f32 * 0.013;
+        if !(0.0..=0.29).contains(&flight) {
+            continue;
+        }
+        let angle = (((slot * 23) % 53) as f32 / 52.0 - 0.5) * 0.59;
+        let speed = MILK_SPEED * (0.58 + ((slot * 11) % 17) as f32 * 0.024);
+        let dir = spray.aim.rotate(angle);
+        let at = spray.origin + dir * (flight * speed);
+        if spray.contains(at, 0.0) {
+            let head = at - cam;
+            let tail = head - dir * (1.0 + flight * 8.0);
+            let opacity = (flight * 30.0).min(1.0) * ((0.29 - flight) * 20.0).min(1.0);
+            blend_px(pb, tail.x.round() as i32, tail.y.round() as i32, (165, 210, 224), opacity * 0.62);
+            blend_px(pb, head.x.round() as i32, head.y.round() as i32, (255, 254, 242), opacity);
+        }
+    }
+}
+
+pub fn draw_milk_splash(pb: &mut PixelBuffer, splash: &MilkSplash, cam: Vec2, elapsed: f32) {
+    let opacity = splash.opacity(elapsed);
+    if opacity <= 0.0 {
+        return;
+    }
+    let p = splash.pos - cam;
+    let rx = splash.size;
+    let ry = rx * 0.53;
+    for y in (p.y - ry).floor() as i32..=(p.y + ry).ceil() as i32 {
+        for x in (p.x - rx).floor() as i32..=(p.x + rx).ceil() as i32 {
+            let d = ((x as f32 - p.x) / rx).powi(2) + ((y as f32 - p.y) / ry).powi(2);
+            let wet = (1.0 - d).clamp(0.0, 1.0);
+            blend_px(pb, x, y, (224, 230, 218), wet.sqrt() * opacity * 0.81);
+        }
+    }
+    for offset in [Vec2::new(-1.20 * rx, -0.8 * ry), Vec2::new(1.35 * rx, 0.55 * ry)] {
+        let bead = p + offset;
+        blend_px(pb, bead.x.round() as i32, bead.y.round() as i32, (243, 242, 226), opacity * 0.60);
+    }
+}
+
+/// Oriented spill rectangle with animated pour chevrons
 /// in Tell and surging frothy sour-milk wave + curds in Active!
 #[allow(clippy::too_many_arguments)]
 fn draw_spill_telegraph(

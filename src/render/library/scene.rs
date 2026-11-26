@@ -860,7 +860,7 @@ impl LibraryScene {
             let r = ((DUMMY_R / scale).round() as i32).max(2);
             // The floor reference is only needed where the cork can land.
             let bare = self.floor_plate(w, h);
-            draw_practice_dummy(art, bare, (sx, sy), r);
+            draw_practice_dummy(art, Some(bare), (sx, sy), r);
         }
         if self.script.trail {
             self.pellet_trails(art);
@@ -953,6 +953,10 @@ impl LibraryScene {
             bounds.grow(pos - Vec2::new(side, up), pos + Vec2::new(side, down));
             if let Some(shape) = mb.telegraph() {
                 let (lo, hi) = shape_bounds(shape);
+                bounds.grow(lo, hi);
+            } else if mb.kind == MinibossKind::MilkCarton && mb.holds() {
+                // The deposited drops still occupy the spray's footprint.
+                let (lo, hi) = mb.milk_spray().bounds();
                 bounds.grow(lo, hi);
             }
         } else {
@@ -2019,7 +2023,9 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
     let cycle = TELL_TIME + primary.active + RECOVER_TIME;
     let mut script = Script::new(cycle, 2.0);
     script.framing = Framing::Pair;
-    script.dummy = true;
+    // The transparent Milk Spray needs its dummy in the world pass, under
+    // the translucent stream and mist.
+    script.dummy = kind != MinibossKind::MilkCarton;
     // The stage fits the body + the tell's own footprint (a cone, a sweep, the
     // Salt Hen's three pads), centre on their midpoint, and takes its zoom from
     // those bounds: what clipped the right edge of the wide rows.
@@ -3351,7 +3357,7 @@ impl BareFloor {
 /// One horizontal chord of a circle of radius `r`, `dy` rows from its centre,
 /// painted only where the world's pass left bare floor — the card's dummy
 /// never covers anything the world drew.
-fn chord(pb: &mut PixelBuffer, floor: &BareFloor, s: (i32, i32), r: i32, dy: i32, c: Rgb) {
+fn chord(pb: &mut PixelBuffer, floor: Option<&BareFloor>, s: (i32, i32), r: i32, dy: i32, c: Rgb) {
     let h2 = r * r - dy * dy;
     if h2 <= 0 {
         return;
@@ -3365,8 +3371,8 @@ fn chord(pb: &mut PixelBuffer, floor: &BareFloor, s: (i32, i32), r: i32, dy: i32
 /// Paint one pixel of the card's dummy, and only if the world's pass left that
 /// pixel as bare floor: the check is what puts the cork *under* the bodies (see
 /// [`draw_practice_dummy`]).
-fn plot_on_floor(pb: &mut PixelBuffer, floor: &BareFloor, x: i32, y: i32, c: Rgb) {
-    if floor.at(x, y) {
+fn plot_on_floor(pb: &mut PixelBuffer, floor: Option<&BareFloor>, x: i32, y: i32, c: Rgb) {
+    if floor.is_none_or(|floor| floor.at(x, y)) {
         pb.plot(x, y, c);
     }
 }
@@ -3384,9 +3390,10 @@ fn plot_on_floor(pb: &mut PixelBuffer, floor: &BareFloor, x: i32, y: i32, c: Rgb
 /// needs to stay honest (a body the cork had covered would leave the plate
 /// with no subject at all — the Bell Flea, the Wick Moth and the Loose Bungee
 /// all end their loop standing on the dummy).
-fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32), r: i32) {
+fn draw_practice_dummy(pb: &mut PixelBuffer, floor: Option<&PixelBuffer>, s: (i32, i32), r: i32) {
     let r = r.max(2);
-    let floor = &BareFloor::of(pb, floor);
+    let floor_mask = floor.map(|floor| BareFloor::of(pb, floor));
+    let floor = floor_mask.as_ref();
     // Its own shadow, so it stands on the floor rather than in it.
     chord(pb, floor, (s.0, s.1 + r), r, 0, CORK_SHADOW);
     for dy in -r..=r {
@@ -3420,6 +3427,12 @@ fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32),
     plot_on_floor(pb, floor, s.0, s.1 - 1, CHALK);
     plot_on_floor(pb, floor, s.0 - 1, s.1 - 1, CHALK);
     plot_on_floor(pb, floor, s.0 + 1, s.1 - 1, CHALK);
+}
+
+/// The Milk Carton plate paints the same target in world space before the
+/// hostile layer, allowing the milky wash to blend over the cork.
+pub(crate) fn draw_world_practice_dummy(pb: &mut PixelBuffer, s: (i32, i32)) {
+    draw_practice_dummy(pb, None, s, DUMMY_R as i32);
 }
 
 /// Every colour the card's dummy paints (its shadow included).
