@@ -46,6 +46,7 @@
   Shed Bob.
 - **Hold Point.** Stand still to charge a knockback pulse. Pair it with Thick
   Hide for Clamp.
+- **Laser Eyes beams follow you throughout the sweep.**
 
 ## 0.3.0 (2026-11-25)
 

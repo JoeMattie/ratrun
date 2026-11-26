@@ -131,6 +131,77 @@ fn laser_line_lights_cover_both_ends_with_bounded_samples() {
         }
     }
 }
+
+#[cfg(test)]
+#[test]
+fn laser_art_and_lights_use_the_moved_hit_segments() {
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::{TileKind, TileMap};
+    use crate::game::ecs::systems::weapons_wave3b::laser_eyes_system;
+    use crate::game::level::{MAP_COLS, MAP_ROWS};
+    use crate::game::weapon::{Weapon, WeaponKind, LASER_EYE_OFFSET, LASER_HALF_WIDTH};
+    use crate::game::world::World;
+
+    let mut w = World::new(Theme::Sewer, 31);
+    w.clear_enemies();
+    w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    // The lower beam will meet the wall at x = 1088. The upper beam sees open
+    // floor all the way to the view edge.
+    w.level.tiles.fill_cells(68, 63, 1, 2, TileKind::Wall(WallKind::Solid));
+    w.level.tiles.rebuild_masks();
+    w.viewport = Vec2::new(64.0, 50.0);
+    w.player.pos = Vec2::new(1000.0, 1000.0);
+    w.player.face = Vec2::new(1.0, 0.0);
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::LaserEyes,
+        level: 1,
+        timer: 0.0,
+        evolved: false,
+    }];
+
+    let dt = 1.0 / 60.0;
+    let moved = w.player.pos + Vec2::new(30.0, 0.0);
+    let eye = moved + w.player.face * LASER_EYE_OFFSET;
+    let half = w.player.loadout.weapons[0].laser_half_arc();
+    let secs = w.player.loadout.weapons[0].laser_sweep_secs();
+    let dir = Vec2::from_angle(half - half * (6.0 * dt / secs));
+    // Beyond the old view edge, on the new lower beam and before the wall.
+    let target = w.spawn_enemy(EnemyKind::Cat, eye + dir * 48.0, 1.0);
+    let hp = w.ecs.get::<Enemy>(target).unwrap().hp;
+    let tick = |w: &mut World| {
+        w.begin_tick(dt, Vec2::ZERO, false);
+        w.ecs.run_system_cached(laser_eyes_system).unwrap();
+        w.end_tick();
+    };
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    assert_eq!(w.ecs.get::<Enemy>(target).unwrap().hp, hp);
+
+    w.player.pos = moved;
+    tick(&mut w);
+    let damage = hp - w.ecs.get::<Enemy>(target).unwrap().hp;
+    assert!((damage - 6.0 * (28.0f32 / 48.0).powi(2)).abs() < 1e-3);
+
+    let art = w.laser_visual().unwrap();
+    assert_eq!(art.origin, eye);
+    let rays = laser_segments(&w.ecs);
+    for (ray, angle, len, stop_x) in [
+        (rays[0], art.angle, art.len, moved.x + w.viewport.x),
+        (rays[1], art.angle_b, art.len_b, 1088.0 - LASER_HALF_WIDTH),
+    ] {
+        let ray = ray.unwrap();
+        assert_eq!(ray.start, eye);
+        assert_eq!(ray.end, art.origin + Vec2::from_angle(angle) * len);
+        assert!((ray.end.x - stop_x).abs() < 1e-3);
+        let mut lights = ray.lights();
+        assert_eq!(lights.next().unwrap().pos, ray.start);
+        assert_eq!(lights.last().unwrap().pos, ray.end);
+    }
+    tick(&mut w);
+    assert_eq!(hp - w.ecs.get::<Enemy>(target).unwrap().hp, damage);
+}
+
 const MAX_LAVA_LIGHTS: usize = 24;
 
 impl LightMap {

@@ -3124,6 +3124,9 @@ mod tests {
         while ticks < 200 {
             run(&mut w, weapons_wave3b::laser_eyes_system);
             ticks += 1;
+            if ticks == 1 {
+                w.player.pos += Vec2::new(30.0, 0.0);
+            }
             let fx = *w.ecs.resource::<LaserFx>();
             if ticks > 1 && !fx.active() {
                 break;
@@ -3139,6 +3142,7 @@ mod tests {
         // body planted on the recorded beam's line.
         w.player.pos = origin + Vec2::new(0.0, 90.0);
         w.player.face = Vec2::new(0.0, 1.0);
+        let second_cast = w.player.pos + Vec2::new(0.0, LASER_EYE_OFFSET);
         let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(20.0, 0.0), 400.0);
         let far = w.spawn_enemy(EnemyKind::Brute, recorded.origin + Vec2::new(116.0, 0.0), 400.0);
         let hp = hp_of(&w, body);
@@ -3148,15 +3152,16 @@ mod tests {
         while ticks < 200 {
             run(&mut w, weapons_wave3b::laser_eyes_system);
             ticks += 1;
-            if ticks == 1 {
-                let fx = w.ecs.resource::<LaserFx>();
+            let fx = w.ecs.resource::<LaserFx>();
+            if fx.copy_active() {
+                assert_eq!(fx.copy.unwrap().origin, recorded.origin);
                 assert!(fx.copy_beams.iter().all(|&len| len > 0.0));
             }
-            if ticks > 1 && !w.ecs.resource::<LaserFx>().active() {
-                // The afterimage may still be running after the live sweep.
-                if w.ecs.resource::<LaserFx>().copy_left <= 0.0 {
-                    break;
-                }
+            if ticks == 1 {
+                assert!(fx.copy_active());
+                w.player.pos += Vec2::new(30.0, 0.0);
+            } else if !fx.active() && !fx.copy_active() {
+                break;
             }
         }
         // Half of one sweep's hit (one pulse = 10, so 5).
@@ -3169,10 +3174,7 @@ mod tests {
         assert_eq!(far_hp - hp_of(&w, far), 1.25, "twice the radius takes a quarter hit");
         // One copy is kept, and the newest completed sweep replaces it.
         let kept = w.ecs.resource::<LaserFx>().copy.expect("still one copy");
-        assert!(
-            (kept.origin.y - (w.player.pos.y + LASER_EYE_OFFSET)).abs() < 1e-4,
-            "the newest completed sweep replaces the old negative"
-        );
+        assert_eq!(kept.origin, second_cast, "keep the newest sweep's cast origin");
     }
 
     /// **Ripcord**: the dash's real route stays taut for 0.6 s; each body on it
