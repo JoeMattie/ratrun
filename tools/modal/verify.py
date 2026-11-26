@@ -18,14 +18,20 @@ def canonical(raw):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--binary", type=Path)
+    source.add_argument("--native-report", type=Path, help="Previously run native shard JSON")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--id", default="defaults-expert-1000")
     args = parser.parse_args()
     pilot = args.output / "raw" / "pilot"
     manifest = read_manifest(pilot / "manifest.json")
     job = next(job for job in manifest["jobs"] if job["id"] == args.id)
-    _, raw, elapsed = run_command(args.binary.resolve(), job)
+    if args.binary:
+        _, raw, elapsed = run_command(args.binary.resolve(), job)
+    else:
+        raw = args.native_report.read_bytes()
+        elapsed = json.loads(raw)["wall_seconds"]
     local = canonical(raw)
     remote = canonical((pilot / f"{args.id}.json").read_bytes())
     atomic_write(pilot / f"{args.id}.native.json", raw)

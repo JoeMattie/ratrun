@@ -49,10 +49,15 @@ KNOBS = (
          ("xp.damage_per_level",)),
     Knob("boss_hp", .50, 1.70, "Set boss fight length through the shared boss HP multiplier.",
          ("bosses.hp_mult",)),
+    Knob("boss_hp_contrast", .80, 2.25, "Raise Sewer boss HP and reduce Flatbed boss HP by reciprocal factors.",
+         ("bosses.build_level",)),
     Knob("pickup_healing", .55, 1.65, "Set recovery from medkits and their availability in ordinary drops.",
          ("loot.heal_pickup_fraction", "loot.pickup_chances")),
 )
 INITIAL_BOUNDS = [(k.low, k.high) for k in KNOBS]
+SCREEN_POINTS = 176
+AUGMENT_POINTS = 33
+CONFIRM_RUNS = 300
 
 
 def overlay(values, defaults):
@@ -74,12 +79,20 @@ def overlay(values, defaults):
                 value = [*(round(min(1, p * v), 6) for p in base[:2]), base[2]]
             elif name == "heal_pickup_fraction":
                 value = round(min(1, base * v), 6)
+            elif knob.name == "boss_hp_contrast":
+                # The director's build_hp_level is also in the boss HP
+                # formula. Compensate for it so the boss levers stay independent.
+                enemy_hp = [values[0], *([values[1]] * 3)]
+                contrast = [v, 1., 1., 1. / v]
+                value = [round(b * c / e, 6) for b, c, e in zip(base, contrast, enemy_hp, strict=True)]
             else:
                 value = round(base * v, 6)
             fields[field] = value
             reason = f"{knob.reason} Sampled at {v:.4f}×."
             if knob.name == "later_enemy_hp":
                 reason = f"Sewer at {values[0]:.4f}×. {reason}"
+            if knob.name == "boss_hp_contrast":
+                reason += " Cancels the ordinary enemy HP scales in the boss formula."
             grouped.setdefault(table, {})[name] = value, base, reason
     return "\n".join(
         f"[{table}]\n" + "\n".join(
@@ -108,18 +121,24 @@ def manifest(kind, defaults, solution=None):
         identifiers = ["defaults"]
         seed, n = 1000, 2
     elif kind == "screen":
-        values = [[1.] * len(KNOBS), *design_points(bounds, 175, 1729)]
+        values = [[1.] * len(KNOBS), *design_points(bounds, SCREEN_POINTS - 1, 1729)]
         identifiers = [f"p{i:03}" for i in range(len(values))]
         seed, n = 1000, 8
     elif kind == "augment":
         bounds = solution["expanded_bounds"]
-        values = [solution["values"], *design_points(bounds, 32, 2718)]
+        near = [
+            (max(lo, value - .35 * (hi - lo)), min(hi, value + .35 * (hi - lo)))
+            for value, (lo, hi) in zip(solution["values"], bounds, strict=True)
+        ]
+        n = (AUGMENT_POINTS - 1) // 2
+        values = [solution["values"], *design_points(bounds, n, 2718),
+                  *design_points(near, AUGMENT_POINTS - 1 - n, 3141)]
         identifiers = [f"a{i:03}" for i in range(len(values))]
         seed, n = 1000, 8
     elif kind == "confirm":
         values = [solution["values"]]
         identifiers = ["candidate"]
-        seed, n = 5000, 300
+        seed, n = 5000, CONFIRM_RUNS
     else:
         raise ValueError(kind)
 

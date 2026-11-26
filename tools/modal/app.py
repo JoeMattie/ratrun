@@ -10,7 +10,7 @@ import time
 
 import modal
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT = Path("/Users/joe/dev/ratrun/.review/model")
 TIMEOUT = 1_500
 MAX_SHARDS = 700
@@ -20,6 +20,7 @@ CPU_PRICE = 0.0000131
 MEMORY_PRICE = 0.00000222
 RATE = CPU * CPU_PRICE + MEMORY_MIB / 1024 * MEMORY_PRICE
 SKILLS = ("expert", "skilled", "casual")
+BUILD_INPUTS = ("src", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "assets/rat.png")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -36,7 +37,7 @@ image = (
         "cd /build && /root/.cargo/bin/cargo build --release --locked -j 4",
         "install /build/target/release/ratrun /usr/local/bin/ratrun",
     )
-)
+) if modal.is_local() else None
 app = modal.App("ratrun-difficulty")
 
 
@@ -108,10 +109,9 @@ def main(manifest: str, output: str = str(OUTPUT)):
     directory.mkdir(parents=True, exist_ok=True)
     recorded_manifest = directory / "manifest.json"
     source_revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
+        ["git", "log", "-1", "--format=%H", "--", *BUILD_INPUTS], cwd=ROOT, text=True,
     ).strip()
-    if subprocess.check_output(["git", "status", "--porcelain", "--", "src", "Cargo.toml", "Cargo.lock",
-                                "rust-toolchain.toml", "assets", "tools/modal"], cwd=ROOT):
+    if subprocess.check_output(["git", "status", "--porcelain", "--", *BUILD_INPUTS], cwd=ROOT):
         raise ValueError("commit the build inputs before dispatching")
     record = json.dumps({**spec, "source_revision": source_revision}, sort_keys=True).encode()
     if recorded_manifest.exists() and recorded_manifest.read_bytes() != record:
