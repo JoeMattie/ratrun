@@ -10372,6 +10372,52 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            // `lit-shadow-lab`: a frozen Lab barrier and pendant. Set
+            // RATRUN_DUMP_ANGLE to rotate the lamp-to-barrier axis in degrees.
+            "lit-shadow-lab" => {
+                use crate::game::art_walls::WallKind;
+                use crate::game::collision::TileKind;
+                use crate::game::level::{Level, LightFixture, LightFixtureKind, Prop, PropKind, Rectf};
+                use crate::render::lighting::LightingMode;
+
+                let angle = std::env::var("RATRUN_DUMP_ANGLE")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(45.0)
+                    .to_radians();
+                let axis = Vec2::new(angle.cos(), angle.sin());
+                let side = Vec2::new(-axis.y, axis.x);
+                let lighting = match std::env::var("RATRUN_DUMP_LIGHTS").as_deref() {
+                    Ok("hard") => LightingMode::Hard,
+                    Ok("coarse") => LightingMode::Coarse,
+                    Ok("compact") => LightingMode::Compact,
+                    _ => LightingMode::Full,
+                };
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                hh.app.start_practice(Theme::Lab);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.set_lighting(lighting);
+                let w = hh.app.world.as_mut().unwrap();
+                w.clear_enemies();
+                w.level = Level::empty(Theme::Lab);
+                let rect = Rectf::new(1600.0, 1280.0, 16.0, 16.0);
+                w.level.tiles.set(100, 80, TileKind::Wall(WallKind::Solid));
+                w.level.tiles.rebuild_masks();
+                w.level.props.push(Prop { kind: PropKind::Barrier, rect });
+                let centre = rect.center();
+                w.level.objects.lights.push(LightFixture {
+                    pos: centre - axis * 30.0,
+                    kind: LightFixtureKind::Pendant,
+                    radius: 110.0,
+                    seed: 1,
+                });
+                w.player.pos = centre + side * 48.0;
+                w.cam_focus = Some(centre + axis * 13.0);
+                w.elapsed = 110.0;
+                hh.app.picture_dirty = true;
+                hh.app.console_paused = true;
+                hh.frame(&[]);
+            }
             // `lit-<scene>-<floor>` (batch 13b): staged scenes for judging the
             // lighting effects. `sconce`: the rat in front of the nearest wall
             // lamp with bodies between lamp and camera; `pendant`: bodies in a

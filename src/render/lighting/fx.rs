@@ -130,8 +130,10 @@ pub(super) struct LightInfo {
     pub air: [u16; 3],
     /// Fog amount 0..=255. `air.rs`.
     pub fog: u8,
-    /// Reserved (0).
-    pub flags: u8,
+    /// Peak contribution lost to cast shadows at this tap, in Q8.8
+    /// multiplier units. The composite uses its gradient to keep shadow
+    /// edges at pixel resolution.
+    pub shadow: u8,
 }
 
 /// Fold one contribution into a sample's record: `toward` is the 2D vector
@@ -415,6 +417,7 @@ pub(super) mod testkit {
                 w * h
             ],
             info: vec![LightInfo::default(); w * h],
+            hard_shadows: Default::default(),
         }
     }
 

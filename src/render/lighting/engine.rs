@@ -47,7 +47,7 @@
 //! tier must never change a simulated number.
 
 use super::fx::{self, Canvas, FxFrame, FxLight, LightInfo, LightTag, Normal, SampleHit, ShadowQuery};
-use super::shadow::{Body, Geometry, ShadowProfile, Surface};
+use super::shadow::{Body, Geometry, HardShadows, ShadowProfile, Surface};
 use super::softshadow::SoftProfile;
 use super::{air, motes, overhead, softshadow, specular, surface, upsample, water};
 use super::{fixtures, LightScene, ThemeAmbient};
@@ -528,6 +528,7 @@ pub(super) struct Grid {
     pub(super) surfaces: Vec<Surface>,
     /// Batch-13 light record per sample (`fx.rs`); empty while fx is off.
     pub(super) info: Vec<LightInfo>,
+    pub(super) hard_shadows: HardShadows,
 }
 
 impl Default for Grid {
@@ -541,6 +542,7 @@ impl Default for Grid {
             samples: Vec::new(),
             surfaces: Vec::new(),
             info: Vec::new(),
+            hard_shadows: HardShadows::default(),
         }
     }
 }
@@ -1340,6 +1342,15 @@ impl Grid {
             }
             self.info.resize(self.w * self.h, LightInfo::default());
         }
+        let refine = pass.fx && pass.mode != LightingMode::Full && !fx::skip("hard-edge");
+        self.hard_shadows.reset(
+            if refine { (pb.w, pb.h) } else { (0, 0) },
+            (self.w, self.h),
+            self.stride,
+            self.start,
+            self.offset,
+            pass.mode == LightingMode::Compact,
+        );
         let scale = pass.ambient_scale;
         for i in 0..self.samples.len() {
             let p = self.point(i % self.w, i / self.w);
@@ -1412,6 +1423,14 @@ impl Grid {
             && theme == Theme::Outfall
             && matches!(mode, LightingMode::Full | LightingMode::Hard);
         let floor_glint = !fx_on || softshadow::keep_floor_glint(mode);
+        let skip_occluders = fx_on && fx::skip("occluder");
+        let has_shadow = shadow.is_some();
+        let shadow = shadow.filter(|_| !skip_occluders);
+        let edge_profile =
+            shadow.filter(|_| self.hard_shadows.enabled() && !matches!(light.blend, Blend::Mix));
+        if edge_profile.is_some() {
+            self.hard_shadows.begin_light();
+        }
         let ceiling = if fx_on {
             upsample::MUL_CEILING
         } else {
@@ -1419,8 +1438,10 @@ impl Grid {
         };
         let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
         let mut touched = 0u64;
-        for y in lo(centre.y)..hi(centre.y, self.h) {
-            for x in lo(centre.x)..hi(centre.x, self.w) {
+        let xs = lo(centre.x)..hi(centre.x, self.w);
+        let ys = lo(centre.y)..hi(centre.y, self.h);
+        for y in ys.clone() {
+            for x in xs.clone() {
                 let delta = self.point(x, y) - light.pos;
                 let (core, tail) = curve.parts(delta, delta.len_sq(), cone_limit);
                 let tail = curve.quantise(tail);
@@ -1434,6 +1455,9 @@ impl Grid {
                 }
                 let visibility = match shadow {
                     None => 1.0,
+                    Some(s) if edge_profile.is_some() && surface.height == 0.0 => {
+                        s.hard_coverage(delta)
+                    }
                     Some(s) if fx_on => softshadow::visibility(
                         s,
                         soft,
@@ -1491,7 +1515,7 @@ impl Grid {
                     1.0
                 };
                 let glint = if floor_glint
-                    && shadow.is_some()
+                    && has_shadow
                     && surface.height == 0.0
                     && matches!(theme, Theme::Sewer | Theme::Lab | Theme::Outfall)
                 {
@@ -1508,6 +1532,10 @@ impl Grid {
                 if amount.abs() < min_amount {
                     continue;
                 }
+                if edge_profile.is_some() && surface.height == 0.0 {
+                    let shaft = if air_on { air::hard_shaft_weight(core) } else { 0.0 };
+                    self.hard_shadows.record(i, amount, visibility, shaft);
+                }
                 touched += 1;
                 self.samples[i].light(light, amount, visibility, ceiling);
                 // A halo (a gem, a spore orb, a cheese wedge, a spark) lights the
@@ -1516,6 +1544,11 @@ impl Grid {
                 // every pickup and projectile on the floor.
                 if fx_on && matches!(light.blend, Blend::Add) && !halo {
                     let shadowed = (1.0 - visibility) * light.shadow_color.opacity;
+                    if shadowed > 0.0 {
+                        let info = &mut self.info[i];
+                        let lost = (amount * shadowed * curve.gain()) as u8;
+                        info.shadow = info.shadow.saturating_add(lost);
+                    }
                     fx::note_light(
                         &mut self.info[i],
                         &light,
@@ -1525,6 +1558,11 @@ impl Grid {
                     );
                 }
             }
+        }
+        if let Some(profile) = edge_profile {
+            self.hard_shadows.refine(&self.surfaces, light, xs, ys, |p| {
+                profile.hard_coverage(p - light.pos)
+            });
         }
         crate::prof::count(crate::prof::Stage::CSplatSamples, touched);
     }
@@ -1547,6 +1585,11 @@ impl Grid {
             MUL_CLAMP
         };
         let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
+        let refine =
+            self.hard_shadows.enabled() && light.casts_shadow && !matches!(light.blend, Blend::Mix);
+        if refine {
+            self.hard_shadows.begin_light();
+        }
         for i in 0..self.samples.len() {
             let surface = self.surfaces[i];
             if surface.zone == Some(LightZoneKind::Maze) || surface.layer & light.layers.0 == 0 {
@@ -1574,6 +1617,9 @@ impl Grid {
                     * 0.25;
             }
             let facing = facing_gain(surface, ray);
+            if refine && surface.height == 0.0 {
+                self.hard_shadows.record(i, facing, vis, 0.0);
+            }
             self.samples[i].light(light, facing, vis, ceiling);
             if fx_on && matches!(light.blend, Blend::Add) {
                 let shadowed = (1.0 - vis) * light.shadow_color.opacity;
@@ -1585,6 +1631,11 @@ impl Grid {
                     facing * (1.0 - shadowed) * light.energy * peak,
                 );
             }
+        }
+        if refine {
+            self.hard_shadows.refine(&self.surfaces, light, 0..self.w, 0..self.h, |p| {
+                geometry.sun_visibility(p, Surface::default(), light, ray, bodies)
+            });
         }
     }
 
@@ -2041,6 +2092,50 @@ mod dropping_light_tests {
 mod composite_tests {
     use super::*;
 
+    #[test]
+    fn hard_casts_follow_the_occluder_at_pixel_resolution() {
+        use crate::game::art_walls::WallKind;
+        use crate::game::collision::TileKind;
+
+        let theme = Theme::Lab;
+        let mut level = crate::game::level::Level::empty(theme);
+        level.tiles.set(3, 2, TileKind::Wall(WallKind::Solid));
+        let mut geometry = Geometry::default();
+        geometry.sync(&level);
+        // The top-right corner (64, 32) projects a slope of 20/44.
+        let mut light = Light::radial(Vec2::new(20.0, 12.0), 200.0, (255, 255, 255), 0.7);
+        light.falloff = Falloff::Hard;
+        light.scatter = 0.0;
+        let mut profile = ShadowProfile::default();
+        profile.bake(&geometry, light);
+
+        for mode in [LightingMode::Hard, LightingMode::Coarse, LightingMode::Compact] {
+            let mut pb = PixelBuffer::new(128, 88);
+            pb.clear((192, 192, 192));
+            let mut grid = Grid::default();
+            let pass = Pass { mode, theme, elapsed: 0.0, fx: true, ambient_scale: 0.3 };
+            grid.prepare(&pb, Vec2::ZERO, &geometry, super::super::theme_ambient(theme), 1.0, pass);
+            let dark = grid.samples[0].shade_exact((192, 192, 192)).2;
+            grid.splat(light, Some(&profile), None, LightTag::Moving { priority: 3 }, pass, 0.0);
+            assert!(grid.hard_shadows.active);
+            let mut frame = fx::testkit::frame(&level, mode);
+            frame.depth = ColorDepth::Truecolor;
+            let (w, h) = (pb.w, pb.h);
+            let (px, mat) = pb.split_mat();
+            upsample::composite(&grid, &mut Canvas { w, h, px, mat }, &frame);
+            let edge: Vec<_> = (72..112)
+                .map(|x| {
+                    let expected = 12.0 + (x - 20) as f32 * 20.0 / 44.0;
+                    let y = (30..60).find(|&y| pb.pixel_at(x, y).2 <= dark + 66).unwrap();
+                    assert!((y as f32 - expected).abs() <= 2.0, "{mode:?} x={x} y={y}, expected {expected}");
+                    y
+                })
+                .collect();
+            assert!(edge.windows(2).all(|p| (0..=1).contains(&(p[1] - p[0]))), "{mode:?}: {edge:?}");
+            assert!(edge.windows(4).all(|p| p[0] != p[3]), "{mode:?}: {edge:?}");
+        }
+    }
+
     /// A small deterministic generator (the tests must not depend on `rand`'s
     /// stream).
     struct Lcg(u64);
@@ -2196,6 +2291,7 @@ mod composite_tests {
                         samples: samples(&mut rng, gw * gh),
                         surfaces: Vec::new(),
                         info: Vec::new(),
+                        hard_shadows: HardShadows::default(),
                     };
                     for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
                         let mut fast = PixelBuffer::new(pw, ph);
