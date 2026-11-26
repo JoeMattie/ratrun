@@ -9246,9 +9246,14 @@ mod tests {
                     if scene == "death" {
                         boss.hp = 0.0;
                     }
+                    if scene == "burrow" {
+                        // Phase two's third pick is the burrow.
+                        boss.phase = 2;
+                        boss.scratch[0] = 2.0;
+                    }
                 }
                 let mut captured = false;
-                for _ in 0..320 {
+                for _ in 0..if scene == "burrow" { 700 } else { 320 } {
                     w.update(1.0 / 60.0, Vec2::ZERO, false);
                     let boss = w.ecs.get::<Boss>(entity).unwrap();
                     captured = match scene {
@@ -9260,6 +9265,9 @@ mod tests {
                         "tail" => boss.state == BossState::HorseshoeCrab(CrabState::TelsonSweep)
                             && boss.progress() >= art::TELSON_ACTIVE_PROGRESS + 0.12,
                         "death" => boss.dead && boss.progress() >= 0.40,
+                        // Mid-dive: the mound is well clear of where it went down.
+                        "burrow" => boss.state == BossState::HorseshoeCrab(CrabState::Burrow)
+                            && boss.pos.dist(boss.pounce_origin) >= 16.0,
                         _ => panic!("unknown Horseshoe capture: {scene}"),
                     };
                     if captured {
@@ -10883,6 +10891,104 @@ mod tests {
             // `giant`: the Growth Serum (batch 13) a few seconds in: ~8 s of
             // Sewer play to gather a crowd, then the buff, then 2.5 s of it
             // (full size, the view pulled back, the stomp landing).
+            // The on-screen touch controls over play (a thumb on the stick)
+            // and over a menu (the Back slot on the pause plate).
+            "touch-play" | "touch-menu" => {
+                use crate::game::weapon::WeaponKind;
+                use crate::touch::TouchPhase;
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+                    w.player.xp_to_next = 1_000_000;
+                }
+                if target == "touch-menu" {
+                    hh.frame(&[KeyCode::Esc]);
+                    hh.frame(&[]);
+                    hh.app.touch(TouchPhase::Start, 1, f32::from(w) * 0.5, 1.5);
+                } else {
+                    let (col, row) = (f32::from(w) * 0.16, f32::from(h) * 0.66);
+                    hh.app.touch(TouchPhase::Start, 1, col, row);
+                    hh.frame(&[]);
+                    hh.app.touch(TouchPhase::Move, 1, col + 3.0, row - 1.0);
+                }
+                for _ in 0..3 {
+                    hh.frame(&[]);
+                }
+            }
+            // A glue board holding two bodies, strands drawn.
+            "glue-stuck" => {
+                use crate::game::art_traps::StickyTrapView;
+                use crate::game::enemy::EnemyKind;
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    w.peace = true;
+                    w.player.loadout.weapons.clear();
+                    let board = w.player.pos + Vec2::new(40.0, 4.0);
+                    w.level
+                        .objects
+                        .sticky_traps
+                        .push(StickyTrapView::new(board, Vec2::new(1.0, 0.0)));
+                    w.spawn_enemy(EnemyKind::Skitterer, board + Vec2::new(-3.0, -2.0), 400.0);
+                    w.spawn_enemy(EnemyKind::Skitterer, board + Vec2::new(4.0, 3.0), 400.0);
+                    w.cam_focus = Some(board - Vec2::new(14.0, 0.0));
+                }
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                for _ in 0..45 {
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.player.hp = w.player.max_hp();
+                    }
+                    hh.frame(&[]);
+                }
+            }
+            // A giant rat with a full rack firing at a ring of heavies that
+            // stand outside the stomp disc.
+            "giant-weapons" => {
+                use crate::game::enemy::EnemyKind;
+                use crate::game::weapon::WeaponKind;
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    w.peace = true;
+                    w.player.xp_to_next = 1_000_000;
+                    for kind in [
+                        WeaponKind::CheeseSpray,
+                        WeaponKind::SqueakNova,
+                        WeaponKind::SporeOrbit,
+                        WeaponKind::LaserEyes,
+                        WeaponKind::LavaBreath,
+                        WeaponKind::SpikedTail,
+                    ] {
+                        w.player.loadout.apply(&Upgrade::NewWeapon(kind));
+                    }
+                    w.player.face = Vec2::new(1.0, 0.0);
+                    w.player.buffs.giant = crate::game::ecs::systems::powerups::GROWTH_SECS;
+                }
+                for tick in 0..62 {
+                    if tick == 34 {
+                        let w = hh.app.world.as_mut().unwrap();
+                        let p = w.player.pos;
+                        for i in 0..6 {
+                            let a = i as f32 * std::f32::consts::TAU / 6.0 + 0.3;
+                            w.spawn_enemy(
+                                EnemyKind::Brute,
+                                p + Vec2::new(a.cos(), a.sin()) * 64.0,
+                                400.0,
+                            );
+                        }
+                        for slot in w.player.loadout.weapons.iter_mut() {
+                            slot.timer = 0.0;
+                        }
+                    }
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.player.hp = w.player.max_hp();
+                    }
+                    hh.frame(&[]);
+                }
+            }
             "giant" => {
                 hh.enter_playing();
                 {
