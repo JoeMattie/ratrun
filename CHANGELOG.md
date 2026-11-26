@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Round-four balance.** The owner's fresh-start playtest is the shipped
+  balance. Subject R-47 keeps one health value on every sector and the
+  facility floors halve incoming damage instead of doubling health. The
+  Sewer horde is heavier, the later floors ease off, and adaptive horde
+  power scaling is on by default. See [docs/balance/README.md](docs/balance/README.md).
 - **Headlamp.** Illuminates your path for 18s and reveals it on the map.
   Ordinary enemies veer away from the middle of the beam.
 - **Growth Serum.** Longer strides and slower footfalls at giant size.

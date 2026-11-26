@@ -569,8 +569,8 @@ pub(crate) const BUILD_HP: [(f32, f32); 7] = [
 /// Flatbed finale is the hardest level.
 pub const BUILD_HP_LEVEL: [f32; 4] = [0.8, 2.2, 2.4, 2.6];
 
-pub(crate) const FRESH_BUILD_HP_LEVEL: [f32; 3] = [0.64, 0.66, 0.68];
-pub(crate) const FRESH_LEVEL_HP_EXTRA: [f32; 3] = [1.23, 1.26, 1.29];
+pub(crate) const FRESH_BUILD_HP_LEVEL: [f32; 3] = [0.6144, 0.6204, 0.6256];
+pub(crate) const FRESH_LEVEL_HP_EXTRA: [f32; 3] = [1.15, 1.17, 1.18];
 
 /// The boss pool's own correction per campaign level, on top of
 /// [`BUILD_HP_LEVEL`]: measured median fights 66 / 78 / 72 / 66 s against the

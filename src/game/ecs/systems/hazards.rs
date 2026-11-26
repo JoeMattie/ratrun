@@ -406,7 +406,7 @@ mod tests {
         let burned = world
             .enemies()
             .iter()
-            .all(|e| !e.alive() || e.hp < crate::game::enemy::EnemyKind::Skitterer.base_hp());
+            .all(|e| !e.alive() || e.hp < e.max_hp);
         assert!(burned, "the plume did not scald the pursuer standing in it");
     }
 

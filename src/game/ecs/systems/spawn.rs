@@ -2703,8 +2703,10 @@ mod tests {
         let expected = crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
             .base_hp()
             // The horde's own curve: the shared ramp times level one's
-            // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate).
+            // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate), times the
+            // shipped Sewer sector row.
             * w.tuning().horde_hp_mult_for(0, open)
+            * w.tuning().enemies.sector_hp_mult[0]
             * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
     }
@@ -2894,7 +2896,8 @@ mod tests {
         );
         // The scalars are level 0's: hp is the kind's own pool times the level-0
         // curve at spawn, with no per-stage extra.
-        let expected_mult = w.tuning().horde_hp_mult_for(0, spawned_at);
+        let expected_mult = w.tuning().horde_hp_mult_for(0, spawned_at)
+            * w.tuning().enemies.sector_hp_mult[0];
         let spawned = w.enemies();
         for e in spawned.iter() {
             assert!(
@@ -2930,7 +2933,10 @@ mod tests {
             let elites: Vec<&Enemy> = snapshot.iter().filter(|e| e.elite).collect();
             assert_eq!(elites.len(), 1, "{theme:?}: no elite arrived");
             assert_eq!(elites[0].kind, heavy, "{theme:?}: the wrong elite body");
-            let expected = heavy.base_hp() * w.tuning().horde_hp_mult_for(0, open) * 1.6;
+            let expected = heavy.base_hp()
+                * w.tuning().horde_hp_mult_for(0, open)
+                * w.tuning().enemies.sector_hp_mult[0]
+                * 1.6;
             assert!(
                 (elites[0].max_hp - expected).abs() < 1e-3,
                 "{theme:?}: elite hp {} is not the 1.6x pool {expected}",
@@ -3935,7 +3941,8 @@ mod tests {
             let expected = w.tuning().horde_hp_mult_for(level, 300.0);
             for e in enemies.iter().filter(|e| !e.elite) {
                 // (The elite branch stacks its own 1.6x on top of the curve.)
-                let base = e.max_hp / expected;
+                let sector = crate::game::director::level_slot(level);
+                let base = e.max_hp / (expected * w.tuning().enemies.sector_hp_mult[sector]);
                 assert!(
                     (base - e.kind.base_hp()).abs() < 1e-2,
                     "level {level}: {:?} hp {} is not its base × {expected}",
@@ -3946,8 +3953,11 @@ mod tests {
             let plain = enemies.iter().find(|e| !e.elite).expect("a plain spawn");
             multipliers.push(plain.max_hp / plain.kind.base_hp());
         }
+        // The shipped fresh rows rise across the facility floors. The Sewer
+        // still leads them all: its own sector row is 2.45x while the later
+        // floors carry 0.86956522.
         assert!(
-            multipliers[1] > multipliers[0] && multipliers[2] > multipliers[1],
+            multipliers[1] < multipliers[2] && multipliers[2] < multipliers[3],
             "hp did not scale with the campaign level: {multipliers:?}"
         );
     }

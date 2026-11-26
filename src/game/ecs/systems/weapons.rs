@@ -2874,7 +2874,7 @@ mod tests {
         run_weapons(&mut w, 1.0 / 60.0);
 
         let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
-        let base = EnemyKind::Skitterer.base_hp() * 5.0;
+        let base = w.ecs.get::<Enemy>(far).unwrap().max_hp;
         assert_eq!(hp(&w, behind), base - damage, "the body behind was missed");
         assert_eq!(hp(&w, off_axis), base - damage, "the rear arc missed at 70°");
         assert_eq!(hp(&w, ahead), base, "the swipe reached in front");
@@ -2921,7 +2921,7 @@ mod tests {
         run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + aim));
 
         let hp = |e| w.ecs.get::<Enemy>(e).unwrap().hp;
-        let base = EnemyKind::Skitterer.base_hp() * 5.0;
+        let base = w.ecs.get::<Enemy>(in_aim).unwrap().max_hp;
         assert!(hp(behind_aim) < base);
         assert_eq!(hp(in_aim), base);
         assert_eq!(hp(behind_face), base);
@@ -2946,7 +2946,7 @@ mod tests {
         arm(&mut w, WeaponKind::Gnaw);
         run_weapons(&mut w, 1.0 / 60.0);
         let hp = |w: &World, e| w.ecs.get::<Enemy>(e).unwrap().hp;
-        let base = EnemyKind::Cat.base_hp();
+        let base = w.ecs.get::<Enemy>(second).unwrap().max_hp;
         assert!(hp(&w, in_jaws) < base, "the nearest body was not bitten");
         assert_eq!(hp(&w, second), base, "the bite must be single-target");
         assert_eq!(hp(&w, out_of_reach), base, "the bite reached too far");
@@ -3472,7 +3472,7 @@ mod tests {
         );
         assert_eq!(
             w.ecs.get::<Enemy>(far).unwrap().hp,
-            EnemyKind::Skitterer.base_hp(),
+            w.ecs.get::<Enemy>(far).unwrap().max_hp,
             "the thrash reached a body outside its arc"
         );
         assert_eq!(
@@ -3578,7 +3578,7 @@ mod tests {
 
         assert_eq!(
             w.ecs.get::<Enemy>(far).unwrap().hp,
-            EnemyKind::Skitterer.base_hp(),
+            w.ecs.get::<Enemy>(far).unwrap().max_hp,
             "the ring reached past its radius"
         );
         assert!(

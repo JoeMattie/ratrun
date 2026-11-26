@@ -39,11 +39,18 @@ Any effective change marks the run **TUNED** and voids Nest banking, high scores
 
 Use the kind keys printed by the dump. Keep the same number of entries when editing an array. Sector arrays follow campaign order. In a practice run using a bare build, the game uses sector one's difficulty values.
 
-`[player] sector_hp_mult` scales base health by the world's campaign sector
-before the Nest and passive bonuses apply. `[enemies] sector_hp_mult` scales
-ordinary enemy HP by sector after each spawn's own HP calculation. This
-includes authored and summoned ordinary bodies. Both arrays default to four
-`1.0` values. Each new floor applies its own row to the carried build.
+`[enemies] sector_hp_mult` scales ordinary enemy HP by sector after each
+spawn's own HP calculation. This includes authored and summoned ordinary
+bodies. It ships as `[2.45, 0.86956522, 0.86956522, 0.86956522]`: the Sewer's
+horde carries the owner's half-HP playtest weight and the facility floors
+ease off.
+
+`[player] sector_damage_taken_mult` scales every hit the rat takes by the
+world's campaign sector, after armor and before the hit lands. It ships as
+`[1.0, 0.5, 0.5, 0.5]`. The rat's own health is one number on every floor
+(`[player] max_hp`, `79.477` by default): the owner asked for flat HP, so the
+later floors soften incoming damage instead of doubling health. Each new
+floor applies its own row to the carried build.
 
 ## Sector buildup
 
@@ -92,7 +99,11 @@ surges, recovery and Sewer opening grace.
 The shipped balance also adjusts the rat's starting HP, regeneration, hit
 immunity and XP costs, plus the horde's speed, sector HP and contact ramps,
 and boss HP. The effective defaults qualify for progression with or without
-a tuning file.
+a tuning file. Round four ships the owner's playtest: `79.477` starting HP on
+every sector, `2.45×` ordinary HP in the Sewer and `0.87×` on Kitchen, Lab and
+Flatbed, build HP corrections of `0.61 / 0.62 / 0.63` with horde tops of
+`1.15 / 1.17 / 1.18` and boss-only multipliers of `1.13 / 1.03 / 1.01` on the
+fresh sectors, and surge strengths of `0.72 / 0.84 / 0.65`.
 
 ## Horde power scaling
 
@@ -100,7 +111,10 @@ Set `power_scaling = true` in `[director]` to size the next wave against
 recent effective weapon damage. Each ordinary pulse and timed elite takes
 one HP multiplier at spawn. The scripted opening pair, guests, minibosses,
 and floor bosses keep their encounter HP. Spawn cadence and payouts stay
-on their existing curves. The shipped power switch is off.
+on their existing curves. The shipped power switch is **on** since round
+four, with `power_hp_exponent = 0.45`, `power_memory_secs = 18`, a `0.9–1.15`
+clamp, and references `power_reference_hp = [31.85, 16.0, 25.0, 15.0]` and
+`power_fresh_reference_hp = [16.0, 19.5, 19.0]`.
 
 The director divides smoothed damage per second by a smoothed reference.
 The reference combines the nominal horde rate and HP curves with

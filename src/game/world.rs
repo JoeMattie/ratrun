@@ -453,11 +453,13 @@ impl World {
         level_index: usize, mut level: Level, seed: u64, mut carried: Loadout,
         carried_totals: CampaignTotals, tuning: crate::tuning::RunTuning,
     ) -> World {
-        let sector_hp_mult = tuning.player.sector_hp_mult[crate::game::director::level_slot(level_index)];
-        let rebuild_carried = tuning.changed || carried.tuning.as_ref().is_some_and(|prior| prior.changed)
-            || carried.sector_hp_mult != sector_hp_mult;
+        // The rat's HP is one number on every sector; the later floors soften
+        // incoming damage instead (see `Player::take_damage`).
+        let sector_damage_taken_mult =
+            tuning.player.sector_damage_taken_mult[crate::game::director::level_slot(level_index)];
+        let rebuild_carried = tuning.changed || carried.tuning.as_ref().is_some_and(|prior| prior.changed);
         carried.tuning = Some(tuning.clone());
-        carried.sector_hp_mult = sector_hp_mult;
+        carried.sector_damage_taken_mult = sector_damage_taken_mult;
         if rebuild_carried {
             carried.rebuild_stats();
         }

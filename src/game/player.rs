@@ -573,7 +573,12 @@ impl Player {
         // Growth Serum: the giant takes half from everything but ordinary
         // contact, which `contact_system` never lands while the serum runs.
         let raw = raw * self.buffs.damage_taken_scale();
-        let dmg = (raw - self.loadout.stats.armor).max(1.0);
+        // The rat's HP does not change between campaign sectors, so the later
+        // floors halve what lands on it instead: the same flat HP, twice the
+        // hits survived. Scaling the post-armour hit (not the raw one) is what
+        // makes that exactly twice, flat armour included.
+        let dmg = (raw - self.loadout.stats.armor).max(1.0)
+            * self.loadout.sector_damage_taken_mult;
         let hp_before = self.hp;
         self.hp -= dmg;
         if self.observed_damage.is_some() {

@@ -1,0 +1,41 @@
+# Round 4 playtest overlay — NOW THE SHIPPED DEFAULTS.
+#
+# The owner played this file ("was pretty good") and the post-`v0.4.2` build
+# ships these values, so an ordinary run plays this game with no tuning file.
+# Loading this file against the shipped build reports no changed fields.
+#
+# One ruling moved two knobs after the playtest:
+#   * the rat's HP is one number on every sector (79.477, the level-one value
+#     of this file) instead of this file's half-health Sewer;
+#   * the later floors halve the damage the rat takes
+#     ([player] sector_damage_taken_mult = [1.0, 0.5, 0.5, 0.5]) instead of
+#     doubling its health. Every other field below is shipped verbatim.
+#
+# Owner playtest with fresh starts on every campaign floor.
+# The Sewer keeps the half-HP test's 79.477 base HP. Its new horde bodies
+# have 1.10–1.41 times the HP they had in that test.
+# On Kitchen, Lab and Flatbed the rat keeps that HP and enemy hits ease off.
+
+[campaign]
+carry = false
+
+[enemies]
+sector_hp_mult = [2.45, 0.86956522, 0.86956522, 0.86956522]
+
+[director]
+power_scaling = true
+power_hp_exponent = 0.45
+power_memory_secs = 18.0
+power_hp_floor = 0.9
+power_hp_ceiling = 1.15
+power_reference_hp = [31.85, 16.0, 25.0, 15.0]
+power_fresh_reference_hp = [16.0, 19.5, 19.0]
+fresh_build_hp_level = [0.6144, 0.6204, 0.6256]
+fresh_level_hp_extra = [1.15, 1.17, 1.18]
+fresh_pressure_sector_scale = [0.72, 0.84, 0.65]
+
+[bosses]
+fresh_build_level = [1.13083333, 1.03404255, 1.00956522]
+
+[minibosses]
+fresh_hp = [[270.0, 1395.0, 2520.0, 3825.0], [297.0, 1440.0, 2610.0, 3915.0], [306.0, 1402.5, 2550.0, 3782.5]]
