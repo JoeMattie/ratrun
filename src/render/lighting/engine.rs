@@ -786,6 +786,7 @@ impl LightMap {
         let theme = scene.level.theme;
         let pass = Pass {
             mode: scene.mode,
+            #[cfg(test)]
             elapsed: scene.elapsed,
             theme,
             fx,
@@ -1021,6 +1022,7 @@ impl LightMap {
             theme,
             level: scene.level,
             cam: Vec2::new(scene.cam.x.round(), scene.cam.y.round()),
+            #[cfg(test)]
             elapsed: scene.elapsed,
             step8: fx::step8(scene.elapsed),
             rat: scene.player.pos,
