@@ -1285,8 +1285,6 @@ pub fn snap_spec(
     crate::game::art_traps::TrapBait,
 ) {
     use crate::game::art_traps::{MousetrapKind, TrapBait};
-    use crate::game::gem::PickupKind;
-
     // 1 in 6 chests, ~1 in 24 plain cheese, the rest a good pickup.
     const CHEST_ROLL: u64 = 20;
     const CHEESE_ROLL: u64 = 5;
@@ -1304,22 +1302,7 @@ pub fn snap_spec(
     } else if roll < CHEST_ROLL + CHEESE_ROLL {
         TrapBait::Cheese
     } else {
-        // Keep the original 13 slots. Divide each into four using the same
-        // hash word, so only the donated Heal and Nuke outcomes can change.
-        let word = splitmix64(h ^ 0x51ED_2701_9E37_79B9);
-        let quarter = word / 13 % 4;
-        let chosen = match word % 13 {
-            0..=2 => PickupKind::Magnet,
-            3 if quarter == 0 => PickupKind::TheCollar,
-            3 => PickupKind::Nuke,
-            4 => PickupKind::GrowthSerum,
-            5..=7 => PickupKind::BottleCap,
-            8..=10 => PickupKind::PocketWatch,
-            11 if quarter == 0 => PickupKind::ShrinkDraught,
-            12 if quarter == 0 => PickupKind::WhiteCoat,
-            _ => PickupKind::Heal,
-        };
-        TrapBait::Pickup(chosen)
+        TrapBait::Pickup(snap_pickup_bait(splitmix64(h ^ 0x51ED_2701_9E37_79B9)))
     };
     // Hair trigger: always under a chest, ~12 % of the pickup baits and ~5 % of
     // the cheese ones, i.e. about one trap in four overall — weighted toward
@@ -1336,6 +1319,35 @@ pub fn snap_spec(
         MousetrapKind::Ordinary
     };
     (kind, bait)
+}
+
+/// The 13 original slots each have four outcomes on the same hash word.
+fn snap_pickup_bait(word: u64) -> crate::game::gem::PickupKind {
+    use crate::game::gem::PickupKind;
+    let quarter = word / 13 % 4;
+    match word % 13 {
+        0..=2 => PickupKind::Magnet,
+        3 if quarter == 0 => PickupKind::TheCollar,
+        3 => PickupKind::Nuke,
+        4 => PickupKind::GrowthSerum,
+        5..=7 => PickupKind::BottleCap,
+        8..=10 => PickupKind::PocketWatch,
+        11 if quarter == 0 => PickupKind::ShrinkDraught,
+        12 if quarter == 0 => PickupKind::WhiteCoat,
+        12 if quarter == 3 => PickupKind::Headlamp,
+        _ => PickupKind::Heal,
+    }
+}
+
+#[test]
+fn headlamp_takes_one_of_the_52_pickup_bait_slots() {
+    use crate::game::gem::PickupKind;
+    let mut counts = [0; 12];
+    for word in 0..52 {
+        counts[snap_pickup_bait(word) as usize] += 1;
+    }
+    assert_eq!((counts[PickupKind::Heal as usize], counts[PickupKind::Headlamp as usize]), (5, 1));
+    assert_eq!(counts, [5, 12, 3, 12, 0, 12, 0, 4, 1, 1, 1, 1]);
 }
 
 /// One round of the splitmix64 finaliser (the generator's own deterministic

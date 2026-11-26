@@ -387,6 +387,7 @@ fn pickup_name(k: PickupKind) -> &'static str {
         PickupKind::ShrinkDraught => "Shrink Draught",
         PickupKind::WhiteCoat => "White Coat",
         PickupKind::TheCollar => "The Collar",
+        PickupKind::Headlamp => "Headlamp",
     }
 }
 
@@ -1702,6 +1703,10 @@ fn pickup_text(k: PickupKind) -> (&'static str, &'static str) {
             "Rare drop · any floor",
             "Gems pay double XP. Elites and the miniboss close faster. +             The tag still carries your number.",
         ),
+        PickupKind::Headlamp => (
+            "Rare drop · any floor",
+            "Reveals the map ahead. The horde veers out of the beam. Batteries issued loose.",
+        ),
     }
 }
 
@@ -2491,6 +2496,11 @@ fn pickup_facts(k: PickupKind, f: &mut Facts) {
             f.push("GEM XP", format!("{:.0}×", powerups::COLLAR_XP_MULT));
             f.push("ELITES AND MINIBOSS", format!("+{:.0}% move speed", (powerups::COLLAR_CHASE_MULT - 1.0) * 100.0));
             f.push("LASTS", format!("{:.0}s", powerups::COLLAR_SECS));
+        }
+        PickupKind::Headlamp => {
+            f.push("EFFECT", "reveals ground and parts the horde");
+            f.push("REACH", format!("{:.0} px", powerups::HEADLAMP_RANGE));
+            f.push("LASTS", format!("{:.0}s", powerups::HEADLAMP_SECS));
         }
     }
     f.push("FOUND", "the rare pickup roll");

@@ -47,7 +47,7 @@ Use **one name per concept** everywhere:
 | Shop | **The Blind Spot / Gene Splice Shelf** (marked on floor by spoon + mouse hole) | vendor, store |
 | Shop upgrades | **Splices** (`SPLICES 0/2`, max 2 per run) | splice sockets, mutations, perks |
 | Shop services | **Stitch** (heal 35%), **Turn the Shelf** (reroll stock), **Molt** (replace an upgrade with a new Lv1 upgrade of the same type) | swap a kind, rack |
-| Floor pickups | **Medkit**, **Magnet**, **Purge**, **Bottle Cap**, **Wind-Up Mouse**, **Pocket Watch**, **Clean Socks**, **Growth Serum**, **Chest**, **Cache**, **Shrink Draught**, **White Coat**, **The Collar** | pocket finds |
+| Floor pickups | **Medkit**, **Magnet**, **Purge**, **Bottle Cap**, **Wind-Up Mouse**, **Pocket Watch**, **Clean Socks**, **Growth Serum**, **Chest**, **Cache**, **Shrink Draught**, **White Coat**, **The Collar**, **Headlamp** | pocket finds |
 | Outfall hazards | **surge** (`SURGE INBOUND`), **tidal drop**, **lure trap** | current event, pit tile |
 | Map views | **Map** (`Tab`, pauses the game) and **Minimap** (`N`, cycles `Normal` / `Small` / `Hidden`) | radar (except as secondary noun for the corner widget) |
 | Defeated enemies | **Kills** (`KILLS` in tables; `KO` only on the 1-row HUD top rail) | frags, takedowns |
@@ -82,7 +82,7 @@ Never slice `.name().chars().take(4)` for compact strips (`Tail Whip` and `Tail 
 `Fat Reserves` (`HP`), `Quick Paws` (`SPD`), `Sharp Teeth` (`DMG`), `Frenzy` (`FIR`), `Whiskers` (`MAG`), `Resilience` (`REG`), `Thick Hide` (`ARM`), `Spring Heel` (`DSH`), `Counterweight` (`SHV`), `Long Fuse` (`FUS`), `Second Scent` (`XP+`), `Lens Cap` (`RCH`).
 
 **Timed pickup buff chips** (row above bottom rail):
-`B` = Bottle Cap, `M` = Wind-Up Mouse, `P` = Pocket Watch, `S` = Clean Socks, `G` = Growth Serum, `T` = Shrink Draught, `W` = White Coat, `K` = The Collar. On a wide terminal the strip names the find (`GIANT 18`, `TINY 12`, `WHITE COAT 5`, `COLLAR 16`).
+`B` = Bottle Cap, `M` = Wind-Up Mouse, `P` = Pocket Watch, `S` = Clean Socks, `G` = Growth Serum, `T` = Shrink Draught, `W` = White Coat, `K` = The Collar, `H` = Headlamp. On a wide terminal the strip names the find (`GIANT 18`, `TINY 12`, `WHITE COAT 5`, `COLLAR 16`, `HEADLAMP 18`).
 
 ---
 

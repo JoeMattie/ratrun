@@ -245,7 +245,7 @@ section!(Loot {
     miniboss_gold: u32 = shop::MINIBOSS_GOLD; "Gold awarded with a miniboss chest before scaling",
     boss_gold: u32 = shop::BOSS_GOLD; "Gold awarded directly for a boss kill before scaling",
     pickup_chances: [f32; 3] = [0.012, 0.12, 1.0]; "Rare pickup probabilities for ordinary, large and legacy boss bodies",
-    pickup_weights: [u32; 11] = [30, 1, 1, 18, 3, 1, 4, 14, 10, 9, 9]; "Ordered weights for Medkit, Shrink Draught, White Coat, Magnet, Purge, The Collar, Growth Serum, Bottle Cap, Wind-Up Mouse, Pocket Watch, Clean Socks",
+    pickup_weights: [u32; 11] = [30, 1, 1, 18, 3, 1, 4, 14, 10, 9, 9]; "Ordered weights for Medkit (last share above a minimum of one goes to Headlamp), Shrink Draught, White Coat, Magnet, Purge, The Collar, Growth Serum, Bottle Cap, Wind-Up Mouse, Pocket Watch, Clean Socks",
     heal_pickup_fraction: f32 = 0.35; "Medkit healing (fraction of max HP)",
     chest_gold: u32 = loadout::CHEST_GOLD; "Chest fallback payout (gold)",
     chest_heal_fraction: f32 = loadout::CHEST_HEAL_FRAC; "Chest fallback healing (fraction of max HP)",

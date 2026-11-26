@@ -1180,6 +1180,11 @@ fn pose_of(player: &Player, elapsed: f32) -> Pose {
     pose_of_with_outfit(player, elapsed, RatOutfit::Standard)
 }
 
+pub(crate) fn headlamp_mount(player: &Player, elapsed: f32, outfit: RatOutfit) -> Vec2 {
+    let pose = pose_of_with_outfit(player, elapsed, outfit);
+    pose.place(if pose.diver { HELMET_U } else { 3.2 }, 0.0)
+}
+
 fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose {
     let raw_face = if player.face.len_sq() > 1e-4 {
         player.face.normalized()

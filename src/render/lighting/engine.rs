@@ -458,7 +458,7 @@ const MUL_CLAMP: i32 = 350;
 
 /// What one lighting pass runs with, handed to the grid's methods.
 #[derive(Clone, Copy)]
-pub(super) struct Pass {
+pub(super) struct Pass<'a> {
     pub mode: LightingMode,
     pub elapsed: f32,
     pub theme: Theme,
@@ -466,6 +466,7 @@ pub(super) struct Pass {
     pub fx: bool,
     /// The ambient share of the theme tint ([`AMBIENT_SCALE`] with fx off).
     pub ambient_scale: f32,
+    headlamp_level: Option<&'a crate::game::level::Level>,
 }
 
 pub(super) struct Candidates {
@@ -848,6 +849,7 @@ impl LightMap {
             elapsed: scene.elapsed,
             theme,
             fx,
+            headlamp_level: (scene.player.buffs.headlamp > 0.0).then_some(scene.level),
             ambient_scale: if fx {
                 upsample::ambient_scale(theme, scene.mode)
             } else {
@@ -1034,7 +1036,7 @@ impl LightMap {
             let tag = if directional { LightTag::Sun } else { entry.tag };
             // Ground sources reach specular and water through the grid. Keep
             // them out of the strongest-light list used to cast body shadows.
-            if fx && tag != LightTag::Ground {
+            if fx && tag != LightTag::Ground && !is_headlamp(tag) {
                 let mut fx_light = FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed));
                 if let Some(steady_total) = entry.steady_total {
                     let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
@@ -1305,6 +1307,11 @@ impl LightMap {
     }
 }
 
+// The lamp owns this moving-light priority so lower tiers preserve the beam.
+fn is_headlamp(tag: LightTag) -> bool {
+    tag == (LightTag::Moving { priority: super::sources::HEADLAMP_LIGHT_PRIORITY })
+}
+
 /// The body of [`LightMap::push_shaped`], on the list alone so it can run
 /// while another field of the map is borrowed.
 fn push_shaped(shaped: &mut Vec<ShapedEntry>, entry: ShapedEntry) {
@@ -1332,7 +1339,7 @@ impl Grid {
         geometry: &Geometry,
         profile: ThemeAmbient,
         cap: f32,
-        pass: Pass,
+        pass: Pass<'_>,
     ) {
         self.stride = pass.mode.stride();
         let s = self.stride as i32;
@@ -1406,11 +1413,12 @@ impl Grid {
         shadow: Option<&ShadowProfile>,
         soft: Option<&SoftProfile>,
         tag: LightTag,
-        pass: Pass,
+        pass: Pass<'_>,
         lure_air: f32,
     ) {
         let (mode, elapsed, theme) = (pass.mode, pass.elapsed, pass.theme);
         let radius = light.extent();
+        let headlamp = is_headlamp(tag);
         let halo = light.falloff == Falloff::Small && matches!(tag, LightTag::Moving { .. });
         let centre = light.pos - self.start;
         let spacing = self.stride as f32;
@@ -1460,7 +1468,8 @@ impl Grid {
         let ys = lo(centre.y)..hi(centre.y, self.h);
         for y in ys.clone() {
             for x in xs.clone() {
-                let delta = self.point(x, y) - light.pos;
+                let point = self.point(x, y);
+                let delta = point - light.pos;
                 let (core, tail) = curve.parts(delta, delta.len_sq(), cone_limit);
                 let tail = curve.quantise(tail);
                 if core <= 0.0 && tail <= 0.0 {
@@ -1469,6 +1478,11 @@ impl Grid {
                 let i = y * self.w + x;
                 let surface = self.surfaces[i];
                 if surface.layer & light.layers.0 == 0 {
+                    continue;
+                }
+                if headlamp && pass.headlamp_level.is_some_and(|level| {
+                    !crate::game::ecs::systems::projectiles::los_clear(level, light.pos, point, 0.0)
+                }) {
                     continue;
                 }
                 let visibility = match shadow {
@@ -1560,7 +1574,7 @@ impl Grid {
                 // floor but is not a light source for relief, sheen and rim: as
                 // a sample's dominant light it drew glinting grout lines round
                 // every pickup and projectile on the floor.
-                if fx_on && matches!(light.blend, Blend::Add) && !halo {
+                if fx_on && matches!(light.blend, Blend::Add) && !halo && !headlamp {
                     let shadowed = (1.0 - visibility) * light.shadow_color.opacity;
                     if shadowed > 0.0 {
                         let info = &mut self.info[i];
@@ -1936,6 +1950,44 @@ mod dropping_light_tests {
     }
 
     #[test]
+    fn headlamp_lights_the_floor_on_every_tier_and_stops_at_walls_in_a_blackout() {
+        use crate::game::art_walls::WallKind;
+        use crate::game::collision::TileKind;
+        use crate::game::ecs::systems::powerups::HEADLAMP_SECS;
+
+        let mut w = fx_world(Theme::Sewer);
+        w.player.face = Vec2::new(1.0, 0.0);
+        for y in 40..48 {
+            w.level.tiles.set(48, y, TileKind::Wall(WallKind::Solid));
+        }
+        w.level.tiles.rebuild_masks();
+        let cam = w.player.pos - Vec2::new(16.0, 32.0);
+        let draw = |world: &World, mode, fx| {
+            let mut scene = fx_scene(world, mode, ColorDepth::Truecolor, cam);
+            scene.fx = fx;
+            scene.blackout = 1.0;
+            let mut pb = PixelBuffer::new(120, 64);
+            pb.clear((54, 54, 54));
+            LightMap::new().apply_scene(&mut pb, &scene);
+            pb
+        };
+        for mode in LightingMode::LIVE {
+            for fx in [false, true] {
+                w.player.buffs.headlamp = 0.0;
+                let off = draw(&w, mode, fx);
+                w.player.buffs.headlamp = HEADLAMP_SECS;
+                let lit = draw(&w, mode, fx);
+                let red = |pb: &PixelBuffer, x, y| pb.pixel_at(x, y).0;
+                assert!(red(&lit, 56, 32) > red(&off, 56, 32) + 10, "{mode:?}, fx={fx}");
+                assert_eq!(lit.pixel_at(100, 32), off.pixel_at(100, 32), "{mode:?}, fx={fx}");
+                assert_eq!(lit.pixel_at(8, 32), off.pixel_at(8, 32), "{mode:?}, fx={fx}");
+            }
+        }
+        let map = gather(&w);
+        assert!(map.shaped.iter().any(|entry| is_headlamp(entry.tag)));
+    }
+
+    #[test]
     fn dropping_lights_scale_by_rank_arm_and_dry() {
         let cases = [
             (1, DROPPING_ARM, 18.0, 0.80),
@@ -2169,7 +2221,7 @@ mod composite_tests {
             let mut pb = PixelBuffer::new(128, 88);
             pb.clear((192, 192, 192));
             let mut grid = Grid::default();
-            let pass = Pass { mode, theme, elapsed: 0.0, fx: true, ambient_scale: 0.3 };
+            let pass = Pass { mode, theme, elapsed: 0.0, fx: true, ambient_scale: 0.3, headlamp_level: None };
             grid.prepare(&pb, Vec2::ZERO, &geometry, super::super::theme_ambient(theme), 1.0, pass);
             let dark = grid.samples[0].shade_exact((192, 192, 192)).2;
             grid.splat(light, Some(&profile), None, LightTag::Moving { priority: 3 }, pass, 0.0);

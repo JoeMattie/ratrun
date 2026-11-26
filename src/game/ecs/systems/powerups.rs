@@ -164,6 +164,108 @@ pub const COLLAR_SECS: f32 = 16.0;
 pub const COLLAR_XP_MULT: f32 = 2.0;
 pub const COLLAR_CHASE_MULT: f32 = 1.3;
 
+pub const HEADLAMP_SECS: f32 = 18.0;
+pub const HEADLAMP_RANGE: f32 = 128.0;
+pub const HEADLAMP_HALF_ANGLE: f32 = 0.38;
+pub const HEADLAMP_SHY_STRENGTH: f32 = 0.9;
+pub const HEADLAMP_FADE_SECS: f32 = 3.0;
+
+/// The lamp's ground-plane beam, shared by movement, fog and lighting.
+#[derive(Clone, Copy)]
+pub(crate) struct HeadlampBeam {
+    pub origin: Vec2,
+    pub dir: Vec2,
+    slope: f32,
+}
+
+impl HeadlampBeam {
+    pub fn from_player(
+        level: &crate::game::level::Level,
+        player: &Player,
+        facing: Vec2,
+    ) -> Option<Self> {
+        if player.buffs.headlamp <= 0.0 || facing.len_sq() <= 1e-6 {
+            return None;
+        }
+        let dir = facing.normalized();
+        let head = player.pos + dir * (3.2 * player.buffs.draw_scale());
+        // A giant or a rat facing a nearby wall can put its drawn head past
+        // the wall face. Keep the ground-plane light on the near side.
+        let origin = match super::projectiles::wall_hit(level, player.pos, head, 0.0) {
+            Some(t) => player.pos + (head - player.pos) * (t - 0.01).max(0.0),
+            None => head,
+        };
+        let (sin, cos) = crate::detmath::sin_cos(HEADLAMP_HALF_ANGLE);
+        Some(Self { origin, dir, slope: sin / cos })
+    }
+
+    /// Relative strength at this point, with a signed side for the push.
+    fn profile(self, level: &crate::game::level::Level, at: Vec2) -> Option<(f32, f32)> {
+        let delta = at - self.origin;
+        let along = delta.dot(self.dir);
+        let side = delta.dot(self.dir.perp());
+        let distance_sq = delta.len_sq();
+        if along <= 0.0
+            || side.abs() >= along * self.slope
+            || distance_sq >= HEADLAMP_RANGE * HEADLAMP_RANGE
+            || !super::projectiles::los_clear(level, self.origin, at, 0.0)
+        {
+            return None;
+        }
+        let angular = 1.0 - side.abs() / (along * self.slope);
+        let radial = 1.0 - distance_sq.sqrt() / HEADLAMP_RANGE;
+        Some((angular * radial, side))
+    }
+
+    pub fn reaches(self, level: &crate::game::level::Level, at: Vec2) -> bool {
+        self.profile(level, at).is_some()
+    }
+
+    /// A lateral fraction of the body's effective gait. Use the spawn slot
+    /// to break an exact centre-line tie so a stacked crowd takes both sides.
+    pub fn shy(self, level: &crate::game::level::Level, enemy: &Enemy, spawn: u64) -> Vec2 {
+        let Some((strength, side)) = self.profile(level, enemy.pos) else {
+            return Vec2::ZERO;
+        };
+        let response = headlamp_response(enemy);
+        if response == 0.0 {
+            return Vec2::ZERO;
+        }
+        let sign = if side.abs() > 1e-3 {
+            side.signum()
+        } else if spawn.is_multiple_of(2) {
+            1.0
+        } else {
+            -1.0
+        };
+        self.dir.perp() * (sign * strength * response * HEADLAMP_SHY_STRENGTH)
+    }
+}
+
+/// A lamp never interrupts an attack whose geometry has already committed.
+fn headlamp_response(e: &Enemy) -> f32 {
+    if e.named
+        || e.kind == EnemyKind::Boss
+        || !e.targetable()
+        || e.crab_pot_held
+        || e.position_locked
+        || e.w3.holds()
+        || e.w3.bar_t > 0.0
+        || (e.w4.holds(e.kind) && e.w4.phase != 0)
+        || super::floor_sewer::leech_tongue(e).is_some()
+        || super::floor_kitchen::egg_tell_of(e).is_some()
+        || super::floor_kitchen::egg_ring_of(e).is_some()
+        || super::floor_lab::syringe_ray(e).is_some()
+        || super::floor_laundry::peg_holding(e)
+        || super::floor_printworks::staple_warned(e)
+        || super::floor_outfall::outfall_enemy_tell(e).is_some()
+        || (e.kind == EnemyKind::Drake && e.w4.phase != super::drake::PHASE_WADDLE)
+    {
+        return 0.0;
+    }
+    if e.elite { 0.5 } else { 1.0 }
+}
+
 /// World px the rat walks between two little heel prints.
 const SOCK_PRINT_SPACING: f32 = 9.0;
 
@@ -261,6 +363,7 @@ pub fn powerups_system(
         (expired[5], PickupKind::ShrinkDraught),
         (expired[6], PickupKind::WhiteCoat),
         (expired[7], PickupKind::TheCollar),
+        (expired[8], PickupKind::Headlamp),
     ] {
         if did_expire {
             vfx::emit_buff_expire(&mut particles, ppos, kind);
@@ -578,10 +681,11 @@ mod tests {
 
         let mut w = open_arena(719);
         type BuffTimer = fn(&Buffs) -> f32;
-        let cases: [(PickupKind, f32, BuffTimer); 3] = [
+        let cases: [(PickupKind, f32, BuffTimer); 4] = [
             (PickupKind::ShrinkDraught, SHRINK_SECS, |b| b.tiny),
             (PickupKind::WhiteCoat, WHITE_COAT_SECS, |b| b.white_coat),
             (PickupKind::TheCollar, COLLAR_SECS, |b| b.collar),
+            (PickupKind::Headlamp, HEADLAMP_SECS, |b| b.headlamp),
         ];
         for (kind, secs, left) in cases {
             collect(&mut w, kind);
@@ -1714,7 +1818,7 @@ mod tests {
 
     // ---- Drop weights ----------------------------------------------------
 
-    /// The three new outcomes use two Heal buckets and one Nuke bucket.
+    /// The Headlamp takes the last default Medkit bucket.
     #[test]
     fn drop_weights_match_the_design() {
         use rand::rngs::StdRng;
@@ -1727,7 +1831,7 @@ mod tests {
         }
         let pct = |k: PickupKind| *counts.get(&k).unwrap_or(&0) as f32 * 100.0 / n as f32;
         for (kind, want) in [
-            (PickupKind::Heal, 30.0),
+            (PickupKind::Heal, 29.0),
             (PickupKind::Magnet, 18.0),
             (PickupKind::Nuke, 3.0),
             (PickupKind::GrowthSerum, 4.0),
@@ -1738,6 +1842,7 @@ mod tests {
             (PickupKind::ShrinkDraught, 1.0),
             (PickupKind::WhiteCoat, 1.0),
             (PickupKind::TheCollar, 1.0),
+            (PickupKind::Headlamp, 1.0),
         ] {
             let got = pct(kind);
             assert!(
@@ -1905,11 +2010,44 @@ mod tests {
         // Same answer either way, so the change is stream-only.
         assert_eq!(kind, loot::roll_pickup_kind_from_word(adversarial));
         assert_eq!(kind, PickupKind::Heal, "the adversarial word is still a Heal");
+        let headlamp_word = (29u64 << 32).div_ceil(100) as u32;
+        let mut lamp = ScriptRng::new(&[headlamp_word]);
+        assert_eq!(loot::roll_pickup_kind(&mut lamp), PickupKind::Headlamp);
+        assert_eq!(lamp.at, 1, "the Headlamp spends the same single loot word");
         // Every bucket is reachable from a word, so the table still pays every
         // kind (the distribution test above pins the weights).
         for word in [0u32, u32::MAX / 2, u32::MAX] {
             let _ = loot::roll_pickup_kind_from_word(word);
         }
+    }
+
+    #[test]
+    fn headlamp_loot_weights_preserve_all_other_buckets() {
+        let mut weights = [0; PickupKind::all().len()];
+        for bucket in 0..100u64 {
+            let word = ((bucket << 32).div_ceil(100)) as u32;
+            weights[loot::roll_pickup_kind_from_word(word) as usize] += 1;
+        }
+        assert_eq!(weights, [29, 18, 3, 14, 10, 9, 9, 4, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn headlamp_collection_and_expiry_do_not_draw_rng() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut w = open_arena(21);
+        w.rng = StdRng::seed_from_u64(21);
+        let mut before = StdRng::seed_from_u64(21);
+        collect(&mut w, PickupKind::Headlamp);
+        assert_eq!(w.player.buffs.headlamp, HEADLAMP_SECS);
+        buff_tick(&mut w);
+        assert!(w.player.buffs.headlamp < HEADLAMP_SECS);
+        collect(&mut w, PickupKind::Headlamp);
+        assert_eq!(w.player.buffs.headlamp, HEADLAMP_SECS);
+        w.player.buffs.headlamp = DT * 0.5;
+        buff_tick(&mut w);
+        assert_eq!(w.player.buffs.headlamp, 0.0);
+        assert_eq!(w.rng.next_u64(), before.next_u64());
     }
 
     // ---- Effect captures (manual, `RATRUN_FX_DUMP=1`) -------------------

@@ -1864,6 +1864,16 @@ impl Bot {
         }
 
         let mut bonus = 0.0f32;
+        if moving && w.player.buffs.headlamp > 0.0
+            && self.threats.iter().any(|threat| {
+                matches!(*threat, Threat::Enemy { pos, vel, .. }
+                    if pos.dist_sq(p) < 100.0 * 100.0 && vel.dot(p - pos) > 0.0)
+            })
+        {
+            // Keep moving through the lane the light is clearing while under
+            // pursuit. Wall, body and telegraph danger still score normally.
+            bonus += 3.0 * dir.dot(w.player.face).max(0.0);
+        }
         // In a boss fight the boss is the objective: the level (and the run)
         // ends when it dies, so it outranks loot and the loop.
         let fighting = self.boss_pos.is_some();
@@ -1995,6 +2005,7 @@ impl Bot {
                 PickupKind::ShrinkDraught => 5.0,
                 PickupKind::WhiteCoat => 3.5,
                 PickupKind::TheCollar => 4.5,
+                PickupKind::Headlamp => if w.enemy_count() > 8 { 6.0 } else { 3.5 },
             };
             bonus += want * (1.0 - d / 190.0) * dir.dot((ppos - p).normalized());
         }

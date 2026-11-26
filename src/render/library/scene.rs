@@ -2581,6 +2581,9 @@ fn stage_pickup(theme: Theme, kind: PickupKind) -> Staged {
             body.speed_scale = 0.45;
         }
     }
+    if kind == PickupKind::Headlamp {
+        world.flat_lit = false;
+    }
     let mut script = Script::new(2.8, 1.5);
     script.framing = Framing::Point(rat + Vec2::new(16.0, 0.0));
     script.input = |t| Input {
