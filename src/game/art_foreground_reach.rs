@@ -1,27 +1,86 @@
 //! Art for foreground items that reach in from off screen (`fore-reach-contract`).
 //!
-//! Each reach item is a near-camera silhouette anchored beyond one viewport edge:
-//! the `x <= 0` stem tiles seamlessly forever (period [`STEM_PERIOD`] = 16 art px)
-//! and transitions smoothly into a free tip ending at `x = spec.tip_len`.
+//! Two geometric families share one local raster API:
+//!
+//! * **Strips** ([`ReachShape::Strip`] — `LightPole`, `SignArm`, `CraneHook`,
+//!   `HangingLamp`, `VineTendril`, `KelpFrond`, `PipeElbow`): narrow near-camera
+//!   silhouettes anchored beyond one viewport edge. Their `x <= 0` stem tiles
+//!   seamlessly forever (period [`STEM_PERIOD`] = 16 art px) and transitions
+//!   smoothly into a free tip ending at `x = spec.tip_len`.
+//! * **2D Tree Canopy** ([`ReachShape::Canopy`] — [`ReachKind::TreeCanopy`]): one
+//!   whole tree crown seen from below or the side, anchored flat along one
+//!   viewport edge (`x = 0`) with its trunk strictly off-screen (`x = CANOPY_TRUNK_X < 0`).
+//!   Its silhouette is an irregular, gappy half-disc of radius [`CANOPY_RADIUS`]
+//!   (`36.0` art px; `72 x 144` world px at `k = 2`, `108 x 216` at `k = 3`),
+//!   covering most of an 80-px short axis while leaving ~45 % open light windows.
 //!
 //! ## Contract
 //!
 //! ```ignore
-//! pub enum ReachKind { TreeBranch, LightPole, SignArm, CraneHook, HangingLamp, VineTendril, KelpFrond, PipeElbow }
-//! pub struct ReachSpec { pub tip_len: f32, pub thickness: f32, pub organic: bool, pub floors: &'static [Theme] }
+//! pub enum AnchorSide { Top, Bottom, Left, Right }
+//! pub enum ReachShape { Strip, Canopy }
+//! pub enum ReachKind { TreeCanopy, LightPole, SignArm, CraneHook, HangingLamp, VineTendril, KelpFrond, PipeElbow }
+//! pub struct ReachSpec {
+//!     pub tip_len: f32,
+//!     pub thickness: f32,
+//!     pub organic: bool,
+//!     pub shape: ReachShape,
+//!     pub sides: &'static [AnchorSide],
+//!     pub floors: &'static [Theme],
+//! }
 //! pub fn reach_spec(kind: ReachKind) -> ReachSpec;
 //! pub fn draw_reach(kind: ReachKind, body: &mut PixelBuffer, shadow: &mut PixelBuffer, len: i32, t: f32, theme: Theme);
 //! ```
 //!
+//! ## Fixed Entry Sides & Anchor-Side Mapping
+//!
+//! Read `reach_spec(kind).sides` (or `kind.allowed_sides()`) when placing items:
+//!
+//! * [`ReachKind::LightPole`] — [`AnchorSide::Bottom`] only (mast rises from bottom edge).
+//! * [`ReachKind::HangingLamp`], [`ReachKind::CraneHook`] — [`AnchorSide::Top`] only
+//!   (cord / cable hangs from top edge).
+//! * [`ReachKind::TreeCanopy`], [`ReachKind::SignArm`], [`ReachKind::VineTendril`],
+//!   [`ReachKind::KelpFrond`], [`ReachKind::PipeElbow`] — any of
+//!   [`AnchorSide::ALL`] (`Top | Bottom | Left | Right`).
+//!
+//! Local coordinates `(local_x, local_y)` map to screen coordinates `(sx, sy)`
+//! around the anchor point along the chosen viewport edge:
+//!
+//! * `AnchorSide::Left`:   anchor edge `sx = 0`,      inward `+local_x -> +sx`, lateral `local_y -> +sy`.
+//! * `AnchorSide::Right`:  anchor edge `sx = view_w`, inward `+local_x -> -sx`, lateral `local_y -> +sy`.
+//! * `AnchorSide::Top`:    anchor edge `sy = 0`,      inward `+local_x -> +sy`, lateral `local_y -> +sx`.
+//! * `AnchorSide::Bottom`: anchor edge `sy = view_h`, inward `+local_x -> -sy`, lateral `local_y -> +sx`.
+//!
+//! ## 2D Canopy Coordinate Contract (`ReachKind::TreeCanopy`)
+//!
+//! `TreeCanopy` uses the **exact same buffer mapping** as the strip kinds, with
+//! `spec.tip_len = CANOPY_RADIUS` (`36.0`) and `spec.thickness = 2.0 * CANOPY_RADIUS` (`72.0`):
+//!
+//! * **Anchor edge**: the flat diameter of the half-disc lies on `local_x = 0.0`.
+//! * **Depth into the view**: `0.0 < local_x <= CANOPY_RADIUS` (`36.0` art px).
+//!   At `k = 2` (standard parallax band) this spans `72` world px (`0.90x` of an
+//!   80-px short axis); at `k = 3` (near parallax) it spans `108` world px.
+//! * **Lateral extent**: `|local_y| <= CANOPY_RADIUS` (`72.0` art px wide,
+//!   centred on `local_y = 0.0` / `py = h * 0.5`; `144` world px at `k = 2`,
+//!   `216` world px at `k = 3`).
+//! * **Sliding off-screen in its one direction**: pass `len in 0..=CANOPY_RADIUS as i32`
+//!   (`0..=36`). At `len = 36` the full half-disc sits flush against the anchor edge;
+//!   smaller `len` clips cleanly from the anchor edge so the outer crown glides
+//!   off-screen. The placer should clamp `len <= spec.tip_len.round() as i32`.
+//! * **Trunk always off-screen**: the trunk hub lives at `local_x = CANOPY_TRUNK_X`
+//!   (`-11.0`); `draw_reach` never paints any pixel with `local_x <= 0.0`, even if
+//!   a caller passes `len > tip_len`.
+//! * **Buffer sizing**: width `>= len + blur_pad`, height `>= 72 + 2 * blur_pad`.
+//! * **Light-through**: 35 %–65 % of the half-disc area is filled (~55 %), keeping
+//!   at least ~45 % open dappled sky so enemies and projectiles stay readable.
+//!
 //! ## Raster Conventions
 //!
-//! * Local coordinates: `x` runs from the off-screen anchor (`x <= 0`) toward the
-//!   tip at `x = spec.tip_len`; `y` runs across the item with `0.0` on the centre
-//!   line (`|y| <= spec.thickness * 0.5`).
 //! * `len` local art pixels are rasterised into `px in 0..len` (clipped to the
 //!   buffer width), mapping `px` to `local_x = px as f32 + 0.5 + (spec.tip_len - len as f32)`
-//!   so `px = len - 1` sits at the tip (`local_x = spec.tip_len - 0.5`) and any
-//!   extra columns `px >= len` remain empty `(0, 0, 0)` for blur padding.
+//!   and `py` to `local_y = py as f32 + 0.5 - h as f32 * 0.5`, so `px = len - 1`
+//!   sits at the tip/rim (`local_x = spec.tip_len - 0.5`) and any extra columns
+//!   `px >= len` remain empty `(0, 0, 0)` for blur padding.
 //! * `body` receives full un-premultiplied silhouette colours (empty pixels stay
 //!   `(0, 0, 0)`) and material pens via [`PixelBuffer::set_pen`] (warm lamp lenses
 //!   on [`ReachKind::LightPole`] and [`ReachKind::HangingLamp`] stamp
@@ -29,8 +88,8 @@
 //! * `shadow` receives a soft grayscale shadow mask `(s, s, s)` with pen `0`
 //!   (`0` = transparent, `255` = full shadow weight).
 //! * Pure render-only drawing: zero heap allocations, zero RNG, and smooth C1
-//!   cantilever sway in `t` for organic kinds (anchored rigid at `x <= 0` so the
-//!   off-screen stem always tiles seamlessly).
+//!   sway in `t` for organic kinds (anchored rigid at `x <= 0`, with outer twigs
+//!   swaying substantially more than inner limbs on `TreeCanopy`).
 
 use std::f32::consts::TAU;
 
@@ -39,10 +98,20 @@ use crate::render::foreground::rim_tint;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
 
-/// Exact seamless repeat period of the `x <= 0` anchor stem in local art pixels.
-/// A power of two so `pos_mod(x, 16.0)` is IEEE-754 exact for every half-integer
-/// sample coordinate.
+/// Exact seamless repeat period of the `x <= 0` anchor stem in local art pixels
+/// for [`ReachShape::Strip`] kinds. A power of two so `pos_mod(x, 16.0)` is
+/// IEEE-754 exact for every half-integer sample coordinate.
 pub const STEM_PERIOD: i32 = 16;
+
+/// Semicircular radius of [`ReachKind::TreeCanopy`] in local art pixels.
+/// At `k = 2` this yields `72` world px (`0.90x` of an 80-px short axis) deep
+/// by `144` world px laterally; at `k = 3`, `108 x 216` world px.
+pub const CANOPY_RADIUS: f32 = 36.0;
+
+/// Off-screen trunk hub coordinate for [`ReachKind::TreeCanopy`] in local art
+/// pixels. Strictly negative so the trunk always lies behind the anchor edge
+/// (`x = 0`) and never enters the drawn extent.
+pub const CANOPY_TRUNK_X: f32 = -11.0;
 
 /// Material pen byte for `MaterialKind::Emissive` (`14`, non-creature, flat) in
 /// `crate::render::lighting::material`, stamped on warm lamp lenses and bulbs.
@@ -64,11 +133,39 @@ const SOFT_LIFT: f32 = 1.18;
 /// Share of the floor's ambient character tint mixed into the rim.
 const RIM_TINT_MIX: f32 = 0.16;
 
-/// Foreground item kinds that reach into the view from off screen and end in a
-/// free tip.
+/// Viewport edge from which a foreground reach item may enter the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AnchorSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl AnchorSide {
+    /// All four viewport edges, in canonical order.
+    pub const ALL: &'static [Self] = &[Self::Top, Self::Bottom, Self::Left, Self::Right];
+}
+
+const TOP_ONLY: &[AnchorSide] = &[AnchorSide::Top];
+const BOTTOM_ONLY: &[AnchorSide] = &[AnchorSide::Bottom];
+
+/// Geometric family of a [`ReachKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReachShape {
+    /// Narrow strip with an infinitely tiling stem (`x <= 0`, period [`STEM_PERIOD`])
+    /// and a free tip (`0 < x <= tip_len`).
+    Strip,
+    /// 2D half-disc canopy anchored flat along `x = 0`, extending `0 < x <= tip_len`
+    /// into the view and `|y| <= thickness * 0.5` laterally, with its trunk strictly
+    /// off-screen (`x < 0`) and nothing drawn for `x <= 0`.
+    Canopy,
+}
+
+/// Foreground item kinds that reach into the view from off screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReachKind {
-    TreeBranch,
+    TreeCanopy,
     LightPole,
     SignArm,
     CraneHook,
@@ -82,7 +179,7 @@ impl ReachKind {
     /// Every reach kind in declaration order.
     pub const fn all() -> [Self; 8] {
         [
-            Self::TreeBranch,
+            Self::TreeCanopy,
             Self::LightPole,
             Self::SignArm,
             Self::CraneHook,
@@ -92,18 +189,47 @@ impl ReachKind {
             Self::PipeElbow,
         ]
     }
+
+    /// Viewport edges from which this kind is allowed to enter.
+    pub const fn allowed_sides(self) -> &'static [AnchorSide] {
+        match self {
+            Self::LightPole => BOTTOM_ONLY,
+            Self::HangingLamp | Self::CraneHook => TOP_ONLY,
+            Self::TreeCanopy
+            | Self::SignArm
+            | Self::VineTendril
+            | Self::KelpFrond
+            | Self::PipeElbow => AnchorSide::ALL,
+        }
+    }
+
+    /// Whether this kind is a repeating-stem strip or a 2D edge-anchored canopy.
+    pub const fn shape(self) -> ReachShape {
+        match self {
+            Self::TreeCanopy => ReachShape::Canopy,
+            Self::LightPole
+            | Self::SignArm
+            | Self::CraneHook
+            | Self::HangingLamp
+            | Self::VineTendril
+            | Self::KelpFrond
+            | Self::PipeElbow => ReachShape::Strip,
+        }
+    }
 }
 
-/// Geometry, motion, and floor eligibility for a [`ReachKind`].
+/// Geometry, motion, entry-side, and floor eligibility for a [`ReachKind`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReachSpec {
     pub tip_len: f32,
     pub thickness: f32,
     pub organic: bool,
+    pub shape: ReachShape,
+    pub sides: &'static [AnchorSide],
     pub floors: &'static [Theme],
 }
 
-const FLOORS_TREE_BRANCH: &[Theme] = &[Theme::Trailer, Theme::Kitchen];
+const FLOORS_TREE_CANOPY: &[Theme] = &[Theme::Trailer, Theme::Kitchen];
 const FLOORS_TRAILER_ONLY: &[Theme] = &[Theme::Trailer];
 const FLOORS_CRANE_HOOK: &[Theme] = &[Theme::Printworks, Theme::Lab, Theme::Sewer];
 const FLOORS_HANGING_LAMP: &[Theme] = &[Theme::Kitchen, Theme::Laundry, Theme::Lab];
@@ -113,67 +239,89 @@ const FLOORS_PIPE_ELBOW: &[Theme] = &[Theme::Sewer, Theme::Lab, Theme::Printwork
 
 /// Static placement and sizing specification for `kind` in local art pixels.
 pub fn reach_spec(kind: ReachKind) -> ReachSpec {
+    let shape = kind.shape();
+    let sides = kind.allowed_sides();
     match kind {
-        ReachKind::TreeBranch => ReachSpec {
-            tip_len: 30.0,
-            thickness: 20.0,
+        ReachKind::TreeCanopy => ReachSpec {
+            tip_len: CANOPY_RADIUS,
+            thickness: CANOPY_RADIUS * 2.0,
             organic: true,
-            floors: FLOORS_TREE_BRANCH,
+            shape,
+            sides,
+            floors: FLOORS_TREE_CANOPY,
         },
         ReachKind::LightPole => ReachSpec {
             tip_len: 26.0,
             thickness: 18.0,
             organic: false,
+            shape,
+            sides,
             floors: FLOORS_TRAILER_ONLY,
         },
         ReachKind::SignArm => ReachSpec {
             tip_len: 28.0,
             thickness: 20.0,
             organic: false,
+            shape,
+            sides,
             floors: FLOORS_TRAILER_ONLY,
         },
         ReachKind::CraneHook => ReachSpec {
             tip_len: 24.0,
             thickness: 16.0,
             organic: false,
+            shape,
+            sides,
             floors: FLOORS_CRANE_HOOK,
         },
         ReachKind::HangingLamp => ReachSpec {
             tip_len: 20.0,
             thickness: 18.0,
             organic: false,
+            shape,
+            sides,
             floors: FLOORS_HANGING_LAMP,
         },
         ReachKind::VineTendril => ReachSpec {
             tip_len: 28.0,
             thickness: 16.0,
             organic: true,
+            shape,
+            sides,
             floors: FLOORS_SEWER_ONLY,
         },
         ReachKind::KelpFrond => ReachSpec {
             tip_len: 32.0,
             thickness: 16.0,
             organic: true,
+            shape,
+            sides,
             floors: FLOORS_OUTFALL_ONLY,
         },
         ReachKind::PipeElbow => ReachSpec {
             tip_len: 24.0,
             thickness: 18.0,
             organic: false,
+            shape,
+            sides,
             floors: FLOORS_PIPE_ELBOW,
         },
     }
 }
 
-/// Rasterise the item in its LOCAL frame: `x` runs from the anchor side
-/// (`x <= 0` continues forever via a repeating stem/trunk/pole/cable/pipe
-/// segment) toward the tip at `x = spec.tip_len`; `y` runs across the item
-/// with `0` on the centre line.
+/// Rasterise the item in its LOCAL frame: `x` runs from the anchor side toward
+/// the tip/rim at `x = spec.tip_len`; `y` runs parallel to the anchor edge with
+/// `0` on the centre line (`|y| <= spec.thickness * 0.5`).
+///
+/// For [`ReachShape::Strip`] kinds, `x <= 0` continues forever via a repeating
+/// stem segment of period [`STEM_PERIOD`]. For [`ReachKind::TreeCanopy`]
+/// ([`ReachShape::Canopy`]), the trunk lies strictly off-screen (`x < 0`) and
+/// `x <= 0` is never drawn; pass `len in 0..=CANOPY_RADIUS as i32`.
 ///
 /// `body` and `shadow` are the kept rasters the foreground layer blurs and
 /// composites (same conventions as `art_foreground`'s bands: 2x/3x pixel
 /// blocks, body + shadow, pens). `len` is how many local px to draw from the
-/// screen edge to the tip; `t` drives smooth sway for organic kinds.
+/// screen edge to the tip/rim; `t` drives smooth sway for organic kinds.
 pub fn draw_reach(
     kind: ReachKind,
     body: &mut PixelBuffer,
@@ -194,7 +342,7 @@ pub fn draw_reach(
     {
         let mut canvas = ReachCanvas::new(body, shadow, spec, len);
         match kind {
-            ReachKind::TreeBranch => paint_tree_branch(&mut canvas, &pal, t),
+            ReachKind::TreeCanopy => paint_tree_canopy(&mut canvas, &pal, t),
             ReachKind::LightPole => paint_light_pole(&mut canvas, &pal),
             ReachKind::SignArm => paint_sign_arm(&mut canvas, &pal),
             ReachKind::CraneHook => paint_crane_hook(&mut canvas, &pal),
@@ -665,110 +813,269 @@ impl<'a> ReachCanvas<'a> {
     }
 }
 
-// ---- 1. TreeBranch (Flatbed + Kitchen window plant, organic) ---------------
+// ---- 1. TreeCanopy (2D half-disc crown, off-screen trunk, organic) ---------
 
-fn paint_tree_branch(c: &mut ReachCanvas, pal: &ReachPal, t: f32) {
-    // 1. Seamless x <= 0 gnarled bark bough (period 16).
-    if let (Some((x_lo, x_hi)), Some((y_lo, y_hi))) =
-        (c.px_range(c.x_origin, 0.0, false), c.py_range(-5.5, 5.5))
-    {
+/// Radius-preserving, C1-anchored whole-canopy breeze with stronger outer-twig sway.
+#[inline]
+fn canopy_sway(x: f32, y: f32, t: f32) -> (f32, f32) {
+    if x <= 0.0 {
+        return (x, y);
+    }
+    let r = (x * x + y * y).sqrt();
+    if r < 1e-4 {
+        return (x, y);
+    }
+    let sr = (r / CANOPY_RADIUS).clamp(0.0, 1.0);
+    let ang = y.atan2(x);
+    // Smoothstep to 0 at x = 0 so primary limbs stay C1-rooted to the off-screen trunk
+    // and never rotate backward across x = 0.
+    let sx = (x / 10.0).clamp(0.0, 1.0);
+    let edge_guard = sx * sx * (3.0 - 2.0 * sx);
+    let whole = (sr * sr) * (0.085 * (t * 1.05).sin() + 0.022 * (t * 1.80 + 0.7).sin());
+    let twig = (sr * sr * sr) * (0.032 * (t * 1.45 + ang * 1.6).sin());
+    let new_ang = ang + edge_guard * (whole + twig);
+    (r * new_ang.cos(), r * new_ang.sin())
+}
+
+fn fill_canopy_lobe(c: &mut ReachCanvas, lobe: [f32; 4], style: PaintStyle) {
+    let [cx, cy, rx, ry] = lobe;
+    if rx <= 0.1 || ry <= 0.1 {
+        return;
+    }
+    let Some((x_lo, x_hi)) = c.px_range(cx - rx - 1.0, cx + rx + 1.0, true) else {
+        return;
+    };
+    let Some((y_lo, y_hi)) = c.py_range(cy - ry - 1.0, cy + ry + 1.0) else {
+        return;
+    };
+    let r_eff = rx.min(ry);
+    let r_max2 = CANOPY_RADIUS * CANOPY_RADIUS;
+    for py in y_lo..=y_hi {
+        let y = c.ly(py);
+        let ny = (y - cy) / ry;
+        let ny2 = ny * ny;
+        if ny2 >= 1.0 {
+            continue;
+        }
+        let y2 = y * y;
         for px in x_lo..=x_hi {
             let x = c.lx(px);
-            if x > 0.0 {
+            if x <= 0.0 || x * x + y2 > r_max2 {
                 continue;
             }
-            let u = pos_mod(x, STEM_PERIOD as f32);
-            let ang = u * (TAU / STEM_PERIOD as f32);
-            let bv = 0.65 * ang.sin();
-            let knot = 0.45 * (1.0 - (u - 8.0).abs() * 0.45).max(0.0);
-            let br = 2.55 + 0.30 * ang.cos() + knot;
-            for py in y_lo..=y_hi {
-                let y = c.ly(py);
-                let d_in = br - (y - bv).abs();
-                if d_in <= 0.0 {
-                    continue;
-                }
-                c.put_shadow(px, py, soft_u8(d_in, 1.5, 230));
-                let side = -(y - bv) / br.max(0.5);
-                let grain = (u * (TAU / 8.0) + y * 1.4).sin();
-                let col = if d_in < 0.9 && side > 0.15 {
-                    pal.bark_rim
-                } else if side < -0.25 || grain < -0.68 {
-                    pal.bark_deep
-                } else {
-                    pal.bark_mid
-                };
-                c.put_body(px, py, col, WOOD_PEN);
+            let nx = (x - cx) / rx;
+            let q = nx * nx + ny2;
+            if q >= 1.0 {
+                continue;
             }
+            let d_in = (1.0 - q.sqrt()) * r_eff;
+            c.put_shadow(px, py, soft_u8(d_in, 1.6, style.sh_w));
+            // Directional crown lighting: outer/upper edge brighter, inner underside shaded.
+            let side = -0.62 * ny + 0.38 * nx;
+            let col = if let Some(rim) = style.rim {
+                if d_in < 1.05 && side > 0.14 {
+                    rim
+                } else if side < -0.22 {
+                    style.dark
+                } else {
+                    palette::mix(style.dark, style.mid, (0.5 + 0.5 * side).clamp(0.0, 1.0))
+                }
+            } else if side < -0.22 {
+                style.dark
+            } else {
+                palette::mix(style.dark, style.mid, (0.5 + 0.5 * side).clamp(0.0, 1.0))
+            };
+            c.put_body(px, py, col, style.pen);
         }
     }
+}
 
-    // 2. Tip (0 < x <= 30.0): asymmetric forked branch + twigs + 3 natural leaf sprays.
-    let sway = |x: f32| -> f32 {
-        let s = (x / 30.0).clamp(0.0, 1.0);
-        (s * s) * (1.8 * (t * 1.4).sin() + 0.4 * (t * 2.3 + 1.1).sin())
+fn paint_tree_canopy(c: &mut ReachCanvas, pal: &ReachPal, t: f32) {
+    let pt = |x: f32, y: f32| -> (f32, f32) { canopy_sway(x, y, t) };
+
+    // Pass 1: Back-crown deep shadow foliage behind forks & sub-crowns.
+    let back_style = PaintStyle {
+        dark: pal.leaf_deep,
+        mid: pal.leaf_deep,
+        rim: None,
+        pen: FOLIAGE_PEN,
+        sh_w: 188,
     };
-    let pt = |x: f32, y: f32| -> (f32, f32) { (x, y + sway(x)) };
+    let back_foliage: [[f32; 4]; 16] = [
+        // Sub-crown 1 (far upper flank)
+        [4.6, -28.6, 3.6, 3.3],
+        [11.4, -27.2, 4.0, 3.5],
+        [17.8, -24.2, 3.8, 3.2],
+        // Mid-crown pocket tucked behind Limb 1/2 forks
+        [10.8, -16.8, 3.3, 2.8],
+        // Sub-crown 2 (dominant upper-central + apex crown)
+        [21.2, -14.8, 3.7, 3.2],
+        [26.8, -12.6, 4.1, 3.4],
+        [23.8, -5.6, 3.6, 3.1],
+        [30.0, -5.2, 4.0, 3.5],
+        [31.2, 0.4, 3.8, 3.4],
+        // Mid-crown pockets on Limb 2/3
+        [13.6, -2.4, 3.1, 2.7],
+        [15.2, 9.6, 3.2, 2.8],
+        // Sub-crown 3 (lower-central crown)
+        [27.8, 12.6, 3.9, 3.3],
+        [23.2, 16.4, 3.8, 3.3],
+        [24.6, 21.8, 3.7, 3.2],
+        // Sub-crown 4 (lower flank)
+        [14.8, 28.4, 3.9, 3.3],
+        [7.8, 29.8, 3.8, 3.4],
+    ];
+    for [cx, cy, rx, ry] in back_foliage {
+        let (px_c, py_c) = pt(cx, cy);
+        fill_canopy_lobe(c, [px_c, py_c, rx, ry], back_style);
+    }
 
-    let p0 = pt(0.0, 0.0);
-    let p1 = pt(6.0, 0.3);
-    let p2 = pt(13.0, -0.3);
-    let p3 = pt(21.0, 0.2);
-    let p_tip = pt(26.8, -0.4);
-    let p_u1 = pt(12.0, -4.4);
-    let p_u2 = pt(17.5, -6.0);
-    let p_d1 = pt(17.5, 4.6);
-    let p_d2 = pt(23.5, 5.6);
-    let p_ur = pt(24.5, -4.2);
-
+    // Pass 2: Gnarled asymmetric 4-bough wood skeleton (3 levels of forks).
+    // Trunk sits strictly off-screen at CANOPY_TRUNK_X (-11.0); all limbs clip to x > 0.
+    let tx = CANOPY_TRUNK_X;
     let bark = PaintStyle {
         dark: pal.bark_deep,
         mid: pal.bark_mid,
         rim: Some(pal.bark_rim),
         pen: WOOD_PEN,
-        sh_w: 230,
+        sh_w: 232,
     };
-    let limbs = [
-        [p1.0, p1.1, 1.55, p_u1.0, p_u1.1, 1.05],
-        [p_u1.0, p_u1.1, 1.05, p_u2.0, p_u2.1, 0.70],
-        [p2.0, p2.1, 1.45, p_d1.0, p_d1.1, 1.00],
-        [p_d1.0, p_d1.1, 1.00, p_d2.0, p_d2.1, 0.65],
-        [p3.0, p3.1, 1.10, p_ur.0, p_ur.1, 0.65],
-        [p3.0, p3.1, 1.25, p_tip.0, p_tip.1, 0.70],
-        [p2.0, p2.1, 1.90, p3.0, p3.1, 1.25],
-        [p1.0, p1.1, 2.35, p2.0, p2.1, 1.90],
-        [p0.0, p0.1, 2.85, p1.0, p1.1, 2.35],
+    let limbs: [[f32; 6]; 43] = [
+        // Limb 1: Sweeping upper-flank oak bough
+        [tx, -2.2, 3.1, 0.4, -12.2, 2.25],
+        [0.4, -12.2, 2.25, 6.4, -16.8, 1.80],
+        [6.4, -16.8, 1.80, 12.8, -22.8, 1.35],
+        // Fork 1a (flank sweep toward anchor rim)
+        [6.4, -16.8, 1.35, 5.2, -24.2, 0.98],
+        [5.2, -24.2, 0.98, 3.6, -30.2, 0.58],
+        [5.2, -24.2, 0.80, 9.4, -27.8, 0.52],
+        // Fork 1b (upper-outer crown)
+        [12.8, -22.8, 1.15, 17.2, -26.4, 0.80],
+        [17.2, -26.4, 0.80, 20.2, -25.4, 0.50],
+        // Fork 1c (mid-upper twigs)
+        [12.8, -22.8, 0.95, 18.8, -20.8, 0.65],
+        [6.4, -16.8, 1.05, 12.4, -14.8, 0.72],
+        // Limb 2: Dominant upper-central hero bough (reaches apex x = 36)
+        [tx, -0.6, 3.4, 0.4, -3.6, 2.55],
+        [0.4, -3.6, 2.55, 9.0, -5.8, 2.05],
+        [9.0, -5.8, 2.05, 17.6, -4.2, 1.55],
+        [17.6, -4.2, 1.55, 25.4, -3.2, 1.12],
+        // Fork 2a (sweeping upper-mid sub-branch)
+        [9.0, -5.8, 1.45, 15.8, -11.6, 1.08],
+        [15.8, -11.6, 1.08, 22.4, -14.8, 0.80],
+        [22.4, -14.8, 0.80, 27.4, -13.0, 0.52],
+        [22.4, -14.8, 0.72, 24.4, -18.8, 0.48],
+        // Fork 2b (upper apex twig)
+        [17.6, -4.2, 1.10, 23.6, -8.8, 0.78],
+        [23.6, -8.8, 0.78, 29.2, -9.2, 0.50],
+        // Fork 2c (outermost apex crown twigs)
+        [25.4, -3.2, 0.95, 31.4, -4.8, 0.55],
+        [25.4, -3.2, 0.98, 32.4, 0.2, 0.58],
+        [17.6, -4.2, 0.95, 22.8, 1.8, 0.65],
+        [22.8, 1.8, 0.65, 27.8, 3.6, 0.48],
+        // Limb 3: Sinuous lower-central bough
+        [tx, 1.0, 3.2, 0.4, 5.2, 2.40],
+        [0.4, 5.2, 2.40, 8.6, 7.6, 1.90],
+        [8.6, 7.6, 1.90, 16.4, 12.6, 1.42],
+        [16.4, 12.6, 1.42, 23.6, 14.8, 1.00],
+        // Fork 3a (inner-mid branchlet)
+        [8.6, 7.6, 1.18, 15.4, 7.2, 0.80],
+        [15.4, 7.2, 0.80, 20.4, 9.2, 0.50],
+        // Fork 3b (outer lower-central twigs)
+        [23.6, 14.8, 0.88, 29.0, 12.4, 0.52],
+        [23.6, 14.8, 0.84, 27.2, 18.8, 0.50],
+        // Fork 3c (downward sub-branch)
+        [16.4, 12.6, 1.15, 20.4, 19.6, 0.82],
+        [20.4, 19.6, 0.82, 23.6, 23.4, 0.50],
+        [20.4, 19.6, 0.72, 16.6, 23.2, 0.48],
+        // Limb 4: Lower flank sweeping oak bough
+        [tx, 2.4, 3.0, 0.4, 13.8, 2.15],
+        [0.4, 13.8, 2.15, 6.2, 20.0, 1.65],
+        [6.2, 20.0, 1.65, 12.0, 25.4, 1.20],
+        // Fork 4a (flank sweep toward bottom anchor rim)
+        [6.2, 20.0, 1.25, 4.8, 27.0, 0.88],
+        [4.8, 27.0, 0.88, 3.0, 32.0, 0.52],
+        // Fork 4b (lower-outer twigs)
+        [12.0, 25.4, 0.98, 15.6, 29.2, 0.70],
+        [15.6, 29.2, 0.70, 18.0, 28.4, 0.48],
+        [12.0, 25.4, 0.85, 9.6, 29.8, 0.52],
     ];
-    for cap in limbs {
-        c.fill_capsule(cap, bark, true);
+    for [ax, ay, ra, bx, by, rb] in limbs {
+        let (pax, pay) = pt(ax, ay);
+        let (pbx, pby) = pt(bx, by);
+        c.fill_capsule([pax, pay, ra, pbx, pby, rb], bark, true);
     }
 
-    // Three distinct lush leaf sprays with dappled sky gaps; rightmost cluster kisses x = 30.0.
-    let clusters: [(f32, f32, f32, f32, bool); 10] = [
-        // Upper-left spray
-        (12.2, -5.2, 2.9, 2.2, false),
-        (16.0, -6.2, 3.2, 2.3, true),
-        (19.0, -5.4, 2.6, 2.1, true),
-        // Lower spray
-        (17.8, 5.2, 3.0, 2.2, false),
-        (21.8, 5.8, 3.2, 2.4, false),
-        (24.8, 4.8, 2.6, 2.0, true),
-        // Terminal crown spray reaching x = 30.0
-        (22.4, -1.6, 3.0, 2.4, false),
-        (24.8, -3.8, 2.9, 2.3, true),
-        (25.2, 1.2, 3.1, 2.4, false),
-        (26.8, -0.6, 3.2, 2.5, true),
+    // Pass 3: Mid-crown + outer billowing leaf clusters with deep sky clefts.
+    let mid_foliage: [(f32, f32, f32, f32, bool); 24] = [
+        // Sub-crown 1 (far upper flank)
+        (3.8, -30.4, 3.1, 3.1, false),
+        (8.6, -28.4, 3.4, 3.0, true),
+        (13.8, -26.8, 3.3, 2.8, false),
+        (18.6, -25.6, 3.2, 2.8, true),
+        // Mid-crown foliage cluster on Limb 1 fork
+        (11.6, -15.6, 3.0, 2.5, false),
+        (15.2, -13.2, 2.6, 2.3, true),
+        // Sub-crown 2 (dominant upper-central + apex; rightmost puff reaches x = 36.0 exact)
+        (24.6, -17.6, 3.0, 2.6, false),
+        (27.6, -13.2, 3.6, 3.1, true),
+        (29.6, -8.8, 3.2, 2.8, false),
+        (25.2, -5.2, 3.1, 2.7, false),
+        (30.8, -4.6, 3.6, 3.1, true),
+        (32.8, 0.2, 3.2, 3.1, true),
+        (28.4, 3.6, 3.1, 2.7, false),
+        // Mid-crown dappled tufts (keep inner sky channels open)
+        (13.8, -2.6, 2.8, 2.4, false),
+        (15.6, 8.8, 2.8, 2.4, false),
+        (9.2, 22.4, 2.3, 2.0, false),
+        // Sub-crown 3 (lower-central; deep sky cleft above it at y = +6..+10)
+        (28.6, 12.4, 3.4, 2.9, true),
+        (24.4, 15.8, 3.4, 2.9, false),
+        (26.8, 19.6, 3.3, 2.9, true),
+        (22.6, 23.2, 3.2, 2.8, false),
+        (17.2, 22.8, 2.6, 2.3, false),
+        // Sub-crown 4 (lower flank; sky notch between 3 and 4 at y = +24..+26)
+        (16.2, 28.6, 3.3, 2.9, true),
+        (10.8, 29.6, 3.4, 2.9, false),
+        (4.8, 31.6, 3.2, 3.1, true),
     ];
-    for (cx, cy, rx, ry, sunlit) in clusters {
+    for (cx, cy, rx, ry, use_soft) in mid_foliage {
         let (px_c, py_c) = pt(cx, cy);
         let style = PaintStyle {
             dark: pal.leaf_deep,
-            mid: if sunlit { pal.leaf_accent } else { pal.leaf_mid },
+            mid: if use_soft { pal.leaf_soft } else { pal.leaf_mid },
             rim: Some(pal.leaf_rim),
             pen: FOLIAGE_PEN,
-            sh_w: 215,
+            sh_w: 210,
         };
-        c.fill_ellipse([px_c, py_c, rx, ry], style, true);
+        fill_canopy_lobe(c, [px_c, py_c, rx, ry], style);
+    }
+
+    // Pass 4: Sunlit crown highlight puffs (dappled outer tips, survive blur).
+    let sun_style = PaintStyle {
+        dark: pal.leaf_mid,
+        mid: pal.leaf_accent,
+        rim: Some(pal.leaf_rim),
+        pen: FOLIAGE_PEN,
+        sh_w: 198,
+    };
+    let sun_puffs: [[f32; 4]; 12] = [
+        [4.8, -30.2, 2.1, 2.0],
+        [9.8, -28.2, 2.3, 2.0],
+        [19.2, -25.4, 2.1, 1.9],
+        [12.6, -15.4, 1.9, 1.7],
+        [28.4, -13.0, 2.5, 2.1],
+        [30.4, -8.6, 2.1, 1.9],
+        [31.6, -4.4, 2.4, 2.1],
+        [33.5, 0.2, 2.3, 2.1],
+        [29.2, 12.2, 2.3, 2.0],
+        [27.4, 19.6, 2.2, 1.9],
+        [16.8, 28.6, 2.2, 1.9],
+        [5.6, 31.4, 2.1, 2.0],
+    ];
+    for [cx, cy, rx, ry] in sun_puffs {
+        let (px_c, py_c) = pt(cx, cy);
+        fill_canopy_lobe(c, [px_c, py_c, rx, ry], sun_style);
     }
 }
 
@@ -1817,6 +2124,42 @@ mod tests {
         (body, shadow)
     }
 
+    fn default_len(spec: ReachSpec) -> i32 {
+        match spec.shape {
+            ReachShape::Canopy => spec.tip_len.round() as i32,
+            ReachShape::Strip => spec.tip_len.round() as i32 + STEM_PERIOD * 2,
+        }
+    }
+
+    #[test]
+    fn allowed_entry_sides_match_owner_spec() {
+        assert_eq!(ReachKind::LightPole.allowed_sides(), &[AnchorSide::Bottom]);
+        assert_eq!(ReachKind::HangingLamp.allowed_sides(), &[AnchorSide::Top]);
+        assert_eq!(ReachKind::CraneHook.allowed_sides(), &[AnchorSide::Top]);
+
+        for kind in [
+            ReachKind::TreeCanopy,
+            ReachKind::SignArm,
+            ReachKind::VineTendril,
+            ReachKind::KelpFrond,
+            ReachKind::PipeElbow,
+        ] {
+            assert_eq!(
+                kind.allowed_sides(),
+                AnchorSide::ALL,
+                "{kind:?} should allow all four anchor sides"
+            );
+        }
+
+        for kind in ReachKind::all() {
+            let spec = reach_spec(kind);
+            assert_eq!(spec.sides, kind.allowed_sides());
+            assert_eq!(spec.shape, kind.shape());
+            assert!(!spec.sides.is_empty());
+        }
+        assert_eq!(ReachKind::TreeCanopy.shape(), ReachShape::Canopy);
+    }
+
     #[test]
     fn every_kind_draws_non_empty_body_and_shadow() {
         for kind in ReachKind::all() {
@@ -1825,7 +2168,7 @@ mod tests {
             assert!(spec.thickness > 0.0, "{kind:?} thickness must be positive");
             assert!(!spec.floors.is_empty(), "{kind:?} must appear on at least one floor");
 
-            let len = spec.tip_len.round() as i32 + STEM_PERIOD * 2;
+            let len = default_len(spec);
             let h = spec.thickness.ceil() as usize + 4;
             for &theme in spec.floors {
                 let (mut body, mut shadow) = make_buffers(len as usize + 4, h, true);
@@ -1850,6 +2193,9 @@ mod tests {
         let p = STEM_PERIOD as usize;
         for kind in ReachKind::all() {
             let spec = reach_spec(kind);
+            if spec.shape != ReachShape::Strip {
+                continue;
+            }
             let theme = spec.floors[0];
             let len = spec.tip_len.round() as i32 + STEM_PERIOD * 2;
             let h = spec.thickness.ceil() as usize + 4;
@@ -1898,12 +2244,120 @@ mod tests {
     }
 
     #[test]
+    fn canopy_coverage_fraction_leaves_light_through_across_sway() {
+        let spec = reach_spec(ReachKind::TreeCanopy);
+        let len = spec.tip_len.round() as i32;
+        let h = spec.thickness.ceil() as usize + 4;
+        let cy = h as f32 * 0.5;
+        let x_origin = spec.tip_len - len as f32;
+        let r2 = CANOPY_RADIUS * CANOPY_RADIUS;
+
+        for &theme in spec.floors {
+            for &t in &[0.0_f32, 0.8, 1.5, 2.5, 3.8, 4.7] {
+                let (mut body, mut shadow) = make_buffers(len as usize + 4, h, true);
+                draw_reach(ReachKind::TreeCanopy, &mut body, &mut shadow, len, t, theme);
+
+                let mut in_disc = 0usize;
+                let mut filled = 0usize;
+                let mut outside_disc = 0usize;
+                let mut wood_px = 0usize;
+                let mut foliage_px = 0usize;
+
+                for py in 0..h {
+                    let ly = (py as f32 + 0.5) - cy;
+                    for px in 0..body.w {
+                        let lx = (px as f32 + 0.5) + x_origin;
+                        let has_body = body.pixel_at(px, py) != (0, 0, 0);
+                        if lx > 0.0 && lx * lx + ly * ly <= r2 {
+                            in_disc += 1;
+                            if has_body {
+                                filled += 1;
+                                if body.mat()[py * body.w + px] == WOOD_PEN {
+                                    wood_px += 1;
+                                } else {
+                                    foliage_px += 1;
+                                }
+                            }
+                        } else if has_body {
+                            outside_disc += 1;
+                        }
+                    }
+                }
+
+                let frac = filled as f32 / in_disc.max(1) as f32;
+                assert_eq!(
+                    outside_disc, 0,
+                    "TreeCanopy ({theme:?}, t={t}) painted {outside_disc} px outside half-disc"
+                );
+                assert!(
+                    (0.35..=0.65).contains(&frac),
+                    "TreeCanopy ({theme:?}, t={t}) coverage {frac:.3} outside 0.35..=0.65"
+                );
+                assert!(wood_px >= 120, "TreeCanopy needs visible branching limbs ({wood_px})");
+                assert!(foliage_px >= 350, "TreeCanopy needs substantial leaf clusters ({foliage_px})");
+            }
+        }
+    }
+
+    #[test]
+    fn canopy_trunk_is_never_inside_drawn_extent() {
+        assert!(CANOPY_TRUNK_X < 0.0, "trunk hub must sit strictly off-screen (x < 0)");
+
+        let spec = reach_spec(ReachKind::TreeCanopy);
+        // Pass len > tip_len to verify local_x <= 0 stays strictly empty even if over-extended.
+        let extra_len = spec.tip_len.round() as i32 + 24;
+        let h = spec.thickness.ceil() as usize + 4;
+        let x_origin = spec.tip_len - extra_len as f32;
+
+        let (mut body, mut shadow) = make_buffers(extra_len as usize + 4, h, true);
+        draw_reach(ReachKind::TreeCanopy, &mut body, &mut shadow, extra_len, 0.7, Theme::Trailer);
+
+        for py in 0..h {
+            for px in 0..body.w {
+                let lx = (px as f32 + 0.5) + x_origin;
+                if lx <= 0.0 {
+                    assert_eq!(
+                        body.pixel_at(px, py),
+                        (0, 0, 0),
+                        "TreeCanopy painted trunk/stem at local_x={lx} <= 0"
+                    );
+                    assert_eq!(
+                        shadow.pixel_at(px, py),
+                        (0, 0, 0),
+                        "TreeCanopy painted shadow at local_x={lx} <= 0"
+                    );
+                }
+            }
+        }
+
+        // At the anchor edge (first drawn column, local_x = 0.5), primary limbs are
+        // splayed apart with open gaps between them — never a solid trunk block.
+        let edge_px = (0.0 - x_origin).floor() as usize;
+        let mut runs = 0usize;
+        let mut in_run = false;
+        for py in 0..h {
+            let filled = body.pixel_at(edge_px, py) != (0, 0, 0);
+            if filled && !in_run {
+                runs += 1;
+            }
+            in_run = filled;
+        }
+        assert!(
+            runs >= 3,
+            "expected splayed primary boughs (>= 3 separate runs) at anchor edge, got {runs}"
+        );
+    }
+
+    #[test]
     fn tip_lies_at_tip_len_and_stays_within_bounds() {
         let pad = 8usize;
         for kind in ReachKind::all() {
             let spec = reach_spec(kind);
             let theme = spec.floors[0];
-            let len = spec.tip_len.round() as i32 + STEM_PERIOD;
+            let len = match spec.shape {
+                ReachShape::Canopy => spec.tip_len.round() as i32,
+                ReachShape::Strip => spec.tip_len.round() as i32 + STEM_PERIOD,
+            };
             let w = len as usize + pad;
             let h = spec.thickness.ceil() as usize + 8;
             let cy = h as f32 * 0.5;
@@ -1950,67 +2404,119 @@ mod tests {
         for kind in ReachKind::all() {
             let spec = reach_spec(kind);
             let theme = spec.floors[0];
-            let len = spec.tip_len.round() as i32 + STEM_PERIOD;
+            let len = match spec.shape {
+                ReachShape::Canopy => spec.tip_len.round() as i32,
+                ReachShape::Strip => spec.tip_len.round() as i32 + STEM_PERIOD,
+            };
             let h = spec.thickness.ceil() as usize + 4;
+            let cy = h as f32 * 0.5;
+            let x_origin = spec.tip_len - len as f32;
 
-            let tip_centroid_y = |t: f32| -> (PixelBuffer, f32) {
+            let sample_centroids = |t: f32| -> (PixelBuffer, f32, f32) {
                 let (mut body, mut shadow) = make_buffers(len as usize, h, false);
                 draw_reach(kind, &mut body, &mut shadow, len, t, theme);
-                let mut sum_y = 0.0_f32;
-                let mut cnt = 0.0_f32;
+                let mut sum_out = 0.0_f32;
+                let mut cnt_out = 0.0_f32;
+                let mut sum_in = 0.0_f32;
+                let mut cnt_in = 0.0_f32;
+                let outer_start = match spec.shape {
+                    ReachShape::Canopy => 0usize,
+                    ReachShape::Strip => STEM_PERIOD as usize + (spec.tip_len as usize / 2),
+                };
                 for py in 0..h {
-                    for px in (STEM_PERIOD as usize + (spec.tip_len as usize / 2))..len as usize {
+                    let ly = (py as f32 + 0.5) - cy;
+                    for px in outer_start..len as usize {
                         if body.pixel_at(px, py) != (0, 0, 0) {
-                            sum_y += py as f32;
-                            cnt += 1.0;
+                            if spec.shape == ReachShape::Canopy {
+                                let lx = (px as f32 + 0.5) + x_origin;
+                                let r = (lx * lx + ly * ly).sqrt();
+                                if r < 14.0 {
+                                    sum_in += py as f32;
+                                    cnt_in += 1.0;
+                                } else if r >= 22.0 {
+                                    sum_out += py as f32;
+                                    cnt_out += 1.0;
+                                }
+                            } else {
+                                sum_out += py as f32;
+                                cnt_out += 1.0;
+                            }
                         }
                     }
                 }
-                (body, sum_y / cnt.max(1.0))
+                (body, sum_in / cnt_in.max(1.0), sum_out / cnt_out.max(1.0))
             };
 
             if spec.organic {
-                let mut min_c = f32::INFINITY;
-                let mut max_c = f32::NEG_INFINITY;
-                let (base_pb, mut prev_c) = tip_centroid_y(0.0);
-                min_c = min_c.min(prev_c);
-                max_c = max_c.max(prev_c);
+                let (base_pb, init_in, mut prev_out) = sample_centroids(0.0);
+                let (mut min_out, mut max_out) = (prev_out, prev_out);
+                let (mut min_in, mut max_in) = (init_in, init_in);
 
                 // Step finely across a full sway cycle: adjacent steps move smoothly.
                 for step in 1..=100 {
                     let tv = step as f32 * 0.05;
-                    let (pb, c) = tip_centroid_y(tv);
+                    let (pb, c_in, c_out) = sample_centroids(tv);
                     assert!(
-                        (c - prev_c).abs() < 0.65,
-                        "{kind:?} jumped between t={} and t={tv}: {prev_c} -> {c}",
+                        (c_out - prev_out).abs() < 0.65,
+                        "{kind:?} jumped between t={} and t={tv}: {prev_out} -> {c_out}",
                         tv - 0.05
                     );
-                    // Anchor stem (x <= 0) stays completely fixed during sway.
-                    for py in 0..h {
-                        for px in 0..STEM_PERIOD as usize {
-                            assert_eq!(
-                                base_pb.pixel_at(px, py),
-                                pb.pixel_at(px, py),
-                                "{kind:?} anchor stem shifted at ({px}, {py}) for t={tv}"
-                            );
+                    if spec.shape == ReachShape::Strip {
+                        // Anchor stem (x <= 0) stays completely fixed during sway.
+                        for py in 0..h {
+                            for px in 0..STEM_PERIOD as usize {
+                                assert_eq!(
+                                    base_pb.pixel_at(px, py),
+                                    pb.pixel_at(px, py),
+                                    "{kind:?} anchor stem shifted at ({px}, {py}) for t={tv}"
+                                );
+                            }
                         }
                     }
-                    min_c = min_c.min(c);
-                    max_c = max_c.max(c);
-                    prev_c = c;
+                    min_out = min_out.min(c_out);
+                    max_out = max_out.max(c_out);
+                    min_in = min_in.min(c_in);
+                    max_in = max_in.max(c_in);
+                    prev_out = c_out;
                 }
+                let out_amp = max_out - min_out;
                 assert!(
-                    max_c - min_c >= 0.9,
-                    "{kind:?} organic sway amplitude too small ({min_c}..{max_c})"
+                    out_amp >= 0.9,
+                    "{kind:?} organic sway amplitude too small ({min_out}..{max_out})"
                 );
+                if spec.shape == ReachShape::Canopy {
+                    let in_amp = max_in - min_in;
+                    assert!(
+                        out_amp > in_amp * 2.5,
+                        "TreeCanopy outer twigs ({out_amp:.3}) must sway more than inner limbs ({in_amp:.3})"
+                    );
+                }
             } else {
-                let (pb_a, _) = tip_centroid_y(0.0);
-                let (pb_b, _) = tip_centroid_y(2.3);
+                let (pb_a, _, _) = sample_centroids(0.0);
+                let (pb_b, _, _) = sample_centroids(2.3);
                 assert_eq!(
                     pb_a.pixels(),
                     pb_b.pixels(),
                     "{kind:?} is man-made and should not sway with t"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn draw_reach_is_deterministic_across_kinds_and_themes() {
+        for kind in ReachKind::all() {
+            let spec = reach_spec(kind);
+            let len = default_len(spec);
+            let h = spec.thickness.ceil() as usize + 4;
+            for &theme in spec.floors {
+                let (mut body_a, mut shadow_a) = make_buffers(len as usize + 4, h, true);
+                let (mut body_b, mut shadow_b) = make_buffers(len as usize + 4, h, true);
+                draw_reach(kind, &mut body_a, &mut shadow_a, len, 1.73, theme);
+                draw_reach(kind, &mut body_b, &mut shadow_b, len, 1.73, theme);
+                assert_eq!(body_a.pixels(), body_b.pixels(), "{kind:?} ({theme:?}) body non-deterministic");
+                assert_eq!(body_a.mat(), body_b.mat(), "{kind:?} ({theme:?}) mat non-deterministic");
+                assert_eq!(shadow_a.pixels(), shadow_b.pixels(), "{kind:?} ({theme:?}) shadow non-deterministic");
             }
         }
     }
