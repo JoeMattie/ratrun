@@ -1224,13 +1224,15 @@ mod tests {
             let _ = fire_and_crack(&mut w);
             let burst = dmg * LASH_BURST_FRAC;
             let lost = |w: &World, i: usize| before[i] - hp(w, [primary, splash, far][i]);
+            // The pools are tens of thousands of HP, where an f32 step is
+            // coarser than 1e-3.
             assert!(
-                (lost(&w, 0) - dmg).abs() < 1e-3,
+                (lost(&w, 0) - dmg).abs() < 0.02,
                 "L{level}: the primary takes the whole lash, once ({})",
                 lost(&w, 0)
             );
             assert!(
-                (lost(&w, 1) - burst).abs() < 1e-3,
+                (lost(&w, 1) - burst).abs() < 0.02,
                 "L{level}: the burst lands once at 40 % ({})",
                 lost(&w, 1)
             );

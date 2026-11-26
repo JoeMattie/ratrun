@@ -46,8 +46,9 @@ horde carries the owner's half-HP playtest weight and the facility floors
 ease off.
 
 `[enemies] sector_damage_mult` scales every hit the floor's enemies deal by
-the world's campaign sector, before it reaches the rat and therefore before
-its armor. It ships as `[1.0, 0.5, 0.5, 0.5]`. It covers ordinary and elite
+sector, before it reaches the rat and therefore before its armor. It ships
+as `[1.0, 0.5, 0.5, 0.5]`. A practice run reads sector one's entry in both
+rows, on any floor. It covers ordinary and elite
 contact, enemy bullets and lobs, floor-roster attacks, the Drake, the Shore
 Crab, miniboss strikes, boss contact, hazards and projectiles, and the
 floors' own hazards (mousetraps, crab pots, steam, the drip shaft, the pits on

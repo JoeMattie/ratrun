@@ -8131,7 +8131,10 @@ mod tests {
                 assert!(!spawned.is_empty(), "sector {sector}: nothing spawned at {t} s");
                 let now = w.elapsed;
                 let director = &w.tuning().director;
-                let hp0 = w.tuning().horde_hp_mult_for(0, now);
+                // Level 0's curve and level 0's sector row: the enemy rows key
+                // on the difficulty level, like the rest of the practice run.
+                let hp0 = w.tuning().horde_hp_mult_for(0, now)
+                    * w.tuning().enemies.sector_hp_mult[0];
                 let mods0 = director.enemy_mods_for(0, now);
                 // The sector's own curve is measurably different.
                 assert!((director.enemy_mods_for(sector, now).damage - mods0.damage).abs() > 0.005);

@@ -280,13 +280,8 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
         );
     }
 
-    // Focus edge, like the options plate.
-    if lay.panel.width > 2 && lay.panel.height > 1 {
-        f.buffer_mut().set_style(
-            Rect::new(lay.panel.x, lay.panel.y, lay.panel.width, 1),
-            ink(tone),
-        );
-    }
+    // `panel` already inks the plate's top edge in `tone`. Inking that row
+    // again here recoloured the build number stamped on the border.
 }
 
 /// Accent colour for the panel edge: the same material tint the options plate

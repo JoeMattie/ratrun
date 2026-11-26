@@ -347,10 +347,14 @@ pub struct DifficultyLevel(pub usize);
 
 /// `[enemies] sector_damage_mult` for the floor being simulated.
 ///
-/// Bundled with [`LevelIndex`] and the run tuning as **one** system parameter:
+/// Keyed on [`DifficultyLevel`], like every other sector table: a practice run
+/// on a later floor plays level one's row here too, so its hits and its bodies
+/// match the curve it is played on.
+///
+/// Bundled with [`DifficultyLevel`] and the run tuning as **one** system parameter:
 /// the softening is applied at each of the eighteen systems that create a hit
 /// on the rat, and four of those are already at bevy's 16-parameter limit (they
-/// fold `Res<LevelIndex>` into an existing tuple and call
+/// read the `Res<DifficultyLevel>` they already take and call
 /// [`crate::game::director::sector_damage_mult`] directly). Read it once per
 /// system (`let dmg_scale = sector.mult();`) and multiply the raw hit by it at
 /// the site.
@@ -360,7 +364,7 @@ pub struct DifficultyLevel(pub usize);
 #[derive(bevy_ecs::system::SystemParam)]
 pub(crate) struct SectorDamage<'w> {
     tuning: bevy_ecs::system::Res<'w, crate::tuning::RunTuning>,
-    level: bevy_ecs::system::Res<'w, LevelIndex>,
+    level: bevy_ecs::system::Res<'w, DifficultyLevel>,
 }
 
 impl<'w> SectorDamage<'w> {

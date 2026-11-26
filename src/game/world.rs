@@ -499,6 +499,9 @@ impl World {
         ecs.register_component_hooks::<Enemy>().on_add(Enemy::apply_spawn_tuning);
         ecs.insert_resource(tuning);
         ecs.insert_resource(LevelIndex(level_index));
+        // The spawn hook reads the difficulty row, and setup code may spawn
+        // before the first tick; `begin_tick` keeps it current afterwards.
+        ecs.insert_resource(DifficultyLevel(level_index));
         ecs.insert_resource(NextSpawnId(0));
         ecs.insert_resource(NeighborScratch::default());
         ecs.insert_resource(PickupScratch::default());

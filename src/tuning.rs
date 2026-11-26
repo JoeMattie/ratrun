@@ -242,7 +242,7 @@ section!(Boss {
 section!(Bosses {
     hp_mult: f32 = 0.76265487; "Global named boss HP multiplier",
     build_level: [f32; 4] = [0.9580967, 0.65357122, 0.380501, 0.77749956]; "Boss-only build HP multipliers by campaign sector",
-    fresh_build_level: [f32; 3] = [1.13083333, 1.03404255, 1.00956522]; "Boss-only build HP multipliers with campaign carry disabled",
+    fresh_build_level: [f32; 3] = [1.130_833_4, 1.034_042_6, 1.009_565_2]; "Boss-only build HP multipliers with campaign carry disabled",
     contact_damage_mult: f32 = 1.0; "Global named boss grounded contact damage multiplier",
     kinds: BTreeMap<BossKind, Boss> = boss_defaults(); "Per-kind named boss stats",
 });
@@ -331,13 +331,24 @@ pub struct RunTuning {
 impl RunTuning {
     #[cfg(test)]
     pub(crate) fn with_base_boss_hazards(kind: BossKind) -> Self {
-        // Controller tests pin the art's unscaled hazard timing and damage.
+        // Controller tests pin the art's unscaled hazard timing and damage,
+        // so the later sectors' hit softening is off as well.
         let mut values = Tuning::default();
+        values.enemies.sector_damage_mult = [1.0; 4];
         let boss = values.bosses.kinds.get_mut(&kind).expect("boss tuning row");
         boss.attack_damage_mult = None;
         boss.tell_time_mult = None;
         boss.swipe_damage = None;
         boss.swipe_windup_mult = None;
+        Self::new(values)
+    }
+
+    /// The shipped balance with adaptive horde power scaling switched off, for
+    /// tests that pin the curve's own HP arithmetic.
+    #[cfg(test)]
+    pub(crate) fn without_power_scaling() -> Self {
+        let mut values = Tuning::default();
+        values.director.power_scaling = false;
         Self::new(values)
     }
 

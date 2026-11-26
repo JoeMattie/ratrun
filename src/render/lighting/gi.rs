@@ -2776,9 +2776,11 @@ mod tests {
             let ao = render_with(&mut w, GlobalLight::AoOnly, (120, 96));
             let gi = render_with(&mut w, GlobalLight::AoGi, (120, 96));
             let cam = (w.cam.x.round() as i32, w.cam.y.round() as i32);
-            // Dry sand 8 px outside the puddle's right edge (`wx = 272`).
-            let (sx, sy) = ((272 - cam.0) as usize, (240 - cam.1) as usize);
-            assert!(!w.level.wet_at(Vec2::new(272.0, 240.0)));
+            // Dry sand just outside the puddle's right edge. The blob's wobble
+            // puts that edge near `wx = 262` on this row, and the bounce
+            // reaches about 8 px past it.
+            let (sx, sy) = ((268 - cam.0) as usize, (240 - cam.1) as usize);
+            assert!(!w.level.wet_at(Vec2::new(268.0, 240.0)));
             let b_px = ao.pixel_at(sx, sy);
             let g_px = gi.pixel_at(sx, sy);
             let dg = i32::from(g_px.1) - i32::from(b_px.1);

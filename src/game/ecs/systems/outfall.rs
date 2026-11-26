@@ -40,12 +40,9 @@ pub fn outfall_motion_system(
     counters: Res<RunCounters>,
     input: Res<TickInput>,
     difficulty: Res<DifficultyLevel>,
-    // The sector row for the floor's hit softening travels with the arrival
-    // flags: this system is at bevy's 16-parameter limit.
     arrival: (
         Res<Director>,
         Res<BossDue>,
-        Res<crate::game::ecs::resources::LevelIndex>,
     ),
     debug: Res<DebugFlags>,
     dash: Res<DashTrack>,
@@ -65,8 +62,8 @@ pub fn outfall_motion_system(
         .filter(|&last| last + input.dt == elapsed)
         .unwrap_or(elapsed - input.dt);
     origins.last_elapsed = Some(elapsed);
-    let (director, due, sector) = arrival;
-    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, sector.0);
+    let (director, due) = arrival;
+    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, difficulty.0);
     let enabled = outfall_surge_enabled(
         director.boss_spawned
             || due.is_pending()

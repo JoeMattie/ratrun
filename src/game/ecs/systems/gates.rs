@@ -853,7 +853,6 @@ mod tests {
     };
     use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
     use crate::game::collision::{cardinal_vec, cell_of, TileKind};
-    use rand::Rng;
     use crate::game::enemy::EnemyKind;
     use crate::game::level::{
         Level, LevelObjects, MazeSection, OneWayDoor, RatHole, Theme, TileRect,

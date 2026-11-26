@@ -4766,7 +4766,7 @@ mod tests {
             assert!(rail.contains("47"), "{tw}x{th}: gold missing: {rail:?}");
             if th >= 20 {
                 assert!(
-                    rail.contains("SEWERS"),
+                    rail.contains("SEWER"),
                     "{tw}x{th}: right-aligned floor pill fell off: {rail:?}"
                 );
             }

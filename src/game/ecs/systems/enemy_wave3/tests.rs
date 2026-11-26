@@ -407,6 +407,8 @@ fn a_wick_burst_hurts_both_sides_and_chains_its_own_fuse() {
     // A second moth close enough to die inside the burst (a moth has 12 hp and
     // the burst deals 20), and a skitterer to prove the friendly fire.
     let second = w.spawn_enemy(EnemyKind::WickMoth, what + Vec2::new(4.0, 0.0), 1.0);
+    // The floor's HP row may carry a moth past one burst; this one is hurt.
+    put(&mut w, second, |e| e.hp = e.hp.min(WICK_ENEMY_DAMAGE * 0.5));
     let bug = w.spawn_enemy(EnemyKind::Skitterer, what + Vec2::new(-3.0, 0.0), 1.0);
     let bug_max = state(&w, bug).max_hp;
     assert_eq!(wick_count(&mut w), 0);
@@ -465,7 +467,7 @@ fn a_moth_killed_by_any_source_still_lights_its_fuse() {
     w.spawn_pool(Pool {
         pos: p + Vec2::new(60.0, 0.0),
         radius: 20.0,
-        dps: 400.0,
+        dps: 4000.0,
         life: 2.0,
         color: (140, 220, 70),
     });
@@ -494,14 +496,16 @@ fn the_porter_heals_after_the_raise_and_flinches_when_hit() {
     let porter = w.spawn_enemy(EnemyKind::Porter, p + Vec2::new(40.0, 0.0), 1.0);
     let ally = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(50.0, 0.0), 1.0);
     let ally_max = state(&w, ally).max_hp;
-    put(&mut w, ally, |e| e.hp = 2.0);
+    // Missing less than one heal, so the top-up is clamped at the max.
+    put(&mut w, ally, |e| e.hp = e.max_hp - PORTER_HEAL * 0.5);
+    let ally_hurt = state(&w, ally).hp;
     ready(&mut w, porter, |e| e.w3.heal_cd = 0.0);
 
     tick(&mut w);
     let s = state(&w, porter);
     assert!(s.w3.raise_t > 0.0, "the porter did not raise the cube");
     assert!(s.w3.holds(), "a raising porter holds position");
-    assert_eq!(state(&w, ally).hp, 2.0, "the heal landed before the tell");
+    assert_eq!(state(&w, ally).hp, ally_hurt, "the heal landed before the tell");
 
     ticks(&mut w, secs(PORTER_RAISE_SECS) + 2);
     assert_eq!(

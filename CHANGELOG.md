@@ -2,13 +2,38 @@
 
 ## Unreleased
 
-- **Round-four balance.** The owner's fresh-start playtest is the shipped
-  balance. Subject R-47 keeps one health value, one regeneration and one
-  armour value on every sector: nothing on the rat changes with the floor.
-  The facility floors' enemies hit half as hard instead
-  (`[enemies] sector_damage_mult`), which is where the softening belongs. The
-  Sewer horde is heavier, the later floors ease off, and adaptive horde
-  power scaling is on by default. See [docs/balance/README.md](docs/balance/README.md).
+## 0.4.4 (2026-11-26, playtest build)
+
+- **Level.** Your level is a gold badge on the bottom bar, beside the XP
+  bar to the next one. A new level prints a banner over the floor and
+  rings you in gold.
+- **Round-four balance.** You keep one max HP, one regen and one armor
+  value in every sector. Enemies and hazards in sectors two to four hit
+  half as hard instead. The Sewer horde is tougher, later hordes are
+  lighter, and new enemies adjust their HP to your recent damage. Practice
+  runs use sector one's values on every floor. See
+  [docs/balance/README.md](docs/balance/README.md).
+- **Global light.** A new `GLOBAL LIGHT` row in Graphics: `OFF`, `AO ONLY`
+  or `AO + GI`. Corners and the feet of props darken. Coloured light
+  bounces off floors, water and lava onto what stands nearby. Off by
+  default.
+- **Foreground.** Tree canopies, lamp posts, hanging lamps and vines reach
+  in from off-screen and pass over the floor.
+- **Smoothing.** `SMOOTHING` offers `OFF`, `SMOOTH` and `CRISP`. The older
+  modes are gone, and a save that named one loads as `OFF`.
+- **Lighting.** The game keeps the lighting tier you set. Nothing steps it
+  down or back up mid-run.
+- **Hold Point.** Removed, with its Clamp evolution. Sixteen weapons and
+  sixteen evolutions remain.
+- **Termite Horde.** A split no longer changes the total HP of the two
+  halves.
+- **Build number.** It keeps its dim ink on the Options, Controls and
+  Graphics plates at small terminal sizes.
+- **Tests.** No test plays a whole level or a bot run any more. Replays are
+  checked by one 20-second sweep per floor. Whole-song renders and the
+  enemy-order guard (`RATRUN_CHECK_ENEMY_INDEX=1`) run on request.
+- **CI.** The full suite and clippy run on Linux only. macOS and Windows
+  run `cargo check`. Builds are cached.
 
 ## 0.4.3 (2026-11-26, playtest build)
 
@@ -27,27 +52,6 @@
 - **The Sweeper.** Keep your distance and it may sprint at you. Watch
   the marked lane and strike when it stops for breath.
 - **Build number.** Shown in the top-left corner of every screen.
-- Removed Hold Point and its Clamp evolution.
-- **Quicker updates.** The suite no longer replays six scripted 60-second
-  games on every run to compare each one with itself. A seed still has to play
-  out identically (at every zoom, and with the fog reveal on or off), so a
-  balance change no longer waits on a replay pass to be re-recorded.
-- **A much shorter test run.** No test simulates a whole level any more, and
-  none runs for fifteen minutes: the two full-run determinism/replay tests are
-  gone, and the twenty-odd hand-written twin-run tests are one table-driven
-  sweep (`ecs::tests::the_same_seed_plays_the_same_run`, one row per floor and
-  per difficulty window, 20 s each). Bot fights and batches no longer play
-  inside `cargo test` — the two-minute-ladder, five-seed boss fights, ten
-  campaign runs and the batch-report tests are all removed, and bot
-  measurements run on request with `--bot-batch`. The pacing and roster-cap
-  tests sample the curve table at its knots and clock-jump to the late window
-  instead of stepping 900 s of director clock, and the Library card scenes are
-  stepped for a sample (every fifth scene plus every boss and miniboss) while
-  every registry row still builds once. Whole-song audio renders are
-  `#[ignore]`d. `debug_assert_enemy_index` is opt-in (`RATRUN_CHECK_ENEMY_INDEX=1`).
-- **Faster CI.** One `Swatinem/rust-cache` step per job, the full suite and
-  clippy on Linux only, and `cargo check --locked` on macOS and Windows
-  instead of a third and fourth copy of the suite.
 
 ## 0.4.2 (2026-11-26)
 

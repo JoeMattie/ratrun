@@ -1858,6 +1858,8 @@ mod tests {
         let a = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
         let b = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(18.0, 0.0), 1.0);
         let c = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(26.0, 0.0), 1.0);
+        // The floor's HP row scales the pool, so read it instead of assuming it.
+        let pool = hp(&w, a);
         infect_at(&mut w, p + Vec2::new(10.0, 0.0));
         assert_eq!(infections(&mut w).len(), 1);
         let mut t = 0.0;
@@ -1866,9 +1868,9 @@ mod tests {
             t += 1.0 / 60.0;
         }
         let dmg = VIRUS_DAMAGE[4];
-        assert!((hp(&w, a) - (60.0 - 3.0 * dmg)).abs() < 1e-4, "a's ticks");
-        assert!((hp(&w, b) - (60.0 - 3.0 * dmg)).abs() < 1e-4, "b's ticks");
-        assert!((hp(&w, c) - (60.0 - 3.0 * dmg)).abs() < 1e-4, "c's ticks");
+        assert!((hp(&w, a) - (pool - 3.0 * dmg)).abs() < 1e-3, "a's ticks");
+        assert!((hp(&w, b) - (pool - 3.0 * dmg)).abs() < 1e-3, "b's ticks");
+        assert!((hp(&w, c) - (pool - 3.0 * dmg)).abs() < 1e-3, "c's ticks");
         // Four jumps at L5, three bodies: the chain ended on `c` with jumps
         // left, because every neighbour was already in its history. Every mark
         // it left is spent and therefore gone.
@@ -1888,6 +1890,8 @@ mod tests {
         let a = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
         let b = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(18.0, 0.0), 1.0);
         let c = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(26.0, 0.0), 1.0);
+        // The floor's HP row scales the pool, so read it instead of assuming it.
+        let pool = hp(&w, c);
         // `c` belongs to a foreign chain that is not ticking yet.
         let mut foreign = Infection::new(999, 4, 22.0, 7.0);
         foreign.timer = 999.0;
@@ -1906,8 +1910,8 @@ mod tests {
         let c_mark = mark_of(&w, c).unwrap();
         assert_eq!(c_mark.ticks_left, 3, "the foreign mark must be untouched");
         assert_eq!(c_mark.jumps_left, 4);
-        assert_eq!(hp(&w, c), 60.0, "no chain damage reached the marked body");
-        assert!((hp(&w, b) - (60.0 - 3.0 * VIRUS_DAMAGE[4])).abs() < 1e-4);
+        assert_eq!(hp(&w, c), pool, "no chain damage reached the marked body");
+        assert!((hp(&w, b) - (pool - 3.0 * VIRUS_DAMAGE[4])).abs() < 1e-3);
     }
 
     /// The weapon always drops, but a marked body is never re-tagged: a new
@@ -2028,6 +2032,8 @@ mod tests {
         let host = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 0.05);
         let victim = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(20.0, 0.0), 1.0);
         let _ = victim;
+        // A 3 HP host on any floor's HP row: one tick has to kill it.
+        w.ecs.get_mut::<Enemy>(host).unwrap().hp = 3.0;
         infect_at(&mut w, p + Vec2::new(10.0, 0.0));
         let start = hp(&w, host);
         // One step worth three tick windows (0.35 s each).

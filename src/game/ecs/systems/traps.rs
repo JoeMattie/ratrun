@@ -995,9 +995,6 @@ pub fn traps_system(
         Res<BossDue>,
         Res<BossOverride>,
         Res<MinibossSchedule>,
-        // The sector row for the floor's hit softening: this system is at
-        // bevy's 16-parameter limit, so it rides in the spawn bundle.
-        Res<crate::game::ecs::resources::LevelIndex>,
     ),
     mut next_enemy_id: ResMut<NextEnemyId>,
     bosses: Query<&Boss>,
@@ -1005,7 +1002,7 @@ pub fn traps_system(
     let dt = input.dt;
     // `[enemies] sector_damage_mult`: the crab pot's door and the mousetrap's
     // bar carry it, as they did when the softening sat on the rat.
-    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, spawn.8.0);
+    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, spawn.1.0);
     traps.sync(&level, &mut enemies);
     if level.theme == Theme::Outfall && !level.objects.crab_pots.is_empty() {
         let scratch = &mut *scratch;
@@ -2904,6 +2901,8 @@ mod tests {
         }
         let ids: Vec<u32> = w.enemies().iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), 6);
+        // The floor's HP row scales the pool, so read it instead of assuming it.
+        let pool = w.enemies()[0].max_hp;
 
         w.level.objects.mousetraps[0].state = MousetrapState::Triggered;
         for _ in 0..(MOUSETRAP_TRIGGER_SECS / DT).ceil() as usize + 2 {
@@ -2920,12 +2919,12 @@ mod tests {
             if ids[..3].contains(&e.id) {
                 assert_eq!(
                     e.hp,
-                    1200.0 - MOUSETRAP_DAMAGE_ENEMY,
+                    pool - MOUSETRAP_DAMAGE_ENEMY,
                     "inside brute hit more than once: hp = {}",
                     e.hp
                 );
             } else {
-                assert_eq!(e.hp, 1200.0, "outside brute was hit: hp = {}", e.hp);
+                assert_eq!(e.hp, pool, "outside brute was hit: hp = {}", e.hp);
             }
         }
     }

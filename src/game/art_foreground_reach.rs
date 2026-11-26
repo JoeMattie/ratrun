@@ -2302,7 +2302,7 @@ mod tests {
 
     #[test]
     fn canopy_trunk_is_never_inside_drawn_extent() {
-        assert!(CANOPY_TRUNK_X < 0.0, "trunk hub must sit strictly off-screen (x < 0)");
+        const { assert!(CANOPY_TRUNK_X < 0.0, "trunk hub must sit strictly off-screen (x < 0)") };
 
         let spec = reach_spec(ReachKind::TreeCanopy);
         // Pass len > tip_len to verify local_x <= 0 stays strictly empty even if over-extended.

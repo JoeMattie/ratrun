@@ -168,7 +168,6 @@ use crate::game::art_traps::{
 };
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{self, SizeClass, TileKind};
-#[cfg(test)]
 use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
@@ -4682,7 +4681,7 @@ pub fn boss_update_system(
     (tick, tuning, sector): (
         Res<TickInput>,
         Res<crate::tuning::RunTuning>,
-        Res<crate::game::ecs::resources::LevelIndex>,
+        Res<DifficultyLevel>,
     ),
     mut level: ResMut<Level>,
     mut player: ResMut<Player>,

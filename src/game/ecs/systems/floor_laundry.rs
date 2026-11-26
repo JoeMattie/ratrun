@@ -314,6 +314,7 @@ fn lure_target(e: &Enemy, rat: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec2
 /// One tick of one peg. `target` is where a new set of jaws is aimed (the rat,
 /// or the decoy's key); the bite always tests the rat. Returns `true` when the
 /// jaws bit the rat this tick.
+#[allow(clippy::too_many_arguments)]
 fn peg_tick(
     e: &mut Enemy,
     jaws: &mut PegJaws,

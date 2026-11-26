@@ -717,14 +717,15 @@ fn spawn_point_stays_in_bounds_clear_of_walls_and_player() {
 /// late budget. The cap can only be pressed once the curve is near its top, so
 /// this jumps the clock to just before the boss hand-off with `w.elapsed` and
 /// plays that window instead: the late budget, the miniboss chest and the boss
-/// reserved slot, in 25 s.
+/// reserved slot, in 30 s (25 s up to the hand-off and 5 s past it, so the
+/// boss's arrival does not hang on the last tick's rounding).
 #[test]
 fn enemy_cap_holds_at_the_top_of_the_curve() {
     let mut w = World::new(Theme::Sewer, 17);
     let dt = 0.1;
     w.elapsed = director::BOSS_TIME - 25.0;
     let mut ticks = 0;
-    while !w.finished() && ticks < 250 {
+    while !w.finished() && ticks < 300 {
         w.update(dt, Vec2::ZERO, false);
         apply_pending(&mut w);
         // Keep the rat alive so the cap is exercised into the boss fight.
@@ -1291,11 +1292,13 @@ fn world_accessors_report_boss_enemies_and_pickups() {
     let mut rng = StdRng::seed_from_u64(11);
     let bpos = w.player.pos + Vec2::new(40.0, -15.0);
     let boss = w.spawn_enemy_with_rng(EnemyKind::Boss, bpos, 1.0, &mut rng);
+    // The legacy body's 1400 on the floor's own HP row.
+    let pool = EnemyKind::Boss.base_hp() * w.tuning().enemies.sector_hp_mult[0];
     edit_enemy(&mut w, boss, |enemy| enemy.hp = 900.0);
     assert_eq!(w.enemy_count(), 1);
     let (hp, max_hp) = w.boss_hp().expect("living boss should report hp");
     assert!((hp - 900.0).abs() < 1e-3);
-    assert!((max_hp - 1400.0).abs() < 1e-3);
+    assert!((max_hp - pool).abs() < 1e-2, "max hp {max_hp}, pool {pool}");
     let ofs = w.boss_offset().expect("living boss should report offset");
     assert!((ofs.x - 40.0).abs() < 1e-3 && (ofs.y + 15.0).abs() < 1e-3);
 

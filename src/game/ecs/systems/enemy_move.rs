@@ -310,7 +310,7 @@ pub fn enemy_steering_system(
         }
         let shy = beam.map_or(Vec2::ZERO, |beam| beam.shy(&level, &e, spawn));
         if e.kind == EnemyKind::ShoreCrab {
-            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase);
+            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase, shy);
         } else {
             e.steer_with_deflection(target, flow_dir, dt, gait, shy);
         }

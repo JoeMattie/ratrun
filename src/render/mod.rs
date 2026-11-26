@@ -56,7 +56,7 @@ pub mod testbed;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod outfall_current;
 
-/// Package version stamped in the top-left corner of every screen (`0.4.3`).
+/// Package version stamped in the top-left corner of every screen.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Dim, non-competing ink for [`BUILD_VERSION`]: readable over both

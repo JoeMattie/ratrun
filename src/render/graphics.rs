@@ -403,11 +403,8 @@ pub fn draw(f: &mut Frame, area: Rect, view: &GraphicsView<'_>, hits: &mut HitMa
         }
     }
 
-    // Accent the panel's outer edge faintly so the plate reads as focused.
-    if lay.panel.width > 2 && lay.panel.height > 1 {
-        f.buffer_mut()
-            .set_style(Rect::new(lay.panel.x, lay.panel.y, lay.panel.width, 1), ink(tone));
-    }
+    // `panel` already inks the plate's top edge in `tone`. Inking that row
+    // again here recoloured the build number stamped on the border.
 }
 
 #[cfg(test)]

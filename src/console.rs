@@ -2876,8 +2876,8 @@ mod tests {
     fn tab_completes_a_command_prefix() {
         let mut c = Console::new();
         c.open_panel();
-        c.input = "gi".into();
-        c.cursor = 2;
+        c.input = "giv".into();
+        c.cursor = 3;
         // A single candidate is filled straight into the line.
         let n = begin_completion(&mut c);
         assert_eq!(n, 1);

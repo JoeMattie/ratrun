@@ -688,7 +688,11 @@ mod tests {
     // ---- harness ---------------------------------------------------------
 
     fn printworks(seed: u64) -> World {
-        let mut w = World::new(Theme::Printworks, seed);
+        // The art's own hazard numbers: no sector softening on slot 2.
+        let mut w = World::with_tuning(
+            Theme::Printworks, seed,
+            crate::tuning::RunTuning::with_base_boss_hazards(BossKind::NightEdition),
+        );
         // Campaign slot 2 is the Printworks, i.e. the Night Edition.
         w.level_index = 2;
         w

@@ -2284,7 +2284,10 @@ mod tests {
             w
         };
         let mut adapted = make_world(enabled.clone());
-        let mut control = make_world(crate::tuning::Tuning::default());
+        // The shipped default has the scaling on, so the control names it off.
+        let mut control = make_world(
+            crate::tuning::Tuning::parse("[director]\npower_scaling = false").unwrap(),
+        );
         let mut disabled = enabled;
         disabled.director.power_scaling = false;
         let mut disabled = make_world(disabled);
@@ -2667,7 +2670,8 @@ mod tests {
     /// the timer to the interval.
     #[test]
     fn elites_start_after_the_gate_and_scale_their_hp() {
-        let mut w = World::new(Theme::Sewer, 29);
+        // Power scaling off: this pins the curve's own pool.
+        let mut w = World::with_tuning(Theme::Sewer, 29, crate::tuning::RunTuning::without_power_scaling());
         w.director.elite_timer = 0.0;
         // Exactly at the gate: no elite (legacy `elapsed > ELITE_START`).
         director_tick(&mut w, 0.0, director::ELITE_START);
@@ -2818,7 +2822,8 @@ mod tests {
     /// Sewer's hp, speed and elite numbers.
     #[test]
     fn practice_scalars_do_not_change_the_floors_cast() {
-        let mut w = World::new(Theme::Trailer, 61);
+        // Power scaling off: this pins the curve's own pool.
+        let mut w = World::with_tuning(Theme::Trailer, 61, crate::tuning::RunTuning::without_power_scaling());
         w.difficulty_override = Some(0);
         let floor = crate::game::roster::floor(Theme::Trailer);
         let mut elapsed = 0.0;
@@ -2867,7 +2872,8 @@ mod tests {
     fn the_elite_is_the_floors_heavy() {
         for theme in Theme::playable() {
             let heavy = crate::game::roster::elite_kind(theme);
-            let mut w = World::new(theme, 67);
+            // Power scaling off: this pins the curve's own pool.
+            let mut w = World::with_tuning(theme, 67, crate::tuning::RunTuning::without_power_scaling());
             w.director.elite_timer = 0.0;
             w.director.spawn_timer = 1.0e6; // keep the ordinary pulse out of it
             let open = director::MINIBOSS_TIMES[0] + director::ELITE_APPOINTMENT_GAP + 0.5;
@@ -3907,7 +3913,11 @@ mod tests {
     fn the_campaign_level_scales_the_horde() {
         let mut multipliers = Vec::new();
         for level in 0..crate::game::campaign::LEVEL_COUNT {
-            let mut w = World::new_level(level, 7, Loadout::starting());
+            // Power scaling off: this pins the curve's own pool.
+            let mut w = World::new_level_tuned(
+                level, crate::game::campaign::level_theme(level), 7, Loadout::starting(),
+                Default::default(), crate::tuning::RunTuning::without_power_scaling(),
+            );
             w.director.spawn_timer = 0.0;
             director_tick(&mut w, 0.1, 300.0);
             let enemies = w.enemies();

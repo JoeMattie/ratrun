@@ -1277,7 +1277,9 @@ impl Enemy {
         context: bevy_ecs::lifecycle::HookContext,
     ) {
         let tuning = world.resource::<crate::tuning::RunTuning>().clone();
-        let level = world.resource::<crate::game::ecs::resources::LevelIndex>().0;
+        // The difficulty row, not the campaign index: a practice run on a later
+        // floor spawns level one's bodies (`World::difficulty_override`).
+        let level = world.resource::<crate::game::ecs::resources::DifficultyLevel>().0;
         let Some(mut enemy) = world.get_mut::<Self>(context.entity) else { return };
         if enemy.named {
             return;
@@ -1288,8 +1290,13 @@ impl Enemy {
         let base_damage = enemy.kind.damage();
         let hp_scale = hp_scale * tuning.enemies.hp_mult
             * tuning.enemies.sector_hp_mult[super::director::level_slot(level)];
-        enemy.hp *= hp_scale;
-        enemy.max_hp *= hp_scale;
+        // A termite horde's second half is added carrying half of its parent's
+        // pool, which this hook already scaled when the parent spawned.
+        let carried_pool = enemy.w4.splits != 0;
+        if !carried_pool {
+            enemy.hp *= hp_scale;
+            enemy.max_hp *= hp_scale;
+        }
         enemy.damage = if row.contact_damage == base_damage {
             enemy.damage
         } else if base_damage > 0.0 {
