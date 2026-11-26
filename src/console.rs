@@ -1422,21 +1422,24 @@ pub fn run_command(app: &mut crate::app::App, line: &str) -> Result<(), String> 
     outcome
 }
 
-/// Split a command line into words. Double quotes group a word; a backslash
-/// escapes the next character.
+/// Split a command line into words. Double quotes group a word. A backslash
+/// escapes only a double quote, a backslash or whitespace; before anything
+/// else it is an ordinary character, so a Windows path (`C:\Users\rat\a.cfg`)
+/// survives intact.
 pub fn split_args(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_quote = false;
-    let mut escape = false;
-    for c in line.chars() {
-        if escape {
-            cur.push(c);
-            escape = false;
-            continue;
-        }
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
         match c {
-            '\\' => escape = true,
+            '\\' => match chars.peek() {
+                Some(&n) if n == '"' || n == '\\' || n.is_whitespace() => {
+                    cur.push(n);
+                    chars.next();
+                }
+                _ => cur.push('\\'),
+            },
             '"' => in_quote = !in_quote,
             c if c.is_whitespace() && !in_quote => {
                 if !cur.is_empty() {
@@ -2849,6 +2852,18 @@ mod tests {
         assert_eq!(parts, vec!["echo", "hello world"]);
     }
 
+    /// A Windows path keeps its backslashes; only `\"`, `\\` and an escaped
+    /// space are escapes.
+    #[test]
+    fn split_args_keeps_windows_paths() {
+        assert_eq!(
+            split_args(r#"exec "C:\Users\RUNNER~1\AppData\loop.cfg""#),
+            vec!["exec", r"C:\Users\RUNNER~1\AppData\loop.cfg"]
+        );
+        assert_eq!(split_args(r"exec C:\tmp\a.cfg"), vec!["exec", r"C:\tmp\a.cfg"]);
+        assert_eq!(split_args(r#"echo \"quoted\" a\ b c\\d"#), vec!["echo", "\"quoted\"", "a b", r"c\d"]);
+    }
+
     // ---- Cheat flag -----------------------------------------------------
 
     #[test]
@@ -3011,13 +3026,22 @@ mod tests {
             "nest reset confirm",
             "set enemy_cap 100",
             "get enemy_cap",
-            "exec /dev/null",
         ];
         for cmd in cases {
             let mut app = fresh_app();
             let result = run_command(&mut app, cmd);
             assert!(result.is_ok(), "`{cmd}` failed: {:?}", result.err());
         }
+        // `exec` reads a real (empty) script, so the case holds on every OS:
+        // `/dev/null` does not exist on Windows.
+        let dir = std::env::temp_dir().join(format!("ratrun-exec-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let empty = dir.join("empty.cfg");
+        std::fs::write(&empty, "").expect("write script");
+        let cmd = format!("exec \"{}\"", empty.display());
+        let result = run_command(&mut fresh_app(), &cmd);
+        assert!(result.is_ok(), "`{cmd}` failed: {:?}", result.err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
