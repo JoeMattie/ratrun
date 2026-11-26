@@ -21,8 +21,6 @@
 //! Pure render-only drawing: zero heap allocations, zero RNG, smooth continuous
 //! animation from `view.anim` and `view.progress`.
 
-#![allow(clippy::disallowed_methods)] // render-only: platform maths is fine
-
 use std::f32::consts::{PI, TAU};
 
 use crate::math::Vec2;

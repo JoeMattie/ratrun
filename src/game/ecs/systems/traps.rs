@@ -967,7 +967,7 @@ fn apply_player_slow(input: &mut TickInput, player: &mut Player, mult: f32) {
 }
 
 /// Advance the floor traps by one tick.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub fn traps_system(
     mut input: ResMut<TickInput>,
     mut player: ResMut<Player>,

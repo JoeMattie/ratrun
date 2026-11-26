@@ -300,7 +300,8 @@ impl GiantPose {
             0.0
         };
 
-        if outfit == RatOutfit::Diver {
+        if outfit != RatOutfit::Standard {
+            let float = if outfit == RatOutfit::Diver { 1.0 } else { 0.0 };
             let hover_phase = elapsed * 2.5;
             let swim_phase = elapsed * 8.5;
             let bob_scale = scale.clamp(0.45, 2.6);
@@ -308,9 +309,9 @@ impl GiantPose {
             let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash) * bob_scale;
             let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash) * bob_scale;
             let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash) * bob_scale;
-            let lift = base_lift - bob_y;
+            let lift = (base_lift - bob_y) * float;
             let ground = player.pos - cam;
-            let center = ground + Vec2::new(bob_x, -lift) + raw_face * surge;
+            let center = ground + Vec2::new(bob_x * float, -lift) + raw_face * (surge * float);
 
             let turn_lean = if player.vel.len_sq() > 4.0 {
                 let vd = player.vel.normalized();

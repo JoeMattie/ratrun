@@ -543,7 +543,7 @@ pub(crate) fn swimmer_lift(e: &Enemy) -> f32 {
         EnemyKind::GlassShrimp => (4.0, 0.75, 0.72),
         EnemyKind::Conger => (4.8, 0.85, 0.62),
         EnemyKind::Lampfish => (4.8, 0.85, 0.65),
-        EnemyKind::Grouper => (5.2, 0.90, 0.48),
+        EnemyKind::Grouper => (8.0, 0.90, 0.48),
         EnemyKind::FrySchool => (4.5, 0.75, 0.68),
         _ => return 0.0,
     };
@@ -1691,7 +1691,7 @@ pub(crate) fn draw_grouper(
 ) {
     let s = e.radius.max(1.0) * (1.0 / 6.5);
     let lift = swimmer_lift(e);
-    draw_floating_shadow(pb, e.pos - cam, 6.0 * s, 3.8 * s, lift, 5.2);
+    draw_floating_shadow(pb, e.pos - cam, 6.0 * s, 3.8 * s, lift, 8.0);
     let lf = Local::of_lifted(e, cam, lift);
     let elite = elite || e.elite;
     let row = (e.anim * 0.8).sin();
@@ -1863,7 +1863,7 @@ pub(crate) fn draw_grouper_lod(
 ) {
     let s = e.radius.max(1.0) * (1.0 / 6.5);
     let lift = swimmer_lift(e);
-    draw_floating_shadow(pb, e.pos - cam, 5.4 * s, 3.4 * s, lift, 5.2);
+    draw_floating_shadow(pb, e.pos - cam, 5.4 * s, 3.4 * s, lift, 8.0);
     let lf = Local::of_lifted(e, cam, lift);
     let elite = elite || e.elite;
     let row = (e.anim * 0.8).sin();
@@ -2656,14 +2656,15 @@ mod tests {
             crate::game::art_enemy::draw_enemy(&mut pb, &e, Vec2::ZERO, ACCENT);
             pb.set_pen(0);
 
-            // Detached seabed shadow sits at the TRUE ground position with floor pen 0.
-            let gx = e.pos.x as usize;
-            let gy = e.pos.y as usize;
+            // The fins may cover part of the shadow. Sample its footprint
+            // around the true ground centre, leaving the sprite pen excluded.
+            let gx = e.pos.x as i32;
+            let gy = e.pos.y as i32;
             let mut shadow_near_ground = 0usize;
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    let x = (gx as i32 + dx) as usize;
-                    let y = (gy as i32 + dy) as usize;
+            for dy in -2..=2 {
+                for dx in -4..=4 {
+                    let x = (gx + dx) as usize;
+                    let y = (gy + dy) as usize;
                     let c = pb.pixel_at(x, y);
                     if pb.mat()[y * pb.w + x] == 0 && lum(c) < lum(BG) {
                         shadow_near_ground += 1;

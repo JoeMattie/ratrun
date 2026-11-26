@@ -305,7 +305,9 @@ fn cast(pb: &mut PixelBuffer, scene: &OverheadScene<'_>, defer: bool) {
         // swimming diver floats above the seabed, so its shadow uses the flyer
         // slide rule and a slightly smaller footprint under `player.pos`.
         if !scene.hide_rat {
-            let (rat_half, rat_height, rat_flyer) = if scene.level.theme == Theme::Outfall {
+            let (rat_half, rat_height, rat_flyer) = if scene.level.theme == Theme::Outfall
+                && !scene.level.objects.rat_in_crab_pot()
+            {
                 (RAT_HALF - 1, HEIGHT_FLYER, true)
             } else {
                 (RAT_HALF, HEIGHT_MEDIUM, false)

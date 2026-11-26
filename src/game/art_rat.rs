@@ -24,9 +24,9 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{rat_helmet_pen, rat_visor_pen};
 use crate::render::palette::{mix, scale, Rgb};
 
-use super::collision::{SizeClass, TileMap};
+use super::collision::TileMap;
 use super::ecs::components::{BiteSnap, Lash, LashPhase, WhipCrack};
-use super::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
+use super::ecs::constants::PLAYER_SUBSTEP;
 use super::ecs::systems::player::{dash_duration, DASH_BOOST, DASH_SECS};
 use super::level::Theme;
 use super::player::Player;
@@ -44,6 +44,8 @@ pub enum RatOutfit {
     /// Classic brass diving helmet, rubber diving suit, flippers, and
     /// swimming animation on the Outfall.
     Diver,
+    /// The same suit with its feet down inside a closed crab pot.
+    CagedDiver,
 }
 
 impl RatOutfit {
@@ -1196,7 +1198,8 @@ fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose
     } else {
         0.0
     };
-    if outfit == RatOutfit::Diver {
+    if outfit != RatOutfit::Standard {
+        let float = if outfit == RatOutfit::Diver { 1.0 } else { 0.0 };
         let hover_phase = elapsed * 2.5;
         let swim_phase = elapsed * 8.5;
         // Smooth analytic float lift + buoyancy bob and stroke surge
@@ -1204,8 +1207,8 @@ fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose
         let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash);
         let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash);
         let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash);
-        let lift = DIVER_LIFT - bob_y;
-        let pos = player.pos + Vec2::new(bob_x, -lift) + raw_face * surge;
+        let lift = (DIVER_LIFT - bob_y) * float;
+        let pos = player.pos + Vec2::new(bob_x * float, -lift) + raw_face * (surge * float);
 
         // Slight continuous tilt into the direction of travel plus gentle
         // swim-kick yaw.
@@ -1382,13 +1385,14 @@ pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap,
         * player.buffs.move_speed_scale()
         * DASH_BOOST;
     let len = speed * dash_duration(charge);
-    let alpha = 0.10 + 0.20 * charge;
+    let alpha = 0.15 + 0.27 * charge;
+    let (radius, class) = player.movement_body(tiles);
     // Two-pixel steps: a lane that reads as a line without drawing the whole
     // corridor pixel by pixel every frame.
     let mut d = PLAYER_SUBSTEP;
     while d <= len {
         let p = player.pos + face * d;
-        let resolved = tiles.resolve_circle(p, PLAYER_RADIUS, SizeClass::Small, Some(face));
+        let resolved = tiles.resolve_circle(p, radius, class, Some(face));
         if resolved != p {
             // The wall is where the dash stops: mark it faintly and stop.
             let s = w2s(p, cam);

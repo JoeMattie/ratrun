@@ -1067,7 +1067,7 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
             "The school spreads in the dark. Near a live light or Subject R-47, it bunches and stops. Strike the smaller, softer target while it holds.",
         ),
         EnemyKind::ShoreCrab => (
-            "Outfall · from 1:00",
+            "Outfall · guest · from 1:00",
             "Small groups scuttle sideways. Step out of the marked box before the claws close. Strike while the shell is exposed.",
         ),
     }

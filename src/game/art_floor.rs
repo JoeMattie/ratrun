@@ -675,9 +675,9 @@ fn sand_noise(wx: i32, wy: i32, cell: i32, salt: i32) -> i32 {
 fn outfall(floor: &mut Floor<'_>, pal: &Palette) {
     let sand_lo = scale(pal.bg, 0.79);
     let sand_hi = mix(pal.bg_alt, (118, 108, 84), 0.45);
-    let quartz_hi: Rgb = (128, 120, 99);
-    let shell_hi: Rgb = (138, 131, 110);
-    let shell_mid: Rgb = (114, 107, 88);
+    let quartz_hi: Rgb = (110, 103, 87);
+    let shell_hi: Rgb = (110, 105, 92);
+    let shell_mid: Rgb = (106, 100, 84);
     let pebble_lo: Rgb = (50, 52, 48);
     let pebble_mid: Rgb = (68, 70, 62);
     let pebble_hi: Rgb = (108, 102, 88);

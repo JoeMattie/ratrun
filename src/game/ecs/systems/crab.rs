@@ -145,7 +145,7 @@ fn group_positions(
 }
 
 /// Runs after the appointments and boss hand-off, before the first grid.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn spawn_crabs_system(
     mut commands: Commands,
     level: Res<Level>,
@@ -445,6 +445,7 @@ pub fn crab_system(
         return;
     }
     let rat = player.pos;
+    let decoy_radius = super::powerups::WINDUP_MOUSE_RADIUS;
     let decoy = decoys.iter().filter(|(_, d)| d.live()).max_by_key(|(id, _)| id.0);
     for (_, mut e) in enemies.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) {
         if e.kind != KIND || !e.targetable() {
@@ -452,7 +453,7 @@ pub fn crab_system(
         }
         let target = decoy
             .filter(|(_, d)| super::powerups::decoy_lures_body(&e)
-                && e.pos.dist_sq(d.pos) <= super::powerups::WINDUP_MOUSE_RADIUS.powi(2)
+                && e.pos.dist_sq(d.pos) <= decoy_radius * decoy_radius
                 && los_clear(&level, e.pos, d.pos, e.radius))
             .map_or(rat, |(_, d)| d.pos);
         if tick_attack(&mut e, &mut player, &level, target, input.dt, &mut sfx) {

@@ -3205,12 +3205,14 @@ impl World {
         const HOSTILE: (u8, u8, u8) = (255, 120, 60);
         const BOSS: (u8, u8, u8) = (255, 220, 60);
 
-        // The body circle, plus the smaller hurt disc while shrunk.
+        // Show both radii whenever a size change separates them.
         {
             let s = self.w2s(self.player.pos, cam);
-            pb.ring(s.0, s.1, PLAYER_RADIUS.round() as i32, PLAYER);
-            if self.player.buffs.tiny > 0.0 {
-                pb.ring(s.0, s.1, self.player.buffs.hurt_radius().round() as i32, HOSTILE);
+            let (body, _) = self.player.movement_body(&self.level.tiles);
+            let hurt = self.player.buffs.hurt_radius();
+            pb.ring(s.0, s.1, body.round() as i32, PLAYER);
+            if body.round() != hurt.round() {
+                pb.ring(s.0, s.1, hurt.round() as i32, HOSTILE);
             }
         }
 
@@ -3747,7 +3749,11 @@ impl World {
                 (id, lash, catch_pos)
             })
         };
-        let outfit = art_rat::RatOutfit::for_theme(self.level.theme);
+        let outfit = if self.level.objects.rat_in_crab_pot() {
+            art_rat::RatOutfit::CagedDiver
+        } else {
+            art_rat::RatOutfit::for_theme(self.level.theme)
+        };
         self.whip_chain.sync_with_outfit(
             &self.player,
             self.elapsed,

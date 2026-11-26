@@ -40,10 +40,10 @@ const DRIFT_B_PER_SEC: f32 = 23.0;
 
 /// Full-tier Outfall caustic peak lift before `fx::strength::CAUSTICS` (0.5),
 /// yielding up to 68 raw levels at full weight before flat quantisation.
-const OUTFALL_CAUSTIC_GAIN: i32 = 136;
+const OUTFALL_CAUSTIC_GAIN: i32 = 108;
 
 /// Cheap-path (`fx = false` / `Coarse` / `Compact`) caustic peak raw lift.
-const CHEAP_CAUSTIC_GAIN: i32 = 54;
+const CHEAP_CAUSTIC_GAIN: i32 = 50;
 
 /// Cool sunlit aqua-cyan tint of refracted ocean caustics.
 const OUTFALL_CAUSTIC_RGB: Rgb = (76, 224, 255);
@@ -260,17 +260,17 @@ fn quantise_fx_level(raw: i32, low_tier: bool) -> i32 {
     if raw < 14 {
         0
     } else if low_tier {
-        if raw < 34 {
-            20
+        if raw < 32 {
+            13
         } else {
-            42
+            30
         }
-    } else if raw < 32 {
-        18
-    } else if raw < 50 {
-        38
+    } else if raw < 28 {
+        12
+    } else if raw < 46 {
+        25
     } else {
-        58
+        43
     }
 }
 
@@ -344,7 +344,7 @@ pub(super) fn apply_fx_caustics(
 
             let wx = cam_x + px as i32;
             let net = caustic_net_q8(wx, wy, ox, oy, p1, p2);
-            let mut raw = ((((net * OUTFALL_CAUSTIC_GAIN) >> 8) * gain_q8) >> 8) * weight >> 8;
+            let mut raw = (((((net * OUTFALL_CAUSTIC_GAIN) >> 8) * gain_q8) >> 8) * weight) >> 8;
             if material::is_creature(byte) {
                 raw = (raw * 3) >> 3;
             }

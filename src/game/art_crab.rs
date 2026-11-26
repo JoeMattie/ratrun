@@ -20,8 +20,6 @@
 //! Pure render-only drawing: zero heap allocations, zero RNG, smooth continuous
 //! animation from `view.anim` and `view.progress`.
 
-#![allow(clippy::disallowed_methods)] // render-only: platform maths is fine
-
 use std::f32::consts::TAU;
 
 use crate::math::Vec2;
@@ -269,7 +267,7 @@ fn crab_pose(view: &CrabView) -> CrabPose {
         CrabState::Tell => {
             let e = smoothstep(prog);
             CrabPose {
-                body_u: -1.0 * e,
+                body_u: -e,
                 body_v: (view.anim * 34.0).sin() * (0.22 * e),
                 claw_u: lerp(6.6, 5.8, e),
                 claw_v: lerp(4.7, 7.6, e),

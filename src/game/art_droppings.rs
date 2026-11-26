@@ -561,12 +561,12 @@ mod tests {
 
     /// Maximum Chebyshev radius from `(sx, sy)` of any green-dominant floor
     /// halo pixel (`g > r.max(b)`).
-    fn green_halo_radius(pb: &PixelBuffer, sx: usize, sy: usize) -> usize {
+    fn green_halo_radius(pb: &PixelBuffer, sx: usize, sy: usize, bg: Rgb) -> usize {
         let mut max_r = 0usize;
-        for y in (sy - 7)..=(sy + 7) {
-            for x in (sx - 8)..=(sx + 8) {
+        for y in 0..pb.h {
+            for x in 0..pb.w {
                 let c = pb.pixel_at(x, y);
-                if c.1 > c.0.max(c.2) {
+                if c.1 > bg.1 && c.1 > c.0.max(c.2) {
                     let r = x.abs_diff(sx).max(y.abs_diff(sy));
                     max_r = max_r.max(r);
                 }
@@ -805,7 +805,7 @@ mod tests {
                 draw_dropping(&mut pb, &sample_dropping(pos, 3.0, seed, level), Vec2::ZERO, 0.0);
 
                 let g = green_excess_in_box(&pb, 20, 20, BG);
-                let rad = green_halo_radius(&pb, 20, 20);
+                let rad = green_halo_radius(&pb, 20, 20, BG);
                 assert!(
                     g > prev_green,
                     "seed={seed}: rank {level} green halo ({g}) should exceed rank {} ({prev_green})",

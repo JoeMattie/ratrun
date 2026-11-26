@@ -8464,7 +8464,11 @@ mod tests {
                             .flat_map(|prop| w.level.clothes_piles.iter().map(move |pile| (prop, pile)))
                             .min_by(|(a, p), (b, q)| a.rect.center().dist_sq(p.pos).total_cmp(&b.rect.center().dist_sq(q.pos)))
                             .expect("running bank and clothes pile");
-                        w.player.pos = pile.pos;
+                        w.player.pos = [east, -east, north, -north]
+                            .into_iter()
+                            .map(|dir| pile.pos + dir * 13.0)
+                            .find(|&p| w.level.tiles.circle_clear(p, 3.0, SizeClass::Small))
+                            .unwrap_or(pile.pos);
                         w.cam_focus = Some((bank.rect.center() + pile.pos) * 0.5);
                         w.elapsed = 6.0;
                     }
@@ -8649,7 +8653,8 @@ mod tests {
                     .and_then(|value| value.parse::<f32>().ok()).unwrap_or(1.0);
                 w.cam_focus = Some(match scene {
                     "arrival" => view.real_bulb.map_or(view.pos, |bulb| (view.pos + bulb.pos) * 0.5),
-                    "body" | "swim" | "death" => view.pos - view.facing * (18.0 + (zoom - 1.0) * 40.0),
+                    "body" | "swim" | "death" => view.floating_body().pos
+                        - view.facing * (12.0 + (zoom - 1.0) * 27.0),
                     "feint" => view.attack.map_or(view.pos, |shape| (view.pos + shape.center()) * 0.5),
                     "gape" | "stamp" => art_boss_lantern::mouth_pos(&view),
                     "decoy" => {

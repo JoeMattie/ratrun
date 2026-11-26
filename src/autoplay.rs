@@ -261,6 +261,8 @@ pub enum DamageCause {
     MinibossBody,
     /// A floor trap (the mousetrap snap; glue only slows).
     Trap,
+    /// A crab pot door closing on the rat.
+    CrabPot,
     /// A Laundry steam grate's plume (it used to be booked to the nearest
     /// body's contact, or to "unknown").
     Steam,
@@ -550,6 +552,7 @@ impl DamageCause {
             DamageCause::BossProjectile(BossKind::Lantern) => "lantern projectile",
             DamageCause::MinibossBody => "miniboss body",
             DamageCause::Trap => "mousetrap",
+            DamageCause::CrabPot => "crab pot",
             DamageCause::Steam => "steam grate",
             DamageCause::Pit => "deck hole",
             DamageCause::TidalDrop => "tidal drop",
@@ -1780,6 +1783,13 @@ impl AutoRun {
                 ));
             }
         }
+        for pot in &w.level.objects.crab_pots {
+            use crate::game::art_crabpot::CrabPotState;
+            use crate::game::ecs::systems::traps::{in_crab_pot, POT_RAT_DAMAGE};
+            if pot.state == CrabPotState::Closing && pot.progress >= 0.95 && in_crab_pot(pot.pos, p) {
+                self.threats.push((DamageCause::CrabPot, (POT_RAT_DAMAGE - armor).max(1.0), p.dist(pot.pos)));
+            }
+        }
         // The Flatbed's own hazards (both lists are empty on every other
         // floor). The snapshot is pre-tick, so a rat a step from the edge
         // counts: the fall lands on the tick its centre crosses.
@@ -1988,6 +1998,7 @@ fn floor_attack_name(kind: EnemyKind) -> &'static str {
 fn classify_death(w: &World, cause: DamageCause) -> String {
     match cause {
         DamageCause::Trap => "trap: mousetrap snap".to_string(),
+        DamageCause::CrabPot => "trap: crab pot snap".to_string(),
         DamageCause::Steam => "hazard: steam plume".to_string(),
         DamageCause::Pit => "hazard: fell through the deck".to_string(),
         DamageCause::TidalDrop => "hazard: tidal drop".to_string(),
