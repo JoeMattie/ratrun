@@ -14,7 +14,8 @@
 //!   carry on to the opposite edges over the same sweep (an X-shaped scissor),
 //!   so the pair covers the whole arc at twice the angular speed. A body takes
 //!   one distance-scaled pulse per sweep (both beams share one hit set). Each
-//!   beam stops at the first wall or the edge of the widest simulation view.
+//!   beam starts at the rat's current eyes and stops at the first wall or the
+//!   edge of the widest simulation view. Carbon Copy keeps the cast origin.
 //! - **Super Dash** is a weapon whose *fire* is the dash. `player_system`
 //!   records the dash's real travelled segments into [`DashTrack`]; this system
 //!   damages every body those segments crossed, once per body per dash. A
@@ -31,7 +32,7 @@
 //! Determinism: every walk is `SpawnId` order (or the cached `EnemyIndex`, which
 //! *is* that order), every rng draw happens inside a `vfx` emitter called only
 //! when something actually happened. Only traces that fire Laser Eyes can see
-//! its longer reach, distance falloff and smaller set of particle effects.
+//! the moving origin, which can change which bodies are hit and their damage.
 
 use bevy_ecs::prelude::*;
 
@@ -214,7 +215,12 @@ fn sweep_step(
     let steps = (delta.abs() / step_rad).ceil().max(1.0) as u32;
     let mut last_len = 0.0;
     for step in 0..=steps {
-        let angle = from_angle + delta * (step as f32 / steps as f32);
+        // Resolve the exact angle the art will use for the final sample.
+        let angle = if step == steps {
+            to_angle
+        } else {
+            from_angle + delta * (step as f32 / steps as f32)
+        };
         let dir = Vec2::from_angle(angle);
         let len = beam_length(&level.tiles, origin, dir, view_center, view);
         last_len = len;
@@ -306,13 +312,13 @@ fn sweep_step(
     last_len
 }
 
-/// Laser Eyes: charge the weapon and sweep one continuous beam across an arc.
+/// Laser Eyes: charge the weapon and sweep two continuous beams across an arc.
 ///
 /// A sweep is the weapon's shot, so it fires on its own cycle without needing a
 /// target (like Squeak Nova, unlike Gnaw): a beam across a corridor is worth
-/// firing before the horde is on screen. `player.face` (or the reticle) is read
-/// **once**, at the trigger tick — turning afterwards does not drag the arc,
-/// which is what makes a sweep read as one deliberate cut.
+/// firing before the horde is on screen. The aim locks to the facing or reticle
+/// at the trigger tick. The eye position follows the rat's current facing and
+/// position throughout the sweep.
 ///
 /// Batch 13 replaced batch 12's one beam (which alternated direction) with a
 /// **symmetrical pair**: one beam starts at each outer edge of the arc and both
@@ -374,6 +380,23 @@ pub fn laser_eyes_system(
             twin: w.laser_twin(),
         });
     }
+    if trigger.is_none() && !fx.active() {
+        return;
+    }
+
+    let face = if player.face.len_sq() > 1e-4 {
+        player.face.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+    let eye = player.pos + face * LASER_EYE_OFFSET;
+    // Near a wall the decorative eyes can extend past the collision radius.
+    // Keep the muzzle on the rat's side of that wall on every tick.
+    let origin = match level.tiles.segment_hit(player.pos, eye, LASER_HALF_WIDTH) {
+        Some(t) => player.pos + face * (LASER_EYE_OFFSET * t - 0.01).max(0.0),
+        None => eye,
+    };
+
     if let Some(cast) = trigger {
         // An aim point turns the sweep's centre to the reticle instead of the
         // facing (wave 3 controls); with no aim this is exactly the locked
@@ -383,19 +406,7 @@ pub fn laser_eyes_system(
             .map(|p| p - player.pos)
             .filter(|v| v.len_sq() > 4.0)
             .map(|v| v.normalized());
-        let face = if player.face.len_sq() > 1e-4 {
-            player.face.normalized()
-        } else {
-            Vec2::new(0.0, -1.0)
-        };
         let base = aimed.unwrap_or(face);
-        let eye = player.pos + face * LASER_EYE_OFFSET;
-        // Near a wall the decorative eyes can extend past the collision
-        // radius. Keep the cast on the rat's side of that wall.
-        let origin = match level.tiles.segment_hit(player.pos, eye, LASER_HALF_WIDTH) {
-            Some(t) => player.pos + face * (LASER_EYE_OFFSET * t - 0.01).max(0.0),
-            None => eye,
-        };
         let base_angle = base.angle();
         // Both beams start at the two outer edges of the arc at the same
         // instant and close inward, so there is no direction to alternate any
@@ -423,7 +434,6 @@ pub fn laser_eyes_system(
             age: 0.0,
             pulses: cast.pulses,
             facing: base,
-            origin,
             full_damage_radius: cast.full_damage_radius,
             dmg: cast.dmg,
             half: cast.half,
@@ -445,6 +455,7 @@ pub fn laser_eyes_system(
             copy_secs: copy_left,
             copy_prev_angle: copy_prev,
             copy_prev_angle_b: copy_prev_b,
+            cast_origin: origin,
             ..LaserFx::default()
         };
         shake.amount = shake.amount.max(0.9);
@@ -464,18 +475,14 @@ pub fn laser_eyes_system(
         }
     }
 
-    if !fx.active() {
-        return;
-    }
-
-    // 2. Sweep the two live beams inward. The angles are a pure function of
-    // `age`, so a replay with the same dt cuts the same band.
+    // 2. Sweep the two live beams inward from this tick's eye position.
+    fx.origin = origin;
     fx.age += dt;
     let t = (fx.age / fx.total.max(1e-4)).clamp(0.0, 1.0);
     let (half, span, full_damage_radius, dmg) = (fx.half, fx.span(), fx.full_damage_radius, fx.dmg);
     let view = widest_view(viewport.0);
     // Match the arena clamp of the widest ordinary view without reading the
-    // render camera. The recorded muzzle stays fixed as the rat moves.
+    // render camera.
     let half_view = Vec2::new(view.x.min(level.arena.x), view.y.min(level.arena.y)) * 0.5;
     let center = Vec2::new(
         player.pos.x.clamp(half_view.x, level.arena.x - half_view.x),
@@ -488,7 +495,7 @@ pub fn laser_eyes_system(
         let mut hits = fx.hits;
         let mut boss_hit = fx.boss_hit;
         let len = sweep_step(
-            fx.origin,
+            origin,
             prev,
             angle,
             full_damage_radius,
@@ -510,7 +517,7 @@ pub fn laser_eyes_system(
         // The mirrored beam shares the same hit set, so the pair still cuts a
         // body once per sweep.
         let len_b = sweep_step(
-            fx.origin,
+            origin,
             prev_b,
             angle_b,
             full_damage_radius,
@@ -1100,25 +1107,33 @@ mod tests {
         }
     }
 
-    /// The facing is locked at the trigger tick: turning the rat mid-burst
-    /// must not drag the sweep.
     #[test]
-    fn laser_locks_the_facing_at_burst_start() {
+    fn laser_origin_follows_the_eyes_while_aim_stays_locked() {
         let mut w = World::new(Theme::Sewer, 12);
         w.clear_enemies();
         open_map(&mut w);
         arm(&mut w, WeaponKind::LaserEyes, 1);
+        w.player.pos = w.level.arena * 0.5;
         w.player.face = Vec2::new(1.0, 0.0);
+        let start = w.player.pos;
         run_laser(&mut w, 1.0 / 60.0);
         let first = *w.ecs.resource::<LaserFx>();
-        assert!((first.facing.x - 1.0).abs() < 1e-5 && first.facing.y.abs() < 1e-5);
-        w.player.face = Vec2::new(0.0, 1.0);
-        run_laser(&mut w, 1.0 / 60.0);
-        let after = *w.ecs.resource::<LaserFx>();
-        assert!(
-            (after.facing.x - 1.0).abs() < 1e-5,
-            "the burst followed the rat's turn"
-        );
+        assert_eq!(first.facing, Vec2::new(1.0, 0.0));
+        assert_eq!(first.origin, start + Vec2::new(LASER_EYE_OFFSET, 0.0));
+        for dy in [10.0, 20.0, 30.0] {
+            w.player.pos = start + Vec2::new(0.0, dy);
+            w.player.face = Vec2::new(0.0, 1.0);
+            run_laser(&mut w, 1.0 / 60.0);
+            let fx = w.ecs.resource::<LaserFx>();
+            assert!(fx.active());
+            assert_eq!(fx.origin, w.player.pos + Vec2::new(0.0, LASER_EYE_OFFSET));
+            assert_eq!(fx.facing, first.facing);
+            let progress = fx.age / fx.total;
+            assert_eq!(
+                (fx.angle, fx.angle_b),
+                sweep_pair(first.facing.angle(), first.half, first.span(), progress),
+            );
+        }
     }
 
     /// Every exposed body on the ray takes the pulse once, and the beam pierces
@@ -1219,14 +1234,12 @@ mod tests {
                 arm(&mut w, WeaponKind::LaserEyes, 1);
 
                 run_laser(&mut w, 1.0 / 60.0);
-                let origin = w.ecs.resource::<LaserFx>().origin;
-                // The cast stays anchored, while the view follows the rat.
+                // The view and the muzzle follow the rat.
                 w.player.pos += Vec2::new(10.0, -8.0);
                 run_laser(&mut w, 1.0 / 60.0);
                 let fx = w.ecs.resource::<LaserFx>();
-                assert_eq!(fx.origin, origin);
                 for (angle, len) in [(fx.angle, fx.beam), (fx.angle_b, fx.beam_b)] {
-                    let end = origin + Vec2::from_angle(angle) * len - w.player.pos;
+                    let end = fx.origin + Vec2::from_angle(angle) * len - w.player.pos;
                     // At 2x the original width and height are the half-extents.
                     let edge = (end.x.abs() / viewport.x).max(end.y.abs() / viewport.y);
                     assert!((edge - 1.0).abs() < 1e-4, "viewport {viewport:?}, end {end:?}");

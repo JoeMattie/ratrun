@@ -912,8 +912,8 @@ impl BossDue {
 /// charges the weapon's `Weapon::timer` and owns the sweep; `fire_weapons_system`
 /// skips the kind entirely (`WeaponKind::fires_outside_fire_one`).
 ///
-/// The facing is **locked at the trigger tick**, so a rat that turns mid-sweep
-/// does not drag it — the arc is centred on where it was looking when it fired.
+/// The aim is locked at the trigger tick. The live beams move with the rat's
+/// eyes, and Carbon Copy replays from the trigger position.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct LaserFx {
     /// Seconds left in the current sweep (0 = idle).
@@ -929,7 +929,7 @@ pub struct LaserFx {
     pub pulses: u32,
     /// The facing the sweep is centred on (unit vector).
     pub facing: Vec2,
-    /// The beam's origin (the rat's eye line at the trigger tick).
+    /// The live beams' origin at the rat's eyes on the current tick.
     pub origin: Vec2,
     /// Full-damage radius at the rank the sweep was cast.
     pub full_damage_radius: f32,
@@ -989,6 +989,8 @@ pub struct LaserFx {
     pub copy_prev_angle_b: f32,
     /// Stopped lengths of those two replay beams, in the same order.
     pub copy_beams: [f32; 2],
+    /// The trigger tick's beam origin, kept for the next Carbon Copy.
+    pub cast_origin: Vec2,
 }
 
 /// Bodies one Laser Eyes sweep may remember as already cut.
@@ -1099,6 +1101,7 @@ impl Default for LaserFx {
             copy_prev_angle: 0.0,
             copy_prev_angle_b: 0.0,
             copy_beams: [0.0; 2],
+            cast_origin: Vec2::ZERO,
         }
     }
 }
@@ -1137,7 +1140,7 @@ impl LaserFx {
             return None;
         }
         Some(LaserCopy {
-            origin: self.origin,
+            origin: self.cast_origin,
             facing: self.facing,
             pulses: self.pulses,
             full_damage_radius: self.full_damage_radius,
