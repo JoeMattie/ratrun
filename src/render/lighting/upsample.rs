@@ -91,6 +91,7 @@ const AMBIENT_LAB: f32 = 0.44;
 const AMBIENT_LAUNDRY: f32 = 0.47;
 const AMBIENT_PRINTWORKS: f32 = 0.45;
 const AMBIENT_FLATBED: f32 = 0.48;
+const AMBIENT_OUTFALL: f32 = 0.41;
 
 /// Bounce blur radius in samples (a tent of weights 4,3,2,1 per axis, sum 16,
 /// so each pass is a shift). 3 samples is 12 px at stride 4, 24 px at 8: wide
@@ -118,6 +119,7 @@ pub(super) fn ambient_scale(theme: Theme, mode: LightingMode) -> f32 {
         Theme::Laundry => AMBIENT_LAUNDRY,
         Theme::Printworks => AMBIENT_PRINTWORKS,
         Theme::Trailer => AMBIENT_FLATBED,
+        Theme::Outfall => AMBIENT_OUTFALL,
     }
 }
 
@@ -583,13 +585,14 @@ mod tests {
     use super::*;
     use crate::game::level::Level;
 
-    const THEMES: [Theme; 6] = [
+    const THEMES: [Theme; 7] = [
         Theme::Sewer,
         Theme::Kitchen,
         Theme::Lab,
         Theme::Laundry,
         Theme::Printworks,
         Theme::Trailer,
+        Theme::Outfall,
     ];
     const MODES: [LightingMode; 4] = [
         LightingMode::Full,

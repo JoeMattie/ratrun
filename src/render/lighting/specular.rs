@@ -87,6 +87,7 @@ pub(crate) fn boss_pen(kind: BossKind) -> u8 {
         BossKind::Hawk => (MaterialKind::Fur, 4),
         BossKind::MegaRat => (MaterialKind::Fur, 6),
         BossKind::Cobra => (MaterialKind::Slime, 5),
+        BossKind::Lantern => (MaterialKind::Slime, 7),
     };
     pen(material, true, height)
 }
@@ -216,6 +217,15 @@ fn enemy_material(kind: EnemyKind) -> MaterialKind {
         // Feathers: matte (rim light only, no highlight), the one place a
         // white body must not blow out under a lamp.
         EnemyKind::Drake => MaterialKind::Fur,
+        // ---- Outfall ------------------------------------------------------
+        EnemyKind::SandHopper => MaterialKind::Shell,
+        EnemyKind::GlassShrimp => MaterialKind::Glass,
+        EnemyKind::Conger => MaterialKind::Slime,
+        EnemyKind::Skater => MaterialKind::Shell,
+        EnemyKind::PistolShrimp => MaterialKind::Shell,
+        EnemyKind::Lampfish => MaterialKind::Slime,
+        EnemyKind::Grouper => MaterialKind::Slime,
+        EnemyKind::FrySchool => MaterialKind::Slime,
     }
 }
 
@@ -261,6 +271,13 @@ fn miniboss_material(kind: MinibossKind) -> MaterialKind {
         MinibossKind::ChainDog => MaterialKind::Metal,
         // A gull with a map over its wings.
         MinibossKind::RoadAtlas => MaterialKind::Fur,
+        // ---- Outfall ------------------------------------------------------
+        // A storm-gate iron flange ring.
+        MinibossKind::Gasket => MaterialKind::Metal,
+        // Wet surging tidal hide.
+        MinibossKind::Swell => MaterialKind::Slime,
+        MinibossKind::Shade => MaterialKind::Slime,
+        MinibossKind::FalseBulb => MaterialKind::Slime,
     }
 }
 
@@ -291,6 +308,9 @@ fn prop_material(kind: PropKind) -> MaterialKind {
         PropKind::Toolbox => MaterialKind::Metal,
         PropKind::PipeStack => MaterialKind::Metal,
         PropKind::ChainCoil => MaterialKind::Metal,
+        PropKind::OutfallPiling => MaterialKind::Wood,
+        PropKind::OutfallBallast => MaterialKind::Metal,
+        PropKind::OutfallRib => MaterialKind::Wood,
     }
 }
 
@@ -917,7 +937,7 @@ mod tests {
     use std::ops::Range;
 
     /// Every prop kind (there is no `PropKind::all()`).
-    const PROPS: [PropKind; 23] = [
+    const PROPS: [PropKind; 26] = [
         PropKind::PipeV,
         PropKind::PipeH,
         PropKind::Valve,
@@ -941,6 +961,9 @@ mod tests {
         PropKind::Toolbox,
         PropKind::PipeStack,
         PropKind::ChainCoil,
+        PropKind::OutfallPiling,
+        PropKind::OutfallBallast,
+        PropKind::OutfallRib,
     ];
 
     /// The sum of every brightening this stage caused over a rectangle, in
@@ -1010,6 +1033,10 @@ mod tests {
         }
         assert_eq!(
             material::kind(boss_pen(BossKind::Cobra)),
+            MaterialKind::Slime
+        );
+        assert_eq!(
+            material::kind(boss_pen(BossKind::Lantern)),
             MaterialKind::Slime
         );
         for kind in [

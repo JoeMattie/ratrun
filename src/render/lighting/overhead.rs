@@ -218,12 +218,13 @@ thread_local! {
     static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default());
 }
 
-/// What the rasteriser must not darken: wall cells and the deck's pits.
+/// What the rasteriser must not darken: wall cells, deck pits and Outfall tidal drops.
 struct Clip<'a> {
     tiles: &'a TileMap,
     /// `cam` rounded once (the same snap `art_floor` uses).
     cam: (i32, i32),
     pits: &'a [Pit],
+    tidal_pits: &'a [Pit],
 }
 
 impl Clip<'_> {
@@ -236,7 +237,7 @@ impl Clip<'_> {
         if self.tiles.get(cx, cy).is_wall() {
             return false;
         }
-        for pit in self.pits {
+        for pit in self.pits.iter().chain(self.tidal_pits.iter()) {
             if pit.rect.contains(cx, cy) {
                 return false;
             }
@@ -289,6 +290,7 @@ fn cast(pb: &mut PixelBuffer, scene: &OverheadScene<'_>, defer: bool) {
         tiles: &scene.level.tiles,
         cam: (scene.cam.x.round() as i32, scene.cam.y.round() as i32),
         pits: &scene.level.trailer.pits,
+        tidal_pits: &scene.level.objects.tidal_pits,
     };
 
     SCRATCH.with(|cell| {
@@ -834,6 +836,29 @@ mod tests {
         assert_eq!(at(wall_x, body_y), FLOOR, "the wall face itself is not");
         assert_ne!(at(body_x, pit_y - 1), FLOOR, "floor before the pit is dark");
         assert_eq!(at(body_x, pit_y), FLOOR, "the pit is not");
+    }
+
+    #[test]
+    fn outfall_tidal_pits_are_never_darkened() {
+        let mut w = world(Theme::Outfall);
+        let c = centre(&w);
+        let (cx, cy) = cell_of(c);
+        w.level
+            .objects
+            .tidal_pits
+            .push(Pit::new(TileRect::new(cx, cy + 1, 1, 1), PitKind::TidalDrop));
+        let body = Vec2::new(cx as f32 * 16.0 + 8.0, cy as f32 * 16.0 + 8.0);
+        spawn(&mut w, enemy_at(EnemyKind::Brute, body), 1);
+        w.player.pos = c + Vec2::new(600.0, 600.0);
+        let cam = Vec2::new(cx as f32 * 16.0 - 40.0, cy as f32 * 16.0 - 40.0);
+        let mut pb = canvas();
+        draw(&mut pb, &scene(&w, cam));
+        let at = |wx: i32, wy: i32| {
+            pb.pixel_at((wx - cam.x as i32) as usize, (wy - cam.y as i32) as usize)
+        };
+        let (body_x, pit_y) = (cx * 16 + 8, (cy + 1) * 16);
+        assert_ne!(at(body_x, pit_y - 1), FLOOR, "sand before tidal drop is shadowed");
+        assert_eq!(at(body_x, pit_y), FLOOR, "tidal drop pit stays clear");
     }
 
     #[test]

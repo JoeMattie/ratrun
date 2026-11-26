@@ -79,6 +79,8 @@ const CAUSTIC_LEVEL_STEP: i32 = 3;
 /// The cool cast a beam's own colour is pulled toward: water light reads cold
 /// even under a warm lamp.
 const CAUSTIC_COOL: Rgb = (120, 200, 255);
+/// Cool pale cyan-blue cast for Outfall marine snow.
+const MARINE_SNOW_COOL: Rgb = (176, 226, 248);
 
 /// The per-stage strength, Q8. The game always uses [`Gains::live`]; the tests
 /// zero it to prove that strength 0 draws nothing.
@@ -112,33 +114,33 @@ enum Flavour {
     Steam,
     /// Sparse cold motes (the Lab).
     Cold,
+    /// Sparse, cool, downward-drifting marine snow (The Outfall).
+    MarineSnow,
 }
 
 const fn flavour(theme: Theme) -> Flavour {
     match theme {
         Theme::Kitchen | Theme::Laundry => Flavour::Steam,
         Theme::Lab => Flavour::Cold,
+        Theme::Outfall => Flavour::MarineSnow,
         Theme::Sewer | Theme::Printworks | Theme::Trailer => Flavour::Dust,
     }
 }
 
-/// Does this theme/zone show caustics? Off everywhere by default.
-///
-/// No water-light floor ships yet: every theme is dry. The under-ocean level
-/// adds its arm in the `match` below (`Theme::Ocean => true`) and its floor
-/// lights up — the pattern, its 8 Hz stepping, its floor and light gates and
-/// its churn are all built and tested here already.
+/// Does this theme/zone show caustics? On for The Outfall outside Blackout
+/// zones; dry everywhere else.
 pub(super) fn caustics_here(theme: Theme, zone: Option<LightZoneKind>) -> bool {
-    #[cfg(test)]
-    {
-        if caustics_override() {
-            return true;
-        }
-    }
-    let water: bool = match theme {
-        Theme::Sewer | Theme::Kitchen | Theme::Lab | Theme::Laundry | Theme::Printworks
+    let water = match theme {
+        Theme::Outfall => true,
+        Theme::Sewer
+        | Theme::Kitchen
+        | Theme::Lab
+        | Theme::Laundry
+        | Theme::Printworks
         | Theme::Trailer => false,
     };
+    #[cfg(test)]
+    let water = water || caustics_override();
     // A blacked-out zone has its lamps dead: no water light there either.
     water && !matches!(zone, Some(LightZoneKind::Blackout))
 }
@@ -196,7 +198,7 @@ fn particulate(
     let count = mote_count(canvas.w, canvas.h, frame.mode, flavour);
     let seed = (frame.level.seed as u32) ^ (frame.level.seed >> 32) as u32;
     let field = (canvas.w * canvas.h) as u32;
-    let cold = flavour == Flavour::Cold;
+    let cold = matches!(flavour, Flavour::Cold | Flavour::MarineSnow);
     let cam = (frame.cam.x as i64, frame.cam.y as i64);
     for i in 0..count {
         // Ambience's hashing, cloned: the mote's whole life comes from these
@@ -205,10 +207,19 @@ fn particulate(
         let h1 = hash(h0 ^ 0x5bf0_3635);
         let cell = (h0 % field) as i32;
         let (base_x, base_y) = (cell % canvas.w as i32, cell / canvas.w as i32);
-        let (vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
+        let (mut vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
         match flavour {
             // A wisp rises whether or not its hash wanted to drift.
             Flavour::Steam => vy = -1,
+            // Marine snow settles gently downward with sparse lateral sway.
+            Flavour::MarineSnow => {
+                vy = 1;
+                vx = match h1 % 5 {
+                    0 => -1,
+                    1 => 1,
+                    _ => 0,
+                };
+            }
             _ => {
                 if vx == 0 && vy == 0 {
                     vy = 1;
@@ -246,6 +257,15 @@ fn particulate(
         if lift <= 0 {
             continue;
         }
+        let tint = if flavour == Flavour::MarineSnow {
+            (
+                ((u16::from(tint.0) + u16::from(MARINE_SNOW_COOL.0)) / 2) as u8,
+                ((u16::from(tint.1) + u16::from(MARINE_SNOW_COOL.1)) / 2) as u8,
+                ((u16::from(tint.2) + u16::from(MARINE_SNOW_COOL.2)) / 2) as u8,
+            )
+        } else {
+            tint
+        };
         if flavour == Flavour::Steam {
             // A soft wisp: a core with two dimmer companions leaning whichever
             // way this mote's hash points.
@@ -404,7 +424,7 @@ fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u3
             if info.dom == 0 {
                 continue;
             }
-            if !whole_view && !caustics_here(frame.theme, surface.zone) {
+            if !caustics_here(frame.theme, surface.zone) {
                 continue;
             }
             let index = py * w + px;
@@ -413,8 +433,10 @@ fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u3
             if material::is_creature(byte) || emissive {
                 continue;
             }
+            let dom_att = i32::from(info.dom).min(128);
             let level = (caustics_q8(wx, wy, phase) * CAUSTIC_GAIN) >> 8;
-            let level = ((level * gains.caustics) >> 8) / CAUSTIC_LEVEL_STEP * CAUSTIC_LEVEL_STEP;
+            let level = (((level * gains.caustics) >> 8) * dom_att) >> 7;
+            let level = level / CAUSTIC_LEVEL_STEP * CAUSTIC_LEVEL_STEP;
             if level <= 0 {
                 continue;
             }
@@ -440,6 +462,10 @@ fn mote_count(w: usize, h: usize, mode: LightingMode, flavour: Flavour) -> usize
     match flavour {
         Flavour::Steam => STEAM_PUFFS,
         Flavour::Cold => (base * 3 / 5).max(MOTE_COUNT_MIN),
+        Flavour::MarineSnow => match mode {
+            LightingMode::Hard => (base * 3 / 10).max(MOTE_COUNT_MIN / 2),
+            _ => (base * 3 / 5).max(MOTE_COUNT_MIN),
+        },
         Flavour::Dust => match mode {
             LightingMode::Hard => (base / 2).max(MOTE_COUNT_MIN / 2),
             _ => base,
@@ -600,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_theme_is_dry() {
+    fn every_non_outfall_theme_is_dry_and_outfall_respects_blackout() {
         let zones = [
             None,
             Some(LightZoneKind::Corridor),
@@ -612,12 +638,88 @@ mod tests {
         ];
         for theme in Theme::playable() {
             for zone in zones {
-                assert!(
-                    !caustics_here(theme, zone),
-                    "{} shows caustics in {zone:?}",
+                let expected = theme == Theme::Outfall && zone != Some(LightZoneKind::Blackout);
+                assert_eq!(
+                    caustics_here(theme, zone),
+                    expected,
+                    "{} caustics in {zone:?}",
                     theme.name()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn outfall_caustics_skip_blackout_creatures_and_emissives() {
+        let lvl = level(Theme::Outfall);
+        let (w, h) = (64, 32);
+        let mut grid = caustic_grid(w, h);
+        // Right half is a Blackout zone: no water light there even on Outfall.
+        for y in 0..h {
+            for x in (w / 2)..w {
+                grid.surfaces[y * w + x].zone = Some(LightZoneKind::Blackout);
+            }
+        }
+        let mut pb = PixelBuffer::new(w, h);
+        pb.set_materials(true);
+        pb.set_pen(0);
+        pb.clear((85, 71, 78));
+        // Stamp a creature pixel and an emissive pixel in the lit left half.
+        let creature_pen = super::material::pen(super::material::MaterialKind::Slime, true, 3);
+        let emissive_pen = super::material::pen(super::material::MaterialKind::Emissive, false, 0);
+        pb.set_pen(creature_pen);
+        pb.plot(10, 10, (85, 71, 78));
+        pb.set_pen(emissive_pen);
+        pb.plot(12, 10, (85, 71, 78));
+        pb.set_pen(0);
+
+        let f = frame(&lvl, LightingMode::Full, 3.0);
+        let mut canvas = testkit::canvas(&mut pb);
+        draw_with(&grid, &mut canvas, &f, Gains::live());
+
+        assert_eq!(pb.pixel_at(10, 10), (85, 71, 78), "creature excluded");
+        assert_eq!(pb.pixel_at(12, 10), (85, 71, 78), "emissive excluded");
+        let mut lit_left = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let changed = pb.pixel_at(x, y) != (85, 71, 78);
+                if x >= w / 2 {
+                    assert!(!changed, "blackout zone must stay dry at ({x}, {y})");
+                } else if changed {
+                    lit_left += 1;
+                }
+            }
+        }
+        assert!(lit_left > 0, "lit non-blackout Outfall floor gets caustics");
+    }
+
+    #[test]
+    fn outfall_marine_snow_is_sparse_cool_and_gated_to_lit_air() {
+        let lvl = level(Theme::Outfall);
+        let (w, h) = (120, 80);
+        let full = mote_count(w, h, LightingMode::Full, Flavour::MarineSnow);
+        let hard = mote_count(w, h, LightingMode::Hard, Flavour::MarineSnow);
+        assert!((MOTE_COUNT_MIN..=MOTE_COUNT_MAX).contains(&full));
+        assert!(hard < full && hard >= MOTE_COUNT_MIN / 2);
+
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        // Air on left half only; zero dom so caustics are off and we measure snow alone.
+        for y in 0..h {
+            for x in 0..w / 2 {
+                grid.info[y * w + x].air = [1200, 1200, 1200];
+            }
+        }
+        let f0 = frame(&lvl, LightingMode::Full, 1.000);
+        let f1 = frame(&lvl, LightingMode::Full, 1.125);
+        let p0 = run(&grid, &f0, Gains::live(), w, h);
+        let p1 = run(&grid, &f1, Gains::live(), w, h);
+        assert_ne!(p0, p1, "marine snow advances on the 8 Hz clock");
+        let hit: Vec<usize> = (0..w * h).filter(|&i| p0[i] != (85, 71, 78)).collect();
+        assert!(!hit.is_empty(), "marine snow appears in lit air");
+        for i in hit {
+            assert!(i % w < w / 2, "snow must stay inside lit air");
+            let c = p0[i];
+            assert!(c.2 >= c.0, "marine snow carries a cool cast: {c:?}");
         }
     }
 

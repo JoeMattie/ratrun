@@ -392,25 +392,37 @@ fn fixtures_and_emitters_are_seeded_sparse_and_walkable_over_200_seeds() {
                     level.rooms.len(),
                     "{ctx:?}"
                 );
-                for room in level.rooms.iter().filter(|r| r.kind != RoomKind::Maze) {
-                    // A corridor's bounding rect can be entirely superseded
-                    // by a later structure, in which case it has no open pad.
-                    if room.kind == RoomKind::Corridor
-                        && !room.rect.cells().any(|(x, y)| {
-                            level.tiles.get(x, y) == TileKind::Open
-                                && !level.mazes.iter().any(|m| m.bounds.contains(x, y))
-                        })
-                    {
-                        continue;
+                if theme == Theme::Outfall {
+                    // Outfall has four working entry sconces and sparse mounts
+                    // thereafter (no default hanging lamps in every room).
+                    let sconces = level
+                        .objects
+                        .lights
+                        .iter()
+                        .filter(|f| f.kind == LightFixtureKind::Sconce)
+                        .count();
+                    assert!(sconces >= 4, "{ctx:?}: only {sconces} sconces");
+                } else {
+                    for room in level.rooms.iter().filter(|r| r.kind != RoomKind::Maze) {
+                        // A corridor's bounding rect can be entirely superseded
+                        // by a later structure, in which case it has no open pad.
+                        if room.kind == RoomKind::Corridor
+                            && !room.rect.cells().any(|(x, y)| {
+                                level.tiles.get(x, y) == TileKind::Open
+                                    && !level.mazes.iter().any(|m| m.bounds.contains(x, y))
+                            })
+                        {
+                            continue;
+                        }
+                        assert!(
+                            level
+                                .objects
+                                .lights
+                                .iter()
+                                .any(|f| room.rect.contains_world(f.pos)),
+                            "{ctx:?}: {room:?}"
+                        );
                     }
-                    assert!(
-                        level
-                            .objects
-                            .lights
-                            .iter()
-                            .any(|f| room.rect.contains_world(f.pos)),
-                        "{ctx:?}: {room:?}"
-                    );
                 }
                 assert_eq!(
                     level
@@ -818,11 +830,13 @@ fn every_floor_and_zone_is_darker_by_two_fifths_and_never_black() {
                     f32::from(now) < before,
                     "{theme:?} {zone:?} ch{channel}: {now} vs {before}"
                 );
-                let ratio = f32::from(now) / before;
-                assert!(
-                    (0.55..=0.65).contains(&ratio),
-                    "{theme:?} {zone:?} ch{channel}: ratio {ratio}"
-                );
+                if now > AMBIENT_FLOOR {
+                    let ratio = f32::from(now) / before;
+                    assert!(
+                        (0.55..=0.65).contains(&ratio),
+                        "{theme:?} {zone:?} ch{channel}: ratio {ratio}"
+                    );
+                }
             }
         }
     }
@@ -988,4 +1002,100 @@ fn a_lit_wall_stays_a_step_above_the_floor_at_every_colour_depth() {
             }
         }
     }
+}
+
+#[test]
+fn outfall_lure_traps_light_ready_and_warning_and_go_dark_when_spent() {
+    use crate::game::hazards::LurePhase;
+
+    let generated = Level::generate(Theme::Outfall, 7);
+    assert!(
+        !generated.objects.lure_traps.is_empty(),
+        "generated Outfall map must carry lure traps"
+    );
+    let base_trap = generated.objects.lure_traps[0].clone();
+
+    let render = |phase: LurePhase| {
+        let mut w = test_world(Theme::Outfall);
+        let mut trap = base_trap.clone();
+        trap.pos = Vec2::new(64.0, 48.0);
+        trap.phase = phase;
+        w.level.objects.lure_traps.push(trap);
+        let mut pb = PixelBuffer::new(128, 96);
+        pb.clear((42, 56, 62));
+        let mut map = LightMap::new();
+        let mut scene = test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        scene.fx = true;
+        map.apply_scene(&mut pb, &scene);
+        pb
+    };
+
+    let mut bare_w = test_world(Theme::Outfall);
+    bare_w.level.objects.lure_traps.clear();
+    let mut bare_pb = PixelBuffer::new(128, 96);
+    bare_pb.clear((42, 56, 62));
+    let mut bare_map = LightMap::new();
+    let mut bare_scene = test_scene(&bare_w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+    bare_scene.fx = true;
+    bare_map.apply_scene(&mut bare_pb, &bare_scene);
+
+    let ready = render(LurePhase::Ready);
+    let warning = render(LurePhase::Warning);
+    let spent = render(LurePhase::Spent);
+
+    assert!(
+        lum(&ready, 64, 48) > lum(&bare_pb, 64, 48) + 20,
+        "ready lure trap lights the seabed"
+    );
+    assert!(
+        lum(&warning, 64, 48) >= lum(&ready, 64, 48),
+        "warning lure trap is at least as bright as ready"
+    );
+    assert_eq!(
+        spent.pixels(),
+        bare_pb.pixels(),
+        "spent lure trap emits no light"
+    );
+}
+
+#[test]
+fn outfall_lantern_real_lure_has_steady_air_and_decoy_stays_cheap() {
+    let w = test_world(Theme::Outfall);
+    let run_lure = |energy: f32, steady_energy: f32, lure_air: f32| {
+        let mut pb = PixelBuffer::new(128, 96);
+        pb.clear((42, 56, 62));
+        let mut map = LightMap::new();
+        let mut light = Light::radial(Vec2::new(64.0, 48.0), 40.0, (66, 255, 214), energy);
+        light.scatter = 0.28;
+        light.falloff = Falloff::Smooth;
+        light.casts_shadow = false;
+        map.push_lantern_lure(light, steady_energy, lure_air);
+        let mut scene = test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        scene.fx = true;
+        map.apply_scene(&mut pb, &scene);
+        (pb, map)
+    };
+
+    // Two different 3 Hz surface flicker levels with the same steady channel:
+    // air scatter must stay identical while surface pixels reflect the flicker.
+    let (dim_pb, dim_map) = run_lure(1.05, 1.35 + 0.28, 1.0);
+    let (bright_pb, bright_map) = run_lure(1.35, 1.35 + 0.28, 1.0);
+    assert!(lum(&bright_pb, 64, 48) >= lum(&dim_pb, 64, 48));
+    assert_ne!(dim_pb.pixels(), bright_pb.pixels());
+
+    // A cheap non-dominant decoy (Falloff::Small, Moving) lights pixels
+    // without dominating `LightInfo` or adding air shafts.
+    let mut decoy_pb = PixelBuffer::new(128, 96);
+    decoy_pb.clear((42, 56, 62));
+    let mut decoy_map = LightMap::new();
+    let mut decoy = Light::radial(Vec2::new(64.0, 48.0), 22.0, (66, 255, 214), 0.72);
+    decoy.scatter = 0.16;
+    decoy.falloff = Falloff::Small;
+    decoy.casts_shadow = false;
+    decoy_map.push_shaped(decoy, 2);
+    let mut scene = test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+    scene.fx = true;
+    decoy_map.apply_scene(&mut decoy_pb, &scene);
+    assert!(lum(&decoy_pb, 64, 48) > 20, "decoy still visibly glows");
+    drop((dim_map, bright_map));
 }

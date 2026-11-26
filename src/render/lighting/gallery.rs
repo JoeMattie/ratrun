@@ -135,6 +135,7 @@ fn capture_lighting_gallery() {
             Theme::Sewer => [PropKind::Grate, PropKind::Valve],
             Theme::Kitchen => [PropKind::Counter, PropKind::Table],
             Theme::Lab => [PropKind::Console, PropKind::Tank],
+            Theme::Outfall => [PropKind::OutfallPiling, PropKind::OutfallBallast],
             _ => [PropKind::Grate, PropKind::Valve],
         };
         let (pw0, ph0) = prop_kinds[0].size();
@@ -325,6 +326,34 @@ fn capture_lighting_gallery() {
             w.draw(&mut pb);
         }
         write_ppm(&dir.join("boss_cat_full.ppm"), &pb);
+    }
+    {
+        // Outfall boss: The Lantern approaching with its cyan lure over wet sand.
+        let mut w = World::new(Theme::Outfall, 77);
+        let c = w.player.pos;
+        let mut boss = Boss::new(
+            BossKind::Lantern,
+            c + Vec2::new(42.0, -4.0),
+            4166.0,
+            TileRect::new(80, 60, 34, 28),
+            c,
+            false,
+        );
+        boss.facing = Vec2::new(-1.0, 0.0);
+        w.ecs.spawn((boss, SpawnId(9003)));
+        let mut pb = PixelBuffer::new(vw, vh);
+        w.lighting = LightingMode::Full;
+        w.smoke_enabled = true;
+        for step in 0..8 {
+            w.elapsed = 45.0 + step as f32 * 0.08;
+            w.draw(&mut pb);
+        }
+        write_ppm(&dir.join("boss_lantern_full.ppm"), &pb);
+        w.lighting = LightingMode::Off;
+        w.smoke_enabled = false;
+        w.draw(&mut pb);
+        write_ppm(&dir.join("boss_lantern_off.ppm"), &pb);
+        draw_matrix(dir, "outfall_lantern", &mut w);
     }
 
     // 3. Nuke capture (Off vs Full).

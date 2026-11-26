@@ -564,9 +564,22 @@ struct QualityController {
     backoff: u8,
 }
 
+#[derive(Clone, Copy)]
+struct ShapedEntry {
+    light: Light,
+    priority: u8,
+    tag: LightTag,
+    /// Steady (unflickered) bioluminescent air-scatter gain for Outfall's real
+    /// Lantern lure; `0.0` for every other light.
+    lure_air: f32,
+    /// Steady `energy + scatter` override for `FxLight::steady` when surface
+    /// light carries a 3 Hz held-step modulation independently of the air channel.
+    steady_total: Option<f32>,
+}
+
 pub struct LightMap {
     pub(super) lights: Candidates,
-    shaped: Vec<(Light, u8, LightTag)>,
+    shaped: Vec<ShapedEntry>,
     marks: Vec<Mark>,
     /// Screen-space enemy rim glints for this frame, filled by the gather and
     /// stamped as marks once the sprites are final (`sources.rs`).
@@ -699,14 +712,48 @@ impl LightMap {
     /// priority-1 halos cannot crowd out the rat's aura) and is dropped
     /// otherwise.
     pub fn push_shaped(&mut self, light: Light, priority: u8) {
-        push_shaped(&mut self.shaped, light, priority, LightTag::Moving { priority });
+        push_shaped(
+            &mut self.shaped,
+            ShapedEntry {
+                light,
+                priority,
+                tag: LightTag::Moving { priority },
+                lure_air: 0.0,
+                steady_total: None,
+            },
+        );
     }
 
     /// Submit a stationary, non-directional emitter. Its samples feed relief, sheen and
     /// water glints. The light shares the dynamic budget and skips body
     /// shadows and fixture mirrors.
     pub fn push_ground(&mut self, light: Light, priority: u8) {
-        push_shaped(&mut self.shaped, light, priority, LightTag::Ground);
+        push_shaped(
+            &mut self.shaped,
+            ShapedEntry {
+                light,
+                priority,
+                tag: LightTag::Ground,
+                lure_air: 0.0,
+                steady_total: None,
+            },
+        );
+    }
+
+    /// Submit The Lantern's real lure light: dominates surface lighting/caustics
+    /// with its 3 Hz held-step flicker while keeping `FxLight::steady` and its
+    /// Outfall air-scatter channel strictly steady.
+    pub(super) fn push_lantern_lure(&mut self, light: Light, steady_total: f32, lure_air: f32) {
+        push_shaped(
+            &mut self.shaped,
+            ShapedEntry {
+                light,
+                priority: 3,
+                tag: LightTag::Moving { priority: 3 },
+                lure_air,
+                steady_total: Some(steady_total),
+            },
+        );
     }
 
     /// A cheap coloured halo from a short-lived source, in world pixels.
@@ -850,7 +897,10 @@ impl LightMap {
         self.static_soft
             .resize(scene.level.objects.lights.len(), SoftProfile::default());
         for (i, fixture) in scene.level.objects.lights.iter().enumerate() {
-            let mut light = fixtures::light(*fixture, theme, profile, phase, scene);
+            if fixtures::sconce_snuffed(scene.level, i, *fixture) {
+                continue;
+            }
+            let mut light = fixtures::light(i, *fixture, theme, profile, phase, scene);
             if !self.grid.overlaps(light) || light.energy <= 0.001 {
                 continue;
             }
@@ -893,7 +943,7 @@ impl LightMap {
             let shadow: &ShadowProfile = shadow;
             let soft = Some(&self.static_soft[i]);
             let _p = crate::prof::scope(crate::prof::Stage::LStaticSplat);
-            self.grid.splat(light, Some(shadow), soft, tag, pass);
+            self.grid.splat(light, Some(shadow), soft, tag, pass, 0.0);
             // A wall lamp also washes the face it hangs on and the floor at its
             // foot (batch 12): a second, very small and very bright source at
             // the mount, sharing the fan's cached bake so it cannot leak
@@ -903,7 +953,7 @@ impl LightMap {
                 let wash = fixtures::sconce_wash(&light, fixture.seed, scene.elapsed);
                 if self.grid.overlaps(wash) {
                     self.grid
-                        .splat(wash, Some(shadow), soft, LightTag::SconceWash, pass);
+                        .splat(wash, Some(shadow), soft, LightTag::SconceWash, pass, 0.0);
                 }
             }
         }
@@ -948,36 +998,44 @@ impl LightMap {
             };
             push_shaped(
                 &mut self.shaped,
-                light,
-                p.priority,
-                LightTag::Moving { priority: p.priority },
+                ShapedEntry {
+                    light,
+                    priority: p.priority,
+                    tag: LightTag::Moving { priority: p.priority },
+                    lure_air: 0.0,
+                    steady_total: None,
+                },
             );
         }
         // Prefer the rat, then the brighter lights and foreground flashes.
         self.shaped.sort_unstable_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| {
-                a.0.pos
+            b.priority.cmp(&a.priority).then_with(|| {
+                a.light
+                    .pos
                     .dist_sq(scene.player.pos)
-                    .total_cmp(&b.0.pos.dist_sq(scene.player.pos))
+                    .total_cmp(&b.light.pos.dist_sq(scene.player.pos))
             })
         });
         drop(_prank);
         crate::prof::count(crate::prof::Stage::CShaped, self.shaped.len() as u64);
         let mut shadow_index = 0;
-        for &(mut light, _, tag) in self.shaped.iter().take(cap) {
+        for &entry in self.shaped.iter().take(cap) {
+            let mut light = entry.light;
             if !self.grid.overlaps(light) {
                 continue;
             }
             crate::prof::count(crate::prof::Stage::CShapedLit, 1);
             let directional = matches!(light.shape, LightShape::Directional { .. });
-            let tag = if directional { LightTag::Sun } else { tag };
+            let tag = if directional { LightTag::Sun } else { entry.tag };
             // Ground sources reach specular and water through the grid. Keep
             // them out of the strongest-light list used to cast body shadows.
             if fx && tag != LightTag::Ground {
-                fx::push_fx_light(
-                    &mut self.fx_lights,
-                    FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed)),
-                );
+                let mut fx_light = FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed));
+                if let Some(steady_total) = entry.steady_total {
+                    let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
+                    fx_light.steady = peak * steady_total.abs();
+                }
+                fx::push_fx_light(&mut self.fx_lights, fx_light);
             }
             if directional {
                 self.grid.sun(light, &self.geometry, &[], scene.mode, fx);
@@ -1011,7 +1069,7 @@ impl LightMap {
                 (None, None)
             };
             let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
-            self.grid.splat(light, shadow, soft, tag, pass);
+            self.grid.splat(light, shadow, soft, tag, pass, entry.lure_air);
         }
         // Submit each bar's bounded samples together. Ranking them against
         // unrelated dynamic lights would trim a long bar at its far end.
@@ -1020,7 +1078,7 @@ impl LightMap {
             let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
             for light in laser_segments.iter().flatten().copied().flat_map(|ray| ray.lights()) {
                 if self.grid.overlaps(light) {
-                    self.grid.splat(light, None, None, LightTag::Moving { priority: 1 }, pass);
+                    self.grid.splat(light, None, None, LightTag::Moving { priority: 1 }, pass, 0.0);
                 }
             }
         }
@@ -1229,20 +1287,20 @@ impl LightMap {
 
 /// The body of [`LightMap::push_shaped`], on the list alone so it can run
 /// while another field of the map is borrowed.
-fn push_shaped(shaped: &mut Vec<(Light, u8, LightTag)>, light: Light, priority: u8, tag: LightTag) {
+fn push_shaped(shaped: &mut Vec<ShapedEntry>, entry: ShapedEntry) {
     if shaped.len() < MAX_SHAPED {
-        shaped.push((light, priority, tag));
+        shaped.push(entry);
         return;
     }
     // First of the lowest priority: deterministic, and only on overflow.
     let mut weakest = 0;
-    for (i, entry) in shaped.iter().enumerate() {
-        if entry.1 < shaped[weakest].1 {
+    for (i, existing) in shaped.iter().enumerate() {
+        if existing.priority < shaped[weakest].priority {
             weakest = i;
         }
     }
-    if shaped[weakest].1 < priority {
-        shaped[weakest] = (light, priority, tag);
+    if shaped[weakest].priority < entry.priority {
+        shaped[weakest] = entry;
     }
 }
 
@@ -1320,6 +1378,7 @@ impl Grid {
         soft: Option<&SoftProfile>,
         tag: LightTag,
         pass: Pass,
+        lure_air: f32,
     ) {
         let (mode, elapsed, theme) = (pass.mode, pass.elapsed, pass.theme);
         let radius = light.extent();
@@ -1348,6 +1407,10 @@ impl Grid {
         }
         let fx_on = pass.fx;
         let air_on = fx_on && air::wants(&light, tag, mode);
+        let lure_air_on = fx_on
+            && lure_air > 0.0
+            && theme == Theme::Outfall
+            && matches!(mode, LightingMode::Full | LightingMode::Hard);
         let floor_glint = !fx_on || softshadow::keep_floor_glint(mode);
         let ceiling = if fx_on {
             upsample::MUL_CEILING
@@ -1401,6 +1464,26 @@ impl Grid {
                             mode,
                         },
                     );
+                } else if lure_air_on && core > 0.0 && visibility > 0.0 {
+                    // Restrained, strictly steady bioluminescent air scatter around
+                    // Outfall's Lantern lure so marine snow catches its spill
+                    // without ever breathing with the 3 Hz attack flicker.
+                    const LURE_AIR_LEVELS: f32 = 26.0;
+                    const LURE_AIR_STEP: u16 = 8;
+                    const LURE_AIR_MAX: u16 = 64 * 256;
+                    let weight =
+                        core * core * visibility * fx::strength::SHAFTS * LURE_AIR_LEVELS * lure_air;
+                    let per_level = weight * (256.0 / 255.0);
+                    let color = [light.color.0, light.color.1, light.color.2];
+                    for (n, &c) in color.iter().enumerate() {
+                        let add = (per_level * f32::from(c)) as u16;
+                        let add = add / LURE_AIR_STEP * LURE_AIR_STEP;
+                        if add < MIN_GAIN as u16 {
+                            continue;
+                        }
+                        self.info[i].air[n] =
+                            self.info[i].air[n].saturating_add(add).min(LURE_AIR_MAX);
+                    }
                 }
                 let face = if surface.height > 0.0 {
                     facing_gain(surface, -delta)
@@ -1410,7 +1493,7 @@ impl Grid {
                 let glint = if floor_glint
                     && shadow.is_some()
                     && surface.height == 0.0
-                    && matches!(theme, Theme::Sewer | Theme::Lab)
+                    && matches!(theme, Theme::Sewer | Theme::Lab | Theme::Outfall)
                 {
                     let streak =
                         (1.0 - delta.x.abs() / 26.0 - (delta.y - 11.0).abs() / 36.0).max(0.0);
@@ -1807,10 +1890,11 @@ mod dropping_light_tests {
             .shaped
             .iter()
             .rev()
-            .filter(|entry| entry.2 == LightTag::Ground)
+            .filter(|entry| entry.tag == LightTag::Ground)
             .collect();
         assert_eq!(lights.len(), cases.len());
-        for ((light, _, _), (_, _, radius, energy)) in lights.into_iter().zip(cases) {
+        for (entry, (_, _, radius, energy)) in lights.into_iter().zip(cases) {
+            let light = entry.light;
             assert!(matches!(light.shape, LightShape::Radial { radius: r } if r == radius));
             assert!((light.energy - energy).abs() < 1e-6);
             assert_eq!(light.color, (110, 255, 120));
@@ -1832,8 +1916,8 @@ mod dropping_light_tests {
         let positions: Vec<_> = map
             .shaped
             .iter()
-            .filter(|entry| entry.2 == LightTag::Ground)
-            .map(|entry| entry.0.pos.x)
+            .filter(|entry| entry.tag == LightTag::Ground)
+            .map(|entry| entry.light.pos.x)
             .collect();
         let expected: Vec<_> = (5..=16).rev().map(|id| id as f32 * 4.0).collect();
         assert_eq!(positions, expected);
@@ -1874,6 +1958,82 @@ mod dropping_light_tests {
             .fx_lights
             .iter()
             .all(|light| light.tag != LightTag::Ground));
+    }
+
+    #[test]
+    fn outfall_lantern_lure_separates_surface_flicker_from_steady_air_and_decoy_stays_non_dominant() {
+        let w = fx_world(Theme::Outfall);
+        let run = |energy: f32, scatter: f32, steady_total: f32, lure_air: f32| {
+            let mut scene = fx_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+            scene.fx = true;
+            let mut pb = PixelBuffer::new(96, 64);
+            pb.clear((42, 56, 62));
+            let mut map = LightMap::new();
+            let mut light = Light::radial(Vec2::new(48.0, 32.0), 40.0, (66, 255, 214), energy);
+            light.scatter = scatter;
+            light.falloff = Falloff::Smooth;
+            light.casts_shadow = false;
+            map.push_lantern_lure(light, steady_total, lure_air);
+            map.apply_scene(&mut pb, &scene);
+            (pb, map)
+        };
+
+        let steady_total = 1.35 + 0.30;
+        let (dim_pb, dim_map) = run(1.03, 0.23, steady_total, 1.0);
+        let (bright_pb, bright_map) = run(1.35, 0.30, steady_total, 1.0);
+
+        // Surface brightness changes across 3 Hz flicker steps...
+        assert_ne!(dim_pb.pixels(), bright_pb.pixels());
+        // ...while air scatter and `FxLight::steady` remain bit-identical.
+        let dim_air: Vec<_> = dim_map.grid.info.iter().map(|i| i.air).collect();
+        let bright_air: Vec<_> = bright_map.grid.info.iter().map(|i| i.air).collect();
+        assert_eq!(dim_air, bright_air, "lure air scatter must ignore 3 Hz flicker");
+        assert!(
+            bright_air.iter().any(|a| a[1] > 0 && a[2] > 0),
+            "Outfall Lantern lure populates steady cyan air for marine snow"
+        );
+        assert!(
+            bright_map
+                .grid
+                .info
+                .iter()
+                .any(|i| i.dom_rgb == (66, 255, 214) && i.dom > 0),
+            "real Lantern lure dominates floor samples for caustics and sheen"
+        );
+        let dim_steady = dim_map
+            .fx_lights
+            .iter()
+            .find(|l| l.color == (66, 255, 214))
+            .expect("real lure in fx_lights")
+            .steady;
+        let bright_steady = bright_map
+            .fx_lights
+            .iter()
+            .find(|l| l.color == (66, 255, 214))
+            .expect("real lure in fx_lights")
+            .steady;
+        assert!((dim_steady - bright_steady).abs() < 1e-4);
+
+        // Cheap non-dominant decoy: lights pixels, never dominates LightInfo or writes air.
+        let mut decoy_pb = PixelBuffer::new(96, 64);
+        decoy_pb.clear((42, 56, 62));
+        let mut decoy_map = LightMap::new();
+        let mut decoy = Light::radial(Vec2::new(48.0, 32.0), 22.0, (66, 255, 214), 0.72);
+        decoy.scatter = 0.16;
+        decoy.falloff = Falloff::Small;
+        decoy.casts_shadow = false;
+        decoy_map.push_shaped(decoy, 2);
+        let mut scene = fx_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        scene.fx = true;
+        decoy_map.apply_scene(&mut decoy_pb, &scene);
+        assert!(
+            decoy_map
+                .grid
+                .info
+                .iter()
+                .all(|i| i.dom_rgb != (66, 255, 214) && i.air == [0, 0, 0]),
+            "decoy bulb must stay cheap and non-dominant"
+        );
     }
 }
 
