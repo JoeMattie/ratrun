@@ -2040,8 +2040,18 @@ impl World {
             .tiles
             .nearest_open_center(arena.center_world(), large, 16)
             .unwrap_or_else(|| arena.center_world());
-        let Some(pos) = self.boss_point_beside(self.player.pos, kind.body_radius()) else {
+        let landing = if kind == BossKind::Lantern {
+            super::ecs::systems::boss::lantern_arrival_beside(&self.level, self.player.pos)
+        } else {
+            self.boss_point_beside(self.player.pos, kind.body_radius())
+        };
+        let Some(pos) = landing else {
             return false;
+        };
+        let arena = if kind == BossKind::Lantern {
+            super::ecs::systems::boss::lantern_fight_rect(&self.level, self.player.pos, pos)
+        } else {
+            arena
         };
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
         let id = self.next_enemy_id;

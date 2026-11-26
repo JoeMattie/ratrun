@@ -8453,7 +8453,7 @@ mod tests {
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
             t if t.starts_with("lantern-") => {
-                use crate::game::art_boss_lantern::LanternState;
+                use crate::game::art_boss_lantern::{self, LanternState};
                 use crate::game::ecs::systems::boss::Boss;
                 hh.app.start_practice(Theme::Outfall);
                 hh.frame(&[KeyCode::Enter]);
@@ -8461,20 +8461,23 @@ mod tests {
                 w.configure_testbed();
                 w.player.loadout.weapons.clear();
                 let scene = &t["lantern-".len()..];
-                if !matches!(scene, "decoy" | "dark" | "snuffed") {
+                if matches!(scene, "arrival" | "feint" | "gape" | "stamp") {
                     // Isolate the lure's light for the arrival and reveal plates.
                     w.level.objects.lights.clear();
                 }
                 assert!(w.force_boss_here(BossKind::Lantern));
                 let boss = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
-                let start_frames = if scene == "arrival" { 45 } else { 150 };
+                let start_frames = match scene {
+                    "arrival" => 45,
+                    "body" | "swim" => 118,
+                    _ => 150,
+                };
                 for _ in 0..start_frames {
                     w.update(1.0 / 60.0, Vec2::ZERO, false);
                 }
                 let hp = match scene {
                     "decoy" | "dark" | "snuffed" => Some(0.60),
-                    "gape" | "stamp" => Some(0.30),
-                    "death" => Some(0.0),
+                    "gape" | "stamp" | "death" => Some(0.30),
                     _ => None,
                 };
                 if let Some(hp) = hp {
@@ -8487,13 +8490,18 @@ mod tests {
                         w.update(1.0 / 60.0, Vec2::ZERO, false);
                         let body = w.ecs.get::<Boss>(boss).expect("the Lantern still on the floor");
                         let view = body.lantern_view().expect("Lantern view");
+                        if scene == "death" && view.state == LanternState::DropLamp {
+                            w.ecs.get_mut::<Boss>(boss).unwrap().hp = 0.0;
+                            continue;
+                        }
                         captured = match scene {
                             "feint" => view.state == LanternState::FeintTell && view.progress >= 0.7,
                             "dark" => view.state == LanternState::DarkTell && view.progress >= 0.55,
                             "decoy" => view.real_bulb.is_some()
-                                && view.decoy.is_some_and(|bulb| bulb.pos.dist(view.pos) <= 45.0),
+                                && view.decoy.is_some_and(|bulb| bulb.pos.dist(view.pos) <= 45.0 * art_boss_lantern::BODY_SCALE),
                             "snuffed" => w.level.objects.outfall_boss_snuff.is_some()
                                 && view.decoy.is_none(),
+                            "swim" => view.state == LanternState::Swim && view.anim >= 4.0,
                             "gape" => view.state == LanternState::GapePull && view.progress >= 0.25,
                             "stamp" => view.state == LanternState::GapeStamp,
                             "death" => body.dead && body.elapsed >= 0.25,
@@ -8507,7 +8515,13 @@ mod tests {
                 }
                 let body = w.ecs.get::<Boss>(boss).unwrap();
                 let view = body.lantern_view().unwrap();
+                let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
+                    .and_then(|value| value.parse::<f32>().ok()).unwrap_or(1.0);
                 w.cam_focus = Some(match scene {
+                    "arrival" => view.real_bulb.map_or(view.pos, |bulb| (view.pos + bulb.pos) * 0.5),
+                    "body" | "swim" | "death" => view.pos - view.facing * (18.0 + (zoom - 1.0) * 40.0),
+                    "feint" => view.attack.map_or(view.pos, |shape| (view.pos + shape.center()) * 0.5),
+                    "gape" | "stamp" => art_boss_lantern::mouth_pos(&view),
                     "decoy" => {
                         // Keep the head and the false light in the compact frame.
                         (view.pos + view.decoy.unwrap().pos) * 0.5
@@ -10245,6 +10259,16 @@ mod tests {
                     if text.contains("LEVEL UP") {
                         hh.frame(&[KeyCode::Enter]);
                     }
+                }
+                if kind == BossKind::Lantern {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let focus = w.ecs.iter_entities().find_map(|e| {
+                        let view = e.get::<crate::game::ecs::systems::boss::Boss>()?.lantern_view()?;
+                        Some(view.pos - view.facing * 40.0)
+                    });
+                    w.cam_focus = focus;
+                    hh.app.picture_dirty = true;
+                    hh.terminal.draw(|f| hh.app.render(f)).unwrap();
                 }
             }
             // `map-early`: the full map a second into a run, when almost the

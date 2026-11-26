@@ -1260,16 +1260,13 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
             }
         }
         BossArtView::Lantern(v) => {
-            let dir = facing_of(v.facing);
             b.point(v.pos, art_boss_lantern::HEAD_RADIUS);
             if v.state != LanternState::ArrivalLure {
-                // The visible body trails the head. Bound its long axis
-                // separately from the reach of the lure and locked attacks.
-                b.point(v.pos - dir * 30.0, 24.0);
-                b.point(v.pos - dir * 66.0, 16.0);
+                let (lo, hi) = art_boss_lantern::body_bounds(&v);
+                b.grow(lo, hi);
             }
             for bulb in [v.real_bulb, v.decoy].into_iter().flatten() {
-                b.point(bulb.pos, 6.0);
+                b.point(bulb.pos, 6.0 * art_boss_lantern::BODY_SCALE);
             }
             for shape in [v.attack, v.stamp].into_iter().flatten() {
                 b.hazard(shape);
@@ -2065,7 +2062,7 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
 }
 
 fn stage_lantern() -> Staged {
-    let mut level = patch(Theme::Outfall, 44, 34);
+    let mut level = patch(Theme::Outfall, 68, 52);
     let aim = level.start;
     let (cx, cy) = crate::game::collision::cell_of(aim);
     let wall = (cx, cy - 2);
@@ -2088,7 +2085,7 @@ fn stage_lantern() -> Staged {
         .iter_entities()
         .find(|entity| entity.contains::<Boss>())
         .map(|entity| entity.id());
-    let mut script = Script::new(25.0, 2.0);
+    let mut script = Script::new(26.0 + 2.0 * art_boss_lantern::PHASE_SHIFT_DURATION, 2.0);
     script.fit = true;
     script.dummy = true;
     script.fixture = Some(fixture);
@@ -2099,9 +2096,10 @@ fn stage_lantern() -> Staged {
 /// Advance only the health thresholds. The controller finishes its locked
 /// move, snuffs the fixture, releases its decoy and runs Gape on its own.
 fn lantern_phase_cue(world: &mut World, subject: Option<Entity>, tick: u32) {
+    let gape_tick = ((18.0 + art_boss_lantern::PHASE_SHIFT_DURATION) / TICK).round() as u32;
     let hp_fraction = match tick {
         300 => 0.60,
-        990 => 0.32,
+        tick if tick == gape_tick => 0.32,
         _ => return,
     };
     if let Some(mut boss) = subject.and_then(|e| world.ecs.get_mut::<Boss>(e)) {
