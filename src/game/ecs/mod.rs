@@ -23,7 +23,7 @@ pub mod systems;
 #[cfg(test)]
 mod tests;
 
-/// Scripted seeded-run determinism regression (the port's equivalence harness,
-/// reduced to a golden-hash test; see the file header).
+/// Scripted seeded-run determinism regression: every case is played twice and
+/// the two traces compared, so nothing is pinned (see the file header).
 #[cfg(test)]
 mod harness;

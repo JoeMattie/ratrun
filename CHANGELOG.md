@@ -16,6 +16,9 @@
   lane and it takes more damage to bring down.
 - **The Sweeper.** Keep your distance and it may sprint at you. Watch
   the marked lane and strike when it stops for breath.
+- **Quicker updates.** The test suite checks that a seed plays out the same
+  way twice instead of comparing it with a stored hash, so a balance change
+  no longer waits on a replay pass to be re-recorded.
 
 ## 0.4.2 (2026-11-26)
 
