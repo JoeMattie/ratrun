@@ -432,6 +432,7 @@ enum Threat {
         active_left: f32,
         damage: f32,
     },
+    CrabPot { pos: Vec2, closing: bool },
 }
 
 /// The bot: policy state plus its own rng stream.
@@ -1003,7 +1004,7 @@ impl Bot {
         self.boss_kind = None;
         for e in w.ecs.iter_entities() {
             if let Some(en) = e.get::<Enemy>() {
-                if !en.targetable() || !self.sees(w, p, en.pos) {
+                if !en.targetable() || en.crab_pot_held || !self.sees(w, p, en.pos) {
                     continue;
                 }
                 self.threats.push(Threat::Enemy {
@@ -1274,6 +1275,18 @@ impl Bot {
                         committed,
                         hair: trap.kind.hair(),
                         bait_good: keeps_bait,
+                    });
+                }
+            }
+            for pot in &w.level.objects.crab_pots {
+                use crate::game::art_crabpot::CrabPotState;
+                if !w.player.buffs.is_giant()
+                    && matches!(pot.state, CrabPotState::Set | CrabPotState::Closing)
+                    && pot.pos.dist_sq(p) < 90.0 * 90.0 && self.sees(w, p, pot.pos)
+                {
+                    self.threats.push(Threat::CrabPot {
+                        pos: pot.pos,
+                        closing: pot.state == CrabPotState::Closing,
                     });
                 }
             }
@@ -2064,6 +2077,11 @@ impl Bot {
                     // than the rat. Use its true radius for these footprints.
                     let radius = if shape.signature_bounds().is_some() { R } else { R + 1.5 };
                     if active_left > 0.0 && shape.contains(p, radius) {
+                        imminent = true;
+                    }
+                }
+                Threat::CrabPot { pos, closing: true } => {
+                    if crate::game::ecs::systems::traps::in_crab_pot(pos, p) {
                         imminent = true;
                     }
                 }
@@ -2880,6 +2898,13 @@ fn threat_cost(
                 // steps on the plate while the rat is inside: a mild cost, so
                 // a leg can still drag a Brute across it.
                 10.0
+            } else {
+                0.0
+            }
+        }
+        Threat::CrabPot { pos, closing } => {
+            if crate::game::ecs::systems::traps::in_crab_pot(pos, q) {
+                if closing { 40.0 } else { 30.0 }
             } else {
                 0.0
             }
@@ -3801,6 +3826,35 @@ mod tests {
             });
             assert!(!bot.wants_dash(&w, &unit_dirs()), "{skill:?} dashed off an armed trap");
         }
+    }
+
+    #[test]
+    fn crab_pot_turns_the_bot_away_when_set_and_sends_it_out_when_closing() {
+        use crate::game::art_crabpot::CrabPotState;
+        use crate::game::ecs::systems::traps::set_crab_pot;
+        use crate::game::level::Level;
+
+        let mut w = World::with_level(
+            0, Level::empty(Theme::Outfall), 19, Loadout::starting(), Default::default(),
+        );
+        let p = w.player.pos;
+        let east = Vec2::new(1.0, 0.0);
+        let mut bot = seeded_bot(Skill::Expert, 19);
+        w.level.objects.crab_pots.push(set_crab_pot(p + east * 14.0, -east));
+        bot.scan(&w);
+        assert!(bot.score(&w, p, -east, true) > bot.score(&w, p, east, true));
+        assert!(!bot.wants_dash(&w, &unit_dirs()));
+
+        let pot = &mut w.level.objects.crab_pots[0];
+        pot.pos = p + east * 5.0;
+        pot.state = CrabPotState::Closing;
+        bot.scan(&w);
+        assert!(bot.score(&w, p, -east, true) > bot.score(&w, p, east, true));
+        assert!(bot.wants_dash(&w, &unit_dirs()));
+
+        w.level.objects.crab_pots[0].state = CrabPotState::Open;
+        bot.scan(&w);
+        assert!(!bot.threats.iter().any(|t| matches!(t, Threat::CrabPot { .. })));
     }
 
     /// Batch 6: the scan used to never build `Threat::Steam` / `Threat::Ink`,

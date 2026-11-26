@@ -102,7 +102,7 @@ pub fn super_dash_charge_secs(level: u32) -> f32 {
 pub fn player_system(
     input: Res<TickInput>,
     mut player: ResMut<Player>,
-    level: Res<Level>,
+    mut level: ResMut<Level>,
     mut particles: ResMut<Particles>,
     mut rng: ResMut<RngRes>,
     mut sfx: ResMut<SfxQueue>,
@@ -118,10 +118,12 @@ pub fn player_system(
     // Input bookkeeping, not simulation state: it is only ever set from live
     // hold edges, which the bot and the goldens never pass.
     mut hold_buffered: Local<bool>,
+    mut traps: ResMut<super::traps::TrapRuntime>,
 ) {
     let dt = input.dt;
     let move_dir = input.move_dir;
     let dash = input.dash;
+    let mut pot_hold = level.objects.crab_pots.iter().position(|pot| pot.caught_rat);
 
     // Legacy 184: a snapshot, not a borrow, exactly like the legacy clone.
     let stats = player.loadout.stats;
@@ -253,8 +255,11 @@ pub fn player_system(
     } else {
         None
     };
-    if let Some(charge) = request {
+    if let Some(charge) = request.filter(|_| pot_hold.is_none_or(|i| traps.pot_dash_ready(i))) {
         if player.dash_cd <= 0.0 {
+            if let Some(i) = pot_hold.take() {
+                traps.dash_out_of_pot(i, &mut level.objects.crab_pots[i]);
+            }
             // Up to `SUPER_DASH_DISTANCE` times the ordinary travel: the boost
             // is unchanged, the dash simply lasts longer.
             player.dash_active = DASH_SECS * (1.0 + (SUPER_DASH_DISTANCE - 1.0) * charge);
@@ -299,7 +304,7 @@ pub fn player_system(
     // the tick after it records nothing.
     let w3b_from = player.pos;
 
-    let dashing = player.dash_active > 0.0;
+    let dashing = pot_hold.is_none() && player.dash_active > 0.0;
     let dash_boost = if dashing { 3.2 } else { 1.0 };
     // `move_dir` is a throttle vector: unit length = full speed (keyboard),
     // shorter = proportionally slower (mouse easing near the cursor).
@@ -319,7 +324,11 @@ pub fn player_system(
     // Copy out `vel` first (the legacy "disjoint borrow" convention) so the
     // arithmetic reads the pre-lerp velocity exactly once.
     let vel = player.vel;
-    player.vel = vel + (target_vel - vel) * (12.0 * dt).min(1.0);
+    player.vel = if pot_hold.is_some() {
+        Vec2::ZERO
+    } else {
+        vel + (target_vel - vel) * (12.0 * dt).min(1.0)
+    };
 
     // Move in sub-steps shorter than the player radius. A dash at upgraded
     // speed can cover ~12 px per tick, which would otherwise skip straight
@@ -337,7 +346,8 @@ pub fn player_system(
     // whole path so far each tick, and Ripcord's route was filled with
     // duplicates until its cap cut the cord short).
     dash_track.seg_len = 0;
-    for _ in 0..steps {
+    let move_steps = if pot_hold.is_some() { 0 } else { steps };
+    for _ in 0..move_steps {
         // Where this sub-step started, so the dash records the legs that
         // really happened (a sub-step a wall pushes back on is no movement and
         // no leg).

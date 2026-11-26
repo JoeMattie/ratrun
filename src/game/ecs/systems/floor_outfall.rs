@@ -223,7 +223,7 @@ fn lane_clear(e: &Enemy, level: &Level, start: Vec2, dir: Vec2) -> bool {
     }
 }
 
-fn cancel_attack(e: &mut Enemy) {
+pub(super) fn cancel_attack(e: &mut Enemy) {
     if e.kind == EnemyKind::Lampfish {
         e.outfall.rearm = LAMPFISH_REARM_SECS;
     }
@@ -423,7 +423,8 @@ pub fn floor_outfall_system(
     }
     order.clear();
     order.extend(enemies.iter().filter(|(_, _, e)| {
-        e.targetable() && !e.named && matches!(e.kind, EnemyKind::Skater | EnemyKind::Lampfish)
+        e.targetable() && !e.crab_pot_held && !e.named
+            && matches!(e.kind, EnemyKind::Skater | EnemyKind::Lampfish)
     }).map(|(entity, id, _)| (id.0, entity)));
     order.sort_unstable_by_key(|&(id, _)| id);
     for &(_, entity) in order.iter() {

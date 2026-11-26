@@ -224,6 +224,10 @@ pub fn enemy_steering_system(
         if e.named {
             continue;
         }
+        if e.crab_pot_held {
+            e.flash = (e.flash - dt).max(0.0);
+            continue;
+        }
         let mut flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
         // `traps::TrapSlow` is the per-enemy movement multiplier a sticky board
         // inserts while it holds this enemy (absent = unaffected).
@@ -345,7 +349,7 @@ pub fn enemy_fire_system(
     pending.clear();
     for (id, mut e) in enemies.iter_mut() {
         // A stunned body (the Sonic Squeak ring) cannot squeeze the trigger.
-        if !e.kind.ranged() || e.stun > 0.0 {
+        if !e.kind.ranged() || e.stun > 0.0 || e.crab_pot_held {
             continue;
         }
         e.fire_cd -= dt;
@@ -469,7 +473,7 @@ pub fn separation_system(
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
-        state.push((e.pos, e.radius, e.position_locked, e.buried));
+        state.push((e.pos, e.radius, e.position_locked || e.crab_pot_held, e.buried));
     }
 
     let reach = scratch.max_radius * 2.0;
@@ -541,6 +545,9 @@ pub fn wall_resolve_system(
             continue;
         };
         let r = e.radius;
+        if e.crab_pot_held {
+            continue;
+        }
         let class = SizeClass::of_enemy(e.kind);
         // One tile-grid query per enemy: the cells it touches, never the
         // level's walls. `None` = no one-way-door permission, so a gate is

@@ -371,6 +371,7 @@ fn blocked_cells(level: &Level) -> Vec<bool> {
                 .iter()
                 .map(|trap| trap.pos)
                 .chain(level.objects.mousetraps.iter().map(|trap| trap.pos))
+                .chain(level.objects.crab_pots.iter().map(|trap| trap.pos))
                 .any(|pos| pos.dist(centre) < TRAP_CLEAR_PX);
             let outfall_bank = level.theme == Theme::Outfall && (
                 level.touches_tidal_pit(centre, 16.0)
@@ -481,9 +482,10 @@ mod tests {
                         level.seed
                     );
                     // The trap rule is a distance, checked from the centre.
-                    for trap in level.objects.sticky_traps.iter().map(|t| t.pos).chain(
-                        level.objects.mousetraps.iter().map(|t| t.pos),
-                    ) {
+                    for trap in level.objects.sticky_traps.iter().map(|t| t.pos)
+                        .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+                        .chain(level.objects.crab_pots.iter().map(|t| t.pos))
+                    {
                         assert!(
                             trap.dist(puddle.pos) >= TRAP_CLEAR_PX,
                             "{theme:?} seed {}: a puddle covers a trap pad",
@@ -548,6 +550,7 @@ mod tests {
                 );
                 assert_eq!(with.objects.sticky_traps.len(), without.objects.sticky_traps.len());
                 assert_eq!(with.objects.mousetraps.len(), without.objects.mousetraps.len());
+                assert_eq!(with.objects.crab_pots.len(), without.objects.crab_pots.len());
                 assert_eq!(with.objects.lights.len(), without.objects.lights.len());
                 assert_eq!(with.rooms.len(), without.rooms.len());
             }

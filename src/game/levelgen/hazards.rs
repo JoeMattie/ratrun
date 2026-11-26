@@ -512,6 +512,7 @@ pub(super) fn tidal_exclusions(level: &Level) -> Vec<TileRect> {
     avoid.extend(level.objects.shop_holes.iter().map(|shop| around(shop.mouth, 3)));
     avoid.extend(level.objects.sticky_traps.iter().map(|trap| around(cell_of(trap.pos), 2)));
     avoid.extend(level.objects.mousetraps.iter().map(|trap| around(cell_of(trap.pos), 2)));
+    avoid.extend(level.objects.crab_pots.iter().map(|trap| around(cell_of(trap.pos), 2)));
     avoid
 }
 

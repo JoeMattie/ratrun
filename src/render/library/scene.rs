@@ -2835,6 +2835,7 @@ fn stage_object(theme: Theme, kind: ObjectKind) -> Option<Staged> {
         ObjectKind::MazeCache => stage_maze_cache(theme),
         ObjectKind::OneWayDoor => stage_one_way_door(theme),
         ObjectKind::Gem => return None,
+        ObjectKind::CrabPot => stage_crab_pot(),
     })
 }
 
@@ -2968,6 +2969,28 @@ fn stage_mousetrap(theme: Theme) -> Staged {
         hp: 40.0,
         speed: 0.7,
         from: Some(Vec2::new(0.0, 1.0)),
+    });
+    (world, script, None)
+}
+
+fn stage_crab_pot() -> Staged {
+    let mut world = sandbox(patch(Theme::Outfall, 40, 30));
+    hide_rat(&mut world);
+    let facing = Vec2::new(0.0, 1.0);
+    let trap = world.player.pos + facing * 22.0;
+    world.level.objects.crab_pots.push(
+        crate::game::ecs::systems::traps::set_crab_pot(trap, facing),
+    );
+    let mut script = Script::new(5.5, 1.9);
+    script.framing = Framing::Point(trap);
+    script.feed = Some(Feed {
+        kind: roster::fodder_kind(Theme::Outfall),
+        first: 0.2,
+        every: 6.0,
+        ring: 48.0,
+        hp: 40.0,
+        speed: 0.9,
+        from: Some(facing),
     });
     (world, script, None)
 }

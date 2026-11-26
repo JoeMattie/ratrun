@@ -451,6 +451,12 @@ pub(super) fn objects_from(
                     .push(MousetrapView::baited(t.pos, t.facing, kind, bait));
                 objects.mousetrap_records.push(record);
             }
+            placement::TrapKind::CrabPot => {
+                objects.crab_pots.push(crate::game::ecs::systems::traps::set_crab_pot(
+                    t.pos, t.facing,
+                ));
+                objects.crab_pot_records.push(record);
+            }
         }
     }
 
@@ -874,10 +880,13 @@ mod tests {
 
     #[test]
     fn outfall_seed_sweep_keeps_dry_routes_lures_sconces_and_wet_banks() {
+        use crate::game::art_crabpot::{CrabPotState, DOOR_DEPTH, POT_HALF};
         use crate::game::hazards::OUTFALL_LURE_COUNT;
-        use crate::game::level::LightFixtureKind;
+        use crate::game::level::{LightFixtureKind, Rectf, TileRect};
 
         let mut valid_by_attempt = [0usize; 2];
+        let mut encounter_pots = 0;
+        let mut incidental_pots = 0;
         for seed in 0..20 {
             let accepted = generate(Theme::Outfall, seed);
             validate::validate(&accepted).unwrap();
@@ -893,6 +902,31 @@ mod tests {
             assert!((240..=265).contains(&accepted.puddles.len()), "seed {seed}");
             assert!((8..=lights::OUTFALL_SCONCE_CAP).contains(&objects.lights.len()), "seed {seed}");
             let entry = accepted.start_room().unwrap().rect;
+            assert!(objects.sticky_traps.is_empty() && objects.mousetraps.is_empty(), "seed {seed}");
+            assert!((1..=16).contains(&objects.crab_pots.len()), "seed {seed}");
+            assert_eq!(objects.crab_pot_records.len(), objects.crab_pots.len(), "seed {seed}");
+            for pot in &objects.crab_pots {
+                let record = objects.trap_record(pot.pos).expect("pot has a placement record");
+                encounter_pots += usize::from(record.encounter);
+                incidental_pots += usize::from(!record.encounter);
+                assert_eq!(pot.state, CrabPotState::Set);
+                assert_eq!(pot.facing, cardinal_vec(record.approach));
+                let reach = POT_HALF + DOOR_DEPTH;
+                let cage = Rectf::new(pot.pos.x - reach, pot.pos.y - reach, 2.0 * reach, 2.0 * reach);
+                assert!(accepted.is_open_floor(cage), "seed {seed}: pot at {:?} clips a wall", pot.pos);
+                let (x, y) = validate::cell_of(pot.pos);
+                let clearance = TileRect::new(x - 1, y - 1, 3, 3);
+                assert!(!clearance.intersects(&entry), "seed {seed}: pot crowds the start");
+                assert!(objects.tidal_pits.iter().all(|pit| !pit.rect.intersects(&clearance)));
+                assert!(objects.rat_holes.iter().all(|hole| !clearance.contains(hole.cell.0, hole.cell.1)));
+                assert!(objects.one_way_doors.iter().all(|door| !clearance.contains(door.cell.0, door.cell.1)));
+                assert!(objects.shop_holes.iter().all(|shop| !clearance.contains(shop.mouth.0, shop.mouth.1)));
+                assert!(objects.lure_traps.iter().all(|lure| {
+                    let (lx, ly) = validate::cell_of(lure.pos);
+                    !clearance.inflate(1).contains(lx, ly)
+                        && lure.landings.iter().all(|&at| !cage.contains(at))
+                }));
+            }
             assert_eq!(objects.lights.iter().filter(|f| entry.contains_world(f.pos)
                 && f.is_live_sconce()).count(), 4, "seed {seed}");
             assert!(objects.lights.iter().all(|f| f.kind == LightFixtureKind::Sconce));
@@ -914,6 +948,7 @@ mod tests {
         }
         assert!(valid_by_attempt.into_iter().sum::<usize>() >= 20);
         assert!(valid_by_attempt.into_iter().all(|count| count > 0));
+        assert!(encounter_pots > 0 && incidental_pots > 0);
     }
 
     #[test]
@@ -1080,6 +1115,9 @@ mod tests {
             for seed in 0..TRACE_SEEDS {
                 let level = generate_once(theme, seed, 0);
                 let objects = &level.objects;
+                if theme != Theme::Outfall {
+                    assert!(objects.crab_pots.is_empty(), "{theme:?} seed {seed}");
+                }
                 assert_eq!(
                     objects.sticky_trap_records.len(),
                     objects.sticky_traps.len(),

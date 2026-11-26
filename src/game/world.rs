@@ -3263,6 +3263,13 @@ impl World {
             art_floor::draw_outfall_tells(
                 pb, &self.level, self.player.pos, cam, self.elapsed, self.outfall_surge_enabled(),
             );
+            for pot in &self.level.objects.crab_pots {
+                if pot.state == super::art_crabpot::CrabPotState::Closing
+                    && on_screen(self.w2s(pot.pos, cam), 16.0, viewport)
+                {
+                    super::art_crabpot::draw_crab_pot_tell(pb, pot, cam);
+                }
+            }
         }
 
         // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground
@@ -4218,6 +4225,16 @@ impl World {
             }
             if foreground == overhead {
                 art_traps::draw_mousetrap(pb, &view, cam, accent);
+            }
+        }
+        for pot in &objects.crab_pots {
+            if !on_screen(self.w2s(pot.pos, cam), 40.0, vp) {
+                continue;
+            }
+            if foreground {
+                super::art_crabpot::draw_crab_pot_front(pb, pot, cam);
+            } else {
+                super::art_crabpot::draw_crab_pot(pb, pot, cam);
             }
         }
         for door in &objects.one_way_doors {

@@ -596,6 +596,7 @@ fn check_objects(level: &Level, errors: &mut Vec<String>) {
         .iter()
         .map(|t| t.pos)
         .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+        .chain(level.objects.crab_pots.iter().map(|t| t.pos))
     {
         let cell = cell_of(pos);
         if !tiles.get(cell.0, cell.1).is_open() {

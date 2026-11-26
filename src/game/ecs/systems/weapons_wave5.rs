@@ -490,7 +490,7 @@ fn hold_pulse(
             &mut enemy, damage, centre, HOLD, &mut hits.ledger, &mut hits.numbers, DamageSource::Normal,
         );
         vfx::emit_weapon_contact(&mut hits.particles, pos, pos - centre, HOLD, killed);
-        if killed {
+        if killed || enemy.crab_pot_held {
             continue;
         }
         let distance = shove * if enemy.kind.heavy() { THRASH_BOSS_KNOCKBACK } else { 1.0 };

@@ -2059,6 +2059,7 @@ pub fn draw_expanded(
             accent_color,
             explored_pct,
             view.maze_discovered,
+            view.palette == MinimapPalette::OUTFALL,
             caches_unclaimed,
             caches_claimed,
             boss_arena_discovered,
@@ -2070,7 +2071,11 @@ pub fn draw_expanded(
         );
     } else {
         let ly = inner.bottom().saturating_sub(1);
-        let legend = if view.maze_discovered {
+        let legend = if view.palette == MinimapPalette::OUTFALL && view.maze_discovered {
+            " ●You ◇Cache ◆Done ▸Breach ▪Crab Pot "
+        } else if view.palette == MinimapPalette::OUTFALL {
+            " ●You ▪Wall ▪Hole ▪Crab Pot "
+        } else if view.maze_discovered {
             " ●You ◇Cache ◆Done ▸Breach ◤Arena "
         } else {
             " ●You ▪Wall ▪Hole ◈Boss ◤Arena "
@@ -2102,6 +2107,7 @@ fn draw_expanded_sidebar(
     accent: Color,
     explored_pct: u8,
     maze_discovered: bool,
+    outfall: bool,
     caches_unclaimed: u32,
     caches_claimed: u32,
     _boss_arena_discovered: bool,
@@ -2184,8 +2190,13 @@ fn draw_expanded_sidebar(
         // The mouse-hole shop's bent spoon (seen once, remembered after).
         ("☌", palette::to_color(SHOP_SPOON_RGB), "Shop", "Splice Shop", false),
     ];
+    let pot = (
+        "▪", palette::to_color(palette::mix(theme.floor_live, WARN_AMBER_RGB, 0.42)),
+        "Crab Pot", "Crab Pot", false,
+    );
+    let pot_entry = outfall.then_some(pot);
 
-    for &(sym, col, short_lbl, long_lbl, maze_only) in entries {
+    for &(sym, col, short_lbl, long_lbl, maze_only) in entries.iter().chain(pot_entry.iter()) {
         if maze_only && !maze_discovered {
             continue;
         }

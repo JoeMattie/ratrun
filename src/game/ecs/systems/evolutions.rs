@@ -1489,7 +1489,7 @@ pub fn ripcord_system(
             // legal floor (a wall is not where a rat's tail can drag you).
             // "Bosses take damage only" (§3) covers every body a cord cannot
             // drag: the legacy boss kind and a named miniboss keep their feet.
-            let dragged = !e.named && e.kind != crate::game::enemy::EnemyKind::Boss;
+            let dragged = !e.crab_pot_held && !e.named && e.kind != crate::game::enemy::EnemyKind::Boss;
             if dragged && back.len_sq() > 0.25 {
                 // Counterweight: the cord's slide is a weapon's native shove,
                 // so the passive that raises every shove raises this one too.

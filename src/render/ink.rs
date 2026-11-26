@@ -245,6 +245,23 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
     let (sw, sh) = (pb.w as i32, pb.h as i32);
     let on = |s: (i32, i32), m: i32| s.0 + m >= 0 && s.1 + m >= 0 && s.0 - m < sw && s.1 - m < sh;
 
+    for pot in &v.level.objects.crab_pots {
+        use crate::game::art_crabpot::{CrabPotState, POT_HALF};
+        if pot.state != CrabPotState::Closing {
+            continue;
+        }
+        let (x, y) = screen(pot.pos, v.cam, v.scale);
+        let r = ((POT_HALF / unit).round() as i32).max(3);
+        if !on((x, y), r) {
+            continue;
+        }
+        let colour = mix((255, 176, 84), (255, 252, 236), pot.progress);
+        let corners = [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)];
+        for side in 0..corners.len() {
+            dotted_line(pb, corners[side], corners[(side + 1) % corners.len()], colour, 2);
+        }
+    }
+
     // 1. Enemy pellets: a dark one-pixel border and a stable bright core.
     {
         let mut q = v.ecs.query::<(&SpawnId, &Bullet)>();

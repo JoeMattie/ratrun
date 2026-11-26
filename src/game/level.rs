@@ -819,6 +819,9 @@ pub struct LevelObjects {
     /// Fixture indices. The Grouper and Lantern each own their own slot.
     pub outfall_elite_snuff: Option<usize>,
     pub outfall_boss_snuff: Option<usize>,
+    pub crab_pots: Vec<super::art_crabpot::CrabPotView>,
+    /// Generator record for each crab pot, in the same order.
+    pub crab_pot_records: Vec<TrapRecord>,
 }
 
 impl LevelObjects {
@@ -855,6 +858,19 @@ impl LevelObjects {
     pub fn trap_record(&self, pos: Vec2) -> Option<TrapRecord> {
         self.sticky_trap_record(pos)
             .or_else(|| self.mousetrap_record(pos))
+            .or_else(|| self.crab_pot_record(pos))
+    }
+
+    pub fn crab_pot_record(&self, pos: Vec2) -> Option<TrapRecord> {
+        self.crab_pots
+            .iter()
+            .zip(&self.crab_pot_records)
+            .find(|(trap, _)| trap.pos == pos)
+            .map(|(_, record)| *record)
+    }
+
+    pub fn rat_in_crab_pot(&self) -> bool {
+        self.crab_pots.iter().any(|pot| pot.caught_rat)
     }
 
     /// Is the trap at `pos` a room-mouth encounter (rather than incidental)?
@@ -887,6 +903,7 @@ impl LevelObjects {
     pub fn len(&self) -> usize {
         self.sticky_traps.len()
             + self.mousetraps.len()
+            + self.crab_pots.len()
             + self.one_way_doors.len()
             + self.rat_holes.len()
             + self.rewards.len()

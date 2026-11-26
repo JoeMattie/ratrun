@@ -335,7 +335,7 @@ fn contact_one(
     };
     // An enemy killed earlier this tick (by a bullet or a pool) must
     // not still land contact damage or knockback.
-    if !e.targetable() {
+    if !e.targetable() || e.crab_pot_held {
         return;
     }
     // Growth Serum (batch 13): an ordinary body touching the giant is being
