@@ -858,6 +858,7 @@ mod tests {
             mode: LightingMode::Full,
             depth: ColorDepth::Truecolor,
             fx: false,
+            blackout: 0.0,
         };
 
         // Rank 1 armed dropping: peak green is well under 232, yet explicit
