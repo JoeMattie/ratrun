@@ -55,11 +55,9 @@ pub struct WebGame {
 #[wasm_bindgen]
 impl WebGame {
     #[wasm_bindgen(constructor)]
-    pub fn new(cols: u16, rows: u16, webgl: bool) -> Self {
-        // xterm's built-in custom glyphs cover the half and quadrant blocks.
+    pub fn new(cols: u16, rows: u16) -> Self {
         let mut app = {
-            let blocks = if webgl { "quad" } else { "half" };
-            term::init(&["--color".into(), "truecolor".into(), "--glyphs".into(), blocks.into()]);
+            term::init(&["--color".into(), "truecolor".into(), "--glyphs".into(), "half".into()]);
             App::new(true, None)
         };
         app.set_lone_ctrl(true);
@@ -76,11 +74,6 @@ impl WebGame {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.size = (cols, rows);
-    }
-
-    pub fn fallback_renderer(&mut self) {
-        term::init(&["--color".into(), "truecolor".into(), "--glyphs".into(), "half".into()]);
-        self.frames.presenter.invalidate();
     }
 
     pub fn focus(&mut self, focused: bool) {
@@ -188,6 +181,22 @@ impl WebGame {
 
     pub fn crosshair(&self) -> bool {
         self.app.cursor_visible()
+    }
+
+    /// The cells last sent to the browser terminal, for frame comparison.
+    pub fn debug_frame(&self) -> String {
+        let buffer = self.frames.presenter.last_buffer();
+        serde_json::json!({
+            "cols": buffer.area.width,
+            "rows": buffer.area.height,
+            "screen": self.app.prof_screen(),
+            "cells": buffer.content.iter().map(|cell| (
+                cell.symbol(),
+                format!("{:?}", cell.fg),
+                format!("{:?}", cell.bg),
+                cell.modifier.bits(),
+            )).collect::<Vec<_>>(),
+        }).to_string()
     }
 
     pub fn start_profile(&self, freeze_lighting: bool) {

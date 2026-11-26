@@ -1,6 +1,5 @@
 import { Terminal } from "./vendor/xterm.mjs";
 import { FitAddon } from "./vendor/addon-fit.mjs";
-import { WebglAddon } from "./vendor/addon-webgl.mjs";
 import init, { KeyPhase, PointerAction, WebGame } from "./ratrun.js";
 
 const host = document.querySelector("#terminal");
@@ -16,6 +15,8 @@ function modifiers(event) {
 async function start() {
   await init();
   await document.fonts.ready;
+  // Use the DOM renderer. The WebGL addon can move entries in its glyph
+  // atlas while assembling a frame of changing truecolor block glyphs.
   const terminal = new Terminal({
     fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
     customGlyphs: true,
@@ -28,20 +29,6 @@ async function start() {
   const fit = new FitAddon();
   terminal.loadAddon(fit);
 
-  let webgl = false;
-  let lostContext = false;
-  try {
-    const gl = new WebglAddon();
-    terminal.loadAddon(gl);
-    gl.onContextLoss(() => {
-      gl.dispose();
-      lostContext = true;
-    });
-    webgl = true;
-  } catch {
-    // The default DOM renderer stays active when WebGL is unavailable.
-  }
-
   function fitGrid() {
     const fontSize = Math.min(20, Math.floor(host.clientWidth / 76), Math.floor(host.clientHeight / 54));
     terminal.options.fontSize = Math.max(10, fontSize);
@@ -49,7 +36,7 @@ async function start() {
   }
 
   fitGrid();
-  const game = new WebGame(terminal.cols, terminal.rows, webgl);
+  const game = new WebGame(terminal.cols, terminal.rows);
   terminal.onResize(({ cols, rows }) => game.resize(cols, rows));
   terminal.write("\x1b[?25l\x1b[?7l"); // Hide the text cursor and disable auto-wrap.
   const screen = host.querySelector(".xterm-screen");
@@ -134,14 +121,16 @@ async function start() {
     if (event.deltaY) pointer(event, event.deltaY < 0 ? PointerAction.ScrollUp : PointerAction.ScrollDown);
   }, { passive: false });
 
-  const profile = new URLSearchParams(location.search).get("profile");
+  const params = new URLSearchParams(location.search);
+  const profile = params.get("profile");
+  const debugFrames = params.has("debug-frames");
   const timings = { wasm: [], write: [], cadence: [] };
   let skipped = 0;
   if (profile !== null) {
     game.start_profile(profile === "full");
     window.ratrunProfile = () => {
       const stages = JSON.parse(game.profile());
-      const result = { ...stages, cols: terminal.cols, rows: terminal.rows, webgl: webgl && !lostContext, skipped };
+      const result = { ...stages, cols: terminal.cols, rows: terminal.rows, skipped };
       for (const [key, values] of Object.entries(timings)) result[key] = values.splice(0);
       skipped = 0;
       return result;
@@ -157,6 +146,7 @@ async function start() {
   }
 
   let writing = false;
+  const decoder = new TextDecoder();
   let next = 0;
   let previous;
   function frame(now) {
@@ -168,10 +158,6 @@ async function start() {
     if (!writing && resizePending) {
       fitGrid();
       resizePending = false;
-    }
-    if (lostContext && webgl) {
-      game.fallback_renderer();
-      webgl = false;
     }
     if (profile !== null) {
       if (previous !== undefined) {
@@ -188,9 +174,14 @@ async function start() {
     if (bytes.length) {
       writing = true;
       if (profile !== null) performance.mark("ratrun-write");
-      terminal.write(bytes, () => {
-        if (profile !== null) measure("write");
+      // Decode the complete frame before passing it to xterm. Its byte-input
+      // decoder can drop a glyph such as — across an internal chunk boundary.
+      terminal.write(decoder.decode(bytes), () => {
         writing = false;
+        if (profile !== null) measure("write");
+        if (debugFrames && !stopped && window.ratrunDebugFrame) {
+          window.ratrunDebugFrame(terminal, JSON.parse(game.debug_frame()));
+        }
       });
     }
     if (game.quit()) {

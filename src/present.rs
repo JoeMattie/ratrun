@@ -177,6 +177,11 @@ impl Default for Presenter {
 }
 
 impl Presenter {
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub(crate) fn last_buffer(&self) -> &Buffer {
+        &self.prev
+    }
+
     pub fn new() -> Self {
         Self::with_mode(PresentMode::from_env())
     }
@@ -1284,6 +1289,13 @@ mod tests {
         pen: Pen,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Wrap {
+        Pending,
+        Immediate,
+        Disabled,
+    }
+
     /// A small VT cell model: cursor addressing, SGR, clear, printing with
     /// wide glyphs. Strict where a real terminal is forgiving — printing
     /// while the cursor is past the last column (relying on autowrap) or
@@ -1300,6 +1312,8 @@ mod tests {
         held: bool,
         /// Cells printed (for the byte/cell statistics).
         printed: u64,
+        width: fn(char) -> usize,
+        wrap: Wrap,
     }
 
     impl Vt {
@@ -1317,6 +1331,8 @@ mod tests {
                 pen: DEFAULT_PEN,
                 held: false,
                 printed: 0,
+                width: |ch| ch.encode_utf8(&mut [0; 4]).cell_width() as usize,
+                wrap: Wrap::Pending,
             }
         }
 
@@ -1330,7 +1346,7 @@ mod tests {
         fn print(&mut self, ch: char) {
             let mut utf8 = [0u8; 4];
             let text: &str = ch.encode_utf8(&mut utf8);
-            let width = if ch.is_ascii() { 1 } else { text.cell_width() as usize };
+            let width = (self.width)(ch);
             if width == 0 {
                 // A combining mark or variation selector joins the glyph
                 // before the cursor.
@@ -1341,6 +1357,9 @@ mod tests {
                 }
                 self.cells[i].text.push(ch);
                 return;
+            }
+            if self.wrap == Wrap::Disabled && self.x == self.w {
+                self.x -= 1;
             }
             assert!(
                 self.y < self.h && self.x + width <= self.w,
@@ -1370,6 +1389,16 @@ mod tests {
                 };
             }
             self.x += width;
+            if self.wrap == Wrap::Immediate && self.x == self.w {
+                self.x = 0;
+                if self.y + 1 == self.h {
+                    self.cells.rotate_left(self.w);
+                    let start = self.cells.len() - self.w;
+                    self.cells[start..].fill(Glyph { text: " ".into(), pen: self.pen });
+                } else {
+                    self.y += 1;
+                }
+            }
             self.printed += 1;
         }
 
@@ -1432,6 +1461,7 @@ mod tests {
                 };
                 if let Some(mode) = body.strip_prefix('?') {
                     match (mode, end) {
+                        ("7", 'l') => self.wrap = Wrap::Disabled,
                         ("2026", 'h') => {
                             assert!(!self.held, "nested synchronized update");
                             self.held = true;
@@ -1565,7 +1595,10 @@ mod tests {
                 // A real resize leaves the old picture reflowed; the presenter
                 // must clear it and repaint everything (the model's fresh
                 // screen is the cleared one, the clear itself is asserted).
-                self.vt = Vt::new(buf.area.width, buf.area.height);
+                let mut resized = Vt::new(buf.area.width, buf.area.height);
+                resized.width = self.vt.width;
+                resized.wrap = self.vt.wrap;
+                self.vt = resized;
                 self.seen.clear();
                 let shown = self.presenter.show(&mut self.backend, buf.clone()).unwrap();
                 let bytes = self.seen.bytes();
@@ -1894,6 +1927,77 @@ mod tests {
         run!("leave library", 3, &[KeyCode::Esc]);
         run!("quit to title", 4, &[c('q')]);
         assert_eq!(app.prof_screen(), "Title");
+    }
+
+    #[test]
+    fn immediate_wrap_scrolls_a_diff_at_the_bottom_right() {
+        let mut rig = Rig::new(PresentMode::Direct);
+        let mut frame = Buffer::empty(Rect::new(0, 0, 8, 2));
+        frame[(0, 0)].set_symbol("A");
+        rig.show(&frame, "initial frame");
+        frame[(7, 1)].set_symbol("▀");
+        rig.show(&frame, "last column updated");
+
+        let mut immediate = Vt::new(8, 2);
+        immediate.cells[0] = Vt::expected(&frame[(0, 0)]);
+        immediate.wrap = Wrap::Immediate;
+        immediate.feed(&rig.seen.bytes());
+        assert_eq!(immediate.cells[0].text, " ", "the first row scrolled away");
+
+        let mut no_wrap = Vt::new(8, 2);
+        no_wrap.cells[0] = Vt::expected(&frame[(0, 0)]);
+        no_wrap.wrap = Wrap::Immediate;
+        let mut setup = String::new();
+        crossterm::Command::write_ansi(&crossterm::terminal::DisableLineWrap, &mut setup).unwrap();
+        no_wrap.feed(setup.as_bytes());
+        no_wrap.feed(&rig.seen.bytes());
+        no_wrap.assert_shows(&frame, "line wrap disabled");
+    }
+
+    // xterm.js 6.0.0's UnicodeV6 widths for the ranges used by the shipped
+    // text and block art. Fail on an unreviewed scalar instead of inheriting
+    // ratatui's answer for new characters.
+    fn xterm_v6_game_width(ch: char) -> usize {
+        match ch {
+            '\u{20}'..='\u{7e}'
+            | '\u{a0}'..='\u{02ff}'
+            | '\u{0370}'..='\u{0482}'
+            | '\u{2010}'..='\u{2029}'
+            | '\u{2030}'..='\u{205f}'
+            | '\u{2070}'..='\u{2328}'
+            | '\u{232b}'..='\u{2e7f}'
+            | '\u{1cd00}'..='\u{1cebf}'
+            | '\u{1fb00}'..='\u{1fbff}' => 1,
+            '\u{fe00}'..='\u{fe0f}' => 0,
+            _ => panic!("check xterm.js UnicodeV6 width of {ch:?}"),
+        }
+    }
+
+    #[test]
+    fn scripted_session_matches_xterm_v6_and_windows_console_with_wrap_disabled() {
+        let mut xterm = Rig::new(PresentMode::Direct);
+        let mut windows = Rig::new(PresentMode::Direct);
+        xterm.vt.width = xterm_v6_game_width;
+        for rig in [&mut xterm, &mut windows] {
+            rig.vt.feed(b"\x1b[?7l");
+        }
+        let mut checked = std::collections::HashSet::new();
+        scripted_session(None, |what, frame| {
+            for cell in &frame.content {
+                let symbol = cell.symbol();
+                if checked.insert(symbol.to_owned()) {
+                    assert_eq!(symbol.cell_width(), 1, "{what}: {symbol:?}");
+                    assert_eq!(symbol.chars().map(xterm_v6_game_width).sum::<usize>(), 1,
+                        "{what}: {symbol:?}");
+                }
+            }
+            xterm.show(frame, what);
+            // Windows Terminal's default width mode treats ambiguous
+            // characters as narrow, like ratatui. The wrap setting also
+            // protects the immediate-wrap case in the Console Host.
+            windows.show(frame, what);
+        });
+        assert!(checked.len() > 100);
     }
 
     #[test]

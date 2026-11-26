@@ -23,6 +23,8 @@ use present::FrameOut;
 
 static KITTY_PUSHED: AtomicBool = AtomicBool::new(false);
 static POINTER_SHAPE_SET: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static LINE_WRAP_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// OSC 22 pointer shape: slim precision crosshair centered on the hot spot so
 /// the OS arrow does not bury the cheese wedge (Ghostty, Kitty, iTerm2 ≥ 3.5).
@@ -302,6 +304,14 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<FrameOut>>, KeyboardMod
         cursor::Hide
     )?;
 
+    // With Windows Console's immediate wrap, filling the bottom-right cell
+    // can scroll the buffer before the presenter's next cursor move.
+    #[cfg(windows)]
+    {
+        LINE_WRAP_DISABLED.store(true, Ordering::SeqCst);
+        execute!(stdout, terminal::DisableLineWrap)?;
+    }
+
     // Ask the terminal whether it speaks the Kitty keyboard protocol. This is
     // the one startup query that can block: crossterm's own version waits its
     // full 2 s timeout on a terminal that never answers (and on every terminal
@@ -397,6 +407,10 @@ fn restore_to(out: &mut impl io::Write) -> Result<()> {
     }
     let _ = execute!(out, DisableFocusChange);
     let _ = execute!(out, DisableMouseCapture);
+    #[cfg(windows)]
+    if LINE_WRAP_DISABLED.swap(false, Ordering::SeqCst) {
+        let _ = execute!(out, terminal::EnableLineWrap);
+    }
     let _ = execute!(out, LeaveAlternateScreen);
     let _ = execute!(out, cursor::Show);
     let _ = terminal::disable_raw_mode();

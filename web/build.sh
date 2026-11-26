@@ -28,7 +28,6 @@ cp LICENSE web/index.html web/game.js "$dist/"
 cp web/node_modules/@xterm/xterm/css/xterm.css "$dist/vendor/"
 cp web/node_modules/@xterm/xterm/lib/xterm.mjs "$dist/vendor/"
 cp web/node_modules/@xterm/addon-fit/lib/addon-fit.mjs "$dist/vendor/"
-cp web/node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs "$dist/vendor/"
-for package in xterm addon-fit addon-webgl; do
+for package in xterm addon-fit; do
     cp "web/node_modules/@xterm/$package/LICENSE" "$dist/vendor/$package.LICENSE"
 done
