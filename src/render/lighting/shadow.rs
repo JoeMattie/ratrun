@@ -41,10 +41,12 @@ pub(super) struct HardShadows {
     compact: bool,
     taps: Vec<EdgeTap>,
     quads: Vec<bool>,
+    shaft_quads: Vec<bool>,
     pixels: Vec<EdgeDelta>,
     blocked: bool,
     lit: bool,
     pub(super) active: bool,
+    pub(super) shafts_active: bool,
 }
 
 impl HardShadows {
@@ -64,7 +66,9 @@ impl HardShadows {
         self.offset = offset;
         self.compact = compact;
         self.active = false;
+        self.shafts_active = false;
         self.quads.clear();
+        self.shaft_quads.clear();
         if self.enabled() {
             self.quads.resize((grid.0 + 1) * (grid.1 + 1), false);
         }
@@ -167,6 +171,13 @@ impl HardShadows {
                     self.active = true;
                 }
                 self.quads[quad] = true;
+                if has_shaft {
+                    if !self.shafts_active {
+                        self.shaft_quads.resize((gw + 1) * (gh + 1), false);
+                        self.shafts_active = true;
+                    }
+                    self.shaft_quads[quad] = true;
+                }
                 for py in sy.max(0)..(sy + self.stride as i32).min(h as i32) {
                     let dy = (py - sy) as f32;
                     let v = dy / step;
@@ -211,6 +222,7 @@ impl HardShadows {
     }
 
     /// Pixel corrections for one span between sample centres.
+    #[inline]
     pub(super) fn row(
         &self,
         col: i32,
@@ -224,6 +236,12 @@ impl HardShadows {
         }
         let base = y * self.size.0;
         Some(&self.pixels[base + x..base + end])
+    }
+
+    #[inline]
+    pub(super) fn shaft(&self, col: i32, row: i32, x: usize, y: usize) -> Option<[i16; 3]> {
+        let quad = (row + 1) as usize * (self.grid.0 + 1) + (col + 1) as usize;
+        self.shaft_quads[quad].then(|| self.pixels[y * self.size.0 + x].air)
     }
 }
 

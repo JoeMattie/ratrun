@@ -446,6 +446,15 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
     if canvas.px.len() < w * h {
         return;
     }
+    if grid.hard_shadows.shafts_active {
+        composite_pixels::<true>(grid, canvas, frame);
+    } else {
+        composite_pixels::<false>(grid, canvas, frame);
+    }
+}
+
+fn composite_pixels<const SHAFT_EDGES: bool>(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>) {
+    let (w, h) = (canvas.w, canvas.h);
     let stride = grid.stride as i32;
     let step = 65_536 / stride;
     let inv = 65_536.0 / stride as f32;
@@ -464,7 +473,11 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
             let tx = (s & 0xFFFF) >> 8;
             let x0 = (s >> 16).clamp(0, gw - 1) as usize;
             let x1 = ((s >> 16) + 1).clamp(0, gw - 1) as usize;
-            let correction = grid.hard_shadows.row(s >> 16, sy >> 16, x, y, x + 1).map(|row| &row[0]);
+            let correction = if SHAFT_EDGES {
+                grid.hard_shadows.shaft(s >> 16, sy >> 16, x, y)
+            } else {
+                None
+            };
             // Two cells share a horizontal weight, as the shade does.
             let tx = if super::upsample::PAIR_X && correction.is_none() {
                 tx & !(2 * (256 / stride) - 1)
@@ -497,7 +510,7 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
                     + i32::from(grid.info[i11].air[n]) * m11;
                 // Q16 weights over Q8.8 air: 24 bits down to output levels.
                 let levels = if let Some(correction) = correction {
-                    (i64::from(sum) + (i64::from(correction.air[n]) << 16) + (1 << 23)) >> 24
+                    (i64::from(sum) + (i64::from(correction[n]) << 16) + (1 << 23)) >> 24
                 } else {
                     i64::from((sum + (1 << 23)) >> 24)
                 };
