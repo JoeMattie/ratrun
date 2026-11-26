@@ -1249,9 +1249,9 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
         ),
         BossKind::Broom => (
             "Kitchen · 15:00 — one of two bosses",
-            "Custody, with feet. The sweeper marches, stomps a shadowed foot and drags \
-             its whole reach round in an arc. It always leaves a safe pocket at its \
-             heel; the trick is being in it when the bristles arrive.",
+            "Custody, with feet. The bristles pass over the pocket at its heel. Stay \
+             out at range and the Sweeper runs. Step clear of the marked lane and \
+             strike while both feet are planted.",
         ),
         BossKind::Mower => (
             "Lab · 15:00 — one of two bosses",

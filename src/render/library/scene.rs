@@ -1204,6 +1204,11 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
                 art_boss_broom::broom_head_pos(&v),
                 art_boss_broom::JAB_HEAD_RADIUS,
             );
+            if v.state == art_boss_broom::BroomBossState::RunWindup {
+                for hazard in &boss.hazards {
+                    b.hazard(hazard.shape);
+                }
+            }
         }
         BossArtView::Mower(v) => {
             // Deck, bumper and the hazard-striped wrap.
@@ -2064,7 +2069,11 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
     // attacks are aimed at, so the plate frames the animal, the space it is
     // about to take, and the thing its telegraphs land on.
     world.player.pos += Vec2::new(30.0, 6.0);
-    world.force_boss(kind);
+    // Open on the Sweeper's feet so its long run can fit without zooming
+    // back for both the arrival and the sprint.
+    if kind != BossKind::Broom || !world.force_boss_here(kind) {
+        world.force_boss(kind);
+    }
     let mut script = Script::new(10.0, 1.0);
     // Drawn 2× oversized and box-filtered down: the art modules draw at 1:1
     // only, and every boss sprite is 26–84 px long against a 44 px plate.
@@ -2074,6 +2083,10 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
     // (`LibraryScene::probe_boss_union`), not a camera that follows the fight:
     // a stomp, a pounce, a coil and a hoisted stamp all left a moving frame.
     script.boss_fit = true;
+    if kind == BossKind::Broom {
+        script.loop_secs = 15.0;
+        script.cue = Some(broom_run_cue);
+    }
     if kind == BossKind::Hawk {
         // The Redtail circles overhead, and while it is up there the art gives
         // it no hit shape at all — the card was a shadow on empty planks. Its
@@ -2083,6 +2096,27 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
         script.cue = Some(hawk_hover_cue);
     }
     (world, script, None)
+}
+
+/// After the close-range demonstration, hold the dummy at running distance.
+fn broom_run_cue(world: &mut World, _subject: Option<Entity>, tick: u32) {
+    use crate::game::art_boss_broom::BroomBossState::{Run, RunRecover, RunWindup};
+    if !(330..780).contains(&tick) {
+        return;
+    }
+    let pose = world.ecs.iter_entities().find_map(|entity| {
+        let boss = entity.get::<Boss>()?;
+        Some((boss.pos, boss.state))
+    });
+    if let Some((pos, _)) = pose.filter(|(_, state)| {
+        !matches!(state, BossState::Broom(RunWindup | Run | RunRecover))
+    }) {
+        let offset = Vec2::new(87.0, 10.0);
+        // Keep the demonstration within the staged floor if the boss has
+        // already walked east to meet the dummy.
+        let direction = if pos.x > world.level.start.x + 80.0 { -1.0 } else { 1.0 };
+        world.player.pos = pos + offset * direction;
+    }
 }
 
 fn stage_lantern() -> Staged {

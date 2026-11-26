@@ -336,6 +336,7 @@ pub enum BossAttack {
     LanternDarkLunge,
     LanternDecoyLeap,
     LanternGapeStamp,
+    BroomRun,
 }
 
 impl BossAttack {
@@ -384,6 +385,7 @@ impl BossAttack {
             BossAttack::LanternDarkLunge => "dark lunge",
             BossAttack::LanternDecoyLeap => "decoy leap",
             BossAttack::LanternGapeStamp => "gape stamp",
+            BossAttack::BroomRun => "broom run",
         }
     }
 }
@@ -469,6 +471,7 @@ impl DamageCause {
                 BossAttack::Sweep => "broom sweep",
                 BossAttack::Jab => "broom jab",
                 BossAttack::Dustpan => "dustpan",
+                BossAttack::BroomRun => "broom run",
                 _ => "broom hazard",
             },
             DamageCause::BossHazard(BossKind::Mower, a) => match a {
@@ -2388,6 +2391,7 @@ fn boss_attack(state: &BossState) -> BossAttack {
             BroomBossState::BroomJab => BossAttack::Jab,
             BroomBossState::DustpanDrop => BossAttack::Dustpan,
             BroomBossState::PhaseChange => BossAttack::PhaseSlam,
+            BroomBossState::Run => BossAttack::BroomRun,
             _ => BossAttack::Other,
         },
         BossState::Mower(s) => match s {

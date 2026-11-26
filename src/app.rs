@@ -10482,6 +10482,66 @@ mod tests {
                     hh.frame(&[KeyCode::Enter]);
                 }
             }
+            // Hold a real Kitchen run at a selected tick after its tell starts.
+            "sweeper-run" => {
+                use crate::game::art_boss_broom::{BroomBossState, RUN_HALF_WIDTH};
+                use crate::game::collision::SizeClass;
+                use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
+                hh.app.start_practice(Theme::Kitchen);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.clear_enemies();
+                w.player.loadout.weapons.clear();
+                w.player.iframes = 30.0;
+                w.shake_scale = 0.0;
+                let east = Vec2::new(1.0, 0.16).normalized();
+                let (start, facing) = w.level.rooms.iter().find_map(|room| {
+                    let center = room.rect.center_world();
+                    [east, -east].into_iter().find_map(|dir| {
+                        let start = center - dir * 45.0;
+                        let end = start + dir * 97.0;
+                        (w.level.tiles.circle_clear(start, RUN_HALF_WIDTH, SizeClass::Large)
+                            && w.level.tiles.circle_clear(end, RUN_HALF_WIDTH, SizeClass::Large)
+                            && w.level.tiles.segment_hit(start, end, RUN_HALF_WIDTH).is_none())
+                        .then_some((start, dir))
+                    })
+                }).expect("clear Kitchen run lane");
+                w.player.pos = start + facing * 75.0;
+                assert!(w.force_boss_here(BossKind::Broom));
+                let entity = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let dt = 1.0 / 60.0;
+                for _ in 0..1200 {
+                    let mut boss = w.ecs.get_mut::<Boss>(entity).unwrap();
+                    if boss.state == BossState::Broom(BroomBossState::RunWindup) {
+                        break;
+                    }
+                    boss.pos = start;
+                    w.update(dt, Vec2::ZERO, false);
+                }
+                let boss = w.ecs.get::<Boss>(entity).unwrap();
+                assert_eq!(boss.state, BossState::Broom(BroomBossState::RunWindup));
+                let end = boss.target;
+                let frames = std::env::var("RATRUN_DUMP_FRAMES")
+                    .ok().and_then(|value| value.parse::<u32>().ok()).unwrap_or(25);
+                for frame in 0..frames {
+                    if frame == 20 {
+                        w.player.pos += facing.perp() * 25.0;
+                    }
+                    w.update(dt, Vec2::ZERO, false);
+                }
+                let boss = w.ecs.get::<Boss>(entity).unwrap();
+                eprintln!("Sweeper frame {frames}: {:?} {:.2}", boss.state, boss.progress());
+                let focus = if boss.state == BossState::Broom(BroomBossState::RunWindup) {
+                    (start + end) * 0.5 - facing * 6.0 + Vec2::new(0.0, -3.0)
+                } else {
+                    (boss.pos + w.player.pos) * 0.5 - facing * 12.0 + Vec2::new(0.0, -10.0)
+                };
+                w.cam_focus = Some(focus);
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             // `bossfight-<n>`: boss `n` of `BossKind::all()` on its own floor,
             // a few seconds into the fight, the rat standing off in the arena.
             t if t.starts_with("bossfight") => {
@@ -11260,7 +11320,8 @@ mod tests {
             || target.starts_with("w6-")
             || target.starts_with("w8-")
             || target.starts_with("dropping-")
-            || target.starts_with("miniboss-milk-");
+            || target.starts_with("miniboss-milk-")
+            || target == "sweeper-run";
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
