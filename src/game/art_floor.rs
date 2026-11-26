@@ -51,6 +51,7 @@ pub fn draw_floor(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) 
         Theme::Lab => lab(&mut floor, &level.palette),
         Theme::Laundry => laundry(&mut floor, &level.palette, elapsed),
         Theme::Printworks => printworks(&mut floor, &level.palette, elapsed),
+        Theme::Outfall => outfall(&mut floor, &level.palette),
         Theme::Trailer => unreachable!("the flatbed draws its own floor"),
     }
     // Walkable hazard surfaces sit on the floor layer.
@@ -96,6 +97,51 @@ impl Floor<'_> {
     fn rows(&self, step: i32, offset: i32) -> Range<i32> {
         grid(&self.y, step, offset)
     }
+
+    #[inline]
+    fn px(&mut self, wx: i32, wy: i32, color: Rgb) {
+        if wx >= self.x.start && wx < self.x.end && wy >= self.y.start && wy < self.y.end {
+            self.pb.plot(wx - self.cam_x, wy - self.cam_y, color);
+        }
+    }
+
+    #[inline]
+    fn blend_world(&mut self, wx: i32, wy: i32, color: Rgb, alpha: f32) {
+        if alpha <= 0.0 || wx < self.x.start || wx >= self.x.end || wy < self.y.start || wy >= self.y.end {
+            return;
+        }
+        let (sx, sy) = ((wx - self.cam_x) as usize, (wy - self.cam_y) as usize);
+        if sx < self.pb.w && sy < self.pb.h {
+            let cur = self.pb.pixel_at(sx, sy);
+            self.pb.plot(sx as i32, sy as i32, mix(cur, color, alpha.clamp(0.0, 1.0)));
+        }
+    }
+
+    #[inline]
+    fn darken_world(&mut self, wx: i32, wy: i32, factor: f32) {
+        if wx < self.x.start || wx >= self.x.end || wy < self.y.start || wy >= self.y.end {
+            return;
+        }
+        let (sx, sy) = ((wx - self.cam_x) as usize, (wy - self.cam_y) as usize);
+        if sx < self.pb.w && sy < self.pb.h {
+            let cur = self.pb.pixel_at(sx, sy);
+            self.pb.plot(sx as i32, sy as i32, scale(cur, factor.clamp(0.0, 1.0)));
+        }
+    }
+}
+
+/// 64-entry integer sine LUT in `[-100, 100]` for zero-trig, crop-invariant
+/// seabed sand ripples and scalloped tidal-drop shorelines.
+const SIN64_LUT: [i32; 64] = [
+    0, 10, 20, 29, 38, 47, 56, 63, 71, 77, 83, 88, 92, 96, 98, 100,
+    100, 100, 98, 96, 92, 88, 83, 77, 71, 63, 56, 47, 38, 29, 20, 10,
+    0, -10, -20, -29, -38, -47, -56, -63, -71, -77, -83, -88, -92, -96, -98, -100,
+    -100, -100, -98, -96, -92, -88, -83, -77, -71, -63, -56, -47, -38, -29, -20, -10,
+];
+
+#[inline]
+fn sin64(idx: i32) -> i32 {
+    SIN64_LUT[(idx & 63) as usize]
 }
 
 // Include partial tiles at either side, including a staggered tile at x < 0.
@@ -595,6 +641,110 @@ fn printworks(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
     }
 }
 
+/// The Outfall floor: warped diagonal ocean-seabed sand ripples with fine silt
+/// grain, scattered half-buried pebbles and shell flecks, dark silt hollows,
+/// and flat recumbent seabed kelp fronds (visual only). Still and strictly
+/// world-anchored so the lighting bump pass stays quiet and scroll crops match.
+fn outfall(floor: &mut Floor<'_>, pal: &Palette) {
+    let sand_deep = mix((17, 28, 38), pal.bg, 0.12);
+    let sand_trough = mix((24, 38, 49), pal.bg, 0.10);
+    let sand_mid = mix((35, 52, 62), pal.bg_alt, 0.08);
+    let sand_crest: Rgb = (48, 67, 75);
+    let sand_hi: Rgb = (58, 78, 85);
+    let pebble_lo: Rgb = (24, 37, 46);
+    let pebble_hi: Rgb = (68, 86, 92);
+    let kelp_dark: Rgb = (14, 42, 36);
+    let kelp_mid: Rgb = (22, 62, 50);
+    let kelp_hi: Rgb = (32, 82, 64);
+
+    for wy in floor.y.clone() {
+        let wy_warp = sin64((wy * 2).div_euclid(3));
+        let sy = wy - floor.cam_y;
+        for wx in floor.x.clone() {
+            let warp = (sin64((wx * 2).div_euclid(3) + 7) * 5 + wy_warp * 4) / 100;
+            let phase = (wy * 5 + wx + warp * 2) & 63;
+            let r = sin64(phase);
+            let grain = ((hash(wx >> 1, wy >> 1) & 7) as i32 - 3) * 5;
+            let val = r + grain;
+
+            let mut col = if val < -48 {
+                sand_deep
+            } else if val < -10 {
+                sand_trough
+            } else if val < 34 {
+                sand_mid
+            } else if val < 72 {
+                sand_crest
+            } else {
+                sand_hi
+            };
+            if val > 54 && (hash(wx, wy) & 15) == 0 {
+                col = mix(col, pebble_hi, 0.36);
+            }
+            floor.pb.plot(wx - floor.cam_x, sy, col);
+        }
+    }
+
+    // Sparse seabed storytelling details on a 48 × 40 world grid (crop-invariant).
+    const STEP_X: i32 = 48;
+    const STEP_Y: i32 = 40;
+    let gx0 = (floor.x.start - 16).div_euclid(STEP_X);
+    let gx1 = (floor.x.end + 16).div_euclid(STEP_X);
+    let gy0 = (floor.y.start - 16).div_euclid(STEP_Y);
+    let gy1 = (floor.y.end + 16).div_euclid(STEP_Y);
+    for gy in gy0..=gy1 {
+        for gx in gx0..=gx1 {
+            let h = hash(gx + 137, gy + 59);
+            let ox = gx * STEP_X + 8 + ((h >> 3) & 31) as i32;
+            let oy = gy * STEP_Y + 8 + ((h >> 8) & 23) as i32;
+            match h & 7 {
+                0 | 1 => {
+                    // Flat recumbent seabed kelp tuft anchored to a tiny silt pebble.
+                    floor.fill(ox - 1, oy, 3, 2, pebble_lo);
+                    floor.px(ox - 1, oy, pebble_hi);
+                    let flen = 8 + ((h >> 13) & 5) as i32;
+                    let flip = if (h & 16) != 0 { 1 } else { -1 };
+                    let p0 = (h & 7) as i32 * 5;
+                    for k in 0..flen {
+                        let fx = ox + flip * (k + 1);
+                        let fy = oy + (sin64(k * 6 + p0) * 14) / 1000 - (k / 4);
+                        let c = if k % 3 == 0 {
+                            kelp_hi
+                        } else if (k & 1) == 0 {
+                            kelp_mid
+                        } else {
+                            kelp_dark
+                        };
+                        floor.blend_world(fx, fy, c, 0.78);
+                        if (k & 1) == 1 {
+                            floor.blend_world(fx, fy + 1, kelp_dark, 0.55);
+                        }
+                    }
+                }
+                2 => {
+                    // Half-buried pale shell & silt pebble cluster.
+                    floor.blend_world(ox, oy, pebble_hi, 0.65);
+                    floor.blend_world(ox + 1, oy, sand_hi, 0.55);
+                    floor.blend_world(ox + 1, oy + 1, pebble_lo, 0.70);
+                    floor.blend_world(ox + 4, oy - 1, pebble_hi, 0.50);
+                    floor.blend_world(ox - 3, oy + 2, pebble_lo, 0.65);
+                }
+                3 => {
+                    // Sunken dark silt hollow.
+                    for dy in -2i32..=2 {
+                        for dx in -5i32..=5 {
+                            if dx * dx * 4 + dy * dy * 25 <= 100 {
+                                floor.darken_world(ox + dx, oy + dy, 0.80);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Floor-layer art for steam grates, ink pads and the drip shaft.
 ///
 /// The surfaces must read before their effects engage.
@@ -893,6 +1043,10 @@ fn kerb(floor: &mut Floor<'_>, level: &Level, width: i32, height: i32) {
             let cyan = mix(face, pal.accent, 0.52);
             (38, 19, cyan, mix(cyan, bevel, 0.40))
         }
+        Theme::Outfall => {
+            let tide = mix(face, pal.accent, 0.36);
+            (24, 8, seam, tide)
+        }
         Theme::Trailer => unreachable!("the flatbed draws its own border"),
     };
     for edge in [2, height - 4] {
@@ -992,6 +1146,389 @@ pub fn draw_drip_shaft(pb: &mut PixelBuffer, shaft: &super::hazards::DripShaft, 
             pb.line(x - spread + 1, y + 2, x + spread - 1, y + 2, color);
         }
         DripPhase::Idle | DripPhase::Resting => {}
+    }
+}
+
+/// **Floor / Ground Hazard Layer (Outfall)**: draw lethal abyssal tidal-drop
+/// pits (`level.objects.tidal_pits`) and lure-trap base stalks + bulbs
+/// (`level.objects.lure_traps`).
+///
+/// ## Explicit Pit & Puddle Ordering
+/// Call **after** `World::draw_puddles` (and before wall bodies, props and
+/// entities) so almost-black tidal drops cut cleanly through any adjacent
+/// shallow slate-blue puddles with their scalloped high-contrast surf rim
+/// intact, and lure-trap stalks sit visibly on the seabed. Camera-clipped and
+/// purely render-only (never advances state or draws RNG).
+pub fn draw_outfall_hazards(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) {
+    use super::hazards::LurePhase;
+
+    if level.theme != Theme::Outfall || pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let (cam_x, cam_y) = (cam.x.round() as i32, cam.y.round() as i32);
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+
+    // 1. Tidal drop pockets: almost-black abyssal water with a distinct
+    //    scalloped undercut lip and high-contrast surf rim.
+    const ABYSS: Rgb = (2, 5, 10);
+    const DEEP: Rgb = (5, 11, 19);
+    const SHELF: Rgb = (11, 24, 36);
+    const RIM_HI: Rgb = (178, 228, 238);
+    const RIM_MID: Rgb = (112, 174, 192);
+    const RIM_LO: Rgb = (48, 88, 108);
+    const SAND_LIP: Rgb = (66, 88, 96);
+    const EDDY: Rgb = (8, 17, 27);
+    let eddy_step = (elapsed.max(0.0) * 3.0).floor() as i32;
+
+    for pit in &level.objects.tidal_pits {
+        let rect = pit.rect.to_world();
+        let x0 = rect.x.round() as i32;
+        let y0 = rect.y.round() as i32;
+        let w = rect.w.round() as i32;
+        let h = rect.h.round() as i32;
+        if w <= 0 || h <= 0 {
+            continue;
+        }
+        let sx0 = x0 - cam_x;
+        let sy0 = y0 - cam_y;
+        if sx0 + w + 2 <= 0 || sx0 - 2 >= bw || sy0 + h + 2 <= 0 || sy0 - 2 >= bh {
+            continue;
+        }
+
+        let ly_start = (-2).max(-sy0);
+        let ly_end = (h + 2).min(bh - sy0);
+        let lx_start = (-2).max(-sx0);
+        let lx_end = (w + 2).min(bw - sx0);
+
+        for ly in ly_start..ly_end {
+            let py = sy0 + ly;
+            let wy = y0 + ly;
+            let in_t = ly;
+            let in_b = h - 1 - ly;
+            let min_v = in_t.min(in_b);
+            for lx in lx_start..lx_end {
+                let px = sx0 + lx;
+                let wx = x0 + lx;
+                let in_l = lx;
+                let in_r = w - 1 - lx;
+                let min_h = in_l.min(in_r);
+                let edge_d = min_h.min(min_v);
+
+                let axis_coord = if min_v <= min_h { wx } else { wy };
+                let sc_wave = sin64(axis_coord * 6 + (x0 + y0) * 3) + sin64(axis_coord * 11) / 2;
+                let scallop = if sc_wave > 55 {
+                    2
+                } else if sc_wave > -25 {
+                    1
+                } else {
+                    0
+                };
+                let corner = ((3 - in_l).max(0) + (3 - in_r).max(0))
+                    * ((3 - in_t).max(0) + (3 - in_b).max(0));
+                let c_in = if corner >= 5 {
+                    2
+                } else if corner >= 2 {
+                    1
+                } else {
+                    0
+                };
+                let d_eff = edge_d - scallop - c_in;
+
+                if d_eff < -2 {
+                    continue;
+                } else if d_eff == -2 {
+                    let cur = pb.pixel_at(px as usize, py as usize);
+                    pb.plot(px, py, mix(cur, SAND_LIP, 0.38));
+                } else if d_eff == -1 {
+                    let cur = pb.pixel_at(px as usize, py as usize);
+                    pb.plot(px, py, mix(cur, SAND_LIP, 0.65));
+                } else if d_eff == 0 {
+                    let top_left = (in_t <= in_b && in_t <= in_r) || (in_l <= in_r && in_l <= in_b);
+                    let col = if top_left {
+                        if (wx + wy).rem_euclid(4) != 0 {
+                            RIM_HI
+                        } else {
+                            RIM_MID
+                        }
+                    } else if scallop == 2 && (wx + wy).rem_euclid(3) == 0 {
+                        RIM_HI
+                    } else if ((wx + wy) & 1) == 0 {
+                        RIM_MID
+                    } else {
+                        RIM_LO
+                    };
+                    pb.plot(px, py, col);
+                } else if d_eff == 1 {
+                    let col = if in_t <= 3 || in_l <= 3 { RIM_LO } else { SHELF };
+                    pb.plot(px, py, col);
+                } else if d_eff == 2 {
+                    pb.plot(px, py, DEEP);
+                } else {
+                    let eh = hash((wx + eddy_step).div_euclid(6), wy.div_euclid(3));
+                    let col = if (eh & 31) == 0 && (wx + eddy_step).rem_euclid(6) < 3 {
+                        EDDY
+                    } else {
+                        ABYSS
+                    };
+                    pb.plot(px, py, col);
+                }
+            }
+        }
+    }
+
+    // 2. Lure trap seabed mounts & 6 px cyan bulbs (dark husk when spent).
+    let bulb_step = (elapsed.max(0.0) * 3.0).floor();
+    for trap in &level.objects.lure_traps {
+        let cx = trap.pos.x.round() as i32 - cam_x;
+        let cy = trap.pos.y.round() as i32 - cam_y;
+        if cx < -12 || cy < -12 || cx >= bw + 12 || cy >= bh + 12 {
+            continue;
+        }
+        // Grounded seabed silt mound + bent dark stalk.
+        for dy in -2i32..=3 {
+            for dx in -4i32..=4 {
+                if dx * dx + dy * dy * 2 <= 14 {
+                    shade_floor(pb, cx + dx, cy + 2 + dy, 0.42);
+                }
+            }
+        }
+        for &(dx, dy) in &[(-2, 3), (-1, 2), (0, 2), (1, 2), (2, 3)] {
+            pb.plot(cx + dx, cy + dy, (26, 38, 46));
+        }
+        for &(dx, dy) in &[(-2, 2), (-3, 0), (-2, -2), (-1, -3), (0, -2)] {
+            pb.plot(cx + dx, cy + dy, (18, 28, 34));
+        }
+
+        match trap.phase {
+            LurePhase::Spent => {
+                // Dark deflated husk with zero cyan emission.
+                for dy in -2i32..=2 {
+                    for dx in -2i32..=2 {
+                        if dx * dx + dy * dy <= 4 {
+                            let c = if dx + dy < 0 {
+                                (44, 54, 62)
+                            } else {
+                                (20, 28, 34)
+                            };
+                            pb.plot(cx + dx, cy + dy, c);
+                        }
+                    }
+                }
+            }
+            LurePhase::Ready | LurePhase::Warning => {
+                let warn = matches!(trap.phase, LurePhase::Warning);
+                let pulse = if warn {
+                    1.0
+                } else {
+                    0.88 + 0.12 * (bulb_step * 1.1 + trap.pos.x * 0.1).sin()
+                };
+                let outer = scale((36, 218, 206), pulse);
+                let body = scale((82, 250, 236), pulse);
+                let core = if warn { (242, 255, 252) } else { (216, 255, 248) };
+                // Subtle 1 px aqua corona around the 6 px bulb.
+                for dy in -4i32..=4 {
+                    for dx in -4i32..=4 {
+                        let d2 = dx * dx + dy * dy;
+                        if d2 > 9 && d2 <= 16 {
+                            let (px, py) = (cx + dx, cy + dy);
+                            if px >= 0 && py >= 0 && px < bw && py < bh {
+                                let cur = pb.pixel_at(px as usize, py as usize);
+                                pb.plot(px, py, mix(cur, (28, 138, 136), 0.35 * pulse));
+                            }
+                        }
+                    }
+                }
+                for dy in -3i32..=3 {
+                    for dx in -3i32..=3 {
+                        let d2 = dx * dx + dy * dy;
+                        if d2 <= 9 {
+                            let col = if d2 <= 2 {
+                                core
+                            } else if d2 <= 5 {
+                                body
+                            } else {
+                                outer
+                            };
+                            pb.plot(cx + dx, cy + dy, col);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **Hostile Layer (Outfall)**: draw bright self-lit warning overlays above
+/// lighting and foreground — 16 px lure-trap warning rings (`LurePhase::Warning`)
+/// and the surge's outlined chevron + parallel marine-snow streaks near the rat
+/// (paused when `surge_enabled` is false during The Lantern fight).
+///
+/// Camera-clipped and purely render-only (never advances state or draws RNG).
+pub fn draw_outfall_tells(
+    pb: &mut PixelBuffer,
+    level: &Level,
+    player_pos: Vec2,
+    cam: Vec2,
+    elapsed: f32,
+    surge_enabled: bool,
+) {
+    use super::hazards::{outfall_surge, LurePhase, SurgePhase};
+
+    if level.theme != Theme::Outfall || pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let (cam_x, cam_y) = (cam.x.round() as i32, cam.y.round() as i32);
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    const OUTLINE: Rgb = (8, 18, 28);
+
+    // 1. Armed lure-trap 16 px warning rings (0.7 s tell before Conger release).
+    for trap in &level.objects.lure_traps {
+        if !matches!(trap.phase, LurePhase::Warning) {
+            continue;
+        }
+        let cx = trap.pos.x.round() as i32 - cam_x;
+        let cy = trap.pos.y.round() as i32 - cam_y;
+        if cx < -24 || cy < -24 || cx >= bw + 24 || cy >= bh + 24 {
+            continue;
+        }
+        let pulse = 0.55 + 0.45 * (elapsed * 14.0).sin();
+        let ring_col = mix((96, 244, 236), (242, 255, 255), pulse);
+        const STEPS: i32 = 72;
+        const R: f32 = 16.0;
+        // Pass 1: continuous dark outline backing so the ring survives bright spills.
+        for i in 0..STEPS {
+            let a = i as f32 * std::f32::consts::TAU / STEPS as f32;
+            let x = cx + (a.cos() * R).round() as i32;
+            let y = cy + (a.sin() * R).round() as i32;
+            for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                pb.plot(x + ox, y + oy, OUTLINE);
+            }
+        }
+        // Pass 2: crisp dashed cyan-white 16 px warning ring.
+        for i in 0..STEPS {
+            if (i % 6) < 4 {
+                let a = i as f32 * std::f32::consts::TAU / STEPS as f32;
+                let x = cx + (a.cos() * R).round() as i32;
+                let y = cy + (a.sin() * R).round() as i32;
+                pb.plot(x, y, ring_col);
+            }
+        }
+        // Pass 3: contracting inner pulse ring + blazing self-lit bulb core.
+        let inner_r = 13.5 - (elapsed * 1.6).rem_euclid(1.0) * 9.5;
+        for i in (0..36).step_by(2) {
+            let a = i as f32 * std::f32::consts::TAU / 36.0;
+            let x = cx + (a.cos() * inner_r).round() as i32;
+            let y = cy + (a.sin() * inner_r).round() as i32;
+            pb.plot(x, y, (186, 255, 250));
+        }
+        pb.filled_circle(cx, cy, 2, (236, 255, 252));
+    }
+
+    // 2. Tidal surge direction tell near the rat (disabled once The Lantern arrives).
+    if !surge_enabled || !player_pos.x.is_finite() || !player_pos.y.is_finite() {
+        return;
+    }
+    let surge = outfall_surge(level.seed, elapsed);
+    let len_sq = surge.dir.len_sq();
+    if !len_sq.is_finite() || len_sq < 1e-4 {
+        return;
+    }
+    let f = surge.dir * (1.0 / len_sq.sqrt());
+    let p = f.perp();
+    let rx = player_pos.x - cam_x as f32;
+    let ry = player_pos.y - cam_y as f32;
+    if rx < -48.0 || ry < -48.0 || rx > bw as f32 + 48.0 || ry > bh as f32 + 48.0 {
+        return;
+    }
+
+    match surge.phase {
+        SurgePhase::Warning => {
+            let pulse = 0.60 + 0.40 * (elapsed * 12.0).sin();
+            let chev_c = mix((118, 234, 248), (242, 254, 255), pulse);
+            // Outlined sparse double chevron ~18 px ahead of the rat along surge dir.
+            for off_u in [16.0_f32, 21.0] {
+                let ax = rx + f.x * off_u;
+                let ay = ry + f.y * off_u;
+                for s in -4i32..=4 {
+                    let u = -(s.abs() as f32) * 0.85;
+                    let v = s as f32 * 1.05;
+                    let x = (ax + f.x * u + p.x * v).round() as i32;
+                    let y = (ay + f.y * u + p.y * v).round() as i32;
+                    for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                        pb.plot(x + ox, y + oy, OUTLINE);
+                    }
+                }
+                for s in -4i32..=4 {
+                    let u = -(s.abs() as f32) * 0.85;
+                    let v = s as f32 * 1.05;
+                    let x = (ax + f.x * u + p.x * v).round() as i32;
+                    let y = (ay + f.y * u + p.y * v).round() as i32;
+                    pb.plot(x, y, chev_c);
+                }
+            }
+            // Six smaller parallel marine-snow streaks drifting along the surge heading.
+            let drift = (elapsed * 26.0).rem_euclid(18.0) - 9.0;
+            const STREAKS: [(f32, f32, i32); 6] = [
+                (-14.0, -18.0, 6),
+                (8.0, -22.0, 5),
+                (-22.0, 6.0, 6),
+                (18.0, 14.0, 5),
+                (-6.0, 20.0, 6),
+                (24.0, -8.0, 5),
+            ];
+            for &(su, sv, slen) in &STREAKS {
+                let bx = rx + f.x * (su + drift) + p.x * sv;
+                let by = ry + f.y * (su + drift) + p.y * sv;
+                for k in 0..slen {
+                    let sx = (bx + f.x * k as f32).round() as i32;
+                    let sy = (by + f.y * k as f32).round() as i32;
+                    pb.plot(sx, sy + 1, OUTLINE);
+                    let col = if k == slen - 1 {
+                        (232, 252, 255)
+                    } else {
+                        (132, 216, 234)
+                    };
+                    pb.plot(sx, sy, col);
+                }
+            }
+        }
+        SurgePhase::Active => {
+            // Steady active-direction mark near the rat (no flicker during shove).
+            const ACTIVE_COL: Rgb = (182, 248, 255);
+            let ax = rx + f.x * 19.0;
+            let ay = ry + f.y * 19.0;
+            for s in -5i32..=5 {
+                let u = -(s.abs() as f32) * 0.9;
+                let v = s as f32;
+                let x = (ax + f.x * u + p.x * v).round() as i32;
+                let y = (ay + f.y * u + p.y * v).round() as i32;
+                for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    pb.plot(x + ox, y + oy, OUTLINE);
+                }
+            }
+            for s in -6i32..0 {
+                let x = (ax + f.x * s as f32).round() as i32;
+                let y = (ay + f.y * s as f32).round() as i32;
+                for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    pb.plot(x + ox, y + oy, OUTLINE);
+                }
+            }
+            for s in -5i32..=5 {
+                let u = -(s.abs() as f32) * 0.9;
+                let v = s as f32;
+                let x = (ax + f.x * u + p.x * v).round() as i32;
+                let y = (ay + f.y * u + p.y * v).round() as i32;
+                pb.plot(x, y, ACTIVE_COL);
+            }
+            for s in -6i32..0 {
+                let x = (ax + f.x * s as f32).round() as i32;
+                let y = (ay + f.y * s as f32).round() as i32;
+                pb.plot(x, y, ACTIVE_COL);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1756,6 +2293,79 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn outfall_hazards_and_tells_clip_and_distinguish_lure_phases_and_surge() {
+        use crate::game::hazards::LurePhase;
+
+        let mut level = Level::generate(Theme::Outfall, 7);
+        assert!(
+            !level.objects.lure_traps.is_empty(),
+            "generated Outfall map should carry lure traps"
+        );
+        let focus = level.objects.lure_traps[0].pos;
+        let cam = focus - Vec2::new(60.0, 40.0);
+
+        // Ready vs Warning vs Spent lure bulbs render distinctly, and only
+        // Warning paints on the hostile tell layer.
+        let mut pb_ready = PixelBuffer::new(120, 80);
+        let mut pb_warn = PixelBuffer::new(120, 80);
+        let mut pb_spent = PixelBuffer::new(120, 80);
+        draw_floor(&mut pb_ready, &level, cam, 1.0);
+        draw_floor(&mut pb_warn, &level, cam, 1.0);
+        draw_floor(&mut pb_spent, &level, cam, 1.0);
+
+        level.objects.lure_traps[0].phase = LurePhase::Ready;
+        draw_outfall_hazards(&mut pb_ready, &level, cam, 1.0);
+        let mut tell_ready = pb_ready.pixels().to_vec();
+        let mut pb_tr = PixelBuffer::new(120, 80);
+        pb_tr.pixels_mut().copy_from_slice(&tell_ready);
+        draw_outfall_tells(&mut pb_tr, &level, focus, cam, 1.0, false);
+        tell_ready = pb_tr.pixels().to_vec();
+        assert_eq!(
+            tell_ready,
+            pb_ready.pixels(),
+            "Ready lure with surge disabled must not paint on the hostile tell layer"
+        );
+
+        level.objects.lure_traps[0].phase = LurePhase::Warning;
+        draw_outfall_hazards(&mut pb_warn, &level, cam, 1.0);
+        let before_tell = pb_warn.pixels().to_vec();
+        draw_outfall_tells(&mut pb_warn, &level, focus, cam, 1.0, false);
+        assert_ne!(
+            before_tell,
+            pb_warn.pixels(),
+            "Warning lure must paint its 16 px hostile warning ring"
+        );
+
+        level.objects.lure_traps[0].phase = LurePhase::Spent;
+        draw_outfall_hazards(&mut pb_spent, &level, cam, 1.0);
+        assert_ne!(
+            pb_ready.pixels(),
+            pb_spent.pixels(),
+            "Spent lure husk must look distinct from a lit Ready bulb"
+        );
+
+        // Surge tell draws during the 8.0..9.0 warning window and 9.0..9.6 active
+        // window when enabled, and stays silent when disabled.
+        let base_col: Rgb = (18, 28, 38);
+        for t in [8.5_f32, 9.25] {
+            let mut pb_on = PixelBuffer::new(120, 80);
+            let mut pb_off = PixelBuffer::new(120, 80);
+            pb_on.clear(base_col);
+            pb_off.clear(base_col);
+            draw_outfall_tells(&mut pb_on, &level, level.start, level.start - Vec2::new(60.0, 40.0), t, true);
+            draw_outfall_tells(&mut pb_off, &level, level.start, level.start - Vec2::new(60.0, 40.0), t, false);
+            assert!(
+                pb_on.pixels().iter().any(|&p| p != base_col),
+                "expected surge tell pixels at t={t}"
+            );
+            assert!(
+                pb_off.pixels().iter().all(|&p| p == base_col),
+                "surge tell must suppress when surge_enabled=false at t={t}"
+            );
         }
     }
 }

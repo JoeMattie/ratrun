@@ -11,13 +11,15 @@
 //! pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw)
 //! ```
 //!
-//! * Eighteen overhead band kinds, three per floor theme:
+//! * Twenty-one overhead band kinds, three per floor theme:
 //!   - **Sewer**: `MainPipe`, `CatwalkGrating`, `ChainRun`
 //!   - **Kitchen**: `ExtractorDuct`, `PotRail`, `CableRun`
 //!   - **Lab**: `CableTray`, `VentDuct`, `Gantry`
 //!   - **Laundry**: `Clothesline`, `SteamPipe`, `RackBeam`
 //!   - **Printworks**: `PaperWeb`, `RollerBeam`, `ProofLine`
 //!   - **Flatbed (`Theme::Trailer`)**: `BranchCanopy`, `PowerLines`, `CloudBand`
+//!   - **The Outfall (`Theme::Outfall`)**: `Kelp`, `HullRib`, `BubbleChain`
+//!     (depth `1.8..=2.4`, capped at 14% overlay coverage)
 //! * [`thickness`] returns the band's full cross-axis thickness in art pixels
 //!   (`base * scale`, landing in `10..=30` art px for `scale` in `1.0..=1.6`).
 //!   Every kind stays strictly inside `[-thickness/2, +thickness/2]` and matches
@@ -88,6 +90,10 @@ const fn base_thickness(kind: ForeKind) -> f32 {
         ForeKind::BranchCanopy => 18.0,
         ForeKind::PowerLines => 13.5,
         ForeKind::CloudBand => 18.5,
+        // The Outfall (Under-ocean; lighter bands within the 14% overlay cap)
+        ForeKind::Kelp => 12.5,
+        ForeKind::HullRib => 13.5,
+        ForeKind::BubbleChain => 12.0,
     }
 }
 
@@ -265,6 +271,23 @@ impl ForePal {
                     bark_deep: (46, 34, 24),
                     bark_mid: (96, 76, 56),
                     bark_rim: (138, 118, 92),
+                }
+            }
+            // The Outfall: deep kelp teal-greens, pale sea-foam bubbles, and
+            // weathered grey-brown sunken ship timber.
+            Theme::Outfall => {
+                let kelp_deep: Rgb = (16, 46, 40);
+                let kelp: Rgb = (32, 86, 68);
+                Self {
+                    deep: kelp_deep,
+                    mid: kelp,
+                    soft: (52, 118, 92),
+                    accent: (84, 156, 122),
+                    pale: (158, 224, 232),
+                    rim: palette::mix(palette::scale(kelp, RIM_LIGHTEN), tint, RIM_TINT_MIX),
+                    bark_deep: (32, 24, 18),
+                    bark_mid: (66, 52, 40),
+                    bark_rim: (106, 88, 70),
                 }
             }
         }
@@ -758,6 +781,10 @@ fn paint_kind(kind: ForeKind, tile: &mut BandTile, c: &BandCtx) {
         ForeKind::BranchCanopy => paint_branch_canopy(tile, c),
         ForeKind::PowerLines => paint_power_lines(tile, c),
         ForeKind::CloudBand => paint_cloud_band(tile, c),
+        // The Outfall (Under-ocean)
+        ForeKind::Kelp => paint_kelp(tile, c),
+        ForeKind::HullRib => paint_hull_rib(tile, c),
+        ForeKind::BubbleChain => paint_bubble_chain(tile, c),
     }
 }
 
@@ -2671,13 +2698,346 @@ fn paint_cloud_band(tile: &mut BandTile, c: &BandCtx) {
     }
 }
 
+// ---- Floor 7: The Outfall (Under-ocean) ------------------------------------
+
+/// 19. Sparse drifting kelp curtain: thin sinuous holdfast vine carrying
+///     alternating ruffled fronds and small oval gas bladders with wide open
+///     water windows between blades.
+fn paint_kelp(tile: &mut BandTile, c: &BandCtx) {
+    let seed_f = (c.seed & 1023) as f32;
+    let vine_v = |wu: f32| -> f32 {
+        (1.55 * c.s * (wu * 0.095 + seed_f * 0.6).sin())
+            .clamp(-c.ht * 0.45, c.ht * 0.45)
+    };
+    let vine_r = (0.85 * c.s).max(0.75);
+
+    // Continuous thin holdfast vine so the band never breaks along `u`.
+    for iu in 0..tile.uw {
+        let wu = tile.wu_at(iu, c.along);
+        let vv = vine_v(wu);
+        let Some((v_lo, v_hi)) = tile.v_range(vv - vine_r - 0.5, vv + vine_r + 0.5) else {
+            continue;
+        };
+        for iv in v_lo..=v_hi {
+            let v = tile.v_at(iv);
+            let d_in = vine_r - (v - vv).abs();
+            if d_in <= 0.0 {
+                continue;
+            }
+            tile.sh_px(iu, iv, soft_u8(d_in, 1.3, 185));
+            let side = ((v - vv) / vine_r.max(0.5)) * c.tc;
+            let col = if side > 0.25 {
+                c.pal.soft
+            } else if side < -0.25 {
+                c.pal.deep
+            } else {
+                c.pal.mid
+            };
+            tile.bd_px(iu, iv, col, soft_u8(d_in, 0.9, 240));
+        }
+    }
+
+    // Sparse alternating ruffled kelp blades anchored to `along`.
+    let pitch = 17.5 * c.s;
+    let wu_min = tile.u0 as f32 + c.along;
+    let wu_max = wu_min + tile.uw as f32;
+    let s0 = ((wu_min - 18.0 * c.s) / pitch).floor() as i32;
+    let s1 = ((wu_max + 18.0 * c.s) / pitch).ceil() as i32;
+    for slot in s0..=s1 {
+        let h = hash_slot(slot, c.seed ^ 0x4E1B);
+        let jitter = (((h & 7) as f32) - 3.5) * 0.42 * c.s;
+        let cu = (slot as f32 + 0.5) * pitch + jitter;
+        let v0 = vine_v(cu);
+        let sign = if (slot & 1) == 0 { 1.0 } else { -1.0 };
+        let v_tip = sign * c.ht;
+        let span = (v_tip - v0).abs().max(2.0);
+        let sw_tip = c.sway * 2.4 * c.s * if (h & 8) == 0 { 1.0 } else { -0.85 };
+
+        let pad_u = 3.2 * c.s + sw_tip.abs() + 1.5;
+        let Some((u_lo, u_hi)) = tile.u_range(cu - pad_u, cu + pad_u, c.along) else {
+            continue;
+        };
+        let Some((v_lo, v_hi)) = tile.v_range(v0.min(v_tip), v0.max(v_tip)) else {
+            continue;
+        };
+        for iv in v_lo..=v_hi {
+            let v = tile.v_at(iv);
+            let dv_start = if sign > 0.0 { v - v0 } else { v0 - v };
+            let dv_end = if sign > 0.0 { v_tip - v } else { v - v_tip };
+            if dv_start < -0.25 || dv_end <= 0.0 {
+                continue;
+            }
+            let t = (dv_start / span).clamp(0.0, 1.0);
+            let u_here =
+                cu + sw_tip * (t * t) + sign * 0.90 * c.s * (t * 4.2 + slot as f32).sin();
+            let ruffle = 0.20 * c.s * (t * 8.5 + slot as f32 * 1.7).sin();
+            let hw = ((1.85 * c.s) * (0.52 + 0.52 * (t * std::f32::consts::PI).sin()) + ruffle)
+                .max(0.85 * c.s);
+            for iu in u_lo..=u_hi {
+                let du = tile.wu_at(iu, c.along) - u_here;
+                let d_in = (hw - du.abs()).min(dv_end);
+                if d_in <= 0.0 {
+                    continue;
+                }
+                tile.sh_px(iu, iv, soft_u8(d_in, 1.5, 195));
+                let aw = soft_u8(d_in, 1.0, 236);
+                let col = if d_in < 0.95 && du * c.tc > 0.0 {
+                    c.pal.rim
+                } else if du.abs() < 0.42 * c.s {
+                    c.pal.soft
+                } else if t > 0.68 {
+                    c.pal.accent
+                } else if du * c.tc < -0.35 * c.s {
+                    c.pal.deep
+                } else {
+                    c.pal.mid
+                };
+                tile.bd_px(iu, iv, col, aw);
+            }
+        }
+
+        // Small translucent oval gas bladder (pneumatocyst) tucked beside the frond base.
+        let bu = cu + sign * 1.35 * c.s + sw_tip * 0.15;
+        let bv = (v0 + sign * (c.ht * 0.24)).clamp(-c.ht + 1.0 * c.s, c.ht - 1.0 * c.s);
+        tile.fill_ellipse_sh([bu, bv, 1.05 * c.s, 0.85 * c.s], c.along, 170, 0.9);
+        tile.fill_ellipse_bd(
+            [bu, bv, 1.05 * c.s, 0.85 * c.s],
+            c.along,
+            c.pal.mid,
+            c.pal.accent,
+            Some(c.pal.rim),
+            c.tc,
+            235,
+            0.7,
+            0.55,
+        );
+    }
+}
+
+/// 20. Skeletal sunken hull-rib band: narrow weathered oak sheer strake crossed
+///     by widely spaced curved ship ribs with iron drift-bolts and barnacle specks.
+fn paint_hull_rib(tile: &mut BandTile, c: &BandCtx) {
+    let seed_f = (c.seed & 1023) as f32;
+    let strake_v = |wu: f32| -> f32 {
+        -c.ht * 0.44 + 0.65 * c.s * (wu * 0.055 + seed_f * 0.5).sin()
+    };
+    let strake_hw = (1.15 * c.s).max(0.90);
+
+    // Continuous narrow weathered oak sheer strake.
+    for iu in 0..tile.uw {
+        let wu = tile.wu_at(iu, c.along);
+        let sv = strake_v(wu);
+        let Some((v_lo, v_hi)) = tile.v_range(sv - strake_hw - 0.5, sv + strake_hw + 0.5) else {
+            continue;
+        };
+        for iv in v_lo..=v_hi {
+            let v = tile.v_at(iv);
+            let d_in = strake_hw - (v - sv).abs();
+            if d_in <= 0.0 {
+                continue;
+            }
+            tile.sh_px(iu, iv, soft_u8(d_in, 1.5, 215));
+            let side = ((v - sv) / strake_hw.max(0.5)) * c.tc;
+            let grain = (wu * 0.28 + v * 1.1).sin();
+            let col = if d_in < 0.85 && side > 0.15 {
+                c.pal.bark_rim
+            } else if side < -0.25 || grain < -0.65 {
+                c.pal.bark_deep
+            } else {
+                c.pal.bark_mid
+            };
+            tile.bd_px(iu, iv, col, soft_u8(d_in, 1.0, 250));
+        }
+    }
+
+    // Widely spaced curved oak cross-ribs spanning the full band thickness.
+    let pitch = 26.0 * c.s;
+    let wu_min = tile.u0 as f32 + c.along;
+    let wu_max = wu_min + tile.uw as f32;
+    let s0 = ((wu_min - 14.0 * c.s) / pitch).floor() as i32;
+    let s1 = ((wu_max + 14.0 * c.s) / pitch).ceil() as i32;
+    for slot in s0..=s1 {
+        let h = hash_slot(slot, c.seed ^ 0xA011);
+        let jitter = (((h & 7) as f32) - 3.5) * 0.45 * c.s;
+        let cu = (slot as f32 + 0.5) * pitch + jitter;
+        let lean = if (slot & 1) == 0 { 1.75 } else { -1.55 } * c.s;
+        let bow = 1.35 * c.s;
+        let sv_joint = strake_v(cu);
+
+        let pad_u = 4.0 * c.s + lean.abs() + bow.abs();
+        let Some((u_lo, u_hi)) = tile.u_range(cu - pad_u, cu + pad_u, c.along) else {
+            continue;
+        };
+        for iv in 0..tile.vh {
+            let v = tile.v_at(iv);
+            let av = v.abs();
+            if av >= c.ht {
+                continue;
+            }
+            let vn = v / c.ht.max(1.0);
+            let u_rib = cu + lean * vn + bow * (1.0 - vn * vn);
+            let hw = (2.10 * c.s) * (1.0 - 0.16 * vn.abs());
+            let dv_end = c.ht - av;
+            for iu in u_lo..=u_hi {
+                let du = tile.wu_at(iu, c.along) - u_rib;
+                let d_in = (hw - du.abs()).min(dv_end);
+                if d_in <= 0.0 {
+                    continue;
+                }
+                tile.sh_px(iu, iv, soft_u8(d_in, 1.7, 230));
+                let aw = soft_u8(d_in, 1.1, 254);
+                let u_side = (du / hw.max(0.5)) * c.tc;
+                let v_side = vn * c.tc;
+                let near_joint = (v - sv_joint).abs() < 1.15 * c.s && du.abs() < 1.15 * c.s;
+                let barnacle = (h & 16) != 0
+                    && (v - (sv_joint + 2.0 * c.s)).abs() < 0.75 * c.s
+                    && (du - 0.9 * c.s).abs() < 0.75 * c.s;
+                let col = if near_joint {
+                    if (v - sv_joint).abs() < 0.45 * c.s && du.abs() < 0.45 * c.s {
+                        c.pal.pale
+                    } else {
+                        c.pal.deep
+                    }
+                } else if barnacle {
+                    c.pal.pale
+                } else if (d_in < 1.0 && u_side > 0.25) || (dv_end < 1.1 && v_side > 0.0) {
+                    c.pal.bark_rim
+                } else if u_side < -0.35 || (v * 0.9 + du * 0.35).sin() < -0.72 {
+                    c.pal.bark_deep
+                } else {
+                    c.pal.bark_mid
+                };
+                tile.bd_px(iu, iv, col, aw);
+            }
+        }
+    }
+}
+
+/// Helper: rasterize one hollow translucent underwater bubble with a crisp rim
+/// and specular highlight on the `toward_centre` side.
+fn paint_bubble(tile: &mut BandTile, bu: f32, bv: f32, r: f32, c: &BandCtx) {
+    if r <= 0.2 {
+        return;
+    }
+    let Some((u_lo, u_hi)) = tile.u_range(bu - r - 0.5, bu + r + 0.5, c.along) else {
+        return;
+    };
+    let Some((v_lo, v_hi)) = tile.v_range(bv - r - 0.5, bv + r + 0.5) else {
+        return;
+    };
+    let glint_col: Rgb = (214, 246, 250);
+    let body_col = palette::mix(c.pal.soft, c.pal.pale, 0.42);
+    let spec_u = bu - r * 0.30;
+    let spec_v = bv + r * 0.28 * c.tc;
+    let spec_r = (r * 0.34).max(0.55);
+
+    for iv in v_lo..=v_hi {
+        let v = tile.v_at(iv);
+        let dy = v - bv;
+        if dy.abs() >= r {
+            continue;
+        }
+        for iu in u_lo..=u_hi {
+            let wu = tile.wu_at(iu, c.along);
+            let dx = wu - bu;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let d_in = r - dist;
+            if d_in <= 0.0 {
+                continue;
+            }
+            // Faint water-refraction shadow only near the rim.
+            tile.sh_px(iu, iv, soft_u8(d_in, 1.0, 95));
+
+            let ds = ((wu - spec_u) * (wu - spec_u) + (v - spec_v) * (v - spec_v)).sqrt();
+            let rn = dist / r.max(0.5);
+            if ds < spec_r {
+                tile.bd_px(iu, iv, glint_col, soft_u8(spec_r - ds, 0.45, 245));
+            } else if rn > 0.62 {
+                let rim_side = (dy / r.max(0.5)) * c.tc;
+                let col = if rim_side > 0.15 {
+                    c.pal.pale
+                } else {
+                    c.pal.rim
+                };
+                tile.bd_px(iu, iv, col, soft_u8(d_in, 0.75, 222));
+            } else {
+                tile.bd_px(iu, iv, body_col, 76);
+            }
+        }
+    }
+}
+
+/// 21. Rising underwater bubble-chain band: delicate undulating current filament
+///     carrying clusters of hollow translucent cyan-white bubbles that sway
+///     with the ocean surge.
+fn paint_bubble_chain(tile: &mut BandTile, c: &BandCtx) {
+    let seed_f = (c.seed & 1023) as f32;
+    let stream_lim = (c.ht - 1.2).max(0.5);
+    let stream_v = |wu: f32| -> f32 {
+        (1.85 * c.s * (wu * 0.085 + seed_f * 0.7).sin()
+            + c.sway * 1.35 * c.s * (wu * 0.14 + seed_f * 0.3).cos())
+        .clamp(-stream_lim, stream_lim)
+    };
+
+    // Whisper-thin continuous current filament (1 art px) so the band never gaps.
+    for iu in 0..tile.uw {
+        let wu = tile.wu_at(iu, c.along);
+        let sv = stream_v(wu);
+        let iv_i = (sv + tile.v_c).round() as i32 - tile.dv0;
+        if iv_i >= 0 && (iv_i as usize) < tile.vh {
+            let iv = iv_i as usize;
+            tile.sh_px(iu, iv, 55);
+            let col = if sv * c.tc > 0.0 {
+                c.pal.pale
+            } else {
+                c.pal.rim
+            };
+            tile.bd_px(iu, iv, col, 132);
+        }
+    }
+
+    // Periodic clusters of 3 varied-size round bubbles anchored to `along`.
+    let pitch = 12.5 * c.s;
+    let wu_min = tile.u0 as f32 + c.along;
+    let wu_max = wu_min + tile.uw as f32;
+    let s0 = ((wu_min - 14.0 * c.s) / pitch).floor() as i32;
+    let s1 = ((wu_max + 14.0 * c.s) / pitch).ceil() as i32;
+    for slot in s0..=s1 {
+        let h = hash_slot(slot, c.seed ^ 0xB0BB);
+        let jitter = (((h & 7) as f32) - 3.5) * 0.35 * c.s;
+        let cu = (slot as f32 + 0.5) * pitch + jitter;
+        let sign = if (slot & 1) == 0 { 1.0 } else { -1.0 };
+        let sw_u = c.sway * 1.85 * c.s * sign;
+
+        // Hero bubble kisses the outer band boundary on alternating sides.
+        let r1 = (2.15 + ((h >> 3) & 3) as f32 * 0.20) * c.s;
+        let bu1 = cu + sw_u;
+        let bv1 = sign * (c.ht - r1).max(0.0);
+        paint_bubble(tile, bu1, bv1, r1, c);
+
+        // Medium trailing bubble near the current line.
+        let r2 = (1.45 + ((h >> 5) & 3) as f32 * 0.14) * c.s;
+        let bu2 = cu - 3.4 * c.s + sw_u * 0.65;
+        let lim2 = (c.ht - r2).max(0.0);
+        let bv2 = (stream_v(bu2) + sign * 1.35 * c.s).clamp(-lim2, lim2);
+        paint_bubble(tile, bu2, bv2, r2, c);
+
+        // Tiny companion micro-bubble on the opposite side.
+        let r3 = (0.95 + ((h >> 7) & 1) as f32 * 0.18) * c.s;
+        let bu3 = cu + 3.2 * c.s - sw_u * 0.45;
+        let lim3 = (c.ht - r3).max(0.0);
+        let bv3 = (stream_v(bu3) - sign * 2.0 * c.s).clamp(-lim3, lim3);
+        paint_bubble(tile, bu3, bv3, r3, c);
+    }
+}
+
 // ---- Unit tests ------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL_KINDS: [(ForeKind, Theme); 18] = [
+    const ALL_KINDS: [(ForeKind, Theme); 21] = [
         (ForeKind::MainPipe, Theme::Sewer),
         (ForeKind::CatwalkGrating, Theme::Sewer),
         (ForeKind::ChainRun, Theme::Sewer),
@@ -2696,6 +3056,9 @@ mod tests {
         (ForeKind::BranchCanopy, Theme::Trailer),
         (ForeKind::PowerLines, Theme::Trailer),
         (ForeKind::CloudBand, Theme::Trailer),
+        (ForeKind::Kelp, Theme::Outfall),
+        (ForeKind::HullRib, Theme::Outfall),
+        (ForeKind::BubbleChain, Theme::Outfall),
     ];
 
     fn make_item(kind: ForeKind, horizontal: bool, scale: f32, seed: u32) -> ForeItem {
@@ -2927,6 +3290,9 @@ mod tests {
             (ForeKind::ProofLine, Theme::Printworks),
             (ForeKind::BranchCanopy, Theme::Trailer),
             (ForeKind::PowerLines, Theme::Trailer),
+            (ForeKind::Kelp, Theme::Outfall),
+            (ForeKind::HullRib, Theme::Outfall),
+            (ForeKind::BubbleChain, Theme::Outfall),
         ];
         for &(kind, theme) in &open_kinds {
             let item = make_item(kind, true, 1.2, 23);
@@ -2964,6 +3330,7 @@ mod tests {
             (ForeKind::ExtractorDuct, Theme::Kitchen),
             (ForeKind::VentDuct, Theme::Lab),
             (ForeKind::SteamPipe, Theme::Laundry),
+            (ForeKind::HullRib, Theme::Outfall),
         ] {
             let item = make_item(kind, true, 1.2, 11);
             let mut pb_pos = PixelBuffer::new(80, 80);
@@ -2998,6 +3365,8 @@ mod tests {
             (ForeKind::Clothesline, Theme::Laundry),
             (ForeKind::ProofLine, Theme::Printworks),
             (ForeKind::BranchCanopy, Theme::Trailer),
+            (ForeKind::Kelp, Theme::Outfall),
+            (ForeKind::BubbleChain, Theme::Outfall),
         ] {
             let item = make_item(kind, true, 1.2, 31);
             let mut pb_l = PixelBuffer::new(100, 80);

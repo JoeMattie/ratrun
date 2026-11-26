@@ -23,6 +23,8 @@ const FADE_RAMP_PX: f32 = 40.0;
 const SWAY_HZ: f32 = 3.0;
 const COVERAGE_PCT: u32 = 45;
 const COVERAGE_SKIP_PCT: u32 = 85;
+const OUTFALL_COVERAGE_PCT: u32 = 14;
+const OUTFALL_COVERAGE_FILL: f32 = 0.36;
 const COVERAGE_ALPHA_MIN: f32 = 0.5;
 const COVERAGE_FILL: f32 = 0.7;
 const COVERAGE_HALF: f32 = 0.5;
@@ -49,6 +51,8 @@ const GEN_SALT: u32 = 0x0F0E_6000;
 const BOSS_BODY_RADIUS: f32 = 20.0;
 const DEPTH_MIN: f32 = 1.8;
 const DEPTH_MAX: f32 = 3.0;
+const OUTFALL_DEPTH_MIN: f32 = 1.8;
+const OUTFALL_DEPTH_MAX: f32 = 2.4;
 const SCALE_MIN: f32 = 1.0;
 const SCALE_MAX: f32 = 1.6;
 const CORRIDOR_MIN_TILES: i32 = 5;
@@ -83,10 +87,16 @@ pub enum ForeKind {
     BranchCanopy,
     PowerLines,
     CloudBand,
+    /// Outfall swaying kelp curtain band (depth 1.8–2.4, 3 Hz held sway, 12.5 art px base).
+    Kelp,
+    /// Outfall sunken shipwreck hull-rib span (depth 1.8–2.4, rigid, max 1/room, 13.5 art px base).
+    HullRib,
+    /// Outfall rising deep-sea bubble-chain band (depth 1.8–2.4, 3 Hz held sway, 12.0 art px base).
+    BubbleChain,
 }
 
 impl ForeKind {
-    pub const fn all() -> [Self; 18] {
+    pub const fn all() -> [Self; 21] {
         [
             Self::MainPipe,
             Self::CatwalkGrating,
@@ -106,6 +116,9 @@ impl ForeKind {
             Self::BranchCanopy,
             Self::PowerLines,
             Self::CloudBand,
+            Self::Kelp,
+            Self::HullRib,
+            Self::BubbleChain,
         ]
     }
 
@@ -118,6 +131,8 @@ impl ForeKind {
                 | Self::Clothesline
                 | Self::ProofLine
                 | Self::BranchCanopy
+                | Self::Kelp
+                | Self::BubbleChain
         )
     }
 }
@@ -167,8 +182,36 @@ const fn kinds_for(theme: Theme) -> [ForeKind; 3] {
         Theme::Laundry => 9,
         Theme::Printworks => 12,
         Theme::Trailer => 15,
+        Theme::Outfall => 18,
     };
     [all[first], all[first + 1], all[first + 2]]
+}
+
+#[inline]
+const fn coverage_pct(theme: Theme) -> u32 {
+    if matches!(theme, Theme::Outfall) {
+        OUTFALL_COVERAGE_PCT
+    } else {
+        COVERAGE_PCT
+    }
+}
+
+#[inline]
+const fn coverage_skip_pct(theme: Theme) -> u32 {
+    if matches!(theme, Theme::Outfall) {
+        OUTFALL_COVERAGE_PCT
+    } else {
+        COVERAGE_SKIP_PCT
+    }
+}
+
+#[inline]
+const fn coverage_fill(theme: Theme) -> f32 {
+    if matches!(theme, Theme::Outfall) {
+        OUTFALL_COVERAGE_FILL
+    } else {
+        COVERAGE_FILL
+    }
 }
 
 fn pixel_scale(item: &ForeItem) -> i32 {
@@ -566,11 +609,12 @@ impl ForeLayer {
             let Some(next) = next else { break };
             self.frame.push(next);
         }
+        let fill = coverage_fill(level.theme);
         let covered: f32 = self.frame.iter()
             .filter(|p| !matches!(p.item.kind, ForeKind::CloudBand | ForeKind::PowerLines))
-            .map(|p| p.body_area() * COVERAGE_FILL)
+            .map(|p| p.body_area() * fill)
             .sum();
-        let cap = view.size.x * view.size.y * COVERAGE_PCT as f32 / 100.0;
+        let cap = view.size.x * view.size.y * coverage_pct(level.theme) as f32 / 100.0;
         if covered > cap {
             let factor = (cap / covered).max(COVERAGE_ALPHA_MIN);
             for plan in &mut self.frame {
@@ -672,13 +716,18 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
     }
 
     let total = (pb.w * pb.h) as u32;
-    let cap_full = total * COVERAGE_PCT / 100;
-    let cap_skip = total * COVERAGE_SKIP_PCT / 100;
+    let cap_full = total * coverage_pct(scene.level.theme) / 100;
+    let cap_skip = total * coverage_skip_pct(scene.level.theme) / 100;
     budget_start(cap_skip);
     clear_disc_set(scene.rat - scene.cam, view.zoom);
     for plan in &layer.frame {
         let painted = writes_so_far();
-        let alpha = if plan.body_area() > (cap_skip - painted) as f32 {
+        let est_writes = if scene.level.theme == Theme::Outfall {
+            plan.body_area() * OUTFALL_COVERAGE_FILL
+        } else {
+            plan.body_area()
+        };
+        let alpha = if est_writes > cap_skip.saturating_sub(painted) as f32 {
             // Keep the whole run visible as haze when it might exceed the
             // hard budget. Stopping midway would leave a visible band end.
             plan.alpha.min(CLOUD_ALPHA_MAX)
@@ -891,6 +940,7 @@ fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
                 (rect.w * rect.h / ROOM_TILES2_PER_BAND).clamp(1, 2)
             };
             let centre = rect.center_world();
+            let mut room_has_rib = false;
             for _ in 0..slots {
                 for attempt in 0..PLACE_ATTEMPTS {
                     // Cross the short axis. If the room is crowded, try a
@@ -921,12 +971,30 @@ fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
                     {
                         continue;
                     }
-                    let kind = kinds[(rng.u32() % kinds.len() as u32) as usize];
+                    let mut kind = kinds[(rng.u32() % kinds.len() as u32) as usize];
+                    let depth = if level.theme == Theme::Outfall {
+                        rng.range(OUTFALL_DEPTH_MIN, OUTFALL_DEPTH_MAX)
+                    } else {
+                        rng.range(DEPTH_MIN, DEPTH_MAX)
+                    };
+                    let scale = rng.range(SCALE_MIN, SCALE_MAX);
+                    let seed = rng.u32();
+                    if level.theme == Theme::Outfall && !corridor && kind == ForeKind::HullRib {
+                        if room_has_rib {
+                            kind = if (seed & 1) == 0 {
+                                ForeKind::Kelp
+                            } else {
+                                ForeKind::BubbleChain
+                            };
+                        } else {
+                            room_has_rib = true;
+                        }
+                    }
                     let item = ForeItem {
                         kind, horizontal, cross,
-                        depth: rng.range(DEPTH_MIN, DEPTH_MAX),
-                        scale: rng.range(SCALE_MIN, SCALE_MAX),
-                        seed: rng.u32(),
+                        depth,
+                        scale,
+                        seed,
                     };
                     out.push(PlacedBand {
                         item: fit_scale(item),
@@ -1285,6 +1353,54 @@ mod tests {
                 assert!(layer.frame.iter().any(|p| p.item.kind == ForeKind::PowerLines));
                 assert!(layer.frame.len() <= MAX_BANDS_IN_VIEW);
             }
+        }
+    }
+
+    #[test]
+    fn outfall_bands_respect_depth_room_rib_cap_and_coverage_budget() {
+        let mut world = World::new(Theme::Outfall, 7);
+        let mut layer = ForeLayer::new();
+        layer.sync(&world.level);
+        let placed: Vec<_> = layer.capture_items().collect();
+        assert!(!placed.is_empty(), "Outfall should place foreground bands");
+        for &(item, _, _) in &placed {
+            assert!(
+                (OUTFALL_DEPTH_MIN..=OUTFALL_DEPTH_MAX).contains(&item.depth),
+                "Outfall band depth {} outside 1.8..=2.4",
+                item.depth
+            );
+            assert!(kinds_for(Theme::Outfall).contains(&item.kind));
+        }
+        // At most one HullRib per non-corridor room.
+        for room in &world.level.rooms {
+            if room.kind == RoomKind::Corridor || room.kind == RoomKind::Maze {
+                continue;
+            }
+            let ribs = placed
+                .iter()
+                .filter(|&&(item, anchor, corridor)| {
+                    !corridor && item.kind == ForeKind::HullRib && room.rect.contains_world(anchor)
+                })
+                .count();
+            assert!(ribs <= 1, "Outfall room had {ribs} HullRib bands (max 1)");
+        }
+        // Coverage stays strictly within the 14% Outfall overlay budget.
+        let max_writes = (VIEW.0 * VIEW.1) as u32 * OUTFALL_COVERAGE_PCT / 100;
+        for kind in kinds_for(Theme::Outfall) {
+            let item = ForeItem {
+                kind,
+                horizontal: true,
+                cross: 40.0,
+                depth: 2.1,
+                scale: 1.2,
+                seed: 19,
+            };
+            force_items(&mut layer, &world.level, &[item]);
+            let (_, used) = render(&mut world, &mut layer, Vec2::ZERO, 1.0, 1.0);
+            assert!(
+                used <= max_writes,
+                "{kind:?} wrote {used} px, exceeding Outfall 14% cap ({max_writes})"
+            );
         }
     }
 }
