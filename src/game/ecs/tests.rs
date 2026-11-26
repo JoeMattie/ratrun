@@ -1354,6 +1354,7 @@ fn dump_vfx_showcase() {
             &mut rng,
             c - Vec2::new(5.0, 0.0),
             w.player.face,
+            1.0,
         );
         for k in 0..5 {
             vfx::emit_dash_trail(
@@ -1362,6 +1363,7 @@ fn dump_vfx_showcase() {
                 c - Vec2::new(k as f32 * 3.2, 0.0),
                 w.player.face * 130.0,
                 1.0 / 60.0,
+                1.0,
             );
         }
 

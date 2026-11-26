@@ -69,6 +69,11 @@ pub const SUPER_DASH_SHOVE: f32 = 40.0;
 /// dash is a taller corridor, not just a longer one).
 pub const SUPER_DASH_RADIUS_PER_CHARGE: f32 = 0.5;
 
+/// Swept half-width shared by the dash, Ripcord and their rendered lanes.
+pub(crate) fn super_dash_radius(base_radius: f32, charge: f32, scale: f32) -> f32 {
+    base_radius * (1.0 + SUPER_DASH_RADIUS_PER_CHARGE * charge.clamp(0.0, 1.0)) * scale
+}
+
 /// A **full charge** multiplies the per-body damage by `1 + this`: up to 2.5x
 /// the weapon's own hit, which is what makes the hold worth the wait.
 pub const SUPER_DASH_DAMAGE_PER_CHARGE: f32 = 1.5;
@@ -662,13 +667,13 @@ pub fn super_dash_system(
     else {
         return;
     };
-    let radius = w.dash_radius();
     let dmg = w.damage() * player.damage_mult();
     // A charged dash (the player held the dash input and released it) is wider
     // and hits harder. A tap dash (`charge = 0`) uses the base radius and
     // damage along its travelled path.
     let charge = track.charge.clamp(0.0, 1.0);
-    let radius = radius * (1.0 + SUPER_DASH_RADIUS_PER_CHARGE * charge);
+    let scale = player.buffs.draw_scale();
+    let radius = super_dash_radius(w.dash_radius(), charge, scale);
     let dmg = dmg * (1.0 + SUPER_DASH_DAMAGE_PER_CHARGE * charge);
     // Counterweight scales the dash's native drag too: it is a shove, so the
     // passive that raises every weapon's shove has to reach it (it used to be
@@ -702,7 +707,7 @@ pub fn super_dash_system(
             track.extend_route(a, b);
         }
     }
-    vfx::emit_super_dash_comb(&mut particles, &mut rng.0, from, to, radius);
+    vfx::emit_super_dash_comb(&mut particles, &mut rng.0, from, to, radius, scale);
 
     let order: &[Entity] = stable_order(&index, &enemies, &mut fallback);
     for &entity in order {
@@ -730,7 +735,7 @@ pub fn super_dash_system(
         // The dash drags what it crosses along with it: the ride is the point.
         let out = (pos - from).normalized();
         e.vel += out * shove;
-        vfx::emit_super_dash_hit(&mut particles, &mut rng.0, pos, pos - from, killed);
+        vfx::emit_super_dash_hit(&mut particles, &mut rng.0, pos, pos - from, killed, scale);
         damage_numbers.record(
             enemy_id,
             pos,
@@ -764,7 +769,9 @@ pub fn super_dash_system(
         }
         ledger.add_boss(kind, amount);
         let killed = boss.hp <= 0.0;
-        vfx::emit_super_dash_hit(&mut particles, &mut rng.0, boss.pos, boss.pos - from, killed);
+        vfx::emit_super_dash_hit(
+            &mut particles, &mut rng.0, boss.pos, boss.pos - from, killed, scale,
+        );
         damage_numbers.record(
             boss.id,
             boss.pos,
@@ -1890,6 +1897,53 @@ mod tests {
             (full_route - tap_route * 2.0).abs() < 0.03,
             "the cord must keep the longer route: {full_route} vs {tap_route}"
         );
+    }
+
+    #[test]
+    fn size_buffs_scale_the_super_dash_and_ripcord_hits() {
+        use crate::game::ecs::systems::{evolutions::ripcord_system, powerups};
+
+        for (giant, tiny, near_hit, wide_hit) in [
+            (0.0, 0.0, true, false),
+            (powerups::GROWTH_SECS - 1.0, 0.0, true, true),
+            (0.0, powerups::SHRINK_SECS - 1.0, false, false),
+        ] {
+            let mut w = World::new(Theme::Sewer, 35);
+            w.clear_enemies();
+            open_map(&mut w);
+            arm(&mut w, WeaponKind::SuperDash, 1);
+            w.player.loadout.weapons[0].evolved = true;
+            w.player.buffs.giant = giant;
+            w.player.buffs.tiny = tiny;
+            w.player.face = Vec2::new(1.0, 0.0);
+            w.player.vel = Vec2::new(58.0, 0.0);
+            let start = w.level.arena * 0.5;
+            w.player.pos = start;
+            let offsets = [7.5, 16.0];
+            let targets = offsets.map(|y| {
+                let body = w.spawn_enemy(EnemyKind::Skitterer, start + Vec2::new(10.0, y), 4.0);
+                (body, enemy_hp(&w, body))
+            });
+
+            run_charged_dash(&mut w, 1.0);
+            for _ in 0..40 {
+                tick_dash(&mut w);
+            }
+            let hit = |w: &World, (body, hp)| enemy_hp(w, body) < hp;
+            assert_eq!(targets.map(|target| hit(&w, target)), [near_hit, wide_hit]);
+
+            // These bodies enter the old route after movement has ended, so
+            // only the taut cord can hit them.
+            w.clear_enemies();
+            let cord_targets = offsets.map(|y| {
+                let body = w.spawn_enemy(EnemyKind::Skitterer, start + Vec2::new(10.0, y), 4.0);
+                (body, enemy_hp(&w, body))
+            });
+            w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+            w.ecs.run_system_cached(ripcord_system).unwrap();
+            w.end_tick();
+            assert_eq!(cord_targets.map(|target| hit(&w, target)), [near_hit, wide_hit]);
+        }
     }
 
     /// A charged dash sweeps a wider corridor: a body beside the lane that a tap

@@ -219,8 +219,8 @@ pub(super) fn gather_ripples(
         if let Some((rx, ry)) = art_puddle::ripple_radii(r.age, r.big) {
             out[n] = WaterRipple {
                 centre: r.pos - cam,
-                rx,
-                ry,
+                rx: rx * r.scale,
+                ry: ry * r.scale,
                 strength: 1.0 - r.age / art_puddle::RIPPLE_LIFE,
             };
             n += 1;

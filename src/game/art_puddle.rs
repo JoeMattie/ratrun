@@ -385,7 +385,7 @@ fn ripple_radii_at(t: f32, big: bool) -> (f32, f32) {
 /// Paint an expanding 1-px elliptical water ripple (2:1 wider than tall) over
 /// [`RIPPLE_LIFE`] seconds (0.45 s), fading as it expands from radius 2→9 px
 /// (`big`: 4→16 px plus three tiny arcing splash droplets at the start).
-pub fn draw_ripple(pb: &mut PixelBuffer, pos_screen: (i32, i32), age: f32, big: bool) {
+pub fn draw_ripple(pb: &mut PixelBuffer, pos_screen: (i32, i32), age: f32, big: bool, scale: f32) {
     if pb.w == 0 || pb.h == 0 || !age.is_finite() || age < 0.0 || age >= RIPPLE_LIFE {
         return;
     }
@@ -399,8 +399,8 @@ pub fn draw_ripple(pb: &mut PixelBuffer, pos_screen: (i32, i32), age: f32, big: 
 
     // Integer midpoint ellipse guarantees a continuous 1-px ring with no
     // double-blended pixels and zero heap allocation.
-    let a_r = (rx.round() as i32).max(1);
-    let b_r = (ry.round() as i32).max(1);
+    let a_r = ((rx * scale).round() as i32).max(1);
+    let b_r = ((ry * scale).round() as i32).max(1);
     let a2 = i64::from(a_r) * i64::from(a_r);
     let b2 = i64::from(b_r) * i64::from(b_r);
 
@@ -449,16 +449,16 @@ pub fn draw_ripple(pb: &mut PixelBuffer, pos_screen: (i32, i32), age: f32, big: 
         let bf = b_r as f32;
         let droplets = [
             (
-                -(af * 0.75 + 2.0 + 4.0 * u).round() as i32,
-                -(bf + 1.0 + 4.0 * u - 5.5 * u * u).round() as i32,
+                -(af * 0.75 + scale * (2.0 + 4.0 * u)).round() as i32,
+                -(bf + scale * (1.0 + 4.0 * u - 5.5 * u * u)).round() as i32,
             ),
             (
-                (af * 0.75 + 2.0 + 4.5 * u).round() as i32,
-                -(bf + 0.5 + 4.5 * u - 6.0 * u * u).round() as i32,
+                (af * 0.75 + scale * (2.0 + 4.5 * u)).round() as i32,
+                -(bf + scale * (0.5 + 4.5 * u - 6.0 * u * u)).round() as i32,
             ),
             (
-                -(1.0 + 2.5 * u).round() as i32,
-                -(bf + 2.0 + 3.5 * u - 5.0 * u * u).round() as i32,
+                -(scale * (1.0 + 2.5 * u)).round() as i32,
+                -(bf + scale * (2.0 + 3.5 * u - 5.0 * u * u)).round() as i32,
             ),
         ];
         for (dx, dy) in droplets {
@@ -575,7 +575,7 @@ mod tests {
         for big in [false, true] {
             let mut pb_active = PixelBuffer::new(80, 60);
             pb_active.clear(base);
-            draw_ripple(&mut pb_active, (40, 30), 0.1, big);
+            draw_ripple(&mut pb_active, (40, 30), 0.1, big, 1.0);
             let painted = pb_active.pixels().iter().filter(|&&c| c != base).count();
             assert!(
                 painted > 0,
@@ -584,7 +584,7 @@ mod tests {
 
             let mut pb_expired = PixelBuffer::new(80, 60);
             pb_expired.clear(base);
-            draw_ripple(&mut pb_expired, (40, 30), 0.5, big);
+            draw_ripple(&mut pb_expired, (40, 30), 0.5, big, 1.0);
             let painted_expired = pb_expired.pixels().iter().filter(|&&c| c != base).count();
             assert_eq!(
                 painted_expired, 0,

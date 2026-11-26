@@ -16,8 +16,24 @@ use crate::render::palette::{self, Rgb};
 
 // ---- Player movement & hurt ------------------------------------------------
 
+const DASH_START_RING: Rgb = (155, 218, 255);
+const COMB_CYAN: Rgb = (104, 218, 255);
+
+/// The dash and cord rings already have their own dust and sparks.
+pub(in crate::game) fn is_dash_shockwave(sw: &Shockwave) -> bool {
+    matches!(sw.color, DASH_START_RING | COMB_CYAN | RIPCORD_CORD)
+}
+
+fn dash_streak(scale: f32) -> Shape {
+    if scale == 1.0 {
+        Shape::Streak
+    } else {
+        Shape::ScaledStreak(scale)
+    }
+}
+
 /// Crisp kick-off puff + pale speed streaks when the rat triggers a dash.
-pub fn emit_dash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, face: Vec2) {
+pub fn emit_dash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, face: Vec2, scale: f32) {
     let back = if face.len_sq() > 0.01 {
         -face.normalized()
     } else {
@@ -26,15 +42,15 @@ pub fn emit_dash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, face: 
     let streaks = ps.budget_count(8, false);
     ps.cone_shaped(
         rng,
-        pos + back * 2.0,
+        pos + back * (2.0 * scale),
         back,
         streaks,
-        92.0,
+        92.0 * scale,
         0.55,
         Ramp::Dash,
         0.26,
         true,
-        Shape::Streak,
+        dash_streak(scale),
         6.5,
     );
     let dust = ps.budget_count(7, false);
@@ -43,7 +59,7 @@ pub fn emit_dash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, face: 
         pos,
         back,
         dust,
-        42.0,
+        42.0 * scale,
         0.95,
         Ramp::Smoke,
         0.34,
@@ -53,14 +69,14 @@ pub fn emit_dash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, face: 
     );
     // Crisp translucent snap arc behind the rat's takeoff spot.
     ps.push_shockwave(Shockwave {
-        pos: pos + back * 1.5,
-        start_r: 2.0,
-        end_r: 10.5,
+        pos: pos + back * (1.5 * scale),
+        start_r: 2.0 * scale,
+        end_r: 10.5 * scale,
         life: 0.22,
         max_life: 0.22,
-        color: (155, 218, 255),
+        color: DASH_START_RING,
         core: (250, 252, 255),
-        thick: 1.5,
+        thick: 1.5 * scale,
         additive: true,
         arc_dir: Some(back),
         arc_half_angle: 1.18,
@@ -68,7 +84,14 @@ pub fn emit_dash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, face: 
 }
 
 /// Continuous sleek motion trail emitted while `player.dash_active > 0`.
-pub fn emit_dash_trail(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, vel: Vec2, dt: f32) {
+pub fn emit_dash_trail(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    vel: Vec2,
+    dt: f32,
+    scale: f32,
+) {
     let dir = if vel.len_sq() > 1.0 {
         -vel.normalized()
     } else {
@@ -89,15 +112,15 @@ pub fn emit_dash_trail(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, vel: V
             Ramp::Dash
         };
         ps.push(Particle {
-            pos: pos + perp * lateral,
-            vel: dir * speed + perp * rng.random_range(-8.0..8.0),
+            pos: pos + perp * (lateral * scale),
+            vel: (dir * speed + perp * rng.random_range(-8.0..8.0)) * scale,
             life,
             max_life: life,
             drag: 7.5,
             gravity: 0.0,
             ramp,
             additive: true,
-            shape: Shape::Streak,
+            shape: dash_streak(scale),
         });
     }
 }
@@ -575,7 +598,7 @@ pub fn emit_weapon_hit(
         // Wave 3's self-driving weapons have their own emitters.
         Some(WeaponKind::LaserEyes) => emit_laser_hit(ps, rng, pos, reflect, killed),
         Some(WeaponKind::SuperDash) => {
-            emit_super_dash_comb(ps, rng, pos, pos + reflect * 12.0, 4.0)
+            emit_super_dash_comb(ps, rng, pos, pos + reflect * 12.0, 4.0, 1.0)
         }
         // A spike shard striking a body: steel-grey thorn sparks.
         Some(WeaponKind::SpikedTail) => emit_lash_shard_hit(ps, rng, pos, reflect, killed),
@@ -1082,6 +1105,7 @@ pub fn emit_super_dash_comb(
     from: Vec2,
     to: Vec2,
     radius: f32,
+    scale: f32,
 ) {
     let seg = to - from;
     let len = seg.len();
@@ -1092,7 +1116,6 @@ pub fn emit_super_dash_comb(
     };
     let perp = dir.perp();
     const COMB_WHITE: Rgb = (248, 254, 255);
-    const COMB_CYAN: Rgb = (104, 218, 255);
     const COMB_ICE: Rgb = (74, 152, 238);
 
     // Leading cyan-white bow wave chevron at the nose of the travelled segment
@@ -1100,13 +1123,13 @@ pub fn emit_super_dash_comb(
     if len > 1.5 {
         ps.push_shockwave(Shockwave {
             pos: to,
-            start_r: (radius * 0.55).max(2.0),
-            end_r: radius + 4.5,
+            start_r: (radius * 0.55).max(2.0 * scale),
+            end_r: radius + 4.5 * scale,
             life: 0.14,
             max_life: 0.14,
             color: COMB_CYAN,
             core: COMB_WHITE,
-            thick: 1.5,
+            thick: 1.5 * scale,
             additive: true,
             arc_dir: Some(dir),
             arc_half_angle: 1.05,
@@ -1121,14 +1144,14 @@ pub fn emit_super_dash_comb(
         let lat = rng.random_range(-14.0..14.0);
         ps.push(Particle {
             pos: from + seg * t,
-            vel: dir * 24.0 + perp * (lat * 0.25),
+            vel: (dir * 24.0 + perp * (lat * 0.25)) * scale,
             life,
             max_life: life,
             drag: 10.0,
             gravity: 0.0,
             ramp: Ramp::Custom(COMB_WHITE, COMB_CYAN),
             additive: true,
-            shape: Shape::Streak,
+            shape: dash_streak(scale),
         });
     }
     // Structured perpendicular comb teeth raking cleanly out to `radius` on
@@ -1144,27 +1167,27 @@ pub fn emit_super_dash_comb(
         // (slightly swept back like supersonic comb barbs).
         ps.push(Particle {
             pos: from + seg * t + perp * side * (reach * 0.55),
-            vel: perp * side * (spd * 1.35) - dir * 10.0,
+            vel: (perp * side * (spd * 1.35) - dir * 10.0) * scale,
             life: life * 1.15,
             max_life: life * 1.15,
             drag: 8.5,
             gravity: 0.0,
             ramp: Ramp::Custom(COMB_WHITE, COMB_ICE),
             additive: true,
-            shape: Shape::Streak,
+            shape: dash_streak(scale),
         });
         // Deterministic opposite-side twin tooth so the comb reads symmetrically
         // across the whole swept width even on short 1-tick segments.
         ps.push(Particle {
             pos: from + seg * t - perp * side * (radius * 0.65),
-            vel: -perp * side * 34.0 - dir * 8.0,
+            vel: (-perp * side * 34.0 - dir * 8.0) * scale,
             life: 0.16,
             max_life: 0.16,
             drag: 9.0,
             gravity: 0.0,
             ramp: Ramp::Custom(COMB_WHITE, COMB_CYAN),
             additive: true,
-            shape: Shape::Streak,
+            shape: dash_streak(scale),
         });
     }
 }
@@ -1176,6 +1199,7 @@ pub fn emit_super_dash_hit(
     pos: Vec2,
     out_dir: Vec2,
     killed: bool,
+    scale: f32,
 ) {
     let dir = if out_dir.len_sq() > 0.01 {
         out_dir.normalized()
@@ -1199,12 +1223,12 @@ pub fn emit_super_dash_hit(
         pos,
         dir,
         n,
-        110.0,
+        110.0 * scale,
         1.0,
         Ramp::Dash,
         0.20,
         true,
-        Shape::Streak,
+        dash_streak(scale),
         6.0,
     );
 }
@@ -7090,6 +7114,7 @@ pub fn emit_ripcord_cord(
     route: &[(Vec2, Vec2)],
     life_frac: f32,
     start: Vec2,
+    scale: f32,
 ) {
     if route.is_empty() {
         return;
@@ -7113,7 +7138,7 @@ pub fn emit_ripcord_cord(
             let braided = i % 2 == 0;
             ps.push(Particle {
                 pos: a + seg * t,
-                vel: dir * 48.0 + dir.perp() * (jitter * 0.18),
+                vel: (dir * 48.0 + dir.perp() * (jitter * 0.18)) * scale,
                 life,
                 max_life: life,
                 drag: 24.0,
@@ -7123,7 +7148,7 @@ pub fn emit_ripcord_cord(
                     palette::scale(RIPCORD_NAVY, bright),
                 ),
                 additive: false,
-                shape: if braided { Shape::Blob } else { Shape::Streak },
+                shape: if braided { Shape::Blob } else { dash_streak(scale) },
             });
         }
     }
@@ -7136,7 +7161,7 @@ pub fn emit_ripcord_cord(
         let life = rng.random_range(0.10..0.16) * 0.48;
         // Dark navy collar backing (0 rng) so the white knot pops off bright floors too.
         ps.push(Particle {
-            pos: knot - Vec2::new(1.0, 1.0),
+            pos: knot - Vec2::splat(scale),
             vel: Vec2::ZERO,
             life: 0.05,
             max_life: 0.05,
@@ -7160,7 +7185,7 @@ pub fn emit_ripcord_cord(
         if ps.budget_count(1, false) > 0 {
             let life = rng.random_range(0.09..0.14) * 0.48;
             ps.push(Particle {
-                pos: knot - Vec2::new(0.5, 0.5),
+                pos: knot - Vec2::splat(0.5 * scale),
                 vel: Vec2::ZERO,
                 life,
                 max_life: life,
@@ -7184,7 +7209,7 @@ pub fn emit_ripcord_cord(
         let (a, b) = route[idx];
         let kp = a + (b - a) * frac;
         ps.push(Particle {
-            pos: kp - Vec2::new(0.5, 0.5),
+            pos: kp - Vec2::splat(0.5 * scale),
             vel: Vec2::ZERO,
             life: 0.045,
             max_life: 0.045,
@@ -7209,7 +7234,14 @@ pub fn emit_ripcord_cord(
 }
 
 /// **Ripcord**: a body the taut cord caught and pulled back.
-pub fn emit_ripcord_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, back: Vec2, killed: bool) {
+pub fn emit_ripcord_hit(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    back: Vec2,
+    killed: bool,
+    scale: f32,
+) {
     let base = safe_pos(pos);
     let dir = if back.len_sq() > 0.01 {
         back.normalized()
@@ -7218,13 +7250,13 @@ pub fn emit_ripcord_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, back:
     };
     ps.push_shockwave(Shockwave {
         pos: base,
-        start_r: 1.5,
-        end_r: if killed { 9.0 } else { 6.0 },
+        start_r: 1.5 * scale,
+        end_r: (if killed { 9.0 } else { 6.0 }) * scale,
         life: 0.18,
         max_life: 0.18,
         color: RIPCORD_CORD,
         core: RIPCORD_KNOT,
-        thick: 1.2,
+        thick: 1.2 * scale,
         additive: true,
         arc_dir: Some(dir),
         arc_half_angle: 0.75,
@@ -7236,32 +7268,38 @@ pub fn emit_ripcord_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, back:
         base,
         dir,
         n,
-        if killed { 115.0 } else { 76.0 },
+        (if killed { 115.0 } else { 76.0 }) * scale,
         0.7,
         Ramp::Custom(RIPCORD_KNOT, RIPCORD_CORD),
         0.22,
         true,
-        Shape::Streak,
+        dash_streak(scale),
         4.5,
     );
 }
 
 /// **Ripcord**: the cord snapping — both white knots pop with blue recoil rings
 /// and the coiled blue line drops away.
-pub fn emit_ripcord_snap(ps: &mut Particles, rng: &mut impl Rng, route: &[(Vec2, Vec2)], start: Vec2) {
+pub fn emit_ripcord_snap(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    route: &[(Vec2, Vec2)],
+    start: Vec2,
+    scale: f32,
+) {
     let Some(&(_, far)) = route.last() else {
         return;
     };
     for knot in [start, far] {
         ps.push_shockwave(Shockwave {
             pos: safe_pos(knot),
-            start_r: 1.5,
-            end_r: 9.0,
+            start_r: 1.5 * scale,
+            end_r: 9.0 * scale,
             life: 0.22,
             max_life: 0.22,
             color: RIPCORD_CORD,
             core: RIPCORD_KNOT,
-            thick: 1.2,
+            thick: 1.2 * scale,
             additive: true,
             arc_dir: None,
             arc_half_angle: 0.0,
@@ -7271,12 +7309,12 @@ pub fn emit_ripcord_snap(ps: &mut Particles, rng: &mut impl Rng, route: &[(Vec2,
             rng,
             knot,
             n,
-            48.0,
+            48.0 * scale,
             1.2,
             Ramp::Custom(RIPCORD_KNOT, RIPCORD_CORD),
             0.22,
             true,
-            Shape::Streak,
+            dash_streak(scale),
             4.5,
         );
     }
@@ -7287,14 +7325,14 @@ pub fn emit_ripcord_snap(ps: &mut Particles, rng: &mut impl Rng, route: &[(Vec2,
         let life = rng.random_range(0.16..0.30);
         ps.push(Particle {
             pos: a + (b - a) * rng.random_range(0.2..0.8),
-            vel: Vec2::new(rng.random_range(-6.0..6.0), rng.random_range(18.0..44.0)),
+            vel: Vec2::new(rng.random_range(-6.0..6.0), rng.random_range(18.0..44.0)) * scale,
             life,
             max_life: life,
             drag: 4.0,
-            gravity: 96.0,
+            gravity: 96.0 * scale,
             ramp: Ramp::Custom(RIPCORD_CORD, RIPCORD_DEEP),
             additive: false,
-            shape: Shape::Streak,
+            shape: dash_streak(scale),
         });
     }
 }
@@ -7732,6 +7770,69 @@ mod tests {
     use crate::render::framebuffer::PixelBuffer;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    #[test]
+    fn dash_emitters_keep_their_rng_draws_at_every_scale() {
+        struct CountRng {
+            inner: StdRng,
+            words: usize,
+        }
+
+        impl rand::TryRng for CountRng {
+            type Error = std::convert::Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                self.words += 1;
+                Ok(rand::Rng::next_u32(&mut self.inner))
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                self.words += 2;
+                Ok(rand::Rng::next_u64(&mut self.inner))
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                self.words += dst.len().div_ceil(4);
+                rand::Rng::fill_bytes(&mut self.inner, dst);
+                Ok(())
+            }
+        }
+
+        let run = |cap, seed, scale| {
+            let mut ps = Particles::new(cap);
+            let mut rng = CountRng { inner: StdRng::seed_from_u64(seed), words: 0 };
+            let from = Vec2::new(100.0, 100.0);
+            let to = from + Vec2::new(12.0, 0.0);
+            let face = Vec2::new(1.0, 0.0);
+            let route = [(from, to)];
+            emit_dash_start(&mut ps, &mut rng, from, face, scale);
+            let takeoff = *ps.shockwaves.front().unwrap();
+            let start = rng.words;
+            emit_dash_trail(&mut ps, &mut rng, to, face * 130.0, 1.0 / 60.0, scale);
+            let trail = rng.words;
+            emit_super_dash_comb(&mut ps, &mut rng, from, to, 6.0 * scale, scale);
+            let comb = rng.words;
+            emit_super_dash_hit(&mut ps, &mut rng, to, face, false, scale);
+            let hit = rng.words;
+            emit_ripcord_cord(&mut ps, &mut rng, &route, 1.0, from, scale);
+            let cord = rng.words;
+            emit_ripcord_hit(&mut ps, &mut rng, to, -face, false, scale);
+            let pull = rng.words;
+            emit_ripcord_snap(&mut ps, &mut rng, &route, from, scale);
+            let snap = rng.words;
+            assert!((takeoff.end_r - 10.5 * scale).abs() < 1e-5);
+            ([start, trail, comb, hit, cord, pull, snap], rand::Rng::next_u64(&mut rng.inner))
+        };
+
+        for cap in [32, 256] {
+            for seed in 0..32 {
+                let normal = run(cap, seed, 1.0);
+                assert!(normal.0[0] > 0);
+                assert_eq!(run(cap, seed, 5.0), normal);
+                assert_eq!(run(cap, seed, 0.35), normal);
+            }
+        }
+    }
 
     /// Invoke every Wave 1 VFX helper with a given `Particles` buffer and parameters.
     fn call_all_new_emitters(ps: &mut Particles, rng: &mut StdRng, pos: Vec2, dir: Vec2, size: f32, dt: f32) {

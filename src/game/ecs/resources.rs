@@ -233,6 +233,8 @@ pub struct Ripple {
     pub age: f32,
     /// A dash's heavier slosh rather than a step's small splash.
     pub big: bool,
+    /// Draw scale at the moment of the splash.
+    pub scale: f32,
     /// Is this slot in use?
     pub live: bool,
 }

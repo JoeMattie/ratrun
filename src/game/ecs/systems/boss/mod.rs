@@ -3728,7 +3728,7 @@ fn emit_cues(
                 );
             }
             BossCue::MegaRatDash => {
-                vfx::emit_dash_start(particles, rng, boss.pos, boss.facing);
+                vfx::emit_dash_start(particles, rng, boss.pos, boss.facing, 1.0);
             }
             BossCue::MegaRatCall => {
                 vfx::emit_boss_spawn(particles, rng, boss.pos, level_blood());

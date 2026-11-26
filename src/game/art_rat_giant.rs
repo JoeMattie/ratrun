@@ -19,14 +19,14 @@
 //! rng. Cast drop shadows temporarily clear the lighting material pen (`0`) so
 //! the lighting pass never rim-lights floor shadow pixels as creature fur.
 
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::{PI, TAU};
 
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{rat_helmet_pen, rat_visor_pen};
 use crate::render::palette::{mix, scale as scale_rgb, Rgb};
 
-use super::art_rat::{bubble_hash, tail_charge, RatOutfit, TailCharge, DIVER_LIFT};
+use super::art_rat::{bubble_hash, draw_charge_ring, tail_charge, RatOutfit, TailCharge, DIVER_LIFT};
 use super::ecs::systems::player::DASH_SECS;
 use super::ecs::systems::powerups::{GIANT_STOMP_INTERVAL, GROWTH_SECS};
 use super::player::Player;
@@ -98,11 +98,7 @@ const THRASH_GLOW: Rgb = (255, 178, 92);
 const THRASH_HOT: Rgb = (255, 246, 214);
 const THRASH_HALO: Rgb = (255, 138, 56);
 
-// Super Dash charge ring (matching `art_rat`).
-const CHARGE_PIPS: i32 = 24;
-const CHARGE_COLOR: Rgb = (198, 230, 255);
-const CHARGE_FULL: Rgb = (255, 255, 255);
-const CHARGE_SOCKET: Rgb = (46, 58, 84);
+// Super Dash charge pose (matching `art_rat`).
 const CHARGE_COIL_SQUASH: f32 = 0.16;
 const CHARGE_COIL_SPREAD: f32 = 0.12;
 
@@ -615,13 +611,15 @@ pub fn draw_giant_rat_with_outfit(
 
     // 7. Super Dash charge ring around the giant while holding dash.
     if player.dash_charging {
+        let prev_pen = pb.set_pen(0);
         draw_charge_ring(pb, w2s(player.pos, cam), player.dash_charge, elapsed, pose.scale);
+        pb.set_pen(prev_pen);
     }
 }
 
 /// Speed lines peeling off the giant's haunches during a dash.
 fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &GiantPose) {
-    let streaks = (7.0 * (0.6 + 0.4 * pose.scale)).round() as i32;
+    let streaks = (7.0 * pose.scale).ceil() as i32;
     let prev_pen = pb.set_pen(0);
     let col = if pose.diver { (110, 200, 235) } else { (90, 120, 170) };
     for side in [-1.0f32, 1.0] {
@@ -1367,46 +1365,6 @@ fn draw_face(pb: &mut PixelBuffer, pose: &GiantPose, elapsed: f32, tint: Tint) {
             }
         }
     }
-}
-
-/// Super Dash charge ring scaled around the giant rat while a charge is held.
-fn draw_charge_ring(
-    pb: &mut PixelBuffer,
-    centre: (i32, i32),
-    charge: f32,
-    elapsed: f32,
-    scale: f32,
-) {
-    let charge = charge.clamp(0.0, 1.0);
-    let full = charge >= 1.0;
-    let pulse = if full {
-        0.62 + 0.38 * (elapsed * 9.0).sin().abs()
-    } else {
-        1.0
-    };
-    let radius = 10.0 * (1.0 + (scale - 1.0) * 0.65);
-    let prev_pen = pb.set_pen(0);
-    for i in 0..CHARGE_PIPS {
-        let t = i as f32 / CHARGE_PIPS as f32;
-        let a = -FRAC_PI_2 + TAU * t;
-        let dir = Vec2::from_angle(a);
-        let x = centre.0 + (dir.x * radius).round() as i32;
-        let y = centre.1 + (dir.y * radius).round() as i32;
-        if t < charge {
-            let colour = if full { CHARGE_FULL } else { CHARGE_COLOR };
-            blend(pb, x, y, colour, (0.45 + 0.55 * pulse).min(1.0));
-            blend(pb, x, y + 1, colour, (0.32 + 0.42 * pulse).min(1.0));
-            if full {
-                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    blend(pb, x + dx, y + dy, CHARGE_COLOR, 0.22 * pulse);
-                }
-            }
-        } else {
-            blend(pb, x, y, CHARGE_SOCKET, 0.7);
-            blend(pb, x, y + 1, CHARGE_SOCKET, 0.45);
-        }
-    }
-    pb.set_pen(prev_pen);
 }
 
 // ---------------------------------------------------------------------------

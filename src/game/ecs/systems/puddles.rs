@@ -145,12 +145,10 @@ pub fn puddle_steps_system(
             steps.dash_splashed = true;
             steps.dist = 0.0;
             sfx.0.push(Sfx::SplashBig);
-            let splash_pos = if wet {
-                feet
-            } else {
-                input.previous_pos + Vec2::new(0.0, FEET_PX)
-            };
-            start_ripple(&mut steps, splash_pos, true);
+            let scale = player.buffs.draw_scale();
+            let origin = if wet { pos } else { input.previous_pos };
+            let splash_pos = origin + Vec2::new(0.0, FEET_PX * scale);
+            start_ripple(&mut steps, splash_pos, true, scale);
         } else if !wet {
             steps.dist = 0.0;
         }
@@ -161,13 +159,13 @@ pub fn puddle_steps_system(
             while steps.dist >= STEP_PX {
                 steps.dist -= STEP_PX;
                 sfx.0.push(Sfx::Splash);
-                start_ripple(&mut steps, feet, false);
+                start_ripple(&mut steps, feet, false, 1.0);
             }
         } else {
             // Dry → wet: a splash on the touch, whatever the speed.
             steps.dist = 0.0;
             sfx.0.push(Sfx::Splash);
-            start_ripple(&mut steps, feet, false);
+            start_ripple(&mut steps, feet, false, 1.0);
         }
     } else {
         steps.dist = 0.0;
@@ -201,7 +199,7 @@ pub fn puddle_steps_system(
                 let mut cooldown = if held.id == id { held.cooldown } else { 0.0 };
                 if cooldown <= 0.0 {
                     cooldown = ENEMY_RIPPLE_SECS;
-                    start_ripple(&mut steps, at, false);
+                    start_ripple(&mut steps, at, false, 1.0);
                 }
                 steps.enemy_slots[slot] = EnemyRippleSlot { id, cooldown };
             }
@@ -213,7 +211,7 @@ pub fn puddle_steps_system(
 /// Start one ripple: the first free slot, else the oldest (so a burst of
 /// splashes keeps the newest [`ENEMY_RIPPLE_SLOTS`] rings rather than dropping
 /// the one that just started).
-fn start_ripple(steps: &mut PuddleSteps, pos: Vec2, big: bool) {
+fn start_ripple(steps: &mut PuddleSteps, pos: Vec2, big: bool, scale: f32) {
     let mut slot = 0;
     let mut oldest = -1.0;
     for (i, ripple) in steps.ripples.iter().enumerate() {
@@ -230,6 +228,7 @@ fn start_ripple(steps: &mut PuddleSteps, pos: Vec2, big: bool) {
         pos,
         age: 0.0,
         big,
+        scale,
         live: true,
     };
 }
