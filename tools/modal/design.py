@@ -163,7 +163,7 @@ def overlay(values, defaults):
 
 def manifest(kind, defaults, solution=None):
     if kind == "pilot":
-        points = {"defaults": []}
+        points = {"defaults": [], "beats": []}
         seed, n = 1000, 2
     elif kind == "screen":
         design = qmc.LatinHypercube(d=len(KNOBS), seed=1729, optimization="random-cd")
@@ -179,7 +179,9 @@ def manifest(kind, defaults, solution=None):
 
     jobs = []
     for point, settings in points.items():
-        tuning = overlay(settings, defaults) if settings else ""
+        tuning = "[director]\npressure_beats = true\n" if point == "beats" else (
+            overlay(settings, defaults) if settings else ""
+        )
         for skill in SKILLS:
             for start in range(seed, seed + n, 8):
                 jobs.append({

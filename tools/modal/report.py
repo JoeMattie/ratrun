@@ -14,10 +14,14 @@ from matplotlib.patches import Patch
 import numpy as np
 
 from app import OUTPUT, RATE, SKILLS
-from design import CONFIRM_RUNS, CONFIRM_SEED, KNOBS, SCREEN_POINTS
-from fit import BOSSES, FLOORS, FLOOR_DEATH, PHASES, WEIGHTS, WINDOW_DEATH, WIN_BANDS, load_stage, observe
+from design import CONFIRM_RUNS, CONFIRM_SEED, KNOBS, SCREEN_POINTS, SCREEN_SEED
+from fit import (
+    BOSSES, FLOORS, FLOOR_DEATH, PHASES, WEIGHTS, WINDOW_DEATH, WIN_BANDS,
+    load_stage, observe, sensitivity_step,
+)
 
 COLORS = ("#17705b", "#2d6397", "#b75328")
+PRIOR_STYLES = (("#8f9399", ":"), ("#353a40", "-."))
 
 
 def wilson(rate, n, z=1.959964):
@@ -62,11 +66,11 @@ def write_plots(output, result, actual, previous):
             observed = np.array([measured(actual[skill], key) for key in keys], dtype=float)
             for start, end in (PHASES[1], PHASES[3]):
                 ax.axvspan(start / 60, (end - 10) / 60, color="#f2e4cb", linewidth=0)
-            if previous:
-                prior = [measured(previous[skill], key) for key in keys]
-                ax.plot(seconds / 60, prior, color="#777777", linewidth=1.0, label="Round 1 measured")
-            ax.plot(seconds / 60, forecast, "--", color=color, linewidth=1.2, label="Round 2 predicted")
-            ax.plot(seconds / 60, observed, color=color, linewidth=1.6, label="Round 2 measured")
+            for (round_no, profile), (ink, stroke) in zip(previous, PRIOR_STYLES):
+                prior = [measured(profile[skill], key) for key in keys]
+                ax.plot(seconds / 60, prior, stroke, color=ink, linewidth=1.0, label=f"Round {round_no} measured")
+            ax.plot(seconds / 60, forecast, "--", color=color, linewidth=1.2, label="Round 3 predicted")
+            ax.plot(seconds / 60, observed, color=color, linewidth=1.6, label="Round 3 measured")
             ax.set(xlim=(0, 15), ylim=(0, 1.02), xticks=[0, 3, 6, 9, 12, 15])
             if not row:
                 ax.set_title(floor)
@@ -87,22 +91,22 @@ def write_plots(output, result, actual, previous):
         ax.plot(WIN_BANDS[i], [i, i], linewidth=10, alpha=.16, color=color, solid_capstyle="butt")
         ax.errorbar(value, i, xerr=[[value - low], [high - value]], fmt="o", color=color, capsize=3)
         ax.scatter(result["candidate"][skill]["win"], i, marker="x", color="#333333", zorder=3)
-        if previous:
-            prior, prior_n = previous[skill]["win"]
+        for j, ((_, profile), (ink, _)) in enumerate(zip(previous, PRIOR_STYLES)):
+            prior, prior_n = profile[skill]["win"]
             prior_low, prior_high = wilson(prior, prior_n)
-            ax.errorbar(prior, i + .14, xerr=[[prior - prior_low], [prior_high - prior]], fmt="o",
-                        color="#777777", markerfacecolor="white", capsize=3)
+            ax.errorbar(prior, i + (j + 1) * .10, xerr=[[prior - prior_low], [prior_high - prior]], fmt="o",
+                        color=ink, markerfacecolor="white", capsize=3)
     ax.set(yticks=range(3), yticklabels=[s.title() for s in SKILLS], xlabel="Win rate", xlim=(0, 1))
     ax.invert_yaxis()
     ax.set_title("Fresh-seed win rates")
     handles = [
         Patch(facecolor="#dedede", label="Target band"),
         Line2D([], [], color="#333333", marker="x", linestyle="none", label="Model prediction"),
-        Line2D([], [], color="#333333", marker="o", linestyle="none", label="Round 2, 95% CI"),
+        Line2D([], [], color="#333333", marker="o", linestyle="none", label="Round 3, 95% CI"),
     ]
-    if previous:
-        handles.append(Line2D([], [], color="#777777", marker="o", markerfacecolor="white",
-                              linestyle="none", label="Round 1, 95% CI"))
+    for (round_no, _), (ink, _) in zip(previous, PRIOR_STYLES):
+        handles.append(Line2D([], [], color=ink, marker="o", markerfacecolor="white",
+                              linestyle="none", label=f"Round {round_no}, 95% CI"))
     ax.legend(handles=handles, loc="upper left", frameon=False, fontsize=8)
     ax = panels[1]
     for index, (skill, color) in enumerate(zip(SKILLS, COLORS, strict=True)):
@@ -128,8 +132,8 @@ def confirmation(lines, cohort, actual, prediction, previous):
               "Intervals are 95% Wilson intervals."]
 
     def comparison(skill, key, formatter):
-        current = formatter(actual[skill][key])
-        return f"{formatter(previous[skill][key])} → {current}" if previous else current
+        cells = [formatter(profile[skill][key]) for _, profile in previous]
+        return " → ".join([*cells, formatter(actual[skill][key])])
 
     def record(pair):
         rate, n = pair
@@ -157,14 +161,14 @@ def confirmation(lines, cohort, actual, prediction, previous):
         label = f"{3 * idx}:00–{3 * (idx + 1)}:00" if window else FLOORS[idx]
         return f"{label}, {share(profile[key])}"
 
-    change = "Round 1 → Round 2" if previous else "Round 2 measured"
+    change = " → ".join([*(f"Round {round_no}" for round_no, _ in previous), "Round 3"])
     rows = []
     for i, skill in enumerate(SKILLS):
         low, high = WIN_BANDS[i]
         rows.append((skill, f"{low:.0%}–{high:.0%}", percent(prediction[skill]["win"]),
                      comparison(skill, "win", win_record),
                      "Within band" if low <= actual[skill]["win"][0] <= high else "Outside band"))
-    table(lines, ("Skill", "Target", "Round 2 predicted", change, "Round 2 result"), rows)
+    table(lines, ("Skill", "Target", "Round 3 predicted", change, "Round 3 result"), rows)
     lines += ["![Win bands and floor deaths](targets.png)", "",
               "Floor and window shares use losses as the denominator. Each three-minute window "
               "starts on the floor clock and pools losses across floors."]
@@ -176,14 +180,13 @@ def confirmation(lines, cohort, actual, prediction, previous):
     rows = []
     for skill in SKILLS:
         for name, keys, window in (("Floor", FLOOR_DEATH, False), ("3-minute window", WINDOW_DEATH, True)):
-            values = [peak(skill, actual, keys, window)]
-            if previous:
-                values.insert(0, peak(skill, previous, keys, window))
+            values = [peak(skill, profile, keys, window) for _, profile in previous]
+            values.append(peak(skill, actual, keys, window))
             rates = [actual[skill][k][0] for k in keys]
             available = actual[skill][keys[0]][1] > 0
             within_band = available and max(rates) <= .40 and (window or min(rates) >= .05)
             rows.append((skill, name, " → ".join(values), "Within target" if within_band else "Outside target"))
-    table(lines, ("Skill", "Peak death share", change, "Round 2 result"), rows)
+    table(lines, ("Skill", "Peak death share", change, "Round 3 result"), rows)
     for skill in SKILLS:
         causes = Counter(r["death"]["cause"] for r in cohort[skill] if r["death"])
         if causes:
@@ -216,9 +219,9 @@ def confirmation(lines, cohort, actual, prediction, previous):
             dips = [hp[0] - hp[1], hp[2] - hp[1], hp[2] - hp[3]] if all(x is not None for x in hp) else []
             rows.append((skill, floor, *(comparison(skill, k, share) for k in keys),
                          "Both dips" if dips and min(dips) >= .05 else "Outside target"))
-    table(lines, ("Skill", "Floor", "1:00–3:00", "3:00–6:00", "6:00–11:00", "11:00–14:00", "Round 2 result"), rows)
+    table(lines, ("Skill", "Floor", "1:00–3:00", "3:00–6:00", "6:00–11:00", "11:00–14:00", "Round 3 result"), rows)
     lines += ["![Predicted and measured HP curves](health.png)"]
-    table(lines, ("Skill", "Win below 30% HP, predicted", f"Win below 30% HP ({change})", "Round 2 result"), [
+    table(lines, ("Skill", "Win below 30% HP, predicted", f"Win below 30% HP ({change})", "Round 3 result"), [
         (skill, percent(prediction[skill]["close_win"]), comparison(skill, "close_win", record),
          "Within target" if actual[skill]["close_win"][1] and actual[skill]["close_win"][0] >= .55 else "Outside target")
         for skill in SKILLS
@@ -228,7 +231,7 @@ def confirmation(lines, cohort, actual, prediction, previous):
 def design_and_fit(lines, result):
     lines += ["## Design and fit", "",
               f"The design used {SCREEN_POINTS - 1} randomized Latin hypercube settings optimized for "
-              f"low discrepancy, plus shipped defaults. Each point used the same eight seeds (1000–1007) "
+              f"low discrepancy, plus shipped defaults. Each point used the same eight seeds ({SCREEN_SEED}–{SCREEN_SEED + 7}) "
               f"for each skill, for {SCREEN_POINTS * 24:,} full campaigns. "
               "Later floors inherited the actual keep choices.", "",
               f"The fit had {len(result['train'])} training settings and {len(result['holdout'])} untouched holdout settings. "
@@ -303,7 +306,7 @@ def design_and_fit(lines, result):
                       "Sewer first card s", "Flatbed boss s", "Sewer cards"), rows)
 
 
-def report(output, baseline=None):
+def report(output, baselines=()):
     result = json.loads((output / "solution.json").read_bytes())
     budget = json.loads((output / "cost-estimate.json").read_bytes())
     proof = json.loads((output / "determinism.json").read_bytes())
@@ -319,15 +322,16 @@ def report(output, baseline=None):
         if sorted(r["seed"] for r in cohort[s]) != list(range(CONFIRM_SEED, CONFIRM_SEED + CONFIRM_RUNS)):
             raise ValueError(f"confirmation cohort mismatch for {s}")
     actual = {s: observe(cohort[s]) for s in SKILLS}
-    prior = json.loads(baseline.read_bytes()) if baseline else None
-    previous = prior["observed_mean_and_count"] if prior else None
-    lines = ["# Rat Run difficulty model, round 2", "",
-             f"Round 2 used Rat Run v0.4.2 at `{result['revision']}`. "
+    previous = []
+    lines = ["# Rat Run pressure beats study, round 3", "",
+             f"Round 3 used the pressure-beats revision `{result['revision']}`. "
              "Campaigns followed Sewer, Kitchen, Lab and Flatbed with a fresh Nest. "
              f"Confirmation used seeds {CONFIRM_SEED}–{CONFIRM_SEED + CONFIRM_RUNS - 1} for every skill.", ""]
-    if prior:
-        lines += [f"Round 1 used v0.4.1 at `{prior['source_revision']}` and seeds 5000–5299. "
-                  "The two rounds use independent seed cohorts.", ""]
+    for round_no, baseline in enumerate(baselines, 1):
+        prior = json.loads(baseline.read_bytes())
+        previous.append((round_no, prior["observed_mean_and_count"]))
+        seed = 4000 + round_no * 1000
+        lines += [f"Round {round_no} used `{prior['source_revision']}` and seeds {seed}–{seed + 299}.", ""]
     confirmation(lines, cohort, actual, result["candidate"], previous)
     design_and_fit(lines, result)
     seconds = pilot_seconds + confirm_seconds + result["screen_seconds"]
@@ -340,11 +344,11 @@ def report(output, baseline=None):
               "at the configured CPU and memory caps. The estimate excludes image building, startup, "
               "failed attempts and workspace credits. [Modal list pricing](https://modal.com/pricing).", "",
               "Raw JSON and checksummed receipts are in raw/. Fit scores and training cohort sizes are in solution.json.",
-              "", "Integrated-by: modal-round2 (Sol worker)", ""]
+              "", "Integrated-by: pressure-beats (Sol worker)", ""]
     with (output / "sensitivity.csv").open("w", newline="") as dest:
         writer = csv.writer(dest)
         writer.writerow(["skill", "knob", "knob_delta", "outcome", "modeled_effect"])
-        deltas = {knob.name: f"{10 if knob.unit == ' HP' else 0.1:g}{knob.unit}" for knob in KNOBS}
+        deltas = {knob.name: f"{sensitivity_step(knob):g}{knob.unit}" for knob in KNOBS}
         for skill, knobs in result["sensitivity"].items():
             for knob, metrics in knobs.items():
                 writer.writerows((skill, knob, deltas[knob], key, value) for key, value in metrics.items())
@@ -358,7 +362,7 @@ def report(output, baseline=None):
     (output / "report.md").write_text("\n".join(lines))
     summary = ", ".join(f"{s} {actual[s]['win'][0]:.1%}" for s in SKILLS)
     (output / "recommended.toml").write_text(
-        "# Rat Run v0.4.2 feel-bounded difficulty model candidate.\n"
+        "# Rat Run pressure beats candidate.\n"
         f"# Fresh seeds {CONFIRM_SEED}–{CONFIRM_SEED + CONFIRM_RUNS - 1}, measured campaign wins {summary}.\n"
         "# See report.md for target conformance, uncertainty and predictions.\n\n"
         + result["defaults_overlay"],
@@ -368,7 +372,8 @@ def report(output, baseline=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--baseline", type=Path, help="Round 1 confirmation.json")
+    parser.add_argument("--baseline", type=Path, action="append", default=[],
+                        help="Earlier confirmation.json, in order from round 1")
     args = parser.parse_args()
     report(args.output, args.baseline)
 

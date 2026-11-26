@@ -11,7 +11,7 @@ import time
 import modal
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-OUTPUT = ROOT / ".review" / "model2"
+OUTPUT = ROOT / ".review" / "model3"
 TIMEOUT = 1_500
 MAX_SHARDS = 700
 CPU = 0.5

@@ -82,7 +82,8 @@ def main():
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--max-compute-usd", type=float, default=20.)
     parser.add_argument("--resume-screen", action="store_true")
-    parser.add_argument("--baseline", type=Path, help="Round 1 confirmation.json")
+    parser.add_argument("--baseline", type=Path, action="append", default=[],
+                        help="Earlier confirmation.json, in order from round 1")
     args = parser.parse_args()
     study(args.output.resolve(), tomllib.loads(args.defaults.read_text()),
           args.max_compute_usd, args.resume_screen, args.baseline)
