@@ -3597,6 +3597,10 @@ impl World {
         let pen = pb.set_pen(crate::render::lighting::pool_pen());
         let theme = self.level.theme;
         let elapsed = self.elapsed;
+        // The dark-mirror look whenever the lighting's water stage will light
+        // it: materials are kept exactly when the effects run at Full or Hard
+        // (`draw_scene`), the tiers `render::lighting::water` runs on.
+        let glossy = pb.materials_on() && crate::render::lighting::water_gloss_enabled();
         // The puddles in view, on the stack (the Sewer has a couple of hundred
         // a map but only a handful a screen): each is drawn knowing the others,
         // so merged puddles share one shoreline. Past the array's size the
@@ -3620,7 +3624,15 @@ impl World {
             if !on_screen(self.w2s(puddle.pos, cam), margin, viewport) {
                 continue;
             }
-            art_puddle::draw_puddle_among(pb, puddle, &seen[..count], cam, elapsed, theme);
+            art_puddle::draw_puddle_among_with(
+                pb,
+                puddle,
+                &seen[..count],
+                cam,
+                elapsed,
+                theme,
+                glossy,
+            );
         }
         // The ripples come straight from the resource the footstep system
         // writes; between ticks it is the ECS world's own (never a facade

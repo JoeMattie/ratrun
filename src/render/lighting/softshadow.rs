@@ -717,7 +717,20 @@ const MAX_PADS: usize = 8;
 
 /// Post-composite pixel stage: lamp streaks on reflective pixels
 /// (`fx::strength::REFLECTION`).
+#[cfg(test)]
 pub(super) fn reflections(grid: &Grid, canvas: &mut Canvas<'_>, normals: &[Normal], frame: &FxFrame<'_>) {
+    reflections_with(grid, canvas, normals, frame, false);
+}
+
+/// `reflections`, leaving water pixels alone when `skip_water` (the engine
+/// passes `water::owns_water`: `water.rs` mirrors the lamp there instead).
+pub(super) fn reflections_with(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    normals: &[Normal],
+    frame: &FxFrame<'_>,
+    skip_water: bool,
+) {
     let hard = match frame.mode {
         LightingMode::Full => false,
         LightingMode::Hard => true,
@@ -742,7 +755,7 @@ pub(super) fn reflections(grid: &Grid, canvas: &mut Canvas<'_>, normals: &[Norma
         if !matches!(l.tag, LightTag::Fixture(_)) || !l.extent.is_finite() || l.gain < MIN_REFLECT_GAIN {
             continue;
         }
-        if streak(grid, canvas, normals, frame, l, hard) {
+        if streak(grid, canvas, normals, frame, l, hard, skip_water) {
             done += 1;
         }
     }
@@ -756,6 +769,7 @@ fn streak(
     frame: &FxFrame<'_>,
     l: &FxLight,
     hard: bool,
+    skip_water: bool,
 ) -> bool {
     let (w, h) = (canvas.w as i32, canvas.h as i32);
     let s = l.pos - frame.cam;
@@ -824,6 +838,7 @@ fn streak(
                 kind = MaterialKind::Ink;
             }
             if kind == MaterialKind::Emissive
+                || (skip_water && kind == MaterialKind::Water)
                 || (hard && !matches!(kind, MaterialKind::Water | MaterialKind::Ink))
             {
                 continue;

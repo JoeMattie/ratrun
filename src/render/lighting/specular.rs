@@ -458,12 +458,19 @@ fn wet_white(c: Rgb) -> Rgb {
 
 /// Post-composite pixel stage: specular highlights by material and the rim
 /// light on CREATURE perimeter pixels (`fx::strength::SPECULAR`, `RIM`).
+///
+/// Water pixels are left to `water.rs`'s glints while that stage owns them
+/// (`water::owns_water`): this stage's per-sample sheen painted a puddle as
+/// one flat 4 px wash.
 pub(super) fn apply(grid: &Grid, canvas: &mut Canvas<'_>, normals: &[Normal], frame: &FxFrame<'_>) {
-    run(grid, canvas, normals, frame, SPEC_Q8, RIM_Q8);
+    let skip_water = super::water::owns_water(frame.mode);
+    run_with(grid, canvas, normals, frame, SPEC_Q8, RIM_Q8, skip_water);
 }
 
 /// [`apply`] with the two strength factors passed in, so the tests can run the
-/// stage at zero strength and prove the picture does not move.
+/// stage at zero strength and prove the picture does not move. Lights water
+/// as it always did.
+#[cfg(test)]
 fn run(
     grid: &Grid,
     canvas: &mut Canvas<'_>,
@@ -471,6 +478,19 @@ fn run(
     frame: &FxFrame<'_>,
     spec_q8: i32,
     rim_q8: i32,
+) {
+    run_with(grid, canvas, normals, frame, spec_q8, rim_q8, false);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    normals: &[Normal],
+    frame: &FxFrame<'_>,
+    spec_q8: i32,
+    rim_q8: i32,
+    skip_water: bool,
 ) {
     let mode = frame.mode;
     // §5: specular on Full (all materials) and Hard (Slime, Ink, Metal only),
@@ -556,6 +576,9 @@ fn run(
                 let i = row + px_index;
                 let byte = mat.get(i).copied().unwrap_or(0);
                 let creature = material::is_creature(byte);
+                if skip_water && !creature && material::kind(byte) == MaterialKind::Water {
+                    continue;
+                }
                 let mut add = [0i32; 3];
                 let mut rim_add = [0i32; 3];
                 // ---- the per-material highlight --------------------------
