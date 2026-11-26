@@ -28,6 +28,8 @@
   itself. Bodies push each other apart harder, and a body pushed into a wall
   is pushed back out before the tick ends. A balance file can restore the
   looser crowd; see [TUNING.md](TUNING.md).
+- **Super Dash.** The lane preview fades out at its tip instead of ending
+  abruptly. A wall that cuts it short keeps its faint mark.
 
 ## 0.4.4 (2026-11-26, playtest build)
 

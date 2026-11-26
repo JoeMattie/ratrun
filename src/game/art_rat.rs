@@ -1376,10 +1376,42 @@ pub(super) fn draw_charge_ring(
     }
 }
 
+/// Where along the planned lane the fade starts, as a share of its length:
+/// from here to the tip each slice loses alpha and a little half-width, so the
+/// lane ends on a soft point instead of a cut. Measured against the **planned**
+/// length (never the stopped one), or a wall would fade the lane short of it.
+const FADE_SHARE: f32 = 0.35;
+
+/// The slice's half-width at the very tip, as a share of the lane's full
+/// half-width: 60% is enough taper to read as a point without the lane
+/// thinning into a hairline before the fade has done its work.
+const PREVIEW_TIP_WIDTH: f32 = 0.60;
+
+/// A preview slice at `d` along a lane of planned length `len`, as
+/// `(alpha scale, half-width scale)`: both 1.0 up to [`FADE_SHARE`] of the
+/// lane, then smoothstepped down to 0.0 alpha and [`PREVIEW_TIP_WIDTH`] width
+/// at the tip. Keyed to the planned length, so a wall that stops the lane early
+/// leaves the stretch before it at full strength.
+#[inline]
+fn preview_slice(d: f32, len: f32) -> (f32, f32) {
+    if !(len.is_finite() && len > 0.0) {
+        return (1.0, 1.0);
+    }
+    let start = len * FADE_SHARE;
+    let t = ((d - start) / (len - start)).clamp(0.0, 1.0);
+    let fade = t * t * (3.0 - 2.0 * t);
+    (1.0 - fade, 1.0 - (1.0 - PREVIEW_TIP_WIDTH) * fade)
+}
+
 /// The **Super Dash lane preview**: a faint blue-white line from the rat along
 /// its dash direction, at the current charge's steady-speed reach, stopped
 /// by the first wall — so "where would this go" is answered before the release
 /// that spends the dash.
+///
+/// The lane does not end dead: over its last stretch (see [`FADE_SHARE`]) each
+/// slice dims and narrows to a soft point, measured along the length the dash
+/// *would* have covered, so a lane a wall cuts short stays at full strength up
+/// to the wall and still wears today's faint mark on it.
 ///
 /// Friendly information: the colour is the weapon's own blue-white at low
 /// alpha, deliberately unlike the red/amber enemy telegraphs, and it is drawn
@@ -1421,8 +1453,14 @@ pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap,
             break;
         }
         if d >= 8.0 * scale {
+            let (dim, width) = preview_slice(d, len);
             super::art_wave3a::draw_dash_lane_slice(
-                pb, p - cam, face.perp(), sweep_radius, PREVIEW_COLOR, alpha,
+                pb,
+                p - cam,
+                face.perp(),
+                sweep_radius * width,
+                PREVIEW_COLOR,
+                alpha * dim,
             );
         }
         d += PLAYER_SUBSTEP;
@@ -3004,6 +3042,95 @@ mod tests {
         assert_eq!(normal, 10.0);
         assert!((radius(GROWTH_SECS - 1.0, 0.0) - normal * 5.0).abs() <= 0.5);
         assert!((radius(0.0, SHRINK_SECS - 1.0) - normal * 0.35).abs() <= 0.5);
+    }
+
+    /// A rat holding a full Super Dash, facing +x: the widest, longest lane the
+    /// preview ever draws.
+    fn full_charge_dash_rat(pos: Vec2) -> Player {
+        let mut p = rat(pos, 0.0);
+        p.loadout
+            .apply(&crate::game::loadout::Upgrade::NewWeapon(WeaponKind::SuperDash));
+        p.dash_charging = true;
+        p.dash_charge = 1.0;
+        p
+    }
+
+    /// The lit pixels along the row the lane runs down, `(x, colour)` in order.
+    /// Over a black floor the red channel is the alpha the slice was drawn at
+    /// (`PREVIEW_COLOR`'s red is 150), so the fade can be read back off the
+    /// buffer instead of trusting the arithmetic.
+    fn lane_row(p: &Player, tiles: &TileMap) -> Vec<(usize, Rgb)> {
+        const W: usize = 200;
+        let mut pb = PixelBuffer::new(W, 64);
+        pb.clear((0, 0, 0));
+        draw_dash_preview(&mut pb, p, tiles, Vec2::ZERO);
+        let y = p.pos.y.round() as usize;
+        (0..W)
+            .filter(|&x| pb.pixel_at(x, y) != (0, 0, 0))
+            .map(|x| (x, pb.pixel_at(x, y)))
+            .collect()
+    }
+
+    /// The lane preview fades out over its last stretch instead of stopping
+    /// dead, and a wall that stops it early still wears today's faint mark while
+    /// the lane up to it stays at full strength (the fade is measured against
+    /// the planned length, not the stopped one).
+    #[test]
+    fn dash_preview_fades_its_tip_and_keeps_a_wall_mark() {
+        use crate::game::level::Rectf;
+        use crate::game::nav::test_tiles;
+
+        let p = full_charge_dash_rat(Vec2::new(40.0, 40.0));
+
+        // Open floor: the tip is a whisper of the lane's own alpha.
+        let open = test_tiles(32, 24, &[]);
+        let lit = lane_row(&p, &open);
+        let drawn = lit.len();
+        assert!(drawn > 8, "the lane draws, got {drawn} pixels");
+        let first = u32::from(lit.first().expect("a near end").1 .0);
+        let last = u32::from(lit.last().expect("a tip").1 .0);
+        assert!(first > 40, "the near end is at full alpha, got {first}");
+        assert!(
+            last * 10 < first,
+            "the last drawn slice ({last}) must be under a tenth of the first ({first})"
+        );
+
+        // The taper itself: untouched until the fade starts, a point at the tip,
+        // and monotonic in between.
+        let len = 120.0;
+        assert_eq!(preview_slice(len * FADE_SHARE * 0.5, len), (1.0, 1.0));
+        let (dim, width) = preview_slice(len, len);
+        assert_eq!(dim, 0.0, "the tip is drawn at no alpha");
+        assert!((width - PREVIEW_TIP_WIDTH).abs() < 1e-6, "a soft point, not a cut");
+        let mut prev = (1.0f32, 1.0f32);
+        for i in 0..=100 {
+            let slice = preview_slice(len * i as f32 / 100.0, len);
+            assert!(
+                slice.0 <= prev.0 + 1e-6 && slice.1 <= prev.1 + 1e-6,
+                "the taper only ever dims and narrows (at {i}%)"
+            );
+            prev = slice;
+        }
+
+        // A wall in the lane's path: it stops there, the stop keeps its mark,
+        // and the slice before it is still the lane's own alpha.
+        let walled = test_tiles(32, 24, &[Rectf::new(96.0, 32.0, 16.0, 16.0)]);
+        let lit = lane_row(&p, &walled);
+        let (mark_x, mark) = *lit.last().expect("the lane stops at the wall");
+        let mark_red = u32::from(mark.0);
+        assert!(
+            (78..96).contains(&mark_x),
+            "the lane stops at the wall, got x={mark_x}"
+        );
+        assert!(
+            mark_red * 10 > first * 12,
+            "the wall keeps its brighter mark: {mark_red} vs {first}"
+        );
+        let before = u32::from(lit[lit.len() - 2].1 .0);
+        assert!(
+            before * 10 >= first * 8,
+            "a wall stop must not fade the lane short of the wall: {before} vs {first}"
+        );
     }
 
     /// A rat that owns a Tail Thrash at `charge` (0 = just fired, 1 = ready).
