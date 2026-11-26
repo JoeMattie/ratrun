@@ -1431,41 +1431,6 @@ mod tests {
         assert_eq!(campaign.level, LEVEL_COUNT);
     }
 
-    /// The carry-over and the derived seeds keep the campaign deterministic:
-    /// two identical campaigns fed the same inputs produce identical levels and
-    /// identical simulations.
-    #[test]
-    fn twin_campaigns_run_identically() {
-        fn trace(run_seed: u64) -> (u64, u64, f32, u32, u32, usize, Vec<i64>) {
-            let campaign = CampaignState::new(run_seed);
-            let mut world = campaign.world();
-            for tick in 0..240u32 {
-                let dir = crate::math::Vec2::from_angle(tick as f32 * 0.03);
-                world.update(1.0 / 60.0, dir, tick % 97 == 0);
-                if world.finished() {
-                    break;
-                }
-            }
-            let enemies = world.enemies();
-            let mut positions: Vec<i64> = enemies
-                .iter()
-                .map(|e| e.pos.x.to_bits() as i64 ^ ((e.pos.y.to_bits() as i64) << 32))
-                .collect();
-            positions.sort_unstable();
-            (
-                world.level.seed,
-                world.kills as u64,
-                world.elapsed,
-                world.score,
-                world.player.hp.to_bits(),
-                enemies.len(),
-                positions,
-            )
-        }
-        assert_eq!(trace(51), trace(51));
-        assert_ne!(trace(51).0, trace(52).0, "different seeds, different maps");
-    }
-
     /// A whole **four-level** campaign replays exactly from one run seed: every
     /// floor's map seed, theme and simulated first seconds are a pure function
     /// of `(run seed, level index, route)`, the ride included.

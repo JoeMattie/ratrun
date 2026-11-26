@@ -5298,9 +5298,15 @@ mod zoom_tests {
     /// and when no frame is drawn at all. Zoom lives in the renderer and never
     /// reaches the simulation; the simulation's viewport is session input,
     /// set here the way the App sets it on a resize.
+    /// Both floors that have a zoom-relevant guest (the Sewer's Drake, the
+    /// Outfall's surge and lure) in the one test: it was two tests with the
+    /// same rule, so it is one loop (and the Outfall is set up beside a lure by
+    /// `assert_zoom_replay`).
     #[test]
     fn the_same_seed_plays_out_identically_at_every_zoom() {
-        assert_zoom_replay(Theme::Sewer);
+        for theme in [Theme::Sewer, Theme::Outfall] {
+            assert_zoom_replay(theme);
+        }
     }
 
     #[test]
@@ -5316,11 +5322,6 @@ mod zoom_tests {
         assert!(!w.outfall_surge_enabled(), "the manual arrival also suppresses the warning");
         w.clear_testbed_boss();
         assert!(w.outfall_surge_enabled());
-    }
-
-    #[test]
-    fn outfall_surge_and_lure_replay_identically_at_every_zoom() {
-        assert_zoom_replay(Theme::Outfall);
     }
 
     fn assert_zoom_replay(theme: Theme) {

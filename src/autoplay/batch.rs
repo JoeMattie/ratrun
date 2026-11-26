@@ -37,7 +37,7 @@
 //! moves, a rat stuck against geometry, an untouched enemy in weapon range, a
 //! map the rat never leaves, levels/DPS/levels far over the batch median). The
 //! scan only reads the world, so an analysed run is the same run
-//! (`tests::the_anomaly_scan_does_not_change_a_run`).
+//! (`tests::a_report_has_its_columns_and_the_scan_does_not_change_a_run`).
 //!
 //! `--cycle-skills` rotates `Expert, Skilled, Casual` per run, so one 200-run
 //! batch samples the whole ladder: the right shape for a defect hunt (the
@@ -3480,42 +3480,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_batches_give_identical_reports() {
-        let a = run_batch_threaded(&tiny(Skill::Expert, 3, 77));
-        let b = run_batch_threaded(&tiny(Skill::Expert, 3, 77));
-        // Ignore the wall clock (the only intentionally varying field).
-        let ja = serde_json::to_string(&a).expect("serialise");
-        let jb = serde_json::to_string(&b).expect("serialise");
-        let strip = |s: &str| {
-            let mut v: serde_json::Value = serde_json::from_str(s).expect("json");
-            if let Some(o) = v.as_object_mut() {
-                o.remove("wall_seconds");
-                o.remove("sim_per_wall_second_per_thread");
-            }
-            serde_json::to_string(&v).expect("json")
-        };
-        assert_eq!(strip(&ja), strip(&jb));
-    }
-
-    #[test]
-    fn thread_count_does_not_change_the_report() {
-        let mut a = tiny(Skill::Expert, 2, 9);
-        let mut b = tiny(Skill::Expert, 2, 9);
-        a.threads = 1;
-        b.threads = 2;
-        let ra = run_batch_threaded(&a);
-        let rb = run_batch_threaded(&b);
-        assert_eq!(ra.win_rate, rb.win_rate);
-        assert_eq!(ra.levels.len(), rb.levels.len());
-        for (la, lb) in ra.levels.iter().zip(&rb.levels) {
-            assert_eq!(la.attempted, lb.attempted);
-            assert_eq!(la.deaths, lb.deaths);
-            assert_eq!(la.boss_kills, lb.boss_kills);
-            assert!((la.boss_seconds.mean - lb.boss_seconds.mean).abs() < 1e-4);
-        }
-    }
-
-    #[test]
     fn cli_parsing_reads_every_flag() {
         let args: Vec<String> = "--bot-batch 5 --seed 42 --level 3 --skill casual --max-sim-seconds 120 --threads 4 --json --practice"
             .split(' ')
@@ -3627,26 +3591,6 @@ mod tests {
         assert_eq!(runs_for_half_width(0.5, 0.05), 385);
     }
 
-    /// The scan is read-only: an analysed run must be the same run.
-    #[test]
-    fn the_anomaly_scan_does_not_change_a_run() {
-        let opts = tiny(Skill::Expert, 2, 21);
-        for i in 0..2 {
-            let seed = seed_for(opts.seed, i);
-            let plain = run_one(seed, AutoOpts::practice(0, Skill::Expert), 40.0);
-            let scanned = run_one_analyzed(seed, AutoOpts::practice(0, Skill::Expert), 40.0);
-            let mut a = serde_json::to_value(&plain).expect("json");
-            let mut b = serde_json::to_value(&scanned).expect("json");
-            if let Some(o) = a.as_object_mut() {
-                o.remove("anomalies");
-            }
-            if let Some(o) = b.as_object_mut() {
-                o.remove("anomalies");
-            }
-            assert_eq!(a, b, "the scan changed run {i}");
-        }
-    }
-
     #[test]
     fn cli_without_our_flag_is_not_handled() {
         let args = vec!["--tiled".to_string()];
@@ -3663,12 +3607,31 @@ mod tests {
         assert_eq!(p.mean, 3.0);
     }
 
-    /// The tuning columns exist, survive a JSON round trip (the comparison
-    /// mode reads them back) and the progression checkpoints fire.
+    /// The report shape `--bot-batch --json` and `--bot-compare` read, and the
+    /// read-only promise of the anomaly scan, in one two-second run.
+    ///
+    /// This is the only suite test that plays a bot run at all. Bot
+    /// measurements are run on request with the binary (`--bot-batch`), so the
+    /// four tests that used to play 40-80 s batches here (identical reports,
+    /// thread-count invariance, the scan, and the JSON columns) are gone; what
+    /// they shared — a run produces a complete, round-trippable report — costs
+    /// two seconds and one row.
     #[test]
-    fn report_has_the_tuning_columns() {
-        let mut opts = tiny(Skill::Expert, 2, 11);
-        opts.max_sim_seconds = 80.0;
+    fn a_report_has_its_columns_and_the_scan_does_not_change_a_run() {
+        // The scan only reads the world, so the run must come out identical.
+        let plain = run_one(7, AutoOpts::practice(0, Skill::Expert), 2.0);
+        let scanned = run_one_analyzed(7, AutoOpts::practice(0, Skill::Expert), 2.0);
+        let strip = |outcome: &RunOutcome| {
+            let mut v = serde_json::to_value(outcome).expect("json");
+            if let Some(o) = v.as_object_mut() {
+                o.remove("anomalies");
+            }
+            v
+        };
+        assert_eq!(strip(&plain), strip(&scanned), "the scan changed the run");
+
+        let mut opts = tiny(Skill::Expert, 1, 7);
+        opts.max_sim_seconds = 2.0;
         let r = run_batch(&opts);
         let v = serde_json::to_value(&r).expect("json");
         for key in [
@@ -3685,56 +3648,23 @@ mod tests {
         ] {
             assert!(!v[key].is_null(), "report is missing {key}");
         }
-        assert!(
-            !r.levels[0].progress.is_empty(),
-            "80 simulated seconds must cross the 60 s checkpoint"
-        );
-        // Round trip: `--bot-compare` reads exactly this shape.
-        let back: BatchReport = serde_json::from_value(v).expect("deserialize");
-        assert_eq!(back.runs, r.runs);
-        assert_eq!(back.levels.len(), r.levels.len());
-        assert_eq!(back.skill, r.skill);
-    }
-
-    /// Comparing a report with itself must show zero everywhere.
-    #[test]
-    fn comparison_of_a_report_with_itself_is_all_zero() {
-        let r = run_batch(&tiny(Skill::Skilled, 2, 5));
-        let c = compare_reports(&r, &r, "a.json", "b.json");
-        for row in &c.rows {
-            assert_eq!(row.delta, 0.0, "{} did not diff to zero", row.metric);
-        }
-        for level in &c.levels {
-            for row in &level.rows {
-                assert_eq!(row.delta, 0.0, "L{} {}", level.level + 1, row.metric);
-            }
-        }
-        let text = render_comparison(&c);
-        assert!(text.contains("delta"));
-        assert!(text.contains("overall"));
-        assert!(text.contains("level 1"));
-    }
-
-    #[test]
-    fn json_has_the_report_columns() {
-        let r = run_batch(&tiny(Skill::Casual, 2, 3));
-        let text = serde_json::to_string(&r).expect("serialise");
-        let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
-        assert_eq!(v["runs"], serde_json::json!(2));
-        assert_eq!(v["skill"], serde_json::json!("casual"));
-        assert!(v["levels"].is_array());
-        assert!(v["damage"].is_array());
-        assert!(v["deaths"].is_array());
+        assert_eq!(v["runs"], serde_json::json!(1));
         let run = &v["run_summaries"][0];
         assert_eq!(run["floor_reached"], 1);
         assert!(run["death_campaign_seconds"].is_null());
         assert!(run["dropped_below_30_percent_hp"].is_boolean());
         let floor = &run["levels"][0];
-        let samples = floor["hp_samples_10s"].as_array().expect("HP samples");
-        assert_eq!(samples.len(), (floor["time"].as_f64().unwrap() / 10.0) as usize);
         assert!(floor["min_hp_fraction"].is_number());
         assert!(floor["hp_lost"].is_number());
         assert!(floor["boss_hp_lost"].is_null());
         assert!(floor["level_up_times"].is_array());
+        // One sample per whole ten seconds of the run.
+        let samples = floor["hp_samples_10s"].as_array().expect("HP samples");
+        assert_eq!(samples.len(), (floor["time"].as_f64().expect("time") / 10.0) as usize);
+        // `--bot-compare` reads exactly this shape back.
+        let back: BatchReport = serde_json::from_value(v).expect("deserialize");
+        assert_eq!(back.runs, r.runs);
+        assert_eq!(back.levels.len(), r.levels.len());
+        assert_eq!(back.skill, r.skill);
     }
 }

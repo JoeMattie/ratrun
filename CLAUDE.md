@@ -356,15 +356,39 @@ Every item has exhaustive `match`es that must be touched or the build fails. Gre
 
 ## Testing strategy
 
-Everything runs without audio or a TTY (`cargo test`; the dev profile's `opt-level = 1` keeps full-run tests fast). The layers:
+Everything runs without audio or a TTY (`cargo test`; the dev profile's `opt-level = 1` keeps the tick-heavy tests fast). The layers:
 
 1. **Pure-logic unit tests** — math, collision, nav, director, loadout, scores, shop, meta, audio synthesis, damage numbers, term/palette.
 2. **Per-system narrow tests** in each `systems/*.rs`: `begin_tick` → `ecs.run_system_cached(…)` → `end_tick`, then assert on facade caches or entity state.
-3. **The ported suite** (`game/ecs/tests.rs`): thousands of headless ticks across themes and viewports, plus spawn/wall/cap/nuke/tie-order regressions.
+3. **The ported suite** (`game/ecs/tests.rs`): headless ticks across themes and viewports, plus spawn/wall/cap/nuke/tie-order regressions.
 4. **`TestBackend` end-to-end** tests (`app.rs`, `render/*`): the full App and render stack with simulated keystrokes, clicks and pad events.
-5. **Gates**: `levelgen::tests::map_trace_pin` (map pin), `world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom` (the same seed at every zoom and never drawn) and the generator's cost and statistics measurements.
+5. **Gates**: `levelgen::tests::map_trace_pin` (map pin), `ecs::tests::the_same_seed_plays_the_same_run` (the twin-run sweep) and the generator's cost and statistics measurements.
+
+### The suite's budget rules
+
+The suite is CPU-bound (~0.5 s of one core per test before the trim), so a test's *span* is the thing to keep small. These are rules, not preferences:
+
+- **No test simulates a full level, and none runs 15 minutes of game time.** If a rule needs the late curve or the boss window, move the clock with the existing setters (`w.elapsed = director::BOSS_TIME - 25.0`) and play only that window, as `ecs::tests::enemy_cap_holds_at_the_top_of_the_curve` and `...::enemy_index_is_fresh_at_every_reader` do. Board them at roughly 20 s of game time per case; 100 s is the ceiling for one `headless_run_does_not_panic` theme.
+- **No bot runs in the suite.** `game/bot.rs` is a test *instrument* and its unit tests (a decision, a shop leg, a read) are cheap and stay; whole fights, campaigns and batches are run on request with the binary (`--bot-batch`, `--ai`), never inside `cargo test`. The measurement tests already `#[ignore]`d there stay that way (`cargo test <name> -- --ignored --nocapture`).
+- **Determinism is proven once, in one place.** `ecs::tests::the_same_seed_plays_the_same_run` is a table-driven twin-run sweep: one row per floor plus the miniboss and boss windows and a weapons row, each at most 20 s, compared on a whole-state fingerprint. Add a row there instead of writing a new twin test. Three named tests keep their own replay because they pin something else on top of it: `world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom` (zoom is render-only), `systems::fog::tests::fog_never_moves_the_simulation` (fog is render-only) and `campaign::tests::a_four_level_campaign_replays_exactly_from_a_seed` (the per-level seed derivation). Tests that compare two renderings of *one* world (`a still scene draws identically twice`, frozen-frame and bit-identical pose tests) are render-stability tests, not twin runs — they stay.
+- **Whole-song audio renders are `#[ignore]`d** (`music::synth`: the two-loop mix targets, the bit-for-bit song render and the per-tier finiteness sweep). A song render is a measurement; the short-slice synth tests gate correctness.
+
+### `debug_assert_enemy_index` is opt-in
+
+Every reader of `EnemyIndex` calls `resources::debug_assert_enemy_index`, which re-sorts the live enemy list and compares it slot by slot. That is ~6 µs at 100 enemies and ~20 µs at 600, 4-8 live calls per tick, so it is **off unless `RATRUN_CHECK_ENEMY_INDEX=1`** (read once and cached, so a normal run pays one relaxed atomic load per call site):
+
+```sh
+RATRUN_CHECK_ENEMY_INDEX=1 cargo test --locked        # turn on the guard
+RATRUN_CHECK_ENEMY_INDEX=1 cargo test enemy_index     # just the crowd proof
+```
+
+Set it when you change spawn/despawn/reap order, the grid rebuild or a reader's window. `ecs::tests::enemy_index_is_fresh_at_every_reader` forces the guard on for its own duration, so the window still has a test that exercises it in CI.
 
 Construct `App::with_options(false, None, ScoreTable::default(), false, Some(seed))` (the test module's `test_app()`) / `World::new(theme, seed)` to stay silent and deterministic. **Never `App::new` in a test**: it loads and persists the player's real save. `ScoreTable::load`/`save` are additionally inert under `cfg(test)` unless `RATRUN_DATA_DIR` names a directory. Never assert on the map pin whose failure output you have not read.
+
+### CI
+
+`.github/workflows/ci.yml` runs the full `cargo test` and `cargo clippy --all-targets -- -D warnings` on `ubuntu-22.04` only, and `cargo check --locked` on macOS and Windows (those runners are there for `cfg(unix)`/`cfg(windows)` compilation, which `check` finds without building every test target). Each job caches `~/.cargo` and `target` with `Swatinem/rust-cache` (pinned); the wasm pass lives in `web/build.sh`, not in CI.
 
 ## Spinning up workers
 

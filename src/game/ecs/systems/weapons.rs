@@ -3825,48 +3825,6 @@ mod tests {
         );
     }
 
-    /// Same seed, same presses: the two active weapons land identical damage,
-    /// crowd control and effect state.
-    #[test]
-    fn active_weapons_are_deterministic() {
-        let run = || -> Vec<(f32, f32, f32)> {
-            let mut w = World::new(Theme::Kitchen, 424242);
-            w.clear_enemies();
-            w.clear_bullets();
-            let ppos = w.player.pos;
-            let mut rng = StdRng::seed_from_u64(9);
-            for i in 0..24 {
-                let a = i as f32 * 0.7;
-                let pos = (ppos + Vec2::from_angle(a) * (14.0 + i as f32 * 3.0))
-                    .clamp_box(Vec2::splat(8.0), w.level.arena);
-                w.spawn_enemy_with_rng(EnemyKind::Skitterer, pos, 6.0, &mut rng);
-            }
-            for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
-                let idx = w.player.loadout.weapons.len();
-                w.player.loadout.weapons.push(Weapon {
-                    kind,
-                    level: 1,
-                    timer: 0.0,
-                    evolved: false,
-                });
-                let _ = idx;
-            }
-            for tick in 0..240u32 {
-                // One press at the start, then let the effects play out.
-                tick_active(&mut w, tick == 0);
-            }
-            let mut out = Vec::new();
-            for e in w.enemies() {
-                out.push((e.pos.x, e.pos.y, e.hp));
-            }
-            out
-        };
-        let a = run();
-        let b = run();
-        assert_eq!(a.len(), b.len(), "same seed spawned different hordes");
-        assert_eq!(a, b, "the active weapons desynchronised the run");
-    }
-
     // ---- Per-tick cost (reported in the change that added line of sight) --
 
     /// Fill `EnemyIndex` in `SpawnId` order the way

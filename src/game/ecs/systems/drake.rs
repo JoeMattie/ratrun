@@ -949,11 +949,16 @@ mod tests {
 
     /// The guest's clock really is the curve clock: a Sewer world stepped past
     /// 2:30 spawns one (the run itself, not a hand-built context).
+    ///
+    /// The clock is moved to 2:20 first instead of being ticked there: nothing
+    /// the Drake spawner reads changes before `FROM_CLOCK`, and the negative
+    /// half (no guest in the opening minute) is `no_opening_run_meets_a_drake`.
     #[test]
-    fn a_full_run_spawns_its_first_drake_after_2_30() {
+    fn a_run_walks_into_its_first_drake_after_2_30() {
         let mut w = World::new(Theme::Sewer, 4242);
+        w.elapsed = FROM_CLOCK - 10.0;
         let mut at = None;
-        while w.elapsed < 200.0 {
+        while w.elapsed < FROM_CLOCK + 10.0 {
             w.update(0.1, Vec2::ZERO, false);
             w.player.hp = w.player.max_hp();
             if w.enemies().iter().any(|e| e.kind == EnemyKind::Drake) {

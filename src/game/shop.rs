@@ -2019,60 +2019,6 @@ mod tests {
         );
     }
 
-    /// Two runs of one seed that shop the same way stay identical tick for
-    /// tick: the shelf, the purchase and the stat rebuild are all pure.
-    #[test]
-    fn twin_runs_with_purchases_agree() {
-        const DT: f32 = 1.0 / 60.0;
-        let mut a = world(51);
-        let mut b = world(51);
-        a.gold = 300;
-        b.gold = 300;
-        let dir = crate::math::Vec2::new(1.0, 0.0);
-        for tick in 0..900 {
-            if tick == 100 {
-                a.open_shop(0);
-                b.open_shop(0);
-                assert_eq!(
-                    buy(&mut a, 0, ShopItem::Splice(0)),
-                    buy(&mut b, 0, ShopItem::Splice(0))
-                );
-                a.leave_shop();
-                b.leave_shop();
-            }
-            if tick == 300 {
-                a.player.hp = a.player.max_hp() * 0.5;
-                b.player.hp = b.player.max_hp() * 0.5;
-                assert_eq!(
-                    buy(&mut a, 0, ShopItem::Stitch),
-                    buy(&mut b, 0, ShopItem::Stitch)
-                );
-                a.leave_shop();
-                b.leave_shop();
-            }
-            a.update(DT, dir, false);
-            b.update(DT, dir, false);
-            assert_eq!(a.player.hp, b.player.hp, "tick {tick}: hp");
-            assert_eq!(a.elapsed, b.elapsed);
-            assert_eq!(a.kills, b.kills, "tick {tick}: kills");
-            assert_eq!(a.score, b.score);
-            assert_eq!(a.gold, b.gold);
-            assert_eq!(a.enemy_count(), b.enemy_count(), "tick {tick}: crowd");
-            assert_eq!(
-                a.player.loadout.stats.max_hp,
-                b.player.loadout.stats.max_hp
-            );
-            assert_eq!(
-                a.player.loadout.stats.damage_mult,
-                b.player.loadout.stats.damage_mult
-            );
-        }
-        assert_eq!(a.player.loadout.splices, b.player.loadout.splices);
-        assert_eq!(a.player.loadout.splices.len(), 1, "one splice each");
-        use rand::RngExt as _;
-        assert_eq!(a.rng.random::<u64>(), b.rng.random::<u64>());
-    }
-
     #[test]
     fn the_row_list_covers_every_item() {
         let mut seen = Vec::new();

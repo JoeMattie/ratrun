@@ -462,7 +462,7 @@ Re-tune the curve for the bigger map (keep `RUN_SECONDS = 300`, `BOSS_TIME =
 `spawn_interval` floor 0.28 s → ~0.20 s and `pulse_count` `2 + t/22` → `3 + t/16`
 are the suggested starting points; the acceptance tests are
 `director::tests::the_curve_fills_a_map_ten_times_larger` (the curve itself) and
-`ecs::tests::enemy_cap_holds_through_a_full_run`, and the whole horde must still arrive at
+`ecs::tests::enemy_cap_holds_at_the_top_of_the_curve`, and the whole horde must still arrive at
 the player rather than piling up behind a wall (add a test: 200 s of simulation,
 every live enemy's distance to the player decreasing over a 10 s window, or
 use the existing nav benchmark).

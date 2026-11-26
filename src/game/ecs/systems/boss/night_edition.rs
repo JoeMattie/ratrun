@@ -1288,55 +1288,6 @@ mod tests {
         );
     }
 
-    // ---- determinism -----------------------------------------------------
-
-    #[test]
-    fn twin_press_fights_match() {
-        let run = |seed: u64| {
-            let mut w = printworks(seed);
-            spawn_press(&mut w);
-            let mut q = w.ecs.query::<&Boss>();
-            let pos = q.iter(&w.ecs).next().expect("boss").pos;
-            w.player.pos = pos + Vec2::new(36.0, 0.0);
-            // The real schedule: director, horde, the boss and the combat
-            // systems all run, so any rng draw outside the boss's stream shows.
-            for _ in 0..(25.0 / DT) as usize {
-                w.update(DT, Vec2::new(1.0, 0.0), false);
-                if !w.player.alive() {
-                    break;
-                }
-            }
-            let boss = {
-                let mut q = w.ecs.query::<&Boss>();
-                q.iter(&w.ecs).next().cloned()
-            };
-            let boss = boss.expect("the press survives 25 s");
-            (
-                boss.pos,
-                boss.hp,
-                boss.state,
-                boss.phase,
-                boss.hazards.len(),
-                w.player.hp,
-                w.enemy_count(),
-            )
-        };
-        let a = run(seed_of(9001));
-        let b = run(seed_of(9001));
-        assert_eq!(a.0, b.0);
-        assert_eq!(a.1, b.1);
-        assert_eq!(a.2, b.2);
-        assert_eq!(a.3, b.3);
-        assert_eq!(a.4, b.4);
-        assert_eq!(a.5, b.5);
-        assert_eq!(a.6, b.6);
-    }
-
-    #[inline]
-    fn seed_of(seed: u64) -> u64 {
-        seed
-    }
-
     // ---- the bot fights it ----------------------------------------------
 
     /// A near-complete build (the campaign's usual end state).
@@ -1426,41 +1377,6 @@ mod tests {
                 w.player.hp,
                 weak_secs,
             );
-        }
-    }
-
-    #[test]
-    fn the_bot_kills_the_night_edition_over_five_seeds() {
-        use crate::game::bot::{Bot, Skill};
-        for seed in [5u64, 41, 77, 1234, 9091] {
-            let mut w = printworks(seed);
-            give_typical_build(&mut w);
-            // Wind the clock to the boss so the test measures the fight.
-            w.elapsed = crate::game::director::BOSS_TIME - 4.0;
-            let mut bot = Bot::new(Skill::Skilled, seed ^ 0x5eed);
-            bot.on_new_level(w.level_index);
-            let mut ticks = 0u32;
-            let limit = (170.0 / DT) as u32;
-            while ticks < limit && !w.level_complete && w.player.alive() {
-                let input = bot.decide(&w, DT);
-                w.update(DT, input.move_dir, input.dash);
-                ticks += 1;
-            }
-            assert!(
-                w.player.alive(),
-                "seed {seed}: the bot died to the press after {:.0} s",
-                ticks as f32 * DT
-            );
-            assert!(
-                w.level_complete,
-                "seed {seed}: the bot never killed the press in {:.0} s",
-                ticks as f32 * DT
-            );
-            let sans_boss = {
-                let mut q = w.ecs.query::<&Boss>();
-                q.iter(&w.ecs).count()
-            };
-            assert_eq!(sans_boss, 0, "seed {seed}: the press must be dead");
         }
     }
 

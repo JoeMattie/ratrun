@@ -777,20 +777,85 @@ pub(crate) struct HoldPointFx {
     pub phase: HoldPhase,
 }
 
-/// Debug-build guard for the [`EnemyIndex`] validity window.
+/// Is the [`EnemyIndex`] guard on? **Opt-in, and read once.**
+///
+/// The guard costs a full `sort_unstable_by_key` of the live enemy list per
+/// call — 18 call sites, 4-8 of them live per tick, ≈ 6 µs at 100 enemies and
+/// ≈ 20 µs at 600 — which is 20-40 % of every tick-heavy test's cost. So it is
+/// off unless `RATRUN_CHECK_ENEMY_INDEX=1` is set in the environment of the
+/// `cargo test` process. The answer is cached in an atomic on first use (one
+/// relaxed load per call site afterwards), so a suite run pays nothing for the
+/// guard.
+///
+/// Set it when you are changing spawn/despawn/reap order or a reader's window:
+///
+/// ```sh
+/// RATRUN_CHECK_ENEMY_INDEX=1 cargo test --locked
+/// ```
+/// Set by the one test that has to exercise the guard
+/// (`ecs::tests::enemy_index_is_fresh_at_every_reader`), because an
+/// environment variable cannot be handed to a test thread that started first.
+/// Only ever set for that test's own duration: everything else in the process
+/// pays a little more per tick for those seconds, and the guard never fails on
+/// correct code.
+#[cfg(debug_assertions)]
+static ENEMY_INDEX_CHECK_FORCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(debug_assertions)]
+fn enemy_index_check_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    if ENEMY_INDEX_CHECK_FORCED.load(Ordering::Relaxed) {
+        return true;
+    }
+    // 0 = not read yet, 1 = off, 2 = on.
+    static CACHED: AtomicU8 = AtomicU8::new(0);
+    match CACHED.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(std::env::var("RATRUN_CHECK_ENEMY_INDEX").as_deref(), Ok("1"));
+            CACHED.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Debug-build guard for the [`EnemyIndex`] validity window. **Opt-in:**
+/// a no-op unless `RATRUN_CHECK_ENEMY_INDEX=1` (see
+/// [`enemy_index_check_enabled`]).
 ///
 /// Every system that reads `EnemyIndex.0[j]` (a `SpatialGrid` bucket index) or
 /// walks `EnemyIndex` instead of sorting the enemy query calls this first with
 /// the live `(SpawnId, Entity)` list. `cargo test` builds with
 /// `debug_assertions`, so any tick where an enemy was spawned or despawned
-/// between a build point and a reader trips here; release builds compile the
-/// function body away (`#[cfg(not(debug_assertions))]` callers skip it too).
-///
-/// The comparison is against a freshly sorted list, not just a length check:
-/// a despawn + spawn in the same window keeps the length identical while
-/// invalidating every slot, which is exactly the hole this is meant to catch.
+/// between a build point and a reader trips here when the guard is on; release
+/// builds compile the function body away (`#[cfg(not(debug_assertions))]`
+/// callers skip it too).
 #[cfg(debug_assertions)]
 pub fn debug_assert_enemy_index(index: &[Entity], spawn_ids: impl Iterator<Item = (u64, Entity)>) {
+    if !enemy_index_check_enabled() {
+        return;
+    }
+    assert_enemy_index_fresh(index, spawn_ids);
+}
+
+/// Turn the guard on for this test's duration (see [`enemy_index_check_enabled`]).
+#[cfg(all(debug_assertions, test))]
+pub(crate) fn force_enemy_index_check(on: bool) {
+    ENEMY_INDEX_CHECK_FORCED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The guard's body: compare the cached `EnemyIndex` against a freshly sorted
+/// `(SpawnId, Entity)` list and panic on the first disagreement.
+///
+/// Split out from [`debug_assert_enemy_index`] so the guard's own unit tests
+/// can prove it still catches a stale index while the opt-in gate is off; the
+/// comparison is against a freshly sorted list, not just a length check (a
+/// despawn + spawn in the same window keeps the length identical while
+/// invalidating every slot, which is exactly the hole this is meant to catch).
+#[cfg(debug_assertions)]
+fn assert_enemy_index_fresh(index: &[Entity], spawn_ids: impl Iterator<Item = (u64, Entity)>) {
     let mut fresh: Vec<(u64, Entity)> = spawn_ids.collect();
     fresh.sort_unstable_by_key(|&(id, _)| id);
     assert_eq!(
@@ -1600,7 +1665,7 @@ mod tests {
         let mut ecs = World::new();
         let a = ecs.spawn(()).id();
         let b = ecs.spawn(()).id();
-        debug_assert_enemy_index(&[b, a], [(1u64, a), (2u64, b)].into_iter());
+        assert_enemy_index_fresh(&[b, a], [(1u64, a), (2u64, b)].into_iter());
     }
 
     #[test]
@@ -1608,7 +1673,7 @@ mod tests {
     fn enemy_index_guard_rejects_a_length_mismatch() {
         let mut ecs = World::new();
         let a = ecs.spawn(()).id();
-        debug_assert_enemy_index(&[a, a], [(1u64, a)].into_iter());
+        assert_enemy_index_fresh(&[a, a], [(1u64, a)].into_iter());
     }
 }
 

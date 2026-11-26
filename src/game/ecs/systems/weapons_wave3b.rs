@@ -1498,61 +1498,6 @@ mod tests {
         assert_eq!(enemy_hp(&w, body), hp, "an unowned Super Dash dealt damage");
     }
 
-    /// Two runs with the same seed and the same inputs land the same numbers:
-    /// the burst and the dash draw rng only through their emitters, in order.
-    #[test]
-    fn twin_runs_of_the_new_weapons_match() {
-        let play = |seed: u64| {
-            let mut w = World::new(Theme::Sewer, seed);
-            w.clear_enemies();
-            w.clear_bullets();
-            open_map(&mut w);
-            w.player.loadout.weapons = vec![
-                Weapon {
-                    kind: WeaponKind::LaserEyes,
-                    level: 3,
-                    timer: 0.0,
-                    evolved: false,
-                },
-                Weapon {
-                    kind: WeaponKind::SuperDash,
-                    level: 3,
-                    timer: 0.0,
-                    evolved: false,
-                },
-            ];
-            let p = w.player.pos;
-            let mut enemies = Vec::new();
-            for i in 0..12 {
-                let a = i as f32 * 0.5;
-                let at = p + Vec2::from_angle(a) * (8.0 + i as f32 * 3.0);
-                enemies.push(w.spawn_enemy(EnemyKind::Cat, at, 4.0));
-            }
-            for tick in 0..240 {
-                let move_dir = if tick < 30 {
-                    Vec2::new(1.0, 0.0)
-                } else {
-                    Vec2::new(0.0, 1.0)
-                };
-                let dash = tick % 40 == 0;
-                w.player.dash_cd = w.player.dash_cd.min(0.0);
-                w.begin_tick(1.0 / 60.0, move_dir, dash);
-                w.ecs
-                    .run_system_cached(crate::game::ecs::systems::player::player_system)
-                    .unwrap();
-                w.ecs.run_system_cached(laser_eyes_system).unwrap();
-                w.ecs.run_system_cached(super_dash_system).unwrap();
-                w.end_tick();
-            }
-            let hps: Vec<u32> = enemies
-                .iter()
-                .map(|&e| (enemy_hp(&w, e) * 100.0) as u32)
-                .collect();
-            (hps, w.player.pos.x.to_bits(), w.player.pos.y.to_bits())
-        };
-        assert_eq!(play(900), play(900));
-    }
-
     /// Every wave-3 passive that claims a weapon actually reaches it: the
     /// audit the design asks for (all eight pre-existing weapons plus the two
     /// new ones).

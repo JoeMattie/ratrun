@@ -703,56 +703,6 @@ mod tests {
         assert!(differed > 4, "the grates vent in lockstep on {} maps", 8 - differed);
     }
 
-    /// Twin runs on both wave 3 floors: the same seed and the same scripted
-    /// inputs reproduce the same run, hazards and all (the levels' extra rng
-    /// draws happen at generation time only, and the plumes are deterministic
-    /// clock crossings, so nothing here may diverge).
-    #[test]
-    fn twin_runs_match_on_both_new_floors() {
-        for theme in [Theme::Laundry, Theme::Printworks] {
-            for seed in [5u64, 17] {
-                let digest = |seed: u64| {
-                    let mut w = World::new(theme, seed);
-                    let dt = 1.0 / 60.0;
-                    for tick in 0..1200u32 {
-                        let dir = Vec2::from_angle(tick as f32 * 0.045);
-                        w.update(dt, dir, tick % 120 == 0);
-                        if w.pending_levelups > 0 {
-                            w.pending_levelups = 0;
-                            let choices = w.player.loadout.generate_choices(&mut w.rng);
-                            if let Some(choice) = choices.first() {
-                                let choice = choice.clone();
-                                w.player.loadout.apply(&choice);
-                            }
-                        }
-                    }
-                    fn fold(mut h: u64, v: f32) -> u64 {
-                        h ^= v.to_bits() as u64;
-                        h.wrapping_mul(0x100000001b3)
-                    }
-                    let mut h = 0xcbf29ce484222325u64;
-                    h = fold(h, w.player.pos.x);
-                    h = fold(h, w.player.pos.y);
-                    h = fold(h, w.player.hp);
-                    h = fold(h, w.elapsed);
-                    h ^= w.kills as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                    for e in w.enemies() {
-                        h = fold(h, e.pos.x);
-                        h = fold(h, e.pos.y);
-                        h = fold(h, e.hp);
-                    }
-                    for g in &w.level.objects.steam_grates {
-                        h ^= g.phase as u64 ^ ((g.timer * 1000.0) as u64).rotate_left(17);
-                        h = h.wrapping_mul(0x100000001b3);
-                    }
-                    h
-                };
-                assert_eq!(digest(seed), digest(seed), "{theme:?} seed {seed} diverged");
-            }
-        }
-    }
-
     #[test]
     fn plume_damage_matches_the_design_number() {
         assert_eq!(STEAM_DAMAGE, 8.0);

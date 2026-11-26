@@ -20,6 +20,18 @@
   games on every run to compare each one with itself. A seed still has to play
   out identically (at every zoom, and with the fog reveal on or off), so a
   balance change no longer waits on a replay pass to be re-recorded.
+- **A much shorter test run.** No test simulates a whole level any more, and
+  none runs for fifteen minutes: the two full-run determinism/replay tests are
+  gone, and the twenty-odd hand-written twin-run tests are one table-driven
+  sweep (`ecs::tests::the_same_seed_plays_the_same_run`, one row per floor and
+  per difficulty window, 20 s each). Bot fights and batches no longer play
+  inside `cargo test` — the two-minute-ladder, five-seed boss fights, ten
+  campaign runs and the batch-report tests are all removed, and bot
+  measurements run on request with `--bot-batch`. Whole-song audio renders are
+  `#[ignore]`d. `debug_assert_enemy_index` is opt-in (`RATRUN_CHECK_ENEMY_INDEX=1`).
+- **Faster CI.** One `Swatinem/rust-cache` step per job, the full suite and
+  clippy on Linux only, and `cargo check --locked` on macOS and Windows
+  instead of a third and fourth copy of the suite.
 
 ## 0.4.2 (2026-11-26)
 

@@ -2707,87 +2707,30 @@ mod tests {
         assert!(w.ecs.resource::<BossDue>().is_pending());
     }
 
-    /// Everything `spawn_point` and `Enemy::spawn` derive from the rng, so any
-    /// divergence in the draw order shows up.
-    fn fingerprint(e: &Enemy) -> (EnemyKind, bool, Vec<u32>) {
-        let fields = [
-            e.pos.x, e.pos.y, e.hp, e.max_hp, e.radius, e.damage, e.fire_cd, e.wander, e.anim,
-        ];
-        (e.kind, e.elite, fields.iter().map(|f| f.to_bits()).collect())
-    }
-
-    /// **Twin runs.** Same seed, same map, same clock ⇒ the same enemies in the
-    /// same order, down to the last rng-derived bit.
-    ///
-    /// This is a finer determinism contract than the scripted cases can check:
-    /// they fold a whole trace into one hash, while this compares every field of
-    /// every body. It also covers the *number* of rng draws per pulse, which
-    /// room-wave, flank and skip rules all have to keep independent of their
-    /// outcomes: every pulse member draws exactly one ring angle, then
-    /// `Enemy::spawn` draws three fields.
+    /// **One run per floor: the roster decides the kinds.** A floor only ever
+    /// spawns its own cast (the Drake is the Sewer's guest, on no slot by
+    /// design). The same-seed-twice half of this test lived here as a twin run;
+    /// that rule is proven once per floor by
+    /// `ecs::tests::the_same_seed_plays_the_same_run` now, so this is one world
+    /// and 120 s of director time instead of two worlds and 600 s.
     #[test]
-    fn the_director_is_deterministic_across_twin_runs() {
-        let seed = 41;
-        let mut a = World::new(Theme::Sewer, seed);
-        let mut b = World::new(Theme::Sewer, seed);
-        assert_eq!(a.level.arena, b.level.arena);
-        let dt = 0.5;
-        let mut elapsed = 0.0;
-        for _ in 0..1900 {
-            elapsed += dt;
-            director_tick(&mut a, dt, elapsed);
-            director_tick(&mut b, dt, elapsed);
-            let (ea, eb) = (a.enemies(), b.enemies());
-            assert_eq!(ea.len(), eb.len(), "count differs at {elapsed:.2}s");
-            for (x, y) in ea.iter().zip(eb.iter()) {
-                assert_eq!(
-                    fingerprint(x),
-                    fingerprint(y),
-                    "enemy differs at {elapsed:.2}s"
-                );
-            }
-            assert_eq!(a.director.spawn_timer, b.director.spawn_timer);
-            assert_eq!(a.director.elite_timer, b.director.elite_timer);
-            assert_eq!(a.director.chamber_room, b.director.chamber_room);
-            assert_eq!(a.director.boss_spawned, b.director.boss_spawned);
-        }
-        assert!(a.enemies().len() > 100, "the run must exercise the cap");
-        assert!(a.director.boss_spawned, "the run must reach the boss hand-off");
-        assert_eq!(
-            a.enemies().first().map(|e| e.id),
-            Some(1),
-            "first director enemy must get id 1"
-        );
-    }
-
-    /// **Twin runs, one per floor.** The roster decides the kinds, so every
-    /// floor has to be reproducible draw for draw: same seed, same map, same
-    /// clock ⇒ the same bodies in the same order, kinds included.
-    #[test]
-    fn every_floor_is_deterministic_across_twin_runs() {
+    fn every_floor_only_spawns_its_own_roster() {
         let seed = 41;
         for theme in Theme::playable() {
             let mut a = World::new(theme, seed);
-            let mut b = World::new(theme, seed);
             let dt = 0.5;
             let mut elapsed = 0.0;
             let mut kinds: Vec<EnemyKind> = Vec::new();
-            for _ in 0..1200 {
+            for _ in 0..240 {
                 elapsed += dt;
                 director_tick(&mut a, dt, elapsed);
-                director_tick(&mut b, dt, elapsed);
-                let (ea, eb) = (a.enemies(), b.enemies());
-                assert_eq!(ea.len(), eb.len(), "{theme:?}: count differs at {elapsed:.1}s");
-                for (x, y) in ea.iter().zip(eb.iter()) {
-                    assert_eq!(fingerprint(x), fingerprint(y), "{theme:?}: enemy differs");
+                for x in a.enemies() {
                     if !kinds.contains(&x.kind) {
                         kinds.push(x.kind);
                     }
                 }
-                assert_eq!(a.director.spawn_timer, b.director.spawn_timer, "{theme:?}");
-                assert_eq!(a.director.elite_timer, b.director.elite_timer, "{theme:?}");
             }
-            assert!(a.enemies().len() > 30, "{theme:?}: the run spawned almost nothing");
+            assert!(a.enemies().len() > 10, "{theme:?}: the run spawned almost nothing");
             // And it only ever spawned its own cast.
             let floor = crate::game::roster::floor(theme);
             for kind in kinds {

@@ -1645,61 +1645,6 @@ mod tests {
         assert_eq!(a.enemies().len(), b.enemies().len());
     }
 
-    /// Twin runs: the same seed and the same inputs land the same hits, in the
-    /// same order, on every level and both evolution states.
-    #[test]
-    fn twin_runs_are_deterministic() {
-        fn trace(level: u8, evolved: bool) -> (u64, f32) {
-            let mut w = arena(123, level);
-            w.player.loadout.weapons[0].evolved = evolved;
-            let mut h = 0xcbf2_9ce4_8422_2325u64;
-            let p = w.player.pos;
-            for i in 0..8 {
-                let a = i as f32 * 0.8;
-                w.spawn_enemy_with_rng(
-                    EnemyKind::Brute,
-                    p + Vec2::from_angle(a) * (18.0 + i as f32 * 5.0),
-                    400.0,
-                    &mut rand::rngs::StdRng::seed_from_u64(i as u64),
-                );
-            }
-            for tick in 0..240u32 {
-                let dir = match (tick / 30) % 4 {
-                    0 => Vec2::new(1.0, 0.0),
-                    1 => Vec2::new(0.0, 1.0),
-                    2 => Vec2::new(-1.0, 0.0),
-                    _ => Vec2::new(0.0, -1.0),
-                };
-                w.update(DT, dir, false);
-                if tick % 12 == 0 {
-                    for v in [
-                        w.player.pos.x.to_bits() as u64,
-                        w.player.pos.y.to_bits() as u64,
-                        w.kills as u64,
-                    ] {
-                        h ^= v;
-                        h = h.wrapping_mul(0x100_0000_01b3);
-                    }
-                    for e in w.enemies() {
-                        for v in [e.pos.x.to_bits() as u64, e.pos.y.to_bits() as u64, e.hp.to_bits() as u64] {
-                            h ^= v;
-                            h = h.wrapping_mul(0x100_0000_01b3);
-                        }
-                    }
-                }
-            }
-            (h, dealt(&w))
-        }
-        for level in [1u8, 3, 5] {
-            for evolved in [false, true] {
-                let a = trace(level, evolved);
-                let b = trace(level, evolved);
-                assert_eq!(a, b, "L{level} evolved={evolved}: twin runs diverged");
-                assert!(a.1 > 0.0, "L{level} evolved={evolved}: nothing was hit");
-            }
-        }
-    }
-
     /// The lash never spawns two entities for one shot, and the wind-up's
     /// crack is exactly once however the ticks are cut.
     #[test]
