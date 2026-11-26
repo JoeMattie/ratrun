@@ -9,6 +9,8 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import numpy as np
 
 from app import OUTPUT, RATE, SKILLS
@@ -84,7 +86,12 @@ def write_plots(output, result, actual):
         ax.scatter(result["candidate"][skill]["win"], i, marker="x", color="#333333", zorder=3)
     ax.set(yticks=range(3), yticklabels=[s.title() for s in SKILLS], xlabel="Win rate", xlim=(0, 1))
     ax.invert_yaxis()
-    ax.set_title("Win bands, predictions and 95% intervals")
+    ax.set_title("Fresh-seed win rates")
+    ax.legend(handles=[
+        Patch(facecolor="#dedede", label="Target band"),
+        Line2D([], [], color="#333333", marker="x", linestyle="none", label="Model prediction"),
+        Line2D([], [], color="#333333", marker="o", label="Measured, 95% CI"),
+    ], loc="upper left", frameon=False, fontsize=8)
     ax = panels[1]
     for index, (skill, color) in enumerate(zip(SKILLS, COLORS, strict=True)):
         values = [actual[skill][key][0] for key in FLOOR_DEATH]
