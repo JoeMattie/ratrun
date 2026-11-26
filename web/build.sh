@@ -23,8 +23,8 @@ cargo build --release --locked --target "$target" --no-default-features --featur
 dist="$root/web/dist"
 mkdir -p "$dist/vendor"
 "$bindgen" "$CARGO_TARGET_DIR/$target/release/ratrun.wasm" \
-    --target web --no-typescript --out-dir "$dist"
-cp web/index.html web/game.js "$dist/"
+    --target web --no-typescript --remove-name-section --out-dir "$dist"
+cp LICENSE web/index.html web/game.js "$dist/"
 cp web/node_modules/@xterm/xterm/css/xterm.css "$dist/vendor/"
 cp web/node_modules/@xterm/xterm/lib/xterm.mjs "$dist/vendor/"
 cp web/node_modules/@xterm/addon-fit/lib/addon-fit.mjs "$dist/vendor/"
