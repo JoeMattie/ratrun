@@ -88,6 +88,26 @@ impl Buffs {
         self.giant > 0.0
     }
 
+    /// Eased body and dash scale, including the size pickup warning blink.
+    pub fn draw_scale(&self) -> f32 {
+        if let Some(scale) = powerups::giant_draw_scale(self.giant) {
+            return scale;
+        }
+        if self.tiny <= 0.0 {
+            return 1.0;
+        }
+        let elapsed = (powerups::SHRINK_SECS - self.tiny).max(0.0);
+        let ramp = elapsed.min(self.tiny).min(powerups::SHRINK_RAMP_SECS)
+            / powerups::SHRINK_RAMP_SECS;
+        let blink = self.tiny <= powerups::SHRINK_BLINK_SECS && (self.tiny * 6.0) as i32 % 2 == 0;
+        let target = if blink {
+            powerups::SHRINK_BLINK_SCALE
+        } else {
+            powerups::SHRINK_SCALE
+        };
+        1.0 - (1.0 - target) * ramp
+    }
+
     /// The radius for incoming hit tests. Movement still uses the body radius.
     pub fn hurt_radius(&self) -> f32 {
         if let Some(scale) = powerups::giant_draw_scale(self.giant) {

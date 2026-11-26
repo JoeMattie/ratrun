@@ -239,6 +239,7 @@ fn capture_lighting_gallery() {
             Vec2::new(1.0, 0.0),
             theme,
             1.0,
+            1.0,
         );
         w.elapsed = 12.0;
         let mut pb = PixelBuffer::new(vw, vh);

@@ -268,7 +268,13 @@ impl SmokeLayer {
 
         // 2. Dash dust kick (rising edge on `dash_active`).
         if scene.player.dash_active > self.prev_dash_active + 0.01 {
-            self.emit_dash_dust(scene.player.pos, scene.player.face, scene.level.theme, density);
+            self.emit_dash_dust(
+                scene.player.pos,
+                scene.player.face,
+                scene.level.theme,
+                density,
+                scene.player.buffs.draw_scale(),
+            );
         }
         self.prev_dash_active = scene.player.dash_active;
 
@@ -359,7 +365,14 @@ impl SmokeLayer {
     }
 
     /// Emit ground dust kick behind a dashing rat.
-    pub fn emit_dash_dust(&mut self, pos: Vec2, face: Vec2, theme: Theme, density: f32) {
+    pub fn emit_dash_dust(
+        &mut self,
+        pos: Vec2,
+        face: Vec2,
+        theme: Theme,
+        density: f32,
+        scale: f32,
+    ) {
         let back = if face.len_sq() > 0.01 {
             -face.normalized()
         } else {
@@ -377,10 +390,10 @@ impl SmokeLayer {
             let r0 = self.rand_range(1.8, 2.6);
             let r1 = self.rand_range(4.8, 6.8);
             let puff = SmokePuff {
-                pos: pos + back * 2.0 + perp * lat,
-                vel,
-                r0,
-                r1,
+                pos: pos + back * (2.0 * scale) + perp * (lat * scale),
+                vel: vel * scale,
+                r0: r0 * scale,
+                r1: r1 * scale,
                 life,
                 max_life: life,
                 alpha: 0.34,
@@ -480,7 +493,7 @@ impl SmokeLayer {
     fn observe_shockwaves(&mut self, scene: &SmokeScene<'_>, vw: f32, vh: f32, density: f32) {
         let cam = scene.cam;
         for sw in &scene.particles.shockwaves {
-            if sw.end_r < 18.0 {
+            if sw.end_r < 18.0 || super::particle::vfx::is_dash_shockwave(sw) {
                 continue;
             }
             let age = 1.0 - (sw.life / sw.max_life.max(1e-4)).clamp(0.0, 1.0);

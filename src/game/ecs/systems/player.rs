@@ -18,11 +18,10 @@
 //! ## Cross-team hooks re-applied (the merge diff, `update_player`)
 //!
 //! - Dash start: the legacy inline `particles.cone(...)` is now
-//!   `vfx::emit_dash_start(&mut particles, &mut rng, pos, face)`. Note the
-//!   argument is `face`, not `-face`: the helper negates internally, so the
-//!   emitted geometry and the rng draw order are unchanged.
-//! - Dashing block: `vfx::emit_dash_trail(&mut particles, &mut rng, pos, vel,
-//!   dt)` reading the post-sub-step `pos` and the post-lerp `vel`, guarded by
+//!   `vfx::emit_dash_start`. The helper uses the facing to emit behind the rat
+//!   and reads its size for the burst geometry. The RNG draw order is unchanged.
+//! - Dashing block: `vfx::emit_dash_trail` reads the post-sub-step `pos` and
+//!   the post-lerp `vel`, guarded by
 //!   the pre-decay `dashing` flag exactly as the other team's `world.rs` does.
 //!
 //! Resources: `Res<TickInput>` (dt/move_dir/dash), `ResMut<Player>`,
@@ -263,6 +262,7 @@ pub fn player_system(
     } else {
         None
     };
+    let dash_scale = player.buffs.draw_scale();
     dash_track.started_this_tick = false;
     if let Some(charge) = request.filter(|_| pot_hold.is_none_or(|i| traps.pot_dash_ready(i))) {
         if player.dash_cd <= 0.0 {
@@ -276,7 +276,7 @@ pub fn player_system(
             player.iframes = player.iframes.max(player.dash_active + DASH_IFRAME_PAD);
             let pos = player.pos;
             let face = player.face;
-            vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face);
+            vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face, dash_scale);
             sfx.0.push(Sfx::Dash);
             if charge > 0.0 {
                 // The release kicks: the weapon's own `Sfx::SuperDash` lands on
@@ -394,7 +394,7 @@ pub fn player_system(
     if dashing {
         let pos = player.pos;
         let vel = player.vel;
-        vfx::emit_dash_trail(&mut particles, &mut rng.0, pos, vel, move_dt);
+        vfx::emit_dash_trail(&mut particles, &mut rng.0, pos, vel, move_dt, dash_scale);
     }
 
     // Timers (legacy 233-240). Decay order matters: dash_cd, dash_active,

@@ -885,14 +885,56 @@ pub fn draw_evolved_spore_orbiter(pb: &mut PixelBuffer, s: (i32, i32), elapsed: 
     pb.plot(mx + 2, my, cap_lo);
 }
 
+/// A cross-section of the sweep, fading toward the outer edge.
+pub(super) fn draw_dash_lane_slice(
+    pb: &mut PixelBuffer,
+    centre: Vec2,
+    across: Vec2,
+    radius: f32,
+    color: Rgb,
+    alpha: f32,
+) {
+    let reach = radius.ceil() as i32;
+    let inv_radius = 1.0 / radius;
+    for k in -reach..=reach {
+        let offset = k as f32;
+        let cover = (radius + 0.5 - offset.abs()).clamp(0.0, 1.0);
+        let fade = 1.0 - 0.75 * (offset.abs() * inv_radius).min(1.0);
+        let p = centre + across * offset;
+        blend_px(pb, p.x.round() as i32, p.y.round() as i32, color, alpha * cover * fade);
+    }
+}
+
+/// Cobalt width cue beneath Ripcord's braided centre and sliding knots.
+pub(super) fn draw_ripcord_lane(
+    pb: &mut PixelBuffer,
+    route: &[(Vec2, Vec2)],
+    radius: f32,
+    life_frac: f32,
+    cam: Vec2,
+) {
+    let alpha = 0.06 + 0.08 * life_frac;
+    for &(from, to) in route {
+        let leg = to - from;
+        let steps = leg.len().ceil() as i32;
+        let across = leg.normalized().perp();
+        for i in 0..steps {
+            let p = from - cam + leg * (i as f32 / steps as f32);
+            draw_dash_lane_slice(pb, p, across, radius, (62, 146, 255), alpha);
+        }
+    }
+}
+
 /// **Super Dash** kinetic blue-white comb drawn cleanly over the swept corridor
 /// (above enemy hit-flashes so the comb teeth visibly cut through crossed bodies).
+#[allow(clippy::too_many_arguments)]
 pub fn draw_super_dash_comb(
     pb: &mut PixelBuffer,
     head: Vec2,
     dir: Vec2,
     length: f32,
     radius: f32,
+    scale: f32,
     dash_frac: f32,
     cam: Vec2,
 ) {
@@ -916,18 +958,21 @@ pub fn draw_super_dash_comb(
         let s = w2s(p, cam);
         let a = (1.0 - t * 0.65) * fade;
         blend_px(pb, s.0, s.1, white, (0.92 * a).clamp(0.0, 1.0));
-        for side in [-1.0f32, 1.0] {
-            let sh = w2s(p + perp * side, cam);
-            pb.plot_add(sh.0, sh.1, palette::scale(cyan, 0.65 * a));
+        for k in 1..=scale.ceil() as i32 {
+            let gain = (scale + 1.0 - k as f32).clamp(0.0, 1.0);
+            for side in [-1.0f32, 1.0] {
+                let sh = w2s(p + perp * (side * k as f32), cam);
+                pb.plot_add(sh.0, sh.1, palette::scale(cyan, 0.65 * a * gain));
+            }
         }
     }
 
     // 2. Crisp evenly-spaced perpendicular comb teeth raking OUT PAST the crossed
     //    bodies (`radius + 4.5 px`), with dark-cobalt edge contrast so they pop
     //    sharply even over bright enemy white hit flashes!
-    let tooth_reach = (radius + 4.5).clamp(7.0, 11.5);
-    let spacing = 3.2f32;
-    let mut dist = 1.0f32;
+    let tooth_reach = radius + 4.5 * scale;
+    let spacing = (3.2 * scale).max(2.0);
+    let mut dist = scale;
     while dist <= length {
         let t = (dist / length.max(1.0)).clamp(0.0, 1.0);
         let a = (1.0 - t * 0.55) * fade;
@@ -935,7 +980,7 @@ pub fn draw_super_dash_comb(
         let reach = tooth_reach * (1.0 - 0.25 * t);
         let max_k = reach.ceil() as i32;
         for side in [-1.0f32, 1.0] {
-            for k in 2..=max_k {
+            for k in (scale.ceil() as i32 + 1).min(max_k)..=max_k {
                 let kt = k as f32 / reach;
                 // Slightly raked backward like supersonic comb tines.
                 let tp = root + perp * (side * k as f32) - dir * (k as f32 * 0.28);
@@ -950,7 +995,7 @@ pub fn draw_super_dash_comb(
                 // Subtle dark backing on outer tips so bright white hit-flashes
                 // cannot swallow the blue comb teeth.
                 if kt >= 0.45 {
-                    let shadow = w2s(tp - dir, cam);
+                    let shadow = w2s(tp - dir * scale, cam);
                     blend_px(pb, shadow.0, shadow.1, navy, 0.55 * a);
                 }
                 blend_px(pb, ts.0, ts.1, col, (0.90 * a * (1.0 - kt * 0.25)).clamp(0.0, 1.0));
@@ -960,13 +1005,14 @@ pub fn draw_super_dash_comb(
     }
 
     // 3. Leading blue-white spearhead chevron right ahead of the rat's nose.
-    let tip = head + dir * 4.5;
-    for k in 0..=5i32 {
-        let kf = k as f32;
+    let tip = head + dir * (4.5 * scale);
+    let steps = (5.0 * scale).ceil() as i32;
+    for k in 0..=steps {
+        let kf = 5.0 * k as f32 / steps as f32;
         for side in [-1.0f32, 1.0] {
-            let p = tip - dir * (kf * 0.9) + perp * (side * kf * 0.85);
+            let p = tip + (perp * (side * kf * 0.85) - dir * (kf * 0.9)) * scale;
             let s = w2s(p, cam);
-            let col = if k <= 2 { white } else { cyan };
+            let col = if kf <= 2.0 { white } else { cyan };
             blend_px(pb, s.0, s.1, col, (0.95 - kf * 0.12) * fade);
         }
     }
@@ -1509,6 +1555,32 @@ pub fn draw_spike_shard(pb: &mut PixelBuffer, s: (i32, i32), vel: Vec2) {
 mod tests {
     use super::*;
     use crate::game::particle::{vfx, Particles};
+
+    #[test]
+    fn super_dash_comb_width_follows_the_dash_scale() {
+        use crate::game::ecs::systems::weapons_wave3b::super_dash_radius;
+
+        let reach = |scale| {
+            let head = Vec2::new(100.0, 80.0);
+            let mut pb = PixelBuffer::new(160, 160);
+            let radius = super_dash_radius(4.0, 1.0, scale);
+            draw_super_dash_comb(
+                &mut pb, head, Vec2::new(1.0, 0.0), 52.0, radius, scale, 1.0, Vec2::ZERO,
+            );
+            let outer = (0..80)
+                .find(|&y| (0..100).any(|x| pb.pixel_at(x, y) != (0, 0, 0)))
+                .unwrap();
+            let covers_offset = (0..100).any(|x| pb.pixel_at(x, 80 - 16) != (0, 0, 0));
+            ((80 - outer) as f32, covers_offset)
+        };
+        let (normal, normal_covers_offset) = reach(1.0);
+        let (giant, giant_covers_offset) = reach(5.0);
+        let (tiny, _) = reach(0.35);
+        assert!((giant - normal * 5.0).abs() <= 4.0, "{giant} vs {normal}");
+        assert!((tiny - normal * 0.35).abs() <= 1.0, "{tiny} vs {normal}");
+        assert!(!normal_covers_offset);
+        assert!(giant_covers_offset);
+    }
 
     /// A dotted ring lights each pixel at most once, at every radius: the
     /// additive plot used to land twice on some pixels.
