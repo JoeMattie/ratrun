@@ -2531,6 +2531,11 @@ impl World {
             }
         }
 
+        // Decorative Outfall seabed plants: after floor/puddles/walls/props and
+        // before pools, loot and bodies so creatures pass over them, lit with
+        // the scene under the default matte floor pen.
+        self.draw_seabed_plants(pb, cam, viewport);
+
         _s = crate::prof::scope(crate::prof::Stage::SceneFixturesAmbience);
         let ambience_started = std::time::Instant::now();
         let blackout = self.blackout();
@@ -4002,6 +4007,32 @@ impl World {
                     ripple.big,
                 );
             }
+        }
+        pb.set_pen(pen);
+    }
+
+    /// Decorative Outfall seabed plants (kelp fronds, seagrass tufts and corner
+    /// anemones). Render-only: reads only `self.elapsed` so frozen frames stay
+    /// bit-identical, stamps the default matte floor pen (`0`), and caps the
+    /// number of swaying plants per view to keep terminal diff churn low.
+    fn draw_seabed_plants(&self, pb: &mut PixelBuffer, cam: Vec2, viewport: Vec2) {
+        if self.level.plants.is_empty() {
+            return;
+        }
+        let pen = pb.set_pen(0);
+        let elapsed = self.elapsed;
+        let mut swaying = 0usize;
+        for plant in &self.level.plants {
+            if !on_screen(self.w2s(plant.pos, cam), 16.0, viewport) {
+                continue;
+            }
+            let sway_scale = if swaying < super::art_seabed::MAX_SWAY_PER_FRAME {
+                swaying += 1;
+                1.0
+            } else {
+                0.0
+            };
+            super::art_seabed::draw_plant(pb, plant, cam, elapsed, sway_scale);
         }
         pb.set_pen(pen);
     }

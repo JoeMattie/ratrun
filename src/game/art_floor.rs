@@ -641,100 +641,138 @@ fn printworks(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
     }
 }
 
-/// The Outfall floor: warped diagonal ocean-seabed sand ripples with fine silt
-/// grain, scattered half-buried pebbles and shell flecks, dark silt hollows,
-/// and flat recumbent seabed kelp fronds (visual only). Still and strictly
-/// world-anchored so the lighting bump pass stays quiet and scroll crops match.
+/// Bilinearly interpolated integer value noise in `[-100, 100]`, strictly
+/// world-anchored and crop-invariant for organic seabed sand ripples.
+#[inline]
+fn sand_noise(wx: i32, wy: i32, cell: i32, salt: i32) -> i32 {
+    let gx = wx.div_euclid(cell);
+    let gy = wy.div_euclid(cell);
+    let fx = wx - gx * cell;
+    let fy = wy - gy * cell;
+    let tx = (fx * 256) / cell;
+    let ty = (fy * 256) / cell;
+    let sx = (tx * tx * (768 - 2 * tx)) >> 16;
+    let sy = (ty * ty * (768 - 2 * ty)) >> 16;
+
+    let corner = |cx: i32, cy: i32| -> i32 {
+        (hash(cx.wrapping_add(salt), cy.wrapping_sub(salt.wrapping_mul(3))) & 255) as i32 - 128
+    };
+    let c00 = corner(gx, gy);
+    let c10 = corner(gx + 1, gy);
+    let c01 = corner(gx, gy + 1);
+    let c11 = corner(gx + 1, gy + 1);
+    let top = c00 + (((c10 - c00) * sx) >> 8);
+    let bot = c01 + (((c11 - c01) * sx) >> 8);
+    let val = top + (((bot - top) * sy) >> 8);
+    (val * 100) / 128
+}
+
+/// The Outfall floor: pale-to-mid matte seabed sand with fine grain, soft
+/// irregular gently-curving current ripples (low contrast, no regular stripes),
+/// and scattered half-buried shells, smooth pebbles and small dark silt
+/// hollows. Still (no animation) and strictly world-anchored so scroll crops
+/// match and wet puddles, tidal drops, lure bases and bodies stay legible.
 fn outfall(floor: &mut Floor<'_>, pal: &Palette) {
-    let sand_deep = mix((17, 28, 38), pal.bg, 0.12);
-    let sand_trough = mix((24, 38, 49), pal.bg, 0.10);
-    let sand_mid = mix((35, 52, 62), pal.bg_alt, 0.08);
-    let sand_crest: Rgb = (48, 67, 75);
-    let sand_hi: Rgb = (58, 78, 85);
-    let pebble_lo: Rgb = (24, 37, 46);
-    let pebble_hi: Rgb = (68, 86, 92);
-    let kelp_dark: Rgb = (14, 42, 36);
-    let kelp_mid: Rgb = (22, 62, 50);
-    let kelp_hi: Rgb = (32, 82, 64);
+    let sand_lo = scale(pal.bg, 0.79);
+    let sand_hi = mix(pal.bg_alt, (118, 108, 84), 0.45);
+    let quartz_hi: Rgb = (128, 120, 99);
+    let shell_hi: Rgb = (138, 131, 110);
+    let shell_mid: Rgb = (114, 107, 88);
+    let pebble_lo: Rgb = (50, 52, 48);
+    let pebble_mid: Rgb = (68, 70, 62);
+    let pebble_hi: Rgb = (108, 102, 88);
+
+    let lo_r = i32::from(sand_lo.0);
+    let lo_g = i32::from(sand_lo.1);
+    let lo_b = i32::from(sand_lo.2);
+    let dr = i32::from(sand_hi.0) - lo_r;
+    let dg = i32::from(sand_hi.1) - lo_g;
+    let db = i32::from(sand_hi.2) - lo_b;
 
     for wy in floor.y.clone() {
-        let wy_warp = sin64((wy * 2).div_euclid(3));
         let sy = wy - floor.cam_y;
         for wx in floor.x.clone() {
-            let warp = (sin64((wx * 2).div_euclid(3) + 7) * 5 + wy_warp * 4) / 100;
-            let phase = (wy * 5 + wx + warp * 2) & 63;
-            let r = sin64(phase);
-            let grain = ((hash(wx >> 1, wy >> 1) & 7) as i32 - 3) * 5;
-            let val = r + grain;
+            // Slow organic domain warp + patchy envelope so current ripples
+            // curve gently and fade across flat bars instead of repeating.
+            let warp_x = sand_noise(wx, wy, 32, 17);
+            let warp_y = sand_noise(wx + 19, wy - 11, 28, 53);
+            let env = (46 + (sand_noise(wx, wy, 48, 97) * 50) / 100).max(8);
 
-            let mut col = if val < -48 {
-                sand_deep
-            } else if val < -10 {
-                sand_trough
-            } else if val < 34 {
-                sand_mid
-            } else if val < 72 {
-                sand_crest
+            let u1 = (wy * 3 + wx) + (warp_y * 18) / 100 + (warp_x * 11) / 100;
+            let r1 = sin64((u1 * 4).div_euclid(3));
+            let r1_shape = (r1 * 4 + (r1 * r1.abs()) / 100) / 5;
+            let u2 = (wy * 2 - wx) + (warp_x * 15) / 100;
+            let r2 = sin64((u2 * 5).div_euclid(4));
+            let ripple = ((r1_shape * 3 + r2) * env) / 380;
+
+            let bank = (sand_noise(wx, wy, 64, 131) * 40) / 100;
+
+            let h_px = hash(wx, wy);
+            let h_2 = hash(wx >> 1, wy >> 1);
+            let grain = (((h_px & 15) as i32 - 8) * 3) + (((h_2 & 7) as i32 - 3) * 4);
+
+            let tone =
+                (128 + (ripple * 56) / 100 + (bank * 78) / 100 + (grain * 78) / 100).clamp(0, 256);
+            let micro = ((h_px >> 5) & 3) as i32 - 1;
+            let r = (lo_r + (dr * tone) / 256 + micro).clamp(0, 255) as u8;
+            let g = (lo_g + (dg * tone) / 256 + micro).clamp(0, 255) as u8;
+            let b = (lo_b + (db * tone) / 256 + (micro >> 1)).clamp(0, 255) as u8;
+
+            let col = if (h_px & 63) == 0 && tone > 155 {
+                mix((r, g, b), quartz_hi, 0.36)
             } else {
-                sand_hi
+                (r, g, b)
             };
-            if val > 54 && (hash(wx, wy) & 15) == 0 {
-                col = mix(col, pebble_hi, 0.36);
-            }
             floor.pb.plot(wx - floor.cam_x, sy, col);
         }
     }
 
-    // Sparse seabed storytelling details on a 48 × 40 world grid (crop-invariant).
-    const STEP_X: i32 = 48;
-    const STEP_Y: i32 = 40;
-    let gx0 = (floor.x.start - 16).div_euclid(STEP_X);
-    let gx1 = (floor.x.end + 16).div_euclid(STEP_X);
-    let gy0 = (floor.y.start - 16).div_euclid(STEP_Y);
-    let gy1 = (floor.y.end + 16).div_euclid(STEP_Y);
+    // Scattered seabed details on a 36 × 32 world grid (disjoint & crop-invariant).
+    const STEP_X: i32 = 36;
+    const STEP_Y: i32 = 32;
+    let gx0 = (floor.x.start - 12).div_euclid(STEP_X);
+    let gx1 = (floor.x.end + 12).div_euclid(STEP_X);
+    let gy0 = (floor.y.start - 12).div_euclid(STEP_Y);
+    let gy1 = (floor.y.end + 12).div_euclid(STEP_Y);
     for gy in gy0..=gy1 {
         for gx in gx0..=gx1 {
             let h = hash(gx + 137, gy + 59);
-            let ox = gx * STEP_X + 8 + ((h >> 3) & 31) as i32;
-            let oy = gy * STEP_Y + 8 + ((h >> 8) & 23) as i32;
+            let ox = gx * STEP_X + 7 + ((h >> 3) % 22) as i32;
+            let oy = gy * STEP_Y + 7 + ((h >> 8) % 18) as i32;
             match h & 7 {
                 0 | 1 => {
-                    // Flat recumbent seabed kelp tuft anchored to a tiny silt pebble.
-                    floor.fill(ox - 1, oy, 3, 2, pebble_lo);
-                    floor.px(ox - 1, oy, pebble_hi);
-                    let flen = 8 + ((h >> 13) & 5) as i32;
-                    let flip = if (h & 16) != 0 { 1 } else { -1 };
-                    let p0 = (h & 7) as i32 * 5;
-                    for k in 0..flen {
-                        let fx = ox + flip * (k + 1);
-                        let fy = oy + (sin64(k * 6 + p0) * 14) / 1000 - (k / 4);
-                        let c = if k % 3 == 0 {
-                            kelp_hi
-                        } else if (k & 1) == 0 {
-                            kelp_mid
-                        } else {
-                            kelp_dark
-                        };
-                        floor.blend_world(fx, fy, c, 0.78);
-                        if (k & 1) == 1 {
-                            floor.blend_world(fx, fy + 1, kelp_dark, 0.55);
-                        }
+                    // Half-buried pale cockle/clam shell with soft underside shadow.
+                    floor.blend_world(ox, oy, shell_hi, 0.78);
+                    floor.blend_world(ox + 1, oy, shell_mid, 0.68);
+                    if (h & 16) != 0 {
+                        floor.blend_world(ox + 2, oy + 1, shell_mid, 0.52);
+                    }
+                    floor.darken_world(ox, oy + 1, 0.76);
+                    floor.darken_world(ox + 1, oy + 1, 0.78);
+                    if (h & 32) != 0 {
+                        floor.blend_world(ox - 3, oy + 2, shell_mid, 0.52);
                     }
                 }
-                2 => {
-                    // Half-buried pale shell & silt pebble cluster.
-                    floor.blend_world(ox, oy, pebble_hi, 0.65);
-                    floor.blend_world(ox + 1, oy, sand_hi, 0.55);
-                    floor.blend_world(ox + 1, oy + 1, pebble_lo, 0.70);
-                    floor.blend_world(ox + 4, oy - 1, pebble_hi, 0.50);
-                    floor.blend_world(ox - 3, oy + 2, pebble_lo, 0.65);
+                2 | 3 => {
+                    // Small cluster of smooth sea pebbles.
+                    floor.blend_world(ox, oy, pebble_mid, 0.78);
+                    floor.blend_world(ox + 1, oy, pebble_lo, 0.74);
+                    floor.blend_world(ox, oy - 1, pebble_hi, 0.48);
+                    floor.darken_world(ox + 1, oy + 1, 0.78);
+                    floor.blend_world(ox + 3, oy + 2, pebble_lo, 0.70);
+                    floor.blend_world(ox + 2, oy + 1, pebble_hi, 0.42);
                 }
-                3 => {
-                    // Sunken dark silt hollow.
-                    for dy in -2i32..=2 {
-                        for dx in -5i32..=5 {
-                            if dx * dx * 4 + dy * dy * 25 <= 100 {
-                                floor.darken_world(ox + dx, oy + dy, 0.80);
+                4 => {
+                    // Small sunken dark damp silt hollow.
+                    let rx = 4 + ((h >> 12) & 2) as i32;
+                    let ry = 2 + ((h >> 14) & 1) as i32;
+                    let rx2 = (rx * rx) as f32 + 0.5;
+                    let ry2 = (ry * ry) as f32 + 0.5;
+                    for dy in -ry..=ry {
+                        for dx in -rx..=rx {
+                            let d = (dx * dx) as f32 / rx2 + (dy * dy) as f32 / ry2;
+                            if d <= 1.0 {
+                                floor.darken_world(ox + dx, oy + dy, 0.78 + 0.18 * d);
                             }
                         }
                     }
@@ -1177,7 +1215,7 @@ pub fn draw_outfall_hazards(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elap
     const RIM_HI: Rgb = (178, 228, 238);
     const RIM_MID: Rgb = (112, 174, 192);
     const RIM_LO: Rgb = (48, 88, 108);
-    const SAND_LIP: Rgb = (66, 88, 96);
+    const SAND_LIP: Rgb = (50, 54, 46);
     const EDDY: Rgb = (8, 17, 27);
     let eddy_step = (elapsed.max(0.0) * 3.0).floor() as i32;
 
@@ -2366,6 +2404,78 @@ mod tests {
                 pb_off.pixels().iter().all(|&p| p == base_col),
                 "surge tell must suppress when surge_enabled=false at t={t}"
             );
+        }
+    }
+
+    #[test]
+    fn outfall_sand_floor_is_sandy_differs_from_old_slate_and_has_no_long_constant_stripes() {
+        let level = Level::empty(Theme::Outfall);
+        let cam = Vec2::new(400.0, 300.0);
+        let mut pb0 = PixelBuffer::new(240, 160);
+        let mut pb1 = PixelBuffer::new(240, 160);
+        draw_floor(&mut pb0, &level, cam, 0.0);
+        draw_floor(&mut pb1, &level, cam, 5.5);
+
+        // Static seabed: elapsed time must never animate the sand floor.
+        assert_eq!(pb0.pixels(), pb1.pixels(), "Outfall sand floor must be static");
+
+        // Warm pale-to-mid sand (R > B, G > B), clearly distinct from the old
+        // dark blue-slate floor around (35, 52, 62), yet darker than bright loot.
+        let n = pb0.pixels().len() as f32;
+        let mean_r = pb0.pixels().iter().map(|c| f32::from(c.0)).sum::<f32>() / n;
+        let mean_g = pb0.pixels().iter().map(|c| f32::from(c.1)).sum::<f32>() / n;
+        let mean_b = pb0.pixels().iter().map(|c| f32::from(c.2)).sum::<f32>() / n;
+        assert!(
+            mean_r > mean_b + 10.0 && mean_g > mean_b + 8.0,
+            "Outfall floor should read as sand (R,G > B), got ({mean_r:.1}, {mean_g:.1}, {mean_b:.1})"
+        );
+        let dist_from_old = (mean_r - 35.0).abs() + (mean_g - 52.0).abs() + (mean_b - 62.0).abs();
+        assert!(
+            dist_from_old > 40.0,
+            "Outfall sand floor should differ cleanly from old slate floor (dist {dist_from_old:.1})"
+        );
+        let mean_lum = (mean_r * 77.0 + mean_g * 150.0 + mean_b * 29.0) / 256.0;
+        assert!(
+            (55.0..=105.0).contains(&mean_lum),
+            "Outfall sand mean luma {mean_lum:.1} out of pale-to-mid contrast band"
+        );
+
+        // No long straight constant-colour stripe longer than MAX_RUN px along
+        // horizontal, vertical, or either 45-degree diagonal.
+        const MAX_RUN: usize = 10;
+        let (w, h) = (pb0.w as i32, pb0.h as i32);
+        for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+            for y in 0..h {
+                for x in 0..w {
+                    let px = x - dx;
+                    let py = y - dy;
+                    let col = pb0.pixel_at(x as usize, y as usize);
+                    if px >= 0
+                        && py >= 0
+                        && px < w
+                        && py < h
+                        && pb0.pixel_at(px as usize, py as usize) == col
+                    {
+                        continue;
+                    }
+                    let mut run = 1usize;
+                    let (mut nx, mut ny) = (x + dx, y + dy);
+                    while nx >= 0
+                        && ny >= 0
+                        && nx < w
+                        && ny < h
+                        && pb0.pixel_at(nx as usize, ny as usize) == col
+                    {
+                        run += 1;
+                        nx += dx;
+                        ny += dy;
+                    }
+                    assert!(
+                        run <= MAX_RUN,
+                        "Outfall sand has straight constant-colour run of {run} px at ({x}, {y}) dir ({dx}, {dy})"
+                    );
+                }
+            }
         }
     }
 }
