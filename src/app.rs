@@ -346,10 +346,8 @@ struct PictureKey {
     size: (usize, usize),
     /// The eased zoom being rendered and the rung it is easing toward.
     zoom: (u32, u32),
-    /// The lighting setting, the tier the cost controller currently runs it
-    /// at, and the colour depth it dithers for.
+    /// The lighting setting and the colour depth it dithers for.
     lighting: (
-        crate::render::lighting::LightingMode,
         crate::render::lighting::LightingMode,
         crate::term::ColorDepth,
     ),
@@ -380,7 +378,7 @@ impl PictureKey {
             ticks: w.ticks,
             size: (pixels.w, pixels.h),
             zoom: (w.zoom_view.to_bits(), w.zoom.to_bits()),
-            lighting: (w.lighting, w.lighting_tier(), w.lighting_depth),
+            lighting: (w.lighting, w.lighting_depth),
             toggles: (w.hitboxes, w.smoke_enabled),
             subcell: w.subcell,
             smooth: w.smooth,
@@ -5766,9 +5764,7 @@ impl App {
                 w.viewport = Vec2::new(game.width as f32, (game.height * 2) as f32);
                 // Scene + lighting only when the picture can have changed: the
                 // world ticked, the view moved, or something the key cannot
-                // see happened (`picture_dirty`). The key is taken *before*
-                // the draw, so a lighting tier the cost controller changes
-                // during this draw is a different key next frame.
+                // see happened (`picture_dirty`).
                 w.subcell =
                     crate::render::subcell::resolve(self.subcell_env, crate::term::block_set());
                 w.smooth = self.smooth;

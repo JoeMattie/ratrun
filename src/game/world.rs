@@ -2515,7 +2515,7 @@ impl World {
         // when the effects run at a tier that reads them. Every buffer writer
         // stamps the current pen; the sprite passes below set it around their
         // draw calls. `clear` resets every byte to the untagged floor.
-        let fx_tier = self.light_map.quality(self.lighting);
+        let fx_tier = self.lighting;
         pb.set_pen(0);
         pb.set_materials(
             self.lighting_fx
@@ -2620,7 +2620,6 @@ impl World {
         self.draw_seabed_plants(pb, cam, viewport);
 
         _s = crate::prof::scope(crate::prof::Stage::SceneFixturesAmbience);
-        let ambience_started = crate::clock::Instant::now();
         let blackout = self.blackout();
         draw_fixtures(
             &mut self.light_map,
@@ -2631,7 +2630,6 @@ impl World {
             blackout,
         );
         draw_ambience(&mut self.light_map, pb, &self.level.objects.emitters, cam, self.elapsed, self.player.pos);
-        let ambience_cost = ambience_started.elapsed();
 
         _s = crate::prof::scope(crate::prof::Stage::SceneGroundLoot);
         // Acid pools, in `SpawnId` order (overlapping sprites must draw in
@@ -3227,7 +3225,7 @@ impl World {
         // and belong to screen space: `draw` stamps them after the resample, so
         // they never scale and are never darkened by the ambient.
         _s = crate::prof::scope(crate::prof::Stage::Lighting);
-        self.apply_lighting(pb, cam, ambience_cost, blackout);
+        self.apply_lighting(pb, cam, blackout);
 
         if self.outfall_surge_enabled() {
             crate::render::outfall_current::draw(
@@ -3713,19 +3711,13 @@ impl World {
             thrash,
             cam,
             elapsed: self.elapsed,
-            mode: self.light_map.quality(self.lighting),
+            mode: self.lighting,
         };
         self.smoke.sync_and_draw(pb, &scene);
     }
 
     /// Render-only lighting pass; never mutates simulation state or `self.rng`.
-    fn apply_lighting(
-        &mut self,
-        pb: &mut PixelBuffer,
-        cam: Vec2,
-        ambience_cost: std::time::Duration,
-        blackout: f32,
-    ) {
+    fn apply_lighting(&mut self, pb: &mut PixelBuffer, cam: Vec2, blackout: f32) {
         #[cfg(test)]
         if self.lighting == LightingMode::Off {
             crate::render::lighting::apply_off_grade(pb, self.level.theme);
@@ -3746,36 +3738,17 @@ impl World {
             cam,
             elapsed: self.elapsed,
             blackout,
-            mode: self.light_map.quality(self.lighting),
+            mode: self.lighting,
             depth: self.lighting_depth,
             fx: self.lighting_fx,
         };
-        let started = crate::clock::Instant::now();
         self.light_map.apply_scene(pb, &scene);
-        // Tests never feed the wall clock to the tier controller: a loaded
-        // test machine would drop a tier in one harness and not its twin, and
-        // two "identical" frames would differ (the controller's own tests call
-        // `observe_cost` with synthetic durations).
-        if cfg!(not(test)) {
-            self.light_map
-                .observe_cost(scene.mode, started.elapsed() + ambience_cost, pb.w * pb.h);
-        }
     }
 
-    /// The tier the next frame's lighting will run at: the setting, lowered
-    /// by the cost controller's current penalty.
+    /// The active lighting tier (`World::lighting`: fixed for the session unless
+    /// the player changes the setting or console `lights`).
     pub(crate) fn lighting_tier(&self) -> LightingMode {
-        self.light_map.quality(self.lighting)
-    }
-
-    /// `--prof-bench`: the tier the last frame's lighting ran at.
-    pub(crate) fn prof_tier(&self) -> LightingMode {
-        self.lighting_tier()
-    }
-
-    /// `--prof-bench`: forget the cost controller's state between configs.
-    pub(crate) fn prof_reset_controller(&mut self) {
-        self.light_map.prof_reset_controller();
+        self.lighting
     }
 
     /// Access the render-only smoke layer (tests and screenshot captures).

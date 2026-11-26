@@ -219,9 +219,8 @@ impl WebGame {
         }).to_string()
     }
 
-    pub fn start_profile(&self, freeze_lighting: bool) {
+    pub fn start_profile(&self, _freeze_lighting: bool) {
         prof::enable(true);
-        prof::freeze_controller(freeze_lighting);
     }
 
     pub fn profile(&self) -> String {

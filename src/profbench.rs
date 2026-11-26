@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! ratrun --prof-bench --color truecolor --floor sewer --at 720 --seed 1000 \
-//!     --mode direct --cfg 120x40:1.0:full:300 --cfg 200x60:2.0:full:300:free
+//!     --mode direct --cfg 120x40:1.0:full:300 --cfg 200x60:2.0:full:300
 //! ```
 //!
 //! * `--mode direct` — `AutoRun::step` + `World::draw` + the half-block blit +
@@ -15,9 +15,8 @@
 //!   `Terminal<CrosstermBackend<counting sink>>`, i.e. what `main`'s loop does
 //!   per frame, including the bytes and `write` calls a frame costs.
 //! * `--mode title` / `--mode paused` — the idle screens through the same path.
-//! * `--cfg COLSxROWS:ZOOM:TIER:FRAMES[:free]` — tier is `full|hard|coarse|
-//!   compact`; `free` lets the cost controller move the tier (and reports the
-//!   trace), otherwise the tier is pinned.
+//! * `--cfg COLSxROWS:ZOOM:TIER:FRAMES` — tier is `full|hard|coarse|compact`
+//!   (fixed for the run; a trailing `:free` token is ignored for CLI compatibility).
 //! * `--sample FILE:SECS` — run the **last** config for `SECS + 2` wall seconds
 //!   and attach `/usr/bin/sample` to this process for `SECS`.
 
@@ -90,7 +89,6 @@ struct Cfg {
     tier: LightingMode,
     tier_name: String,
     frames: usize,
-    free: bool,
 }
 
 fn arg<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -117,7 +115,6 @@ fn parse_cfg(s: &str) -> Cfg {
         tier,
         tier_name,
         frames: parts.get(3).and_then(|z| z.parse().ok()).unwrap_or(300),
-        free: parts.get(4).is_some_and(|f| *f == "free"),
     }
 }
 
@@ -343,8 +340,6 @@ fn configure(run: &mut AutoRun, cfg: &Cfg) -> Rect {
         crate::term::block_set(),
     );
     w.smooth = crate::render::subcell::smooth_from_env();
-    w.prof_reset_controller();
-    prof::freeze_controller(!cfg.free);
     g
 }
 
@@ -370,9 +365,6 @@ fn bench_direct(run: &mut AutoRun, cfg: &Cfg, floor: &str, at: f32, sample: Opti
     let mut changed_cells = 0u64;
     let mut enemies = 0u64;
     let mut bullets = 0u64;
-    let mut tier_hist = [0u32; 4];
-    let mut transitions: Vec<(usize, &'static str)> = Vec::new();
-    let mut last_tier = run.world().prof_tier();
     let mut frames = 0usize;
     let mut frame_hash = 0xcbf2_9ce4_8422_2325u64;
     loop {
@@ -408,12 +400,6 @@ fn bench_direct(run: &mut AutoRun, cfg: &Cfg, floor: &str, at: f32, sample: Opti
         diff_ns += (t4 - t3).as_nanos() as u64;
         draws.push((t2 - t1).as_nanos() as u64);
         lights.push(prof::ns(Stage::Lighting) - light_before);
-        let tier = run.world().prof_tier();
-        tier_hist[LightingMode::LIVE.iter().position(|m| *m == tier).unwrap_or(0)] += 1;
-        if tier != last_tier {
-            transitions.push((frames, tier_label(tier)));
-            last_tier = tier;
-        }
         if frames.is_multiple_of(16) {
             enemies += run.world().enemy_count() as u64;
             bullets += run.world().bullet_count() as u64;
@@ -432,15 +418,13 @@ fn bench_direct(run: &mut AutoRun, cfg: &Cfg, floor: &str, at: f32, sample: Opti
     let world_px = ((g.width as f32 * cfg.zoom).round() * (g.height as f32 * 2.0 * cfg.zoom).round()) as usize;
     let world_px = if (cfg.zoom - 1.0).abs() < 0.002 { px } else { world_px };
     let mut out = format!(
-        "{{\"mode\":\"direct\",\"floor\":\"{floor}\",\"at\":{at},\"elapsed_end\":{:.1},\"finished\":{},\"size\":\"{}x{}\",\"zoom\":{},\"tier\":\"{}\",\"free\":{},\"frames\":{n},\"screen_px\":{px},\"world_px\":{world_px},\"light_budget_us\":{:.0},\"enemies\":{:.0},\"bullets\":{:.0},\"boss\":{},\"step_us\":{:.1},\"draw_us\":{:.1},\"draw_p50\":{:.1},\"draw_p95\":{:.1},\"draw_max\":{:.1},\"light_p50\":{:.1},\"light_p95\":{:.1},\"blit_us\":{:.1},\"diff_us\":{:.1},\"changed_cells\":{:.0},\"tier_hist\":{:?},\"transitions\":{:?},\"frame_hash\":\"{:016x}\",",
+        "{{\"mode\":\"direct\",\"floor\":\"{floor}\",\"at\":{at},\"elapsed_end\":{:.1},\"finished\":{},\"size\":\"{}x{}\",\"zoom\":{},\"tier\":\"{}\",\"frames\":{n},\"screen_px\":{px},\"world_px\":{world_px},\"enemies\":{:.0},\"bullets\":{:.0},\"boss\":{},\"step_us\":{:.1},\"draw_us\":{:.1},\"draw_p50\":{:.1},\"draw_p95\":{:.1},\"draw_max\":{:.1},\"light_p50\":{:.1},\"light_p95\":{:.1},\"blit_us\":{:.1},\"diff_us\":{:.1},\"changed_cells\":{:.0},\"frame_hash\":\"{:016x}\",",
         run.world().elapsed,
         run.finished(),
         cfg.cols,
         cfg.rows,
         cfg.zoom,
         cfg.tier_name,
-        cfg.free,
-        160.0 + world_px as f64 * 0.035,
         enemies as f64 / (n as f64 / 16.0).ceil(),
         bullets as f64 / (n as f64 / 16.0).ceil(),
         run.world().boss_hp().is_some(),
@@ -454,22 +438,11 @@ fn bench_direct(run: &mut AutoRun, cfg: &Cfg, floor: &str, at: f32, sample: Opti
         per(blit_ns),
         per(diff_ns),
         changed_cells as f64 / n as f64,
-        tier_hist,
-        transitions.iter().take(40).collect::<Vec<_>>(),
         frame_hash,
     );
     dump_stages(&mut out, n);
     out.push('}');
     println!("{out}");
-}
-
-fn tier_label(m: LightingMode) -> &'static str {
-    match m {
-        LightingMode::Full => "full",
-        LightingMode::Hard => "hard",
-        LightingMode::Coarse => "coarse",
-        _ => "compact",
-    }
 }
 
 /// The real App loop body (`main::run`) against a counting sink.

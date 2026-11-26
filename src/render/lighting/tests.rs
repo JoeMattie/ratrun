@@ -1,6 +1,6 @@
 //! Assertions for the lighting pass: shapes, blends and layer masks; distinct
 //! wall, prop and doorway shadows; cached fixture shadows refreshing when a
-//! door opens; emissive cores; the quality controller and palette dither; an
+//! door opens; emissive cores; colour-depth defaults and palette dither; an
 //! enemy staying readable at the edge of a blackout on every theme; and that
 //! degenerate viewports or a change of tier never change the simulation.
 //!
@@ -22,7 +22,7 @@ use crate::game::level::{
 use crate::game::world::World;
 use crate::render::framebuffer::PixelBuffer;
 use rand::RngExt;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const WALL: TileKind = TileKind::Wall(WallKind::Solid);
 
@@ -241,19 +241,20 @@ fn emissive_core_is_preserved_and_lights_nearby_pixels() {
 }
 
 #[test]
-fn lighting_quality_adapts_and_palette_dither_keeps_multiple_tones() {
+fn lighting_defaults_follow_colour_depth_and_palette_dither_keeps_multiple_tones() {
+    assert_eq!(
+        LightingMode::default_for_depth(ColorDepth::Truecolor),
+        LightingMode::Full
+    );
+    assert_eq!(
+        LightingMode::default_for_depth(ColorDepth::Ansi256),
+        LightingMode::Hard
+    );
+    assert_eq!(
+        LightingMode::default_for_depth(ColorDepth::Ansi16),
+        LightingMode::Coarse
+    );
     let mut map = LightMap::new();
-    for mode in LightingMode::LIVE.into_iter().take(3) {
-        assert_eq!(map.quality(LightingMode::Full), mode);
-        for _ in 0..8 {
-            map.observe_cost(mode, Duration::from_millis(8), 9_600);
-        }
-    }
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Compact);
-    for _ in 0..180 {
-        map.observe_cost(LightingMode::Compact, Duration::from_micros(60), 9_600);
-    }
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Coarse);
     let w = test_world(Theme::Lab);
     for depth in [ColorDepth::Ansi16, ColorDepth::Ansi256] {
         let mut pb = PixelBuffer::new(96, 80);
@@ -704,41 +705,61 @@ fn a_flood_of_halos_cannot_evict_the_rats_aura() {
 }
 
 #[test]
-fn a_relapse_doubles_the_wait_before_the_next_climb() {
-    let slow = Duration::from_millis(8);
-    let fast = Duration::from_micros(60);
-    let drop_tier = |map: &mut LightMap| {
-        for _ in 0..8 {
-            map.observe_cost(LightingMode::Full, slow, 9_600);
+fn lighting_tier_stays_fixed_across_frames_and_prop_pools_survive_bullet_volleys() {
+    let mut w = test_world(Theme::Lab);
+    w.player.pos = Vec2::new(200.0, 200.0);
+    w.level.props.push(Prop {
+        kind: PropKind::Console,
+        rect: Rectf::new(256.0, 192.0, 16.0, 16.0),
+    });
+    let mut pb = PixelBuffer::new(160, 100);
+    for mode in LightingMode::LIVE {
+        w.lighting = mode;
+        for i in 0..16 {
+            w.elapsed = i as f32 * 0.25;
+            w.draw(&mut pb);
+            assert_eq!(w.lighting_tier(), mode);
         }
+    }
+
+    // A stationary room prop pool (`Console`) must not pop off when a volley of
+    // player projectiles spawns around the rat and overflows the dynamic cap.
+    let cam = Vec2::new(140.0, 150.0);
+    let render = |w: &World| {
+        let mut pb = PixelBuffer::new(160, 100);
+        pb.clear((72, 76, 82));
+        let mut map = LightMap::new();
+        map.begin_frame();
+        map.apply_scene(
+            &mut pb,
+            &test_scene(w, LightingMode::Full, ColorDepth::Truecolor, cam),
+        );
+        pb
     };
-    let cheap = |map: &mut LightMap, frames: usize| {
-        let mode = map.quality(LightingMode::Full);
-        for _ in 0..frames {
-            map.observe_cost(mode, fast, 9_600);
-        }
-    };
-    let mut map = LightMap::new();
-    drop_tier(&mut map);
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Hard);
-    cheap(&mut map, 180);
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Full);
-    // Losing the regained tier straight away is a relapse.
-    drop_tier(&mut map);
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Hard);
-    cheap(&mut map, 180);
-    assert_eq!(
-        map.quality(LightingMode::Full),
-        LightingMode::Hard,
-        "the second climb must wait twice as long"
+    let calm = render(&w);
+    for i in 0..40 {
+        let a = i as f32 * 0.15;
+        w.spawn_bullet(Bullet::new(
+            w.player.pos + Vec2::from_angle(a) * 8.0,
+            Vec2::from_angle(a) * 90.0,
+            4.0,
+            Faction::Player,
+            (255, 210, 80),
+        ));
+    }
+    let volley = render(&w);
+    // Probe on the far side of the Console (x = 132 in screen px -> world x = 272,
+    // 72 px from the rat and out of reach of the muzzle bullets).
+    assert!(
+        lum(&calm, 132, 50) > 45,
+        "console pool must light the floor: {}",
+        lum(&calm, 132, 50)
     );
-    cheap(&mut map, 180);
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Full);
-    // A climb that holds through its probation earns the short wait back.
-    cheap(&mut map, 600);
-    drop_tier(&mut map);
-    cheap(&mut map, 180);
-    assert_eq!(map.quality(LightingMode::Full), LightingMode::Full);
+    assert_eq!(
+        lum(&volley, 132, 50),
+        lum(&calm, 132, 50),
+        "player projectile volley must not evict a stationary room prop light"
+    );
 }
 
 #[test]
