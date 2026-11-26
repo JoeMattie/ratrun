@@ -103,6 +103,16 @@ pub(crate) fn giant_rat_pen() -> u8 {
     pen(MaterialKind::Fur, true, 7)
 }
 
+/// The pen for the rat's brass/copper diving helmet on the Outfall.
+pub(crate) fn rat_helmet_pen(giant: bool) -> u8 {
+    pen(MaterialKind::Metal, true, if giant { 7 } else { RAT_HEIGHT })
+}
+
+/// The pen for the rat's diving helmet porthole faceplate (glass gleam).
+pub(crate) fn rat_visor_pen(giant: bool) -> u8 {
+    pen(MaterialKind::Glass, true, if giant { 7 } else { RAT_HEIGHT })
+}
+
 /// The pen for a prop (tanks and lenses: Glass; pipes and housings: Metal; …).
 pub(crate) fn prop_pen(kind: PropKind) -> u8 {
     pen(prop_material(kind), false, prop_height_class(kind))
@@ -1398,5 +1408,20 @@ mod tests {
             a.pixels() == b.pixels(),
             "nothing in this stage reads a clock"
         );
+    }
+
+    #[test]
+    fn diver_helmet_and_visor_pens_tag_metal_and_glass_creatures() {
+        for (giant, expected_h) in [(false, RAT_HEIGHT), (true, 7)] {
+            let helmet = super::rat_helmet_pen(giant);
+            assert!(material::is_creature(helmet));
+            assert_eq!(material::kind(helmet), MaterialKind::Metal);
+            assert_eq!(material::height(helmet), expected_h);
+
+            let visor = super::rat_visor_pen(giant);
+            assert!(material::is_creature(visor));
+            assert_eq!(material::kind(visor), MaterialKind::Glass);
+            assert_eq!(material::height(visor), expected_h);
+        }
     }
 }

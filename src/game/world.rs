@@ -3696,10 +3696,12 @@ impl World {
                 (id, lash, catch_pos)
             })
         };
-        self.whip_chain.sync(
+        let outfit = art_rat::RatOutfit::for_theme(self.level.theme);
+        self.whip_chain.sync_with_outfit(
             &self.player,
             self.elapsed,
             live_lash.as_ref().map(|(id, l, c)| (*id, l, *c)),
+            outfit,
         );
         let lash = self.lash_visual();
         let flash = art_rat::tail_ready_flash(
@@ -3717,8 +3719,8 @@ impl World {
             crate::render::lighting::rat_pen()
         });
         match scale {
-            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash),
-            None => art_rat::draw_rat_with_whip(
+            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash, outfit),
+            None => art_rat::draw_rat_with_outfit(
                 pb,
                 &self.player,
                 self.elapsed,
@@ -3726,6 +3728,7 @@ impl World {
                 flash,
                 lash,
                 Some(&self.whip_chain),
+                outfit,
             ),
         }
         if self.player.buffs.collar > 0.0 {
@@ -3786,8 +3789,23 @@ impl World {
     ///
     /// Render-only: it reads the player, the frame clock and the render-only
     /// whip chain, and writes pixels.
-    fn draw_scaled_rat(&self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
-        art_rat_giant::draw_giant_rat(pb, &self.player, self.elapsed, cam, scale, tail_flash);
+    fn draw_scaled_rat(
+        &self,
+        pb: &mut PixelBuffer,
+        cam: Vec2,
+        scale: f32,
+        tail_flash: f32,
+        outfit: art_rat::RatOutfit,
+    ) {
+        art_rat_giant::draw_giant_rat_with_outfit(
+            pb,
+            &self.player,
+            self.elapsed,
+            cam,
+            scale,
+            tail_flash,
+            outfit,
+        );
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
             art_rat::draw_live_whip(
@@ -6069,5 +6087,108 @@ mod trap_order_tests {
             let share = intact_share(&mut w, &format!("snap-{}", kind.name()));
             assert!(share > 0.9, "{}: only {share:.2} of the body is over the trap", kind.name());
         }
+    }
+}
+
+#[cfg(test)]
+mod outfall_diver_tests {
+    use super::*;
+
+    const BG: palette::Rgb = (24, 28, 30);
+
+    fn count_brass(pb: &PixelBuffer) -> usize {
+        pb.pixels()
+            .iter()
+            .filter(|&&(r, g, b)| r >= 165 && g >= 95 && r > g && r >= b.saturating_add(65))
+            .count()
+    }
+
+    fn draw_rat_on_theme(
+        w: &mut World,
+        theme: Theme,
+        size: (usize, usize),
+        elapsed: f32,
+        giant: f32,
+        tiny: f32,
+    ) -> PixelBuffer {
+        w.level.theme = theme;
+        w.elapsed = elapsed;
+        w.player.buffs.giant = giant;
+        w.player.buffs.tiny = tiny;
+        let mut pb = PixelBuffer::new(size.0, size.1);
+        pb.set_materials(true);
+        pb.clear(BG);
+        w.draw_player(&mut pb, Vec2::ZERO);
+        pb
+    }
+
+    #[test]
+    fn outfall_draws_diving_suit_and_other_themes_stay_byte_identical() {
+        let mut w = World::new(Theme::Sewer, 42);
+        w.player.pos = Vec2::new(60.0, 38.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.vel = Vec2::ZERO;
+
+        let sewer = draw_rat_on_theme(&mut w, Theme::Sewer, (120, 76), 0.45, 0.0, 0.0);
+        let outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 76), 0.45, 0.0, 0.0);
+
+        assert_ne!(
+            sewer.pixels(),
+            outfall.pixels(),
+            "Outfall rat must differ from the Sewer rat"
+        );
+        assert!(
+            count_brass(&outfall) >= 6,
+            "Outfall rat must draw brass diving helmet pixels (found {})",
+            count_brass(&outfall)
+        );
+        assert!(
+            outfall.mat().contains(&crate::render::lighting::rat_helmet_pen(false)),
+            "Outfall rat helmet must stamp Metal pen"
+        );
+        assert!(
+            outfall.mat().contains(&crate::render::lighting::rat_visor_pen(false)),
+            "Outfall rat faceplate must stamp Glass pen"
+        );
+
+        // Every non-Outfall floor must remain pixel- and material-identical to Sewer.
+        for theme in Theme::playable() {
+            if theme == Theme::Outfall {
+                continue;
+            }
+            let frame = draw_rat_on_theme(&mut w, theme, (120, 76), 0.45, 0.0, 0.0);
+            assert_eq!(
+                frame.pixels(),
+                sewer.pixels(),
+                "{theme:?} must be pixel-identical to the standard rat"
+            );
+            assert_eq!(
+                frame.mat(),
+                sewer.mat(),
+                "{theme:?} must be material-identical to the standard rat"
+            );
+        }
+
+        // Swim bob animates over time on Outfall without moving player.pos or hurt_radius.
+        let orig_pos = w.player.pos;
+        let orig_hurt = w.player.buffs.hurt_radius();
+        let bob_a = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 76), 0.0, 0.0, 0.0);
+        let bob_b = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 76), 0.65, 0.0, 0.0);
+        assert_eq!(w.player.pos, orig_pos);
+        assert_eq!(w.player.buffs.hurt_radius(), orig_hurt);
+        assert_ne!(bob_a.pixels(), bob_b.pixels(), "Outfall swim bob must animate over time");
+
+        // Growth Serum (5x) and Shrink Draught (0.35x) both draw the diving suit on Outfall.
+        w.player.pos = Vec2::new(110.0, 74.0);
+        let giant_sewer = draw_rat_on_theme(&mut w, Theme::Sewer, (220, 148), 0.35, 15.0, 0.0);
+        let giant_outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (220, 148), 0.35, 15.0, 0.0);
+        assert_ne!(giant_sewer.pixels(), giant_outfall.pixels());
+        assert!(count_brass(&giant_outfall) >= 40, "5x giant Outfall rat must wear the brass helmet");
+
+        w.player.pos = Vec2::new(32.0, 32.0);
+        let tiny_sewer = draw_rat_on_theme(&mut w, Theme::Sewer, (64, 64), 0.35, 0.0, 8.0);
+        let tiny_outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (64, 64), 0.35, 0.0, 8.0);
+        assert_ne!(tiny_sewer.pixels(), tiny_outfall.pixels());
+        assert!(count_brass(&tiny_outfall) >= 2, "0.35x tiny Outfall rat must wear the brass helmet");
     }
 }

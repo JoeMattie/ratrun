@@ -23,9 +23,10 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::lighting::{rat_helmet_pen, rat_visor_pen};
 use crate::render::palette::{mix, scale as scale_rgb, Rgb};
 
-use super::art_rat::{tail_charge, TailCharge};
+use super::art_rat::{bubble_hash, tail_charge, RatOutfit, TailCharge};
 use super::ecs::systems::powerups::{GIANT_STOMP_INTERVAL, GROWTH_SECS};
 use super::player::Player;
 
@@ -63,6 +64,33 @@ const WHISKER: Rgb = (232, 226, 242);
 
 const HURT: Rgb = (255, 56, 64);
 const GHOST: Rgb = (130, 200, 255);
+
+// Outfall diving suit palette (matching `art_rat`).
+const SUIT_DEEP: Rgb = (36, 52, 64);
+const SUIT_SHADOW: Rgb = (52, 74, 88);
+const SUIT_BASE: Rgb = (108, 138, 152);
+const SUIT_LIGHT: Rgb = (176, 206, 214);
+const SUIT_SEAM: Rgb = (30, 44, 56);
+const BRASS_DEEP: Rgb = (116, 66, 22);
+const BRASS_SHADOW: Rgb = (170, 102, 32);
+const BRASS_BASE: Rgb = (224, 160, 58);
+const BRASS_LIGHT: Rgb = (255, 220, 122);
+const BRASS_SPEC: Rgb = (255, 248, 210);
+const VISOR_DARK: Rgb = (30, 82, 106);
+const VISOR_BASE: Rgb = (78, 174, 206);
+const VISOR_LIGHT: Rgb = (168, 236, 248);
+const VISOR_GLINT: Rgb = (242, 254, 255);
+const FLIPPER_SHADOW: Rgb = (38, 52, 64);
+const FLIPPER_BASE: Rgb = (58, 78, 94);
+const FLIPPER_TIP: Rgb = (218, 168, 56);
+const TANK_SHADOW: Rgb = (138, 92, 28);
+const TANK_BODY: Rgb = (214, 166, 58);
+const HOSE_DARK: Rgb = (34, 44, 52);
+const BUBBLE_RING: Rgb = (158, 224, 242);
+const BUBBLE_SPEC: Rgb = (236, 252, 255);
+
+const HELMET_U: f32 = 3.25;
+const HELMET_R: f32 = 2.35;
 
 // Tail Thrash charge & lash glow (matching `art_rat`).
 const THRASH_GLOW: Rgb = (255, 178, 92);
@@ -223,17 +251,26 @@ struct GiantPose {
     sh_shift: f32,
     light_u: f32,
     light_v: f32,
+    diver: bool,
+    bob_y: f32,
+    swim_phase: f32,
+    hover_phase: f32,
 }
 
 impl GiantPose {
-    fn from_player(player: &Player, elapsed: f32, cam: Vec2, scale: f32) -> Self {
+    fn from_player_with_outfit(
+        player: &Player,
+        elapsed: f32,
+        cam: Vec2,
+        scale: f32,
+        outfit: RatOutfit,
+    ) -> Self {
         let scale = scale.max(crate::game::ecs::systems::powerups::SHRINK_SCALE);
-        let face = if player.face.len_sq() > 1e-4 {
+        let raw_face = if player.face.len_sq() > 1e-4 {
             player.face.normalized()
         } else {
             Vec2::new(0.0, -1.0)
         };
-        let perp = face.perp();
         let speed = player.vel.len();
         let top = player.loadout.stats.move_speed.max(1.0);
         let moving = (speed / top).clamp(0.0, 1.0);
@@ -260,7 +297,57 @@ impl GiantPose {
             0.0
         };
 
-        let phase = player.pos.dot(face) * 1.15;
+        if outfit == RatOutfit::Diver {
+            let hover_phase = elapsed * 2.5;
+            let swim_phase = elapsed * 8.5;
+            let bob_scale = scale.clamp(0.45, 2.6);
+            let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash) * bob_scale;
+            let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash) * bob_scale;
+            let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash) * bob_scale;
+            let center = (player.pos - cam) + Vec2::new(bob_x, bob_y) + raw_face * surge;
+
+            let turn_lean = if player.vel.len_sq() > 4.0 {
+                let vd = player.vel.normalized();
+                let cross = raw_face.x * vd.y - raw_face.y * vd.x;
+                cross.atan2(raw_face.dot(vd)).clamp(-0.55, 0.55) * 0.22 * moving
+            } else {
+                0.0
+            };
+            let swim_yaw = 0.09 * moving * (1.0 - dash) * swim_phase.sin()
+                + 0.045 * (1.0 - moving) * (hover_phase + 0.6).cos();
+            let face = raw_face.rotate(turn_lean + swim_yaw);
+            let perp = face.perp();
+            let wig = (0.14 * (1.0 - moving) + 0.56 * moving) * (1.0 - 0.85 * dash);
+            let breathe = 0.12 * (1.0 - moving) * hover_phase.sin();
+            let hip_shift = 0.20 * moving * swim_phase.sin() * (1.0 - dash);
+            let sh_shift = -0.15 * moving * swim_phase.sin() * (1.0 - dash);
+
+            return Self {
+                center,
+                face,
+                perp,
+                scale,
+                su: (1.0 + 0.06 * moving + 0.34 * dash - CHARGE_COIL_SQUASH * coil - squash * 0.7) * scale,
+                sv: (1.0 - 0.04 * moving - 0.15 * dash + CHARGE_COIL_SPREAD * coil + squash * 1.15) * scale,
+                detail: ((scale - 1.15) / 1.85).clamp(0.0, 1.0),
+                phase: swim_phase,
+                wig,
+                breathe,
+                moving,
+                dash,
+                hip_shift,
+                sh_shift,
+                light_u: face.dot(LIGHT),
+                light_v: perp.dot(LIGHT),
+                diver: true,
+                bob_y,
+                swim_phase,
+                hover_phase,
+            };
+        }
+
+        let perp = raw_face.perp();
+        let phase = player.pos.dot(raw_face) * 1.15;
         let wig = 0.42 * moving * (1.0 - dash);
         let breathe = 0.16 * (1.0 - moving) * (elapsed * 3.2).sin();
         let hip_shift = 0.22 * moving * phase.sin() * (1.0 - dash);
@@ -268,7 +355,7 @@ impl GiantPose {
 
         Self {
             center: player.pos - cam,
-            face,
+            face: raw_face,
             perp,
             scale,
             su: (1.0 + 0.30 * dash - CHARGE_COIL_SQUASH * coil - squash * 0.7) * scale,
@@ -281,16 +368,27 @@ impl GiantPose {
             dash,
             hip_shift,
             sh_shift,
-            light_u: face.dot(LIGHT),
+            light_u: raw_face.dot(LIGHT),
             light_v: perp.dot(LIGHT),
+            diver: false,
+            bob_y: 0.0,
+            swim_phase: 0.0,
+            hover_phase: 0.0,
         }
     }
 
     /// Lateral spine wave in normalised rat units (fades out at the head).
     #[inline]
     fn spine(&self, u: f32) -> f32 {
-        let steady = ((3.0 - u) * 0.24).clamp(0.0, 1.0);
-        self.wig * steady * (self.phase - u * 0.7).sin()
+        if self.diver {
+            let steady = ((2.2 - u) * 0.25).clamp(0.0, 1.0);
+            let idle_w = 0.14 * (self.hover_phase - u * 0.55).sin() * (1.0 - self.moving);
+            let swim_w = 0.56 * (self.swim_phase - u * 0.75).sin() * self.moving;
+            (idle_w + swim_w) * steady * (1.0 - 0.85 * self.dash)
+        } else {
+            let steady = ((3.0 - u) * 0.24).clamp(0.0, 1.0);
+            self.wig * steady * (self.phase - u * 0.7).sin()
+        }
     }
 
     /// Local `(u, v)` (normalised rat units, `v` measured from the spine) → screen position.
@@ -381,6 +479,30 @@ impl GiantPose {
         let lv = -du * SA + dv * CA;
         sd_ellipse(lu, lv, 0.0, 0.0, 0.94, 1.14)
     }
+
+    /// Diving-suit torso SDF (haunches, mid-torso, shoulders, neck collar) in
+    /// normalised rat units — stops at the collar so the brass helmet caps it.
+    #[inline]
+    fn diver_torso_sdf(&self, u: f32, v: f32) -> f32 {
+        let vs = v - self.spine(u);
+        let haunch_w = 2.66 + self.breathe;
+        let d_haunch = sd_ellipse(u, vs, -1.85, 0.0, 2.02, haunch_w);
+        let d_mid = sd_taper_capsule(
+            Vec2::new(u, vs),
+            Vec2::new(-1.55, 0.0),
+            Vec2::new(1.25, 0.0),
+            2.42 + self.breathe * 0.5,
+            1.78,
+        );
+        let d_collar = sd_ellipse(u, vs, 1.38, 0.0, 0.72, 1.88);
+        smin(smin(d_haunch, d_mid, 0.65), d_collar, 0.42)
+    }
+
+    /// Round brass diving helmet SDF in normalised rat units.
+    #[inline]
+    fn helmet_sdf(&self, u: f32, v: f32) -> f32 {
+        (u - HELMET_U).hypot(v) - HELMET_R
+    }
 }
 
 /// Draw the player's rat at the scale of either size buff.
@@ -397,10 +519,33 @@ pub fn draw_giant_rat(
     scale: f32,
     tail_flash: f32,
 ) {
+    draw_giant_rat_with_outfit(
+        pb,
+        player,
+        elapsed,
+        cam,
+        scale,
+        tail_flash,
+        RatOutfit::Standard,
+    );
+}
+
+/// [`draw_giant_rat`], selecting the rat's outfit (`RatOutfit::Diver` on the
+/// Outfall so both Growth Serum 5× and Shrink Draught 0.35× wear the diving
+/// suit and swim). Render-only.
+pub fn draw_giant_rat_with_outfit(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    elapsed: f32,
+    cam: Vec2,
+    scale: f32,
+    tail_flash: f32,
+    outfit: RatOutfit,
+) {
     if pb.w == 0 || pb.h == 0 {
         return;
     }
-    let pose = GiantPose::from_player(player, elapsed, cam, scale);
+    let pose = GiantPose::from_player_with_outfit(player, elapsed, cam, scale, outfit);
     let tint = Tint::from_player(player, elapsed);
     let lash = tail_flash.clamp(0.0, 1.0);
 
@@ -413,30 +558,54 @@ pub fn draw_giant_rat(
         draw_dash_streaks(pb, &pose);
     }
 
-    // 1. Cast ground shadow first (stamped with floor pen `0` so the lighting
-    //    pass never rim-lights the floor shadow as creature fur).
-    if !tint.ghost {
-        let prev_pen = pb.set_pen(0);
-        draw_body_shadow(pb, &pose);
-        pb.set_pen(prev_pen);
+    if pose.diver {
+        // 1. Buoyant underwater drop shadow (pen `0`).
+        if !tint.ghost {
+            let prev_pen = pb.set_pen(0);
+            draw_diver_shadow(pb, &pose);
+            pb.set_pen(prev_pen);
+        }
+
+        // 2. Undulating swimming tail (with Tail Thrash / lash intact).
+        draw_tail(pb, &pose, player.vel, elapsed, tint, charge, lash);
+
+        // 3. Paddling rubber front mitts and webbed brass-trimmed flippers.
+        draw_diver_limbs(pb, &pose, tint);
+
+        // 4. Rubbery diving suit torso, brass neck corselet, dorsal air tank & hose.
+        draw_diver_body(pb, &pose, tint);
+
+        // 5. Classic brass/copper diving helmet, riveted glass porthole, eyes inside & whiskers.
+        draw_diver_helmet(pb, &pose, elapsed, tint);
+
+        // 6. Analytic helmet valve bubbles (pre-lighting, pen `0`).
+        draw_diver_bubbles(pb, &pose, player.vel, elapsed, tint);
+    } else {
+        // 1. Cast ground shadow first (stamped with floor pen `0` so the lighting
+        //    pass never rim-lights the floor shadow as creature fur).
+        if !tint.ghost {
+            let prev_pen = pb.set_pen(0);
+            draw_body_shadow(pb, &pose);
+            pb.set_pen(prev_pen);
+        }
+
+        // 2. Long tapering segmented pink tail (sways with movement, lashes when
+        //    `tail_flash > 0`, and carries Tail Thrash charge glow).
+        draw_tail(pb, &pose, player.vel, elapsed, tint, charge, lash);
+
+        // 3. Four articulated paws with toes stepping in diagonal trot pairs.
+        draw_paws(pb, &pose, tint);
+
+        // 4. Sculpted body & head (4-shade white/lavender coat, dorsal stripe,
+        //    pale belly edge, anatomical creases, fur grain, 1-px outline).
+        draw_body(pb, &pose, tint);
+
+        // 5. Two round ears with furred rims and cupped pink inner bowls.
+        draw_ears(pb, &pose, tint);
+
+        // 6. Glossy dark eyes with 1-px glint, pink nose, and crisp 1-px whiskers.
+        draw_face(pb, &pose, elapsed, tint);
     }
-
-    // 2. Long tapering segmented pink tail (sways with movement, lashes when
-    //    `tail_flash > 0`, and carries Tail Thrash charge glow).
-    draw_tail(pb, &pose, player.vel, elapsed, tint, charge, lash);
-
-    // 3. Four articulated paws with toes stepping in diagonal trot pairs.
-    draw_paws(pb, &pose, tint);
-
-    // 4. Sculpted body & head (4-shade white/lavender coat, dorsal stripe,
-    //    pale belly edge, anatomical creases, fur grain, 1-px outline).
-    draw_body(pb, &pose, tint);
-
-    // 5. Two round ears with furred rims and cupped pink inner bowls.
-    draw_ears(pb, &pose, tint);
-
-    // 6. Glossy dark eyes with 1-px glint, pink nose, and crisp 1-px whiskers.
-    draw_face(pb, &pose, elapsed, tint);
 
     // 7. Super Dash charge ring around the giant while holding dash.
     if player.dash_charging {
@@ -448,12 +617,13 @@ pub fn draw_giant_rat(
 fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &GiantPose) {
     let streaks = (7.0 * (0.6 + 0.4 * pose.scale)).round() as i32;
     let prev_pen = pb.set_pen(0);
+    let col = if pose.diver { (110, 200, 235) } else { (90, 120, 170) };
     for side in [-1.0f32, 1.0] {
         for j in 0..streaks {
             let t = j as f32 / streaks.max(1) as f32;
             let p = pose.place(-3.2 - t * 6.5, side * (2.3 - 0.9 * t));
             let f = pose.dash * (1.0 - t) * 0.85;
-            pb.plot_add(p.x.round() as i32, p.y.round() as i32, scale_rgb((90, 120, 170), f));
+            pb.plot_add(p.x.round() as i32, p.y.round() as i32, scale_rgb(col, f));
         }
     }
     pb.set_pen(prev_pen);
@@ -548,8 +718,17 @@ fn draw_tail(
 
     for (i, slot) in pts.iter_mut().enumerate().take(n_pts + 1).skip(1) {
         let s = (i as f32 - 0.5) / n_pts as f32;
-        let idle_th = 1.55 * s.powf(1.35) + 0.24 * (elapsed * 1.7 - s * 2.2).sin();
-        let run_th = 0.18 * s + 0.58 * s * (elapsed * 13.0 - s * 5.2).sin() * whip_damp;
+        let (idle_th, run_th) = if pose.diver {
+            (
+                0.35 * s + 0.52 * s * (elapsed * 2.6 - s * 3.4).sin(),
+                0.10 * s + 0.85 * s * (elapsed * 8.5 - s * 4.8).sin() * whip_damp,
+            )
+        } else {
+            (
+                1.55 * s.powf(1.35) + 0.24 * (elapsed * 1.7 - s * 2.2).sin(),
+                0.18 * s + 0.58 * s * (elapsed * 13.0 - s * 5.2).sin() * whip_damp,
+            )
+        };
         let lash_th = lash * (1.15 * (s * 5.5 - (1.0 - lash) * 8.5).sin() * s + 0.65 * s);
         let th = lag * s + idle_th * (1.0 - pose.moving) + run_th * pose.moving + lash_th;
         p += back.rotate(th) * step_len;
@@ -1223,6 +1402,634 @@ fn draw_charge_ring(
     pb.set_pen(prev_pen);
 }
 
+// ---------------------------------------------------------------------------
+// Outfall diving suit & swimming (0.35× Shrink Draught through 5× Growth Serum)
+// ---------------------------------------------------------------------------
+
+/// Soft buoyant seabed drop shadow under the diving suit and helmet.
+fn draw_diver_shadow(pb: &mut PixelBuffer, pose: &GiantPose) {
+    let sh_offset = Vec2::new(
+        1.35 * pose.scale + 0.6,
+        1.85 * pose.scale + 0.8 - pose.bob_y * 0.45,
+    );
+    let reach = (6.8 * pose.scale * (1.0 + 0.34 * pose.dash)).ceil() as i32 + 5;
+    let cx = pose.center.x.round() as i32;
+    let cy = pose.center.y.round() as i32;
+    let x0 = (cx - reach).max(0);
+    let x1 = (cx + reach).min(pb.w as i32 - 1);
+    let y0 = (cy - reach).max(0);
+    let y1 = (cy + reach).min(pb.h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let feather = 2.2 + 0.55 * pose.scale;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let d = Vec2::new(x as f32, y as f32) - pose.center - sh_offset;
+            let (u, v) = pose.to_local(d);
+            if u < -4.8 || u > 6.4 || v.abs() > 3.8 {
+                continue;
+            }
+            let dist = pose.diver_torso_sdf(u, v).min(pose.helmet_sdf(u, v)) * pose.scale;
+            if dist < 1.5 {
+                let soft = ((1.5 - dist) / feather).clamp(0.0, 1.0);
+                darken(pb, x, y, 0.26 * soft);
+            }
+        }
+    }
+}
+
+/// Front paddling rubber mitts and hind webbed brass-trimmed diving flippers,
+/// smoothly animating through hover tread, flutter kick, and kick-glide dash.
+fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &GiantPose, tint: Tint) {
+    let alpha = tint.alpha();
+    let m = pose.moving;
+    let g = pose.dash;
+
+    // 1. Front paddling rubber arms and webbed mitts.
+    for side in [-1.0f32, 1.0] {
+        let ph_i = pose.hover_phase + side * 0.9;
+        let ph_s = pose.swim_phase + if side > 0.0 { 0.0 } else { 0.85 };
+        let u_idle = 0.65 + 0.32 * ph_i.sin();
+        let v_idle = side * (2.05 + 0.30 * ph_i.cos());
+        let u_swim = 0.50 + 0.90 * ph_s.cos();
+        let v_swim = side * (2.15 + 0.68 * ph_s.sin().max(-0.25));
+        let u = (u_idle * (1.0 - m) + u_swim * m) * (1.0 - g) + (-0.30) * g;
+        let v = (v_idle * (1.0 - m) + v_swim * m) * (1.0 - g) + (side * 2.05) * g;
+
+        let root_w = pose.place(0.55 - 0.35 * g, side * 1.45);
+        let mitt_w = pose.place(u, v);
+        let arm_r = (0.38 * pose.scale).max(0.42);
+        let mitt_r = (0.56 * pose.scale).max(0.48);
+
+        let pad = (mitt_r + 2.2).ceil() as i32;
+        let x0 = (root_w.x.min(mitt_w.x).floor() as i32 - pad).max(0);
+        let x1 = (root_w.x.max(mitt_w.x).ceil() as i32 + pad).min(pb.w as i32 - 1);
+        let y0 = (root_w.y.min(mitt_w.y).floor() as i32 - pad).max(0);
+        let y1 = (root_w.y.max(mitt_w.y).ceil() as i32 + pad).min(pb.h as i32 - 1);
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        let ab = mitt_w - root_w;
+        let ab2 = ab.len_sq().max(1e-4);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let p = Vec2::new(x as f32, y as f32);
+                let d = sd_taper_capsule(p, root_w, mitt_w, arm_r, mitt_r);
+                if d > 1.1 {
+                    continue;
+                }
+                if d > 0.0 {
+                    let oa = ((1.1 - d) / 1.1).clamp(0.0, 1.0) * 0.85 * alpha;
+                    blend(pb, x, y, tint.apply(OUTLINE), oa);
+                    continue;
+                }
+                let t = ((p - root_w).dot(ab) / ab2).clamp(0.0, 1.0);
+                let lit = (p - mitt_w).dot(LIGHT) / mitt_r.max(1.0);
+                let base = if t < 0.45 { SUIT_BASE } else { FLIPPER_BASE };
+                let col = if lit > 0.0 {
+                    mix(base, SUIT_LIGHT, (lit * 0.42).clamp(0.0, 0.45))
+                } else {
+                    mix(base, FLIPPER_SHADOW, ((-lit) * 0.5).clamp(0.0, 0.55))
+                };
+                blend(pb, x, y, tint.apply(col), alpha);
+            }
+        }
+    }
+
+    // 2. Hind webbed diving flippers: flared triangular blades with rubber
+    //    ribs and brass-yellow trailing edge trim.
+    for side in [-1.0f32, 1.0] {
+        let off = if side > 0.0 { 0.0 } else { PI };
+        let kick = (pose.hover_phase + off).sin() * (1.0 - m) + (pose.swim_phase + off).sin() * m;
+        let u_root = -2.65 - 0.30 * g;
+        let v_root = side * (1.68 - 0.42 * g + 0.18 * kick * (1.0 - g));
+        let u_tip = -4.55 - 0.65 * m - 0.60 * g - 0.45 * kick * (1.0 - g);
+        let v_tip = side * (2.15 - 0.72 * g + 0.55 * kick * (1.0 - g));
+
+        let root_w = pose.place(u_root, v_root);
+        let tip_w = pose.place(u_tip, v_tip);
+        let ankle_r = (0.36 * pose.scale).max(0.42);
+        let blade_r = (0.86 * pose.scale).max(0.55);
+
+        let pad = (blade_r + 2.4).ceil() as i32;
+        let x0 = (root_w.x.min(tip_w.x).floor() as i32 - pad).max(0);
+        let x1 = (root_w.x.max(tip_w.x).ceil() as i32 + pad).min(pb.w as i32 - 1);
+        let y0 = (root_w.y.min(tip_w.y).floor() as i32 - pad).max(0);
+        let y1 = (root_w.y.max(tip_w.y).ceil() as i32 + pad).min(pb.h as i32 - 1);
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        let ab = tip_w - root_w;
+        let ab_len = ab.len().max(1e-4);
+        let ab_dir = ab * (1.0 / ab_len);
+        let ab_perp = ab_dir.perp();
+
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let p = Vec2::new(x as f32, y as f32);
+                let d = sd_taper_capsule(p, root_w, tip_w, ankle_r, blade_r);
+                if d > 1.1 {
+                    continue;
+                }
+                if d > 0.0 {
+                    let oa = ((1.1 - d) / 1.1).clamp(0.0, 1.0) * 0.88 * alpha;
+                    blend(pb, x, y, tint.apply(OUTLINE), oa);
+                    continue;
+                }
+                let rel = p - root_w;
+                let t = (rel.dot(ab_dir) / ab_len).clamp(0.0, 1.0);
+                let lat = rel.dot(ab_perp) / (ankle_r + (blade_r - ankle_r) * t).max(0.5);
+                let lit = (p - tip_w).dot(LIGHT) / blade_r.max(1.0);
+
+                let mut col = if t > 0.78 {
+                    // Brass-yellow flipper edge trim.
+                    mix(BRASS_SHADOW, FLIPPER_TIP, (0.55 + 0.45 * lit).clamp(0.0, 1.0))
+                } else if t < 0.22 {
+                    SUIT_SEAM
+                } else {
+                    let c = mix(FLIPPER_SHADOW, FLIPPER_BASE, (0.55 + 0.45 * lit).clamp(0.0, 1.0));
+                    if pose.detail > 0.15 {
+                        // Two longitudinal rubber ribs along the flipper blade.
+                        let rib = ((lat.abs() - 0.42).abs() / 0.14).clamp(0.0, 1.0);
+                        mix(SUIT_SEAM, c, 0.35 + 0.65 * rib)
+                    } else {
+                        c
+                    }
+                };
+                if d > -0.45 {
+                    let et = (-d / 0.45).clamp(0.0, 1.0);
+                    col = mix(OUTLINE, col, 0.35 + 0.65 * et);
+                }
+                blend(pb, x, y, tint.apply(col), alpha);
+            }
+        }
+    }
+}
+
+/// Sculpted rubbery diving suit torso, brass neck corselet, dorsal air tank
+/// with harness straps, and curved dark rubber air hose.
+fn draw_diver_body(pb: &mut PixelBuffer, pose: &GiantPose, tint: Tint) {
+    let reach = (6.2 * pose.scale * (1.0 + 0.34 * pose.dash)).ceil() as i32 + 4;
+    let cx = pose.center.x.round() as i32;
+    let cy = pose.center.y.round() as i32;
+    let x0 = (cx - reach).max(0);
+    let x1 = (cx + reach).min(pb.w as i32 - 1);
+    let y0 = (cy - reach).max(0);
+    let y1 = (cy + reach).min(pb.h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+
+    let body_pen = pb.pen();
+    let helmet_pen = rat_helmet_pen(pose.scale > 1.5);
+    let alpha = tint.alpha();
+    let outline_col = if tint.hurt > 0.0 { (90, 10, 18) } else { OUTLINE };
+
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let d = Vec2::new(x as f32, y as f32) - pose.center;
+            let (u, v) = pose.to_local(d);
+            if u < -4.6 || u > 3.2 || v.abs() > 3.6 {
+                continue;
+            }
+            let d_local = pose.diver_torso_sdf(u, v);
+            let d_px = d_local * pose.scale;
+            if d_px > 1.15 {
+                continue;
+            }
+            if d_px > 0.0 {
+                let oa = ((1.15 - d_px) / 1.15).clamp(0.0, 1.0) * 0.92 * alpha;
+                pb.set_pen(body_pen);
+                blend(pb, x, y, outline_col, oa);
+                continue;
+            }
+
+            const EPS: f32 = 0.08;
+            let mut gu = (pose.diver_torso_sdf(u + EPS, v) - pose.diver_torso_sdf(u - EPS, v))
+                / (2.0 * EPS);
+            let mut gv = (pose.diver_torso_sdf(u, v + EPS) - pose.diver_torso_sdf(u, v - EPS))
+                / (2.0 * EPS);
+            let glen = gu.hypot(gv);
+            if glen > 1e-4 {
+                gu /= glen;
+                gv /= glen;
+            }
+
+            let depth = (-d_local / 1.9).clamp(0.0, 1.0);
+            let dome = (1.0 - (1.0 - depth) * (1.0 - depth)).clamp(0.0, 1.0).sqrt();
+            let slope = (1.0 - depth).powf(0.75);
+            let dir_lit = (gu * pose.light_u + gv * pose.light_v) * slope;
+            let vs = v - pose.spine(u);
+            let form_lit = u * 0.10 * pose.light_u + vs * 0.24 * pose.light_v;
+            let lum = (0.46 + 0.34 * dome + 0.54 * dir_lit + 0.22 * form_lit).clamp(0.0, 1.15);
+
+            let mut px_pen = body_pen;
+            // Sculpted dorsal air cylinder in local (u, vs) space.
+            let d_tank = sd_taper_capsule(
+                Vec2::new(u, vs),
+                Vec2::new(-1.78, 0.0),
+                Vec2::new(0.22, 0.0),
+                0.92,
+                0.90,
+            );
+            let d_valve = (u - 0.42).hypot(vs) - 0.38;
+
+            let mut col = if d_tank <= 0.14 || d_valve <= 0.08 {
+                if d_tank > 0.0 && d_valve > 0.0 {
+                    OUTLINE
+                } else if (-1.28..=-1.04).contains(&u) || (-0.42..=-0.18).contains(&u) {
+                    // Twin dark rubber tank mounting straps.
+                    SUIT_SEAM
+                } else {
+                    px_pen = helmet_pen;
+                    let t_n = (vs / 0.92).clamp(-1.0, 1.0);
+                    let t_z = (1.0 - t_n * t_n).max(0.0).sqrt();
+                    let t_lit = (0.42 + 0.40 * t_z + 0.55 * t_n * pose.light_v).clamp(0.0, 1.25);
+                    if t_lit < 0.52 {
+                        mix(TANK_SHADOW, TANK_BODY, t_lit / 0.52)
+                    } else if t_lit < 0.98 {
+                        mix(TANK_BODY, BRASS_LIGHT, (t_lit - 0.52) / 0.46)
+                    } else {
+                        mix(BRASS_LIGHT, BRASS_SPEC, ((t_lit - 0.98) / 0.27).clamp(0.0, 1.0))
+                    }
+                }
+            } else if (0.88..=1.92).contains(&u) {
+                // Bolted brass neck corselet collar.
+                px_pen = helmet_pen;
+                let c_lit = (0.46 + 0.50 * (vs / 1.85).clamp(-1.0, 1.0) * pose.light_v
+                    + 0.25 * dir_lit)
+                    .clamp(0.0, 1.2);
+                let mut c = if c_lit < 0.42 {
+                    mix(BRASS_DEEP, BRASS_SHADOW, c_lit / 0.42)
+                } else if c_lit < 0.82 {
+                    mix(BRASS_SHADOW, BRASS_BASE, (c_lit - 0.42) / 0.40)
+                } else {
+                    mix(BRASS_BASE, BRASS_LIGHT, ((c_lit - 0.82) / 0.38).clamp(0.0, 1.0))
+                };
+                if pose.detail > 0.20 {
+                    // Individual collar rivets across the flange.
+                    let ru = u - 1.28;
+                    for &rv in &[-1.25f32, -0.45, 0.45, 1.25] {
+                        let rd = ru.hypot(vs - rv);
+                        if rd < 0.22 {
+                            c = if rd < 0.12 { BRASS_SPEC } else { BRASS_DEEP };
+                        }
+                    }
+                }
+                c
+            } else if u <= -3.02 && vs.abs() <= 0.96 {
+                // Brass tail-gland cuff at the rump.
+                px_pen = helmet_pen;
+                mix(BRASS_SHADOW, BRASS_BASE, (0.5 + 0.45 * dir_lit).clamp(0.0, 1.0))
+            } else {
+                // Rubbery slate-teal diving suit body.
+                let mut c = if lum < 0.32 {
+                    mix(SUIT_DEEP, SUIT_SHADOW, lum / 0.32)
+                } else if lum < 0.70 {
+                    mix(SUIT_SHADOW, SUIT_BASE, (lum - 0.32) / 0.38)
+                } else {
+                    mix(SUIT_BASE, SUIT_LIGHT, ((lum - 0.70) / 0.45).clamp(0.0, 1.0))
+                };
+                if pose.detail > 0.12 {
+                    // Waist seam & shoulder harness straps.
+                    let waist = (-(u + 0.55) * (u + 0.55) / 0.06).exp();
+                    let strap = (-(vs.abs() - 0.95).powi(2) / 0.04).exp()
+                        * smoothstep(-1.4, -0.8, u)
+                        * (1.0 - smoothstep(0.65, 1.05, u));
+                    let seam_amt = (waist * 0.42 + strap * 0.65).clamp(0.0, 0.75) * pose.detail;
+                    c = mix(c, SUIT_SEAM, seam_amt);
+                }
+                c
+            };
+
+            if d_px > -0.45 {
+                let edge_t = (-d_px / 0.45).clamp(0.0, 1.0);
+                col = mix(outline_col, col, 0.35 + 0.65 * edge_t);
+            }
+            pb.set_pen(px_pen);
+            blend(pb, x, y, tint.apply(col), alpha);
+        }
+    }
+
+    // Curved dark-rubber air hose connecting the tank valve to the helmet's rear-left.
+    pb.set_pen(body_pen);
+    let h0 = pose.place(0.40, -0.25);
+    let h1 = pose.place(0.95, -1.45);
+    let h2 = pose.place(1.75, -1.78);
+    let hose_r = (0.24 * pose.scale).max(0.45);
+    let steps = (10.0 * pose.scale.clamp(0.6, 3.0)).round() as i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps.max(1) as f32;
+        let mt = 1.0 - t;
+        let pt = h0 * (mt * mt) + h1 * (2.0 * mt * t) + h2 * (t * t);
+        let r = hose_r.ceil() as i32;
+        let px = pt.x.round() as i32;
+        let py = pt.y.round() as i32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let dd = (dx as f32).hypot(dy as f32);
+                if dd <= hose_r {
+                    let c = if dd < hose_r * 0.45 { SUIT_SHADOW } else { HOSE_DARK };
+                    blend(pb, px + dx, py + dy, tint.apply(c), alpha);
+                }
+            }
+        }
+    }
+    pb.set_pen(body_pen);
+}
+
+/// Classic brass/copper diving helmet with spherical metallic lighting, bolted
+/// porthole bezel with rivets, reflective aqua glass faceplate showing the rat's
+/// eyes inside, side exhaust valve, and gently swaying whiskers.
+fn draw_diver_helmet(pb: &mut PixelBuffer, pose: &GiantPose, elapsed: f32, tint: Tint) {
+    let body_pen = pb.pen();
+    let giant_pen = pose.scale > 1.5;
+    let helmet_pen = rat_helmet_pen(giant_pen);
+    let visor_pen = rat_visor_pen(giant_pen);
+    let alpha = tint.alpha();
+    let outline_col = if tint.hurt > 0.0 { (90, 10, 18) } else { OUTLINE };
+
+    let h_center = pose.place(HELMET_U, 0.0);
+    // Keep the rigid brass dome circular even while the rubber suit stretches in a dash.
+    let r_u = (HELMET_R * pose.scale).max(1.15);
+    let r_v = r_u;
+    let r_min = r_u;
+    let pad = r_u.max(r_v).ceil() as i32 + 3;
+    let cx = h_center.x.round() as i32;
+    let cy = h_center.y.round() as i32;
+    let x0 = (cx - pad).max(0);
+    let x1 = (cx + pad).min(pb.w as i32 - 1);
+    let y0 = (cy - pad).max(0);
+    let y1 = (cy + pad).min(pb.h as i32 - 1);
+
+    if x0 <= x1 && y0 <= y1 {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let d_vec = Vec2::new(x as f32, y as f32) - h_center;
+                let nu = d_vec.dot(pose.face) / r_u;
+                let nv = d_vec.dot(pose.perp) / r_v;
+                let r_norm = nu.hypot(nv);
+                let d_px = (r_norm - 1.0) * r_min;
+                if d_px > 1.15 {
+                    continue;
+                }
+                if d_px > 0.0 {
+                    let oa = ((1.15 - d_px) / 1.15).clamp(0.0, 1.0) * 0.92 * alpha;
+                    pb.set_pen(body_pen);
+                    blend(pb, x, y, outline_col, oa);
+                    continue;
+                }
+
+                // Front oval porthole faceplate in normalised helmet coordinates.
+                let vu = (nu - 0.40) / 0.42;
+                let vv = nv / 0.60;
+                let vp = vu * vu + vv * vv;
+
+                let (mut col, px_pen) = if vp <= 1.0 {
+                    let v_lit = (0.50 + 0.50 * (vu * pose.light_u + vv * pose.light_v))
+                        .clamp(0.0, 1.0);
+                    let mut c = if v_lit < 0.52 {
+                        mix(VISOR_DARK, VISOR_BASE, v_lit / 0.52)
+                    } else {
+                        mix(VISOR_BASE, VISOR_LIGHT, (v_lit - 0.52) / 0.48)
+                    };
+                    // Subtle recessed glass rim shadow right inside the brass bezel.
+                    if vp > 0.78 {
+                        c = mix(c, VISOR_DARK, ((vp - 0.78) / 0.22).clamp(0.0, 1.0) * 0.55);
+                    }
+                    // Rat's pale snout, dark glossy eyes, and pink nose visible inside the porthole.
+                    if pose.scale >= 1.25 {
+                        let d_head_in = sd_ellipse(vu, vv, -0.08, 0.0, 0.68, 0.66);
+                        if d_head_in < 0.0 {
+                            c = mix(c, FUR_BASE, 0.34);
+                        }
+                        for side in [-1.0f32, 1.0] {
+                            let ed = (vu + 0.16).hypot(vv - side * 0.44);
+                            if ed < 0.22 {
+                                c = EYE;
+                                let g_off = ((vu + 0.16) - 0.08 * pose.light_u)
+                                    .hypot((vv - side * 0.44) - 0.08 * pose.light_v);
+                                if pose.detail > 0.2 && g_off < 0.09 {
+                                    c = EYE_GLINT;
+                                }
+                            }
+                        }
+                        if (vu - 0.46).hypot(vv) < 0.17 {
+                            c = mix(NOSE_PINK, VISOR_LIGHT, 0.25);
+                        }
+                    }
+                    // Crisp curved specular reflection across the glass faceplate.
+                    let g_u = vu - 0.32 * pose.light_u;
+                    let g_v = vv - 0.32 * pose.light_v;
+                    let glint = (1.0 - (g_u * g_u + g_v * g_v) / 0.18).clamp(0.0, 1.0);
+                    if glint > 0.0 && vp < 0.80 {
+                        c = mix(c, VISOR_GLINT, glint * 0.72);
+                    }
+                    (c, visor_pen)
+                } else {
+                    // 3D spherical copper/brass helmet dome.
+                    let nz = (1.0 - r_norm * r_norm).max(0.0).sqrt();
+                    let lit = (0.38
+                        + 0.44 * nz
+                        + 0.62 * (nu * pose.light_u + nv * pose.light_v))
+                        .clamp(0.0, 1.30);
+                    let mut c = if lit < 0.34 {
+                        mix(BRASS_DEEP, BRASS_SHADOW, lit / 0.34)
+                    } else if lit < 0.72 {
+                        mix(BRASS_SHADOW, BRASS_BASE, (lit - 0.34) / 0.38)
+                    } else if lit < 1.02 {
+                        mix(BRASS_BASE, BRASS_LIGHT, (lit - 0.72) / 0.30)
+                    } else {
+                        mix(BRASS_LIGHT, BRASS_SPEC, ((lit - 1.02) / 0.28).clamp(0.0, 1.0))
+                    };
+
+                    // Raised bolted brass bezel framing the porthole.
+                    if vp <= 1.50 {
+                        if vp > 1.34 {
+                            c = mix(c, BRASS_DEEP, 0.55);
+                        } else {
+                            c = mix(c, BRASS_LIGHT, 0.20);
+                        }
+                        // Six brass rivets spaced around the porthole ring.
+                        if pose.detail > 0.15 {
+                            for ri in 0..6 {
+                                let ang = ri as f32 * (TAU / 6.0) + 0.26;
+                                let rvu = ang.cos() * 1.15;
+                                let rvv = ang.sin() * 1.15;
+                                let rd = (vu - rvu).hypot(vv - rvv);
+                                if rd < 0.15 {
+                                    c = if rd < 0.08 { BRASS_SPEC } else { BRASS_DEEP };
+                                }
+                            }
+                        }
+                    } else if pose.detail > 0.20 {
+                        // Subtle riveted crown seam across the top of the dome.
+                        let seam = (-(nu + 0.18).powi(2) / 0.008).exp();
+                        c = mix(c, BRASS_DEEP, seam * 0.38 * pose.detail);
+                    }
+                    (c, helmet_pen)
+                };
+
+                if d_px > -0.45 {
+                    let et = (-d_px / 0.45).clamp(0.0, 1.0);
+                    col = mix(outline_col, col, 0.35 + 0.65 * et);
+                }
+                pb.set_pen(px_pen);
+                blend(pb, x, y, tint.apply(col), alpha);
+            }
+        }
+    }
+
+    // Small-scale readability guarantees (Shrink Draught 0.35× and ~1× ramp):
+    // crisp porthole pixel and dark eyes inside the glass.
+    pb.set_pen(visor_pen);
+    if pose.scale < 0.85 {
+        let vp = pose.place(4.2, 0.0);
+        blend(pb, vp.x.round() as i32, vp.y.round() as i32, tint.apply(VISOR_LIGHT), alpha);
+    } else if pose.scale < 1.25 {
+        for side in [-1.0f32, 1.0] {
+            let ep = pose.place(4.05, side * 0.62);
+            blend(pb, ep.x.round() as i32, ep.y.round() as i32, tint.apply(EYE), alpha);
+        }
+    }
+
+    // Side brass exhaust valve knob (origin of the rising bubble stream).
+    pb.set_pen(helmet_pen);
+    let valve = pose.place(1.90, -2.10);
+    let vr = (0.34 * pose.scale).max(0.55);
+    let vri = vr.ceil() as i32;
+    let vx = valve.x.round() as i32;
+    let vy = valve.y.round() as i32;
+    for dy in -vri..=vri {
+        for dx in -vri..=vri {
+            let dd = (dx as f32).hypot(dy as f32);
+            if dd <= vr {
+                let c = if dd < vr * 0.5 { BRASS_LIGHT } else { BRASS_SHADOW };
+                blend(pb, vx + dx, vy + dy, tint.apply(c), alpha);
+            }
+        }
+    }
+
+    // Whiskers poking past the helmet flanks with gentle underwater drift.
+    pb.set_pen(0);
+    if pose.scale < 1.6 {
+        let sway = 0.28 * (elapsed * 4.5).sin();
+        for side in [-1.0f32, 1.0] {
+            for (k, &(wu, wv)) in [(4.85f32, 2.0f32), (5.15, 2.95)].iter().enumerate() {
+                let wp = pose.place(wu + sway * (k as f32 + 1.0) * 0.5, side * wv);
+                let g = if k == 0 { 64 } else { 36 };
+                pb.plot_add(wp.x.round() as i32, wp.y.round() as i32, (g, g, g));
+            }
+        }
+    } else {
+        let configs: [(f32, f32, f32, f32); 3] = [
+            (4.65, 1.45, 0.95, 2.05),
+            (4.35, 1.75, 1.32, 2.45),
+            (4.00, 1.95, 1.65, 1.95),
+        ];
+        for side in [-1.0f32, 1.0] {
+            for (k, &(wu, wv, base_ang, wlen)) in configs.iter().enumerate() {
+                let sway = 0.06 * (elapsed * 4.5 + k as f32 * 1.1 + side * 0.4).sin();
+                let ang = side * (base_ang + sway);
+                let start = pose.place(wu, side * wv);
+                let wdir = pose.face.rotate(ang);
+                let total_len = wlen * (0.72 + 0.28 * pose.detail) * pose.scale;
+                let steps = (total_len * 1.2).ceil().max(4.0) as i32;
+                let mut last = (i32::MIN, i32::MIN);
+                for i in 1..=steps {
+                    let t = i as f32 / steps as f32;
+                    let sweep_back = -0.22 * total_len * (t * t);
+                    let pt = start + wdir * (total_len * t) + pose.face * sweep_back;
+                    let sx = pt.x.round() as i32;
+                    let sy = pt.y.round() as i32;
+                    if (sx, sy) == last {
+                        continue;
+                    }
+                    last = (sx, sy);
+                    let wa = (0.48 + 0.16 * pose.detail) * (1.0 - 0.68 * t) * alpha;
+                    blend(pb, sx, sy, tint.apply(WHISKER), wa);
+                }
+            }
+        }
+    }
+    pb.set_pen(body_pen);
+}
+
+/// Sparse analytic stream of bubbles rising from the scaled helmet exhaust valve
+/// (with a dash kick-glide burst). Zero rng, zero state, pre-lighting with pen `0`.
+fn draw_diver_bubbles(pb: &mut PixelBuffer, pose: &GiantPose, vel: Vec2, elapsed: f32, tint: Tint) {
+    let prev_pen = pb.set_pen(0);
+    let valve = pose.place(1.90, -2.10);
+    let bscale = pose.scale.clamp(0.45, 3.0);
+    let alpha_mul = tint.alpha();
+
+    for slot in 0..8u32 {
+        let (weight, period) = if slot < 3 {
+            (1.0, 1.15 + 0.55 * bubble_hash(slot, 0, 3))
+        } else if slot < 5 {
+            (
+                ((pose.moving - 0.10) / 0.45).clamp(0.0, 1.0),
+                0.78 + 0.35 * bubble_hash(slot, 0, 5),
+            )
+        } else {
+            (
+                (pose.dash * 1.4).clamp(0.0, 1.0),
+                0.38 + 0.20 * bubble_hash(slot, 0, 7),
+            )
+        };
+        if weight <= 0.02 {
+            continue;
+        }
+        let offset = bubble_hash(slot, 0, 13) * period;
+        let phase = (elapsed + offset) / period;
+        let floor_p = phase.floor();
+        let cycle = (floor_p as i32) as u32;
+        let t = phase - floor_p;
+        let env = (t / 0.14).min(1.0) * ((1.0 - t) / 0.32).clamp(0.0, 1.0);
+        let a = env * weight * 0.85 * alpha_mul;
+        if a <= 0.04 {
+            continue;
+        }
+        let h1 = bubble_hash(slot, cycle, 19);
+        let h2 = bubble_hash(slot, cycle, 31);
+        let origin = match slot {
+            6 => pose.place(-4.0, -1.3),
+            7 => pose.place(-4.0, 1.3),
+            _ => valve,
+        };
+        let rise = -t * (6.5 + 5.5 * h1) * bscale;
+        let drag = (vel * (-0.13 * t)).clamp_len(11.0 * bscale);
+        let wobble = (t * 7.2 + h2 * TAU).sin() * (0.5 + 1.1 * t) * bscale;
+        let bp = origin + drag + Vec2::new(wobble, rise);
+        let bx = bp.x.round() as i32;
+        let by = bp.y.round() as i32;
+
+        if pose.scale < 1.6 {
+            blend(pb, bx, by, tint.apply(BUBBLE_SPEC), a);
+            if t < 0.55 && h1 > 0.45 {
+                blend(pb, bx + 1, by + 1, tint.apply(BUBBLE_RING), a * 0.40);
+            }
+        } else {
+            let br = (0.55 + 0.35 * h1) * pose.scale.clamp(1.6, 3.6) * 0.55;
+            let ri = br.ceil() as i32;
+            for dy in -ri..=ri {
+                for dx in -ri..=ri {
+                    let dd = (dx as f32).hypot(dy as f32);
+                    if dd <= br {
+                        let rim = ((dd / br.max(0.5)).powf(1.5)).clamp(0.25, 1.0);
+                        blend(pb, bx + dx, by + dy, tint.apply(BUBBLE_RING), a * rim * 0.65);
+                    }
+                }
+            }
+            let gx = (bp.x + LIGHT.x * br * 0.45).round() as i32;
+            let gy = (bp.y + LIGHT.y * br * 0.45).round() as i32;
+            blend(pb, gx, gy, tint.apply(BUBBLE_SPEC), a);
+        }
+    }
+    pb.set_pen(prev_pen);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,5 +2225,100 @@ mod tests {
             shadow_floor_px > 50,
             "drop shadow should darken floor with pen 0 ({shadow_floor_px} px)"
         );
+    }
+
+    #[test]
+    fn diver_suit_scales_across_shrink_and_giant_with_brass_and_materials() {
+        use crate::game::ecs::systems::powerups::SHRINK_SCALE;
+
+        for (scale, size) in [(SHRINK_SCALE, 64usize), (5.0f32, 240usize)] {
+            let giant_pen = scale > 1.5;
+            let base_pen = if giant_pen {
+                crate::render::lighting::giant_rat_pen()
+            } else {
+                crate::render::lighting::rat_pen()
+            };
+            let helmet_pen = crate::render::lighting::rat_helmet_pen(giant_pen);
+            let visor_pen = crate::render::lighting::rat_visor_pen(giant_pen);
+            let center = Vec2::new(size as f32 * 0.5, size as f32 * 0.5);
+            let mut p = test_rat(center, Vec2::new(1.0, 0.0));
+            p.vel = Vec2::new(50.0, 0.0);
+
+            let mut std_a = PixelBuffer::new(size, size);
+            std_a.set_materials(true);
+            std_a.clear(BG);
+            std_a.set_pen(base_pen);
+            draw_giant_rat(&mut std_a, &p, 0.35, Vec2::ZERO, scale, 0.0);
+
+            let mut std_b = PixelBuffer::new(size, size);
+            std_b.set_materials(true);
+            std_b.clear(BG);
+            std_b.set_pen(base_pen);
+            draw_giant_rat_with_outfit(
+                &mut std_b,
+                &p,
+                0.35,
+                Vec2::ZERO,
+                scale,
+                0.0,
+                RatOutfit::Standard,
+            );
+            assert_eq!(std_a.pixels(), std_b.pixels(), "Standard must match draw_giant_rat");
+
+            let mut diver = PixelBuffer::new(size, size);
+            diver.set_materials(true);
+            diver.clear(BG);
+            diver.set_pen(base_pen);
+            draw_giant_rat_with_outfit(
+                &mut diver,
+                &p,
+                0.35,
+                Vec2::ZERO,
+                scale,
+                0.0,
+                RatOutfit::Diver,
+            );
+
+            let mut diff_px = 0usize;
+            let mut brass_px = 0usize;
+            let mut helmet_mat_px = 0usize;
+            let mut visor_mat_px = 0usize;
+            for (i, (&a, &b)) in std_a.pixels().iter().zip(diver.pixels().iter()).enumerate() {
+                if a != b {
+                    diff_px += 1;
+                }
+                if b.0 >= 165 && b.1 >= 95 && b.0 > b.1 && b.0 >= b.2.saturating_add(65) {
+                    brass_px += 1;
+                }
+                let m = diver.mat()[i];
+                if m == helmet_pen {
+                    helmet_mat_px += 1;
+                } else if m == visor_pen {
+                    visor_mat_px += 1;
+                }
+            }
+            assert!(diff_px >= 6, "scale {scale}: diver must differ from standard ({diff_px} px)");
+            assert!(brass_px >= 2, "scale {scale}: diver must draw brass helmet ({brass_px} px)");
+            assert!(
+                helmet_mat_px >= 2,
+                "scale {scale}: diver helmet must stamp Metal pen ({helmet_mat_px} px)"
+            );
+            assert!(
+                visor_mat_px >= 1,
+                "scale {scale}: diver porthole must stamp Glass pen ({visor_mat_px} px)"
+            );
+        }
+
+        // Giant diver swim bob animates over time without mutating player.pos.
+        let p = test_rat(Vec2::new(110.0, 70.0), Vec2::new(1.0, 0.0));
+        let orig_pos = p.pos;
+        let mut f0 = PixelBuffer::new(220, 140);
+        f0.clear(BG);
+        draw_giant_rat_with_outfit(&mut f0, &p, 0.0, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
+        let mut f1 = PixelBuffer::new(220, 140);
+        f1.clear(BG);
+        draw_giant_rat_with_outfit(&mut f1, &p, 0.65, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
+        assert_eq!(p.pos, orig_pos);
+        assert_ne!(f0.pixels(), f1.pixels(), "giant diver swim bob must animate over time");
     }
 }
