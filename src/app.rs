@@ -10911,7 +10911,10 @@ mod tests {
             // (full size, the view pulled back, the stomp landing).
             // The on-screen touch controls over play (a thumb on the stick)
             // and over a menu (the Back slot on the pause plate).
-            "touch-play" | "touch-menu" => {
+            // `touch-play-ready` is the same frame with the ACTIVE weapon
+            // charged, so the Actives button shows its resting look instead of
+            // the dimmer recharging one.
+            "touch-play" | "touch-play-ready" | "touch-menu" => {
                 use crate::game::weapon::WeaponKind;
                 use crate::touch::TouchPhase;
                 hh.enter_playing();
@@ -10920,6 +10923,14 @@ mod tests {
                     w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
                     w.player.xp_to_next = 1_000_000;
                 }
+                let charge_actives = |hh: &mut Harness| {
+                    let w = hh.app.world.as_mut().unwrap();
+                    for weapon in &mut w.player.loadout.weapons {
+                        if weapon.kind.is_active() {
+                            weapon.timer = 0.0;
+                        }
+                    }
+                };
                 if target == "touch-menu" {
                     hh.frame(&[KeyCode::Esc]);
                     hh.frame(&[]);
@@ -10931,6 +10942,12 @@ mod tests {
                     hh.app.touch(TouchPhase::Move, 1, col + 3.0, row - 1.0);
                 }
                 for _ in 0..3 {
+                    hh.frame(&[]);
+                }
+                if target == "touch-play-ready" {
+                    // The meter is the weapon's own timer; nothing fires an
+                    // ACTIVE weapon without a press, so it stays charged.
+                    charge_actives(&mut hh);
                     hh.frame(&[]);
                 }
             }
