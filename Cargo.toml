@@ -13,14 +13,13 @@ default = ["console", "gamepad"]
 console = []
 # Gamepad support (wave 3 controls); see the optional `gilrs` dependency.
 gamepad = ["dep:gilrs"]
+# Browser entry point and Web Audio bindings (wasm32-unknown-unknown).
+web = ["dep:bitflags", "dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dependencies]
-ratatui = "0.30"
-crossterm = "0.29"
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dirs = "7"
 anyhow = "1"
 # Platform-independent maths for the simulation (`src/detmath.rs`). Rust's
 # `f32::sin`/`cos`/`powf`/… forward to the platform maths library, whose
@@ -28,16 +27,31 @@ anyhow = "1"
 # pure Rust and bit-identical everywhere, which is what the determinism
 # goldens need. Already in the tree transitively, so no new download.
 libm = "0.2"
-rodio = { version = "0.23", default-features = false, features = ["playback"] }
 rascii_art = "0.4.5"
 image = "0.24" # must match rascii_art's image version so DynamicImage unifies
 # ECS for the simulation port. Single-threaded determinism is required:
 # default features (bevy_reflect, async_executor, backtrace, std) are off and
 # only `std` is re-enabled; `multi_threaded` must stay off.
 bevy_ecs = { version = "0.20", default-features = false, features = ["std"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+dirs = "7"
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
 # Gamepad support (wave 3 controls). Optional so `--no-default-features` builds
 # on a machine without libudev: gilrs needs it on Linux, nothing on macOS.
 gilrs = { version = "0.11", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["std", "layout-cache", "macros", "underline-color"] }
+bevy_platform = { version = "0.20", default-features = false, features = ["std", "web"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+rodio = { version = "0.23", default-features = false, features = ["playback", "wasm-bindgen"] }
+bitflags = { version = "2", optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "=0.2.130", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Storage", "Window"] }
 
 # Terminal capability detection polls stdin with a short timeout when it asks
 # the terminal for its keyboard protocol (see src/term.rs). Already in the tree

@@ -2,3 +2,6 @@
 **/*.rs.bk
 Cargo.lock.orig
 __pycache__/
+/.tools/
+/web/dist/
+/web/node_modules/

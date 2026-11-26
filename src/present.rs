@@ -16,16 +16,21 @@
 //! together, shared by `main::run` and the `--prof-bench` harness.
 
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::queue;
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
+#[cfg(not(target_arch = "wasm32"))]
+use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::{Buffer, Cell, CellDiffOption, CellWidth};
 use ratatui::style::{Color, Modifier};
 use ratatui::{Frame, Terminal};
 
 use crate::app::App;
+use crate::clock::Instant;
 use crate::prof::{self, Stage};
 
 /// Large enough for a whole 300×90 truecolor frame without growing.
@@ -87,6 +92,7 @@ impl<W: Write> Write for FrameOut<W> {
 /// the backend's own writer, in that order. The end marker is always issued
 /// and flushed, even when the draw fails, so the terminal is never left in a
 /// held update.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn synchronized_frame<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     draw: impl FnOnce(&mut Frame),
@@ -201,18 +207,28 @@ impl Presenter {
 
     /// Does the terminal's frame no longer match what was last presented (it
     /// was resized)? Such a frame must be rendered now.
-    pub fn stale_for<W: Write>(&self, terminal: &mut Terminal<CrosstermBackend<W>>) -> bool {
+    pub fn stale_for<B: Backend>(&self, terminal: &mut Terminal<B>) -> bool {
         self.full || terminal.get_frame().area() != self.prev.area
     }
 
     /// Render one frame with `render` and send what changed, inside a
     /// synchronized update (DEC mode 2026) so it is presented atomically
     /// instead of tearing; terminals without support ignore the markers.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn frame<W: Write>(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<W>>,
         render: impl FnOnce(&mut Frame),
     ) -> io::Result<Presented> {
+        let cur = self.take_frame(terminal, render);
+        self.show(terminal.backend_mut(), cur)
+    }
+
+    fn take_frame<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        render: impl FnOnce(&mut Frame),
+    ) -> Buffer {
         let area = {
             let mut frame = terminal.get_frame();
             render(&mut frame);
@@ -223,20 +239,31 @@ impl Presenter {
         if self.spare.area != area {
             self.spare = Buffer::empty(area);
         }
-        let cur = std::mem::replace(
+        std::mem::replace(
             terminal.current_buffer_mut(),
             std::mem::take(&mut self.spare),
-        );
-        self.show(terminal.backend_mut(), cur)
+        )
     }
 
     /// Send a rendered frame: what changed since the last one, or everything
     /// (after a clear) when the size changed or [`Presenter::invalidate`] was
     /// called. Takes the buffer; it becomes the record of the screen.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn show<W: Write>(
         &mut self,
         backend: &mut CrosstermBackend<W>,
         cur: Buffer,
+    ) -> io::Result<Presented> {
+        self.show_with(cur, |presenter, cur, full| match presenter.mode {
+            PresentMode::Ratatui => presenter.send_ratatui(backend, cur, full),
+            PresentMode::Direct => presenter.send_direct(backend, cur, full),
+        })
+    }
+
+    fn show_with(
+        &mut self,
+        cur: Buffer,
+        send: impl FnOnce(&mut Self, &Buffer, bool) -> io::Result<Presented>,
     ) -> io::Result<Presented> {
         let _p = prof::scope(Stage::Present);
         if self.prev.area != cur.area {
@@ -247,10 +274,7 @@ impl Presenter {
         if full {
             self.prev.reset();
         }
-        let sent = match self.mode {
-            PresentMode::Ratatui => self.send_ratatui(backend, &cur, full),
-            PresentMode::Direct => self.send_direct(backend, &cur, full),
-        };
+        let sent = send(self, &cur, full);
         // Whatever happened, `cur` is the best record of the screen.
         let mut old = std::mem::replace(&mut self.prev, cur);
         if self.spare.area != old.area {
@@ -264,6 +288,7 @@ impl Presenter {
         sent
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn send_ratatui<W: Write>(
         &mut self,
         backend: &mut CrosstermBackend<W>,
@@ -292,7 +317,7 @@ impl Presenter {
 
     fn send_direct<W: Write>(
         &mut self,
-        backend: &mut CrosstermBackend<W>,
+        out: &mut W,
         cur: &Buffer,
         full: bool,
     ) -> io::Result<Presented> {
@@ -332,8 +357,8 @@ impl Presenter {
         self.bytes.extend_from_slice(SYNC_END);
         // One buffer, begin marker to end marker: either all of it reaches
         // the frame writer or (on an error) the writer drops it.
-        backend.write_all(&self.bytes)?;
-        Write::flush(backend)?;
+        out.write_all(&self.bytes)?;
+        out.flush()?;
         Ok(Presented { cells })
     }
 }
@@ -756,45 +781,70 @@ pub struct FrameLoop {
 
 impl FrameLoop {
     /// Returns `None` when the frame was skipped (nothing could have changed).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn present<W: Write>(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<W>>,
         app: &mut App,
         now: Instant,
     ) -> io::Result<Option<Presented>> {
-        if app.input.refocused {
-            // The terminal may have been drawn over while we were away.
-            self.presenter.invalidate();
-        }
         if self.size.due(now, app.input.resized) {
             // One size query; on a change ratatui resizes its buffers and
             // clears the screen (a no-op for the fixed viewports of tests and
             // the bench, which never touch a TTY).
             terminal.autoresize()?;
         }
+        if !self.render_due(terminal, app, now) {
+            return Ok(None);
+        }
+        let shown = self.presenter.frame(terminal, |f| render_app(app, f))?;
+        self.pacer.rendered(now, shown.cells > 0);
+        Ok(Some(shown))
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub fn present_web<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        app: &mut App,
+        now: Instant,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.render_due(terminal, app, now) {
+            let cur = self.presenter.take_frame(terminal, |f| render_app(app, f));
+            let shown = self.presenter.show_with(cur, |presenter, cur, full| {
+                presenter.send_direct(out, cur, full)
+            })?;
+            self.pacer.rendered(now, shown.cells > 0);
+        }
+        Ok(())
+    }
+
+    fn render_due<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        app: &App,
+        now: Instant,
+    ) -> bool {
+        if app.input.refocused {
+            self.presenter.invalidate();
+        }
         let demand = app.frame_demand();
         let urgent = match demand {
             Demand::AnimatedMenu => app.repaint_immediate(),
             _ => app.repaint_urgent(),
         } || self.presenter.stale_for(terminal);
-        if !self.pacer.should_render(now, demand, urgent) {
-            return Ok(None);
-        }
-        let shown = self.presenter.frame(terminal, |f| {
-            {
-                let _p = prof::scope(Stage::AppRender);
-                app.render(f);
-            }
-            // Fold the finished frame into what this terminal can draw: RGB →
-            // palette when truecolor is unavailable, and risky glyphs → safe
-            // ones when the terminal mis-sizes them. A no-op when the terminal
-            // supports everything (the default path).
-            let _p = prof::scope(Stage::Sanitize);
-            crate::term::sanitize(f.buffer_mut());
-        })?;
-        self.pacer.rendered(now, shown.cells > 0);
-        Ok(Some(shown))
+        self.pacer.should_render(now, demand, urgent)
     }
+}
+
+fn render_app(app: &mut App, frame: &mut Frame) {
+    {
+        let _p = prof::scope(Stage::AppRender);
+        app.render(frame);
+    }
+    let _p = prof::scope(Stage::Sanitize);
+    crate::term::sanitize(frame.buffer_mut());
 }
 
 #[cfg(test)]

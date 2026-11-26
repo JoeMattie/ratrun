@@ -884,6 +884,7 @@ pub const KITTY_QUERY_TIMEOUT: Duration = Duration::from_millis(300);
 ///
 /// No environment sniffing: tmux and ssh forward the query, so asking is always
 /// correct and never needs to be skipped.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn query_keyboard_enhancement() -> bool {
     query_keyboard().supported()
 }
@@ -910,6 +911,7 @@ impl KeyboardProbe {
 }
 
 /// Ask the terminal and return the whole answer, not just the verdict.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn query_keyboard() -> KeyboardProbe {
     query_reply(KITTY_QUERY_TIMEOUT)
 }
@@ -917,11 +919,13 @@ pub fn query_keyboard() -> KeyboardProbe {
 /// Enter raw mode for the `--probe` diagnostic. Failure is ignored: the probe
 /// only needs the terminal to stop echoing, and a terminal that cannot enter
 /// raw mode still answers the query (or times out) the same way.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn enable_raw_mode_for_probe() {
     let _ = crossterm::terminal::enable_raw_mode();
 }
 
 /// Leave raw mode after the `--probe` diagnostic.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn disable_raw_mode_for_probe() {
     let _ = crossterm::terminal::disable_raw_mode();
 }
@@ -1007,7 +1011,7 @@ fn query_reply(timeout: Duration) -> KeyboardProbe {
     probe
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn query_reply(_timeout: Duration) -> KeyboardProbe {
     // crossterm's Windows implementation answers immediately (it never queries
     // the console), so there is no timeout to bound here.

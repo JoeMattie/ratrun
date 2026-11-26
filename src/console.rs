@@ -19,7 +19,7 @@
 //!
 //! The drawing lives in [`crate::render::console`].
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::input_event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::game::ecs::systems::boss::BossKind;
 use crate::game::ecs::systems::miniboss::MinibossKind;
@@ -2670,7 +2670,7 @@ fn parse_clock(raw: &str) -> Result<f32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::input_event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

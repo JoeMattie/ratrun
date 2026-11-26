@@ -232,7 +232,7 @@ fn generate_stages(
     /// Run one stage, recording its cost when profiling.
     macro_rules! stage {
         ($field:ident, $body:expr) => {{
-            let started = timings.is_some().then(std::time::Instant::now);
+            let started = timings.is_some().then(crate::clock::Instant::now);
             let value = $body;
             if let (Some(slot), Some(started)) = (timings.as_deref_mut(), started) {
                 slot.$field = started.elapsed().as_micros() as u64;

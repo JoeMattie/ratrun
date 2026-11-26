@@ -21,7 +21,7 @@
 //! controls legend and the HUD's dash module name whichever key is live
 //! ([`DashKey`]).
 
-use crossterm::event::{
+use crate::input_event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent,
     MouseEventKind,
 };
@@ -958,7 +958,7 @@ impl InputState {
 mod tests {
     use super::*;
     use crate::controls::Scheme;
-    use crossterm::event::{KeyModifiers, MouseButton};
+    use crate::input_event::{KeyModifiers, MouseButton};
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
         MouseEvent {

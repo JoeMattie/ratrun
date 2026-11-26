@@ -179,6 +179,29 @@ cargo test               # the full suite (no TTY or audio device needed)
 cargo clippy --all-targets
 ```
 
+## Web build
+
+Build the browser edition with the pinned Rust toolchain and Node.js/npm.
+The script installs the matching `wasm-bindgen` CLI in `.tools/` and copies
+the pinned xterm.js assets into `web/dist/` with the compiled game.
+
+```sh
+rustup target add wasm32-unknown-unknown --toolchain 1.100.0
+./web/build.sh
+python3 -m http.server 8000 --directory web/dist
+```
+
+Open [localhost:8000](http://localhost:8000) in a desktop browser. Click the
+terminal to focus it. Use Enter to start, hold WASD or the arrows to move,
+press Ctrl to dash, and press Esc to pause. Music and effects start on the
+first key press or click. Scores, settings, and the Nest use the browser’s
+local storage. The web build supports a keyboard and mouse.
+
+The **Rat Run Web** workflow deploys `web/dist/` to GitHub Pages on a
+`v*` tag or through manual dispatch. In the repository’s **Settings → Pages**,
+set **Source** to **GitHub Actions** and allow release tags to deploy to the
+`github-pages` environment if it has deployment restrictions.
+
 ## Terminal requirements
 
 Developed against **Ghostty**, which is the reference terminal: 24-bit colour,
