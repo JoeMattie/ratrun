@@ -3122,6 +3122,12 @@ impl World {
         _s = crate::prof::scope(crate::prof::Stage::Lighting);
         self.apply_lighting(pb, cam, ambience_cost, blackout);
 
+        if self.outfall_surge_enabled() {
+            crate::render::outfall_current::draw(
+                pb, &self.level, cam, self.player.pos, zoom::clamp(self.zoom_view), self.elapsed,
+            );
+        }
+
         // The beam cores are self-lit. Draw them after the water stage so
         // painting a beam cannot erase the water material under its reflection.
         if !self.hide_rat {
@@ -3284,9 +3290,7 @@ impl World {
         }
 
         if self.level.theme == Theme::Outfall {
-            art_floor::draw_outfall_tells(
-                pb, &self.level, self.player.pos, cam, self.elapsed, self.outfall_surge_enabled(),
-            );
+            art_floor::draw_outfall_tells(pb, &self.level, cam, self.elapsed);
         }
 
         // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground

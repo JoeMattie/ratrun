@@ -1397,21 +1397,9 @@ pub fn draw_outfall_hazards(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elap
     }
 }
 
-/// **Hostile Layer (Outfall)**: draw bright self-lit warning overlays above
-/// lighting and foreground — 16 px lure-trap warning rings (`LurePhase::Warning`)
-/// and the surge's outlined chevron + parallel marine-snow streaks near the rat
-/// (paused when `surge_enabled` is false during The Lantern fight).
-///
-/// Camera-clipped and purely render-only (never advances state or draws RNG).
-pub fn draw_outfall_tells(
-    pb: &mut PixelBuffer,
-    level: &Level,
-    player_pos: Vec2,
-    cam: Vec2,
-    elapsed: f32,
-    surge_enabled: bool,
-) {
-    use super::hazards::{outfall_surge, LurePhase, SurgePhase};
+/// Self-lit 16 px lure-trap warning rings above lighting and foreground.
+pub fn draw_outfall_tells(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) {
+    use super::hazards::LurePhase;
 
     if level.theme != Theme::Outfall || pb.w == 0 || pb.h == 0 {
         return;
@@ -1421,7 +1409,7 @@ pub fn draw_outfall_tells(
     let bh = pb.h as i32;
     const OUTLINE: Rgb = (8, 18, 28);
 
-    // 1. Armed lure-trap 16 px warning rings (0.7 s tell before Conger release).
+    // Armed lure-trap 16 px warning rings (0.7 s tell before Conger release).
     for trap in &level.objects.lure_traps {
         if !matches!(trap.phase, LurePhase::Warning) {
             continue;
@@ -1462,111 +1450,6 @@ pub fn draw_outfall_tells(
             pb.plot(x, y, (186, 255, 250));
         }
         pb.filled_circle(cx, cy, 2, (236, 255, 252));
-    }
-
-    // 2. Tidal surge direction tell near the rat (disabled once The Lantern arrives).
-    if !surge_enabled || !player_pos.x.is_finite() || !player_pos.y.is_finite() {
-        return;
-    }
-    let surge = outfall_surge(level.seed, elapsed);
-    let len_sq = surge.dir.len_sq();
-    if !len_sq.is_finite() || len_sq < 1e-4 {
-        return;
-    }
-    let f = surge.dir * (1.0 / len_sq.sqrt());
-    let p = f.perp();
-    let rx = player_pos.x - cam_x as f32;
-    let ry = player_pos.y - cam_y as f32;
-    if rx < -48.0 || ry < -48.0 || rx > bw as f32 + 48.0 || ry > bh as f32 + 48.0 {
-        return;
-    }
-
-    match surge.phase {
-        SurgePhase::Warning => {
-            let pulse = 0.60 + 0.40 * (elapsed * 12.0).sin();
-            let chev_c = mix((118, 234, 248), (242, 254, 255), pulse);
-            // Outlined sparse double chevron ~18 px ahead of the rat along surge dir.
-            for off_u in [16.0_f32, 21.0] {
-                let ax = rx + f.x * off_u;
-                let ay = ry + f.y * off_u;
-                for s in -4i32..=4 {
-                    let u = -(s.abs() as f32) * 0.85;
-                    let v = s as f32 * 1.05;
-                    let x = (ax + f.x * u + p.x * v).round() as i32;
-                    let y = (ay + f.y * u + p.y * v).round() as i32;
-                    for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                        pb.plot(x + ox, y + oy, OUTLINE);
-                    }
-                }
-                for s in -4i32..=4 {
-                    let u = -(s.abs() as f32) * 0.85;
-                    let v = s as f32 * 1.05;
-                    let x = (ax + f.x * u + p.x * v).round() as i32;
-                    let y = (ay + f.y * u + p.y * v).round() as i32;
-                    pb.plot(x, y, chev_c);
-                }
-            }
-            // Six smaller parallel marine-snow streaks drifting along the surge heading.
-            let drift = (elapsed * 26.0).rem_euclid(18.0) - 9.0;
-            const STREAKS: [(f32, f32, i32); 6] = [
-                (-14.0, -18.0, 6),
-                (8.0, -22.0, 5),
-                (-22.0, 6.0, 6),
-                (18.0, 14.0, 5),
-                (-6.0, 20.0, 6),
-                (24.0, -8.0, 5),
-            ];
-            for &(su, sv, slen) in &STREAKS {
-                let bx = rx + f.x * (su + drift) + p.x * sv;
-                let by = ry + f.y * (su + drift) + p.y * sv;
-                for k in 0..slen {
-                    let sx = (bx + f.x * k as f32).round() as i32;
-                    let sy = (by + f.y * k as f32).round() as i32;
-                    pb.plot(sx, sy + 1, OUTLINE);
-                    let col = if k == slen - 1 {
-                        (232, 252, 255)
-                    } else {
-                        (132, 216, 234)
-                    };
-                    pb.plot(sx, sy, col);
-                }
-            }
-        }
-        SurgePhase::Active => {
-            // Steady active-direction mark near the rat (no flicker during shove).
-            const ACTIVE_COL: Rgb = (182, 248, 255);
-            let ax = rx + f.x * 19.0;
-            let ay = ry + f.y * 19.0;
-            for s in -5i32..=5 {
-                let u = -(s.abs() as f32) * 0.9;
-                let v = s as f32;
-                let x = (ax + f.x * u + p.x * v).round() as i32;
-                let y = (ay + f.y * u + p.y * v).round() as i32;
-                for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    pb.plot(x + ox, y + oy, OUTLINE);
-                }
-            }
-            for s in -6i32..0 {
-                let x = (ax + f.x * s as f32).round() as i32;
-                let y = (ay + f.y * s as f32).round() as i32;
-                for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    pb.plot(x + ox, y + oy, OUTLINE);
-                }
-            }
-            for s in -5i32..=5 {
-                let u = -(s.abs() as f32) * 0.9;
-                let v = s as f32;
-                let x = (ax + f.x * u + p.x * v).round() as i32;
-                let y = (ay + f.y * u + p.y * v).round() as i32;
-                pb.plot(x, y, ACTIVE_COL);
-            }
-            for s in -6i32..0 {
-                let x = (ax + f.x * s as f32).round() as i32;
-                let y = (ay + f.y * s as f32).round() as i32;
-                pb.plot(x, y, ACTIVE_COL);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -2335,7 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn outfall_hazards_and_tells_clip_and_distinguish_lure_phases_and_surge() {
+    fn outfall_hazards_and_tells_distinguish_lure_phases_without_a_surge_arrow() {
         use crate::game::hazards::LurePhase;
 
         let mut level = Level::generate(Theme::Outfall, 7);
@@ -2360,18 +2243,18 @@ mod tests {
         let mut tell_ready = pb_ready.pixels().to_vec();
         let mut pb_tr = PixelBuffer::new(120, 80);
         pb_tr.pixels_mut().copy_from_slice(&tell_ready);
-        draw_outfall_tells(&mut pb_tr, &level, focus, cam, 1.0, false);
+        draw_outfall_tells(&mut pb_tr, &level, cam, 1.0);
         tell_ready = pb_tr.pixels().to_vec();
         assert_eq!(
             tell_ready,
             pb_ready.pixels(),
-            "Ready lure with surge disabled must not paint on the hostile tell layer"
+            "Ready lure must not paint on the hostile tell layer"
         );
 
         level.objects.lure_traps[0].phase = LurePhase::Warning;
         draw_outfall_hazards(&mut pb_warn, &level, cam, 1.0);
         let before_tell = pb_warn.pixels().to_vec();
-        draw_outfall_tells(&mut pb_warn, &level, focus, cam, 1.0, false);
+        draw_outfall_tells(&mut pb_warn, &level, cam, 1.0);
         assert_ne!(
             before_tell,
             pb_warn.pixels(),
@@ -2386,24 +2269,14 @@ mod tests {
             "Spent lure husk must look distinct from a lit Ready bulb"
         );
 
-        // Surge tell draws during the 8.0..9.0 warning window and 9.0..9.6 active
-        // window when enabled, and stays silent when disabled.
-        let base_col: Rgb = (18, 28, 38);
-        for t in [8.5_f32, 9.25] {
-            let mut pb_on = PixelBuffer::new(120, 80);
-            let mut pb_off = PixelBuffer::new(120, 80);
-            pb_on.clear(base_col);
-            pb_off.clear(base_col);
-            draw_outfall_tells(&mut pb_on, &level, level.start, level.start - Vec2::new(60.0, 40.0), t, true);
-            draw_outfall_tells(&mut pb_off, &level, level.start, level.start - Vec2::new(60.0, 40.0), t, false);
-            assert!(
-                pb_on.pixels().iter().any(|&p| p != base_col),
-                "expected surge tell pixels at t={t}"
-            );
-            assert!(
-                pb_off.pixels().iter().all(|&p| p == base_col),
-                "surge tell must suppress when surge_enabled=false at t={t}"
-            );
+        // The hostile pass stays clear at both surge phases with no armed lures.
+        level.objects.lure_traps.clear();
+        let base_col = (18, 28, 38);
+        let mut pb = PixelBuffer::new(120, 80);
+        pb.clear(base_col);
+        for t in [8.5, 9.55] {
+            draw_outfall_tells(&mut pb, &level, cam, t);
+            assert!(pb.pixels().iter().all(|&p| p == base_col), "t={t}");
         }
     }
 

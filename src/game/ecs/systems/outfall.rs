@@ -18,8 +18,7 @@ use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Gold, Pickup};
 use crate::game::hazards::{
     clamp_outfall_displacement, lure_landing_clear, outfall_sand_clear, outfall_surge,
-    outfall_surge_enabled, LurePhase, LURE_ARM_RADIUS, LURE_WARN_SECS, SURGE_ACTIVE_SECS,
-    SURGE_DISTANCE, SURGE_PERIOD,
+    outfall_surge_distance, outfall_surge_enabled, LurePhase, LURE_ARM_RADIUS, LURE_WARN_SECS,
 };
 use crate::game::level::{Level, Theme};
 use crate::game::player::Player;
@@ -32,21 +31,6 @@ use super::trailer::{
 };
 
 const RECOVERY_CELLS: i32 = 7;
-
-fn active_slice(previous_elapsed: f32, elapsed: f32) -> f32 {
-    let end = f64::from(elapsed);
-    let start = f64::from(previous_elapsed).max(0.0);
-    let period = f64::from(SURGE_PERIOD);
-    let duration = f64::from(SURGE_ACTIVE_SECS);
-    // Cumulative active time starts at cycle one. Subtracting two samples
-    // accounts for both partial ticks, including a tick ending after the surge.
-    let active_until = |time: f64| {
-        let cycle = (time / period).floor();
-        (cycle - 1.0).max(0.0) * duration
-            + if cycle >= 1.0 { (time - cycle * period).min(duration) } else { 0.0 }
-    };
-    (active_until(end) - active_until(start)).max(0.0) as f32
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn outfall_motion_system(
@@ -84,8 +68,7 @@ pub fn outfall_motion_system(
         elapsed,
     );
     let shove = if enabled {
-        outfall_surge(level.seed, elapsed).dir
-            * (SURGE_DISTANCE / SURGE_ACTIVE_SECS * active_slice(previous_elapsed, elapsed))
+        outfall_surge(level.seed, elapsed).dir * outfall_surge_distance(previous_elapsed, elapsed)
     } else {
         Vec2::ZERO
     };
@@ -294,7 +277,7 @@ mod tests {
     use rand::RngExt;
 
     use super::*;
-    use crate::game::hazards::{LureTrap, SurgePhase};
+    use crate::game::hazards::{LureTrap, SurgePhase, SURGE_ACTIVE_SECS, SURGE_DISTANCE};
     use crate::game::level::{LightFixture, LightFixtureKind, Pit, PitKind, TileRect};
     use crate::game::world::World;
 
@@ -318,14 +301,32 @@ mod tests {
     }
 
     #[test]
-    fn surge_uses_one_compass_and_the_whole_active_slice() {
+    fn surge_uses_one_compass_and_an_integrated_sine_bell() {
         let first = outfall_surge(23, 8.0);
         assert_eq!(first.phase, SurgePhase::Warning);
         assert_eq!(outfall_surge(23, 9.0).phase, SurgePhase::Active);
-        assert_eq!(outfall_surge(23, 9.6).phase, SurgePhase::Quiet);
+        assert_eq!(outfall_surge(23, 10.09).phase, SurgePhase::Active);
+        assert_eq!(outfall_surge(23, 10.1).phase, SurgePhase::Quiet);
         assert_eq!(outfall_surge(23, 17.0), first);
-        let slice = active_slice(8.98, 9.03) + active_slice(9.03, 9.58) + active_slice(9.58, 9.64);
-        assert!((slice * SURGE_DISTANCE / SURGE_ACTIVE_SECS - 20.0).abs() < 1e-5);
+        assert_eq!(outfall_surge_distance(0.0, 8.99), 0.0);
+        assert_eq!(outfall_surge_distance(8.98, 10.1), 64.0);
+        assert_eq!(outfall_surge_distance(8.98, 19.2), 2.0 * SURGE_DISTANCE);
+        let midpoint = 9.0 + SURGE_ACTIVE_SECS * 0.5;
+        let middle = outfall_surge_distance(midpoint - 0.05, midpoint + 0.05);
+        let opening = outfall_surge_distance(9.0, 9.1);
+        let closing = outfall_surge_distance(10.0, 10.1);
+        assert!(middle > 4.0 * opening && opening > 0.0);
+        assert!((opening - closing).abs() < 1e-4);
+        for dt in [1.0 / 144.0, 1.0 / 60.0, 0.37, 2.0] {
+            let mut t = 8.98;
+            let mut total = 0.0_f64;
+            while t < 10.13 {
+                let next = t + dt;
+                total += f64::from(outfall_surge_distance(t, next));
+                t = next;
+            }
+            assert!((total - f64::from(SURGE_DISTANCE)).abs() < 1e-5, "{dt}: {total}");
+        }
     }
 
     #[test]
@@ -365,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn surge_exempts_dashes_heavies_named_and_elites_and_halves_giant() {
+    fn surge_exempts_dashes_heavies_named_elites_bosses_and_magnetized_gems() {
         let mut world = patch();
         let from = world.player.pos;
         world.player.buffs.giant = 20.0;
@@ -374,6 +375,7 @@ mod tests {
             (EnemyKind::Conger, true, false),
             (EnemyKind::Conger, false, true),
             (EnemyKind::Grouper, false, false),
+            (EnemyKind::Brute, false, false),
         ].map(|(kind, named, elite)| {
             let entity = world.spawn_enemy(kind, from, 1.0);
             let mut enemy = world.ecs.get_mut::<Enemy>(entity).unwrap();
@@ -381,16 +383,33 @@ mod tests {
             enemy.elite = elite;
             entity
         });
-        motion(&mut world, 9.61, 0.65);
-        assert!((world.player.pos.dist(from) - 10.0).abs() < 0.001);
+        let loose = world.spawn_gem(Gem::new(from, 1));
+        let mut magnetized = Gem::new(from, 1);
+        magnetized.magnetized = true;
+        let magnetized = world.spawn_gem(magnetized);
+        let boss = world.ecs.spawn(Boss::new(
+            BossKind::Cat,
+            from,
+            100.0,
+            TileRect::new(10, 10, 20, 20),
+            from,
+            false,
+        )).id();
+        motion(&mut world, 10.12, 1.15);
+        assert!((world.player.pos.dist(from) - SURGE_DISTANCE * 0.5).abs() < 0.001);
         let [ordinary, other @ ..] = bodies;
-        assert!((world.ecs.get::<Enemy>(ordinary).unwrap().pos.dist(from) - 20.0).abs() < 0.001);
+        let ordinary_pos = world.ecs.get::<Enemy>(ordinary).unwrap().pos;
+        assert!((ordinary_pos.dist(from) - SURGE_DISTANCE).abs() < 0.001);
         for entity in other {
             assert_eq!(world.ecs.get::<Enemy>(entity).unwrap().pos, from);
         }
+        let loose_pos = world.ecs.get::<Gem>(loose).unwrap().pos;
+        assert!((loose_pos.dist(from) - SURGE_DISTANCE).abs() < 0.001);
+        assert_eq!(world.ecs.get::<Gem>(magnetized).unwrap().pos, from);
+        assert_eq!(world.ecs.get::<Boss>(boss).unwrap().pos, from);
         world.player.dash_active = 0.1;
         let before = world.player.pos;
-        motion(&mut world, 18.61, 0.65);
+        motion(&mut world, 19.12, 1.15);
         assert_eq!(world.player.pos, before);
     }
 

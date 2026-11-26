@@ -40,8 +40,8 @@ pub const LURE_LIGHT_RANGE: f32 = 26.0;
 pub const OUTFALL_LURE_COUNT: usize = 6;
 pub const SURGE_PERIOD: f32 = 9.0;
 pub const SURGE_WARN_SECS: f32 = 1.0;
-pub const SURGE_ACTIVE_SECS: f32 = 0.6;
-pub const SURGE_DISTANCE: f32 = 20.0;
+pub const SURGE_ACTIVE_SECS: f32 = 1.1;
+pub const SURGE_DISTANCE: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LurePhase {
@@ -122,7 +122,32 @@ pub fn outfall_surge(seed: u64, elapsed: f32) -> SurgeView {
     SurgeView { dir, phase }
 }
 
-/// Also call this for the hostile overlay. The caller combines the director
+/// Distance covered by the sine-bell current over this elapsed-time slice.
+/// Subtract the integrated curve at each endpoint so even a tick crossing
+/// either edge of the surge gets just its share of the 64 px.
+pub fn outfall_surge_distance(previous_elapsed: f32, elapsed: f32) -> f32 {
+    let period = f64::from(SURGE_PERIOD);
+    let duration = f64::from(SURGE_ACTIVE_SECS);
+    let cumulative = |time: f32| {
+        let time = f64::from(time);
+        let cycle = (time / period).floor();
+        if cycle < 1.0 {
+            return 0.0;
+        }
+        let progress = (time - cycle * period) / duration;
+        if progress >= 1.0 {
+            return cycle;
+        }
+        // sin²(πt/2) integrates the normalized half-sine speed and is
+        // numerically stable at the very start of the surge.
+        let s = libm::sin(progress * std::f64::consts::FRAC_PI_2);
+        cycle - 1.0 + s * s
+    };
+    ((cumulative(elapsed) - cumulative(previous_elapsed)).max(0.0)
+        * f64::from(SURGE_DISTANCE)) as f32
+}
+
+/// Also call this for the visible current. The caller combines the director
 /// handoff, a due arrival and a Lantern present on the floor.
 pub fn outfall_surge_enabled(arriving_or_present: bool, testbed: bool, elapsed: f32) -> bool {
     !arriving_or_present && (testbed || elapsed < crate::game::director::BOSS_TIME)

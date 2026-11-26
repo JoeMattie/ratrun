@@ -53,3 +53,5 @@ pub mod foreground;
 pub mod glyphfx;
 pub mod graphics;
 pub mod testbed;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+pub mod outfall_current;
