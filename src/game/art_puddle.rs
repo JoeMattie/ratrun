@@ -24,10 +24,6 @@ pub const RIPPLE_LIFE: f32 = 0.45;
 /// `render::lighting::water` stand out from. 0.12 = 12 % deeper.
 pub const GLOSS_DEEPEN: f32 = 0.12;
 
-/// Held step rate for surface shimmer (4 Hz: still frames repaint rarely, and
-/// fewer than 3 % of a puddle's pixels change on any step boundary).
-const SHIMMER_HZ: f32 = 4.0;
-
 /// Per-theme surface look for standing water.
 struct WaterStyle {
     /// Multiplicative floor darkening at full puddle depth.
@@ -44,10 +40,6 @@ struct WaterStyle {
     ul_highlight: Rgb,
     /// Peak blend factor for the upper-left highlight arc.
     ul_alpha: f32,
-    /// Colour of the 4 Hz held-step surface shimmer glints.
-    shimmer: Rgb,
-    /// Peak blend factor for shimmer glints.
-    shimmer_alpha: f32,
 }
 
 fn style_for(theme: Theme) -> WaterStyle {
@@ -65,8 +57,6 @@ fn style_for(theme: Theme) -> WaterStyle {
             rim_alpha: 0.60,
             ul_highlight: (112, 184, 180),
             ul_alpha: 0.72,
-            shimmer: (132, 196, 190),
-            shimmer_alpha: 0.60,
         },
         Theme::Laundry => WaterStyle {
             darken: 0.92,
@@ -76,8 +66,6 @@ fn style_for(theme: Theme) -> WaterStyle {
             rim_alpha: 0.56,
             ul_highlight: (128, 160, 176),
             ul_alpha: 0.56,
-            shimmer: (140, 170, 186),
-            shimmer_alpha: 0.50,
         },
         Theme::Kitchen => WaterStyle {
             darken: 0.90,
@@ -87,8 +75,6 @@ fn style_for(theme: Theme) -> WaterStyle {
             rim_alpha: 0.50,
             ul_highlight: (120, 138, 144),
             ul_alpha: 0.50,
-            shimmer: (120, 138, 144),
-            shimmer_alpha: 0.42,
         },
         Theme::Lab | Theme::Printworks | Theme::Trailer => WaterStyle {
             darken: 0.90,
@@ -98,8 +84,6 @@ fn style_for(theme: Theme) -> WaterStyle {
             rim_alpha: 0.50,
             ul_highlight: (104, 132, 140),
             ul_alpha: 0.50,
-            shimmer: (104, 132, 140),
-            shimmer_alpha: 0.42,
         },
     }
 }
@@ -141,16 +125,14 @@ pub fn draw_puddle_among(
 
 /// [`draw_puddle_among`] with the look chosen: `glossy` is the dark-mirror
 /// base the lighting effects' water stage (`render::lighting::water`) lights.
-/// It deepens the sheet by [`GLOSS_DEEPEN`] and leaves out the painted 4 Hz
-/// shimmer glints and the still wavelet dashes, which would fight the real
-/// glints; the waterline rim, the meniscus and the floating specks stay.
-/// `glossy == false` is the previous look exactly.
+/// It deepens the sheet by [`GLOSS_DEEPEN`] and leaves the still wavelet dashes
+/// to the plain look. Both keep the waterline rim, meniscus and floating specks.
 pub fn draw_puddle_among_with(
     pb: &mut PixelBuffer,
     puddle: &Puddle,
     neighbours: &[Puddle],
     cam: Vec2,
-    elapsed: f32,
+    _elapsed: f32,
     theme: Theme,
     glossy: bool,
 ) {
@@ -176,7 +158,6 @@ pub fn draw_puddle_among_with(
     let style = style_for(theme);
     let inv_rx = 1.0 / puddle.rx.max(1.0);
     let inv_ry = 1.0 / puddle.ry.max(1.0);
-    let step = (elapsed.max(0.0) * SHIMMER_HZ).floor() as u32;
     let pen = pb.pen();
     let check_wet = pb.materials_on() && pen != 0;
     let bw = pb.w;
@@ -247,32 +228,18 @@ pub fn draw_puddle_among_with(
             };
 
             if depth >= 0.42 {
-                // Slow surface shimmer in held 4 Hz steps: 10×6 world cells
-                // each hold one 2-px horizontal glint active 1 step in 8
-                // (~0.6–0.9 % of puddle pixels change per step).
-                let gx = wx.div_euclid(10);
-                let gy = wy.div_euclid(6);
-                let ox = wx - gx * 10;
-                let oy = wy - gy * 6;
-                let ch = hash3(gx, gy, puddle.seed ^ 0x9E37);
-                let px_off = ((ch >> 3) % 7) as i32;
-                let py_off = ((ch >> 7) % 5) as i32;
-                let phase = (ch >> 11) & 7;
-                if !glossy
-                    && oy == py_off
-                    && (ox == px_off || ox == px_off + 1)
-                    && (step.wrapping_add(phase) & 7) == 0
-                {
-                    col = mix(col, style.shimmer, style.shimmer_alpha * depth);
-                }
-                // Still wavelets: a faint 3 px dash in one cell of three, the
-                // surface texture that tells a sheet of water wider than the
-                // view from the dry stone beside it. Never animated.
-                if !glossy && !already_wet && (ch >> 16).is_multiple_of(3) {
-                    let wy_off = ((ch >> 20) % 6) as i32;
-                    let wx_off = ((ch >> 24) % 7) as i32;
-                    if oy == wy_off && (wx_off..wx_off + 3).contains(&ox) {
-                        col = mix(col, style.ul_highlight, 0.20 * depth);
+                // Fixed dashes give the plain sheet texture even when its
+                // shoreline lies outside the view.
+                if !glossy && !already_wet {
+                    let ch = hash3(wx.div_euclid(10), wy.div_euclid(6), puddle.seed ^ 0x9E37);
+                    if (ch >> 16).is_multiple_of(3) {
+                        let wy_off = ((ch >> 20) % 6) as i32;
+                        let wx_off = ((ch >> 24) % 7) as i32;
+                        if wy.rem_euclid(6) == wy_off
+                            && (wx_off..wx_off + 3).contains(&wx.rem_euclid(10))
+                        {
+                            col = mix(col, style.ul_highlight, 0.20 * depth);
+                        }
                     }
                 }
 
@@ -529,43 +496,23 @@ mod tests {
     }
 
     #[test]
-    fn draw_puddle_shimmer_holds_within_4hz_step_and_changes_under_3_percent() {
+    fn the_plain_sheet_is_identical_across_elapsed_times() {
         let puddle = sample_puddle();
         let floor_col: Rgb = (18, 28, 26);
-
-        let mut pb_a = PixelBuffer::new(160, 100);
-        pb_a.clear(floor_col);
-        draw_puddle(&mut pb_a, &puddle, Vec2::ZERO, 1.00, Theme::Sewer);
-
-        let mut pb_same = PixelBuffer::new(160, 100);
-        pb_same.clear(floor_col);
-        draw_puddle(&mut pb_same, &puddle, Vec2::ZERO, 1.20, Theme::Sewer);
-        assert_eq!(
-            pb_a.pixels(),
-            pb_same.pixels(),
-            "frames within the same 4 Hz step must be bit-identical"
-        );
-
-        let mut pb_next = PixelBuffer::new(160, 100);
-        pb_next.clear(floor_col);
-        draw_puddle(&mut pb_next, &puddle, Vec2::ZERO, 1.25, Theme::Sewer);
-
-        let inside: usize = pb_a.pixels().iter().filter(|&&c| c != floor_col).count();
-        let changed: usize = pb_a
-            .pixels()
-            .iter()
-            .zip(pb_next.pixels())
-            .filter(|(a, b)| a != b)
-            .count();
-        assert!(inside > 0);
-        assert!(
-            changed * 100 < inside * 3,
-            "shimmer changed {changed}/{inside} px (> 3% budget)"
-        );
+        let draw = |elapsed| {
+            let mut pb = PixelBuffer::new(160, 100);
+            pb.clear(floor_col);
+            draw_puddle(&mut pb, &puddle, Vec2::ZERO, elapsed, Theme::Sewer);
+            pb
+        };
+        let first = draw(0.0);
+        for elapsed in [0.25, 0.75, 1.5, 3.75] {
+            assert_eq!(first.pixels(), draw(elapsed).pixels(), "plain at {elapsed}");
+        }
     }
 
     #[test]
-    fn the_glossy_sheet_is_darker_and_holds_still_across_steps() {
+    fn the_glossy_sheet_is_darker_and_stays_still() {
         let puddle = sample_puddle();
         let floor_col: Rgb = (60, 66, 64);
         let draw = |glossy: bool, elapsed: f32| {
@@ -579,15 +526,9 @@ mod tests {
         let centre = (puddle.pos.x as usize, puddle.pos.y as usize);
         let lum = |c: Rgb| u32::from(c.0) + u32::from(c.1) + u32::from(c.2);
         assert!(lum(glossy.pixel_at(centre.0, centre.1)) < lum(plain.pixel_at(centre.0, centre.1)));
-        // No painted shimmer: the glossy sheet does not change across steps.
         for elapsed in [1.25, 1.5, 2.0, 3.75] {
             assert_eq!(glossy.pixels(), draw(true, elapsed).pixels(), "glossy at {elapsed}");
         }
-        // The plain look is unchanged by the new path.
-        let mut old = PixelBuffer::new(160, 100);
-        old.clear(floor_col);
-        draw_puddle(&mut old, &puddle, Vec2::ZERO, 1.0, Theme::Sewer);
-        assert_eq!(old.pixels(), plain.pixels());
     }
 
     #[test]

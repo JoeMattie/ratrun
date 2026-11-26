@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Still water.** Puddle glints and reflections stay still at rest. Passing
+  splash ripples brighten the water and bend reflections as they spread.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

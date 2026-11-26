@@ -9,17 +9,17 @@
 //!   [`MIRROR_REACH`]; at distance `d` it shows the creature pixel mirrored
 //!   about that body's foot line, `(x + wobble, y − 2d + 1)`, darkened, tinted
 //!   toward the water and faded with `d`. So the rat and the horde stand on an
-//!   upside-down, wobbling, dim copy of themselves. One pass, one column array
+//!   upside-down, dim copy of themselves. One pass, one column array
 //!   on the stack; nothing is written where no body is in reach.
 //! * **B. Lamp mirrors** ([`lamp_mirrors`], Full and Hard): each visible
 //!   fixture (never the rat's aura or a halo) is mirrored as a bright soft
 //!   ellipse [`MIRROR_K`] × its height below it, its core pulled
-//!   [`MIRROR_WHITE`] toward white, its rows shifted ±1 px by the ripple
-//!   field, clipped to water. It replaces `softshadow`'s wet-brick streak on
+//!   [`MIRROR_WHITE`] toward white, its rows shifted ±1 px by a world-row
+//!   hash, clipped to water. It replaces `softshadow`'s wet-brick streak on
 //!   water pixels (the streak still runs on brick, tile, metal and ink).
 //! * **A. Glints** ([`glints`], Full and Hard): a sparse sparkle. A water
-//!   pixel is a glint *candidate* one time in `256 / GLINT_DENSITY` (a hash of
-//!   its world position and the 3 Hz step), and only a candidate is lit: a fake
+//!   pixel is a glint *candidate* if its world-position hash passes
+//!   [`GLINT_DENSITY`], and only a candidate is lit: a fake
 //!   surface normal from a two-octave ripple field (value noise on
 //!   [`OCT1_CELL`] px cells plus per-pixel grain, tilted further on a live
 //!   ripple ring), a narrow Blinn lobe (`cos^GLINT_POWER`) against the
@@ -38,9 +38,9 @@
 //! `softshadow` light the water exactly as before, and [`apply`] writes
 //! nothing.
 //!
-//! Clocks: only the 3 Hz step ([`GLINT_HZ`]) is read, so a still scene
-//! repaints on the step and only the glints that moved. Render-only: no rng,
-//! no simulation state; the ripples are read from the cosmetic `PuddleSteps`.
+//! The surface pattern and row offsets are fixed in world space. Live rings
+//! from the cosmetic `PuddleSteps` bend the reflections and tilt the glints
+//! where they pass. This stage reads no clock and draws no rng.
 
 use super::engine::{Grid, LayerMask, LightingMode};
 use super::fx::{self, strength, Canvas, FxFrame, LightTag, DIR_ONE};
@@ -57,13 +57,9 @@ use crate::term::ColorDepth;
 
 // ---- A. glints -------------------------------------------------------------
 
-/// The held step of the ripple field and the glint pattern, Hz. Raising it
-/// makes the sparkle livelier and repaints more often.
-pub(super) const GLINT_HZ: f32 = 3.0;
 /// Glint candidates per 256 water pixels. The hard ceiling on how many pixels
-/// can sparkle at once (with the dashes: `× (1 + DASH_CHANCE / 16)`, 9.3 %);
-/// the lobe then keeps only the facets that face the light. Raising it makes
-/// the water busier.
+/// can sparkle at rest, before the lobe and the dashes. Raising it makes the
+/// water busier.
 pub(super) const GLINT_DENSITY: u32 = 40;
 /// Candidates per 256 pixels on a live ripple ring (a ring sparkles harder).
 pub(super) const RIPPLE_DENSITY: u32 = 96;
@@ -133,8 +129,10 @@ pub(super) const MIRROR_FULL_GAIN: f32 = 256.0;
 pub(super) const MIRROR_GATE_SPEC: f32 = 24.0;
 /// The most fixtures mirrored a frame.
 pub(super) const MAX_MIRRORS: usize = 5;
-/// How far a row of the image shifts (± px) with the ripple field.
+/// How far a row of the lamp image shifts (± px) at rest.
 pub(super) const MIRROR_WOBBLE_PX: i32 = 1;
+/// Maximum extra horizontal displacement (px) from live rings.
+const RIPPLE_SHIFT_PX: f32 = 2.0;
 
 // ---- C. body mirrors -------------------------------------------------------
 
@@ -147,7 +145,7 @@ pub(super) const BODY_MIRROR: f32 = 0.58;
 pub(super) const BODY_DARKEN: f32 = 0.15;
 /// ... and tinted this far toward the water under it.
 pub(super) const BODY_TINT: f32 = 0.15;
-/// How far (± px) a row of the body image shifts with the ripple field.
+/// How far (± px) a row of the body image shifts at rest.
 pub(super) const BODY_WOBBLE_PX: i32 = 1;
 /// Columns the body pass handles (a stack array); wider buffers skip the rest.
 const MAX_COLS: usize = 2048;
@@ -179,6 +177,7 @@ pub(super) struct WaterRipple {
     pub centre: Vec2,
     pub rx: f32,
     pub ry: f32,
+    strength: f32,
 }
 
 impl WaterRipple {
@@ -186,6 +185,7 @@ impl WaterRipple {
         centre: Vec2::ZERO,
         rx: 0.0,
         ry: 0.0,
+        strength: 0.0,
     };
 }
 
@@ -212,6 +212,7 @@ pub(super) fn gather_ripples(
                 centre: r.pos - cam,
                 rx,
                 ry,
+                strength: 1.0 - r.age / art_puddle::RIPPLE_LIFE,
             };
             n += 1;
         }
@@ -237,12 +238,11 @@ fn run(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, ripples: &[Wat
     if canvas.w == 0 || canvas.h == 0 || canvas.mat.len() != canvas.w * canvas.h {
         return;
     }
-    let z = step3(frame.elapsed);
     if full {
-        body_mirrors(canvas, frame, k, z);
+        body_mirrors(canvas, frame, ripples, k);
     }
-    lamp_mirrors(grid, canvas, frame, k, z);
-    glints(grid, canvas, frame, ripples, k, full, z);
+    lamp_mirrors(grid, canvas, frame, ripples, k);
+    glints(grid, canvas, frame, ripples, k, full);
 }
 
 // ============================================================================
@@ -262,16 +262,10 @@ fn hash3(x: i32, y: i32, z: u32) -> u32 {
     n
 }
 
-/// `floor(elapsed * GLINT_HZ)`: the one clock this stage reads.
+/// A reflection's fixed shift (−1, 0 or +1) for a world row.
 #[inline]
-fn step3(elapsed: f32) -> u32 {
-    (elapsed.max(0.0) * GLINT_HZ).floor() as u32
-}
-
-/// A world row's shift (−1, 0 or +1) on step `z`: the wobble of a reflection.
-#[inline]
-fn wobble(wy: i32, z: u32, salt: u32) -> i32 {
-    (hash3(0x5157, wy, z ^ salt) % 3) as i32 - 1
+fn wobble(wy: i32, salt: u32) -> i32 {
+    (hash3(0x5157, wy, salt) % 3) as i32 - 1
 }
 
 #[inline]
@@ -329,7 +323,7 @@ fn toward(p: Rgb, c: Rgb, a: f32) -> Rgb {
 // C. Body mirrors
 // ============================================================================
 
-fn body_mirrors(canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f32, z: u32) {
+fn body_mirrors(canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, ripples: &[WaterRipple], k: f32) {
     let stride = canvas.w;
     let (w, h) = (canvas.w.min(MAX_COLS), canvas.h);
     // The row of the nearest creature pixel above, per column.
@@ -339,7 +333,7 @@ fn body_mirrors(canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f32, z: u32) {
     let alpha0 = (BODY_MIRROR * k).min(1.0);
     for y in 0..h {
         let yi = y as i32;
-        let shift = wobble(cam_y + yi, z, BODY_SALT) * BODY_WOBBLE_PX;
+        let shift = wobble(cam_y + yi, BODY_SALT) * BODY_WOBBLE_PX;
         let row = y * stride;
         #[allow(clippy::needless_range_loop)]
         for x in 0..w {
@@ -357,16 +351,28 @@ fn body_mirrors(canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f32, z: u32) {
                 continue;
             }
             let sy = yi - 2 * d + 1;
-            let sx = x as i32 + shift;
-            if sy < 0 || sx < 0 || sx >= w as i32 {
-                continue;
-            }
-            let si = sy as usize * stride + sx as usize;
-            if !material::is_creature(canvas.mat[si]) {
+            if sy < 0 {
                 continue;
             }
             let here = canvas.px[i];
-            let image = mix(scale(canvas.px[si], 1.0 - BODY_DARKEN), here, BODY_TINT);
+            let sample = |sx: i32| {
+                if sx >= 0 && sx < w as i32 {
+                    let si = sy as usize * stride + sx as usize;
+                    if material::is_creature(canvas.mat[si]) {
+                        return mix(scale(canvas.px[si], 1.0 - BODY_DARKEN), here, BODY_TINT);
+                    }
+                }
+                here
+            };
+            let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            let dx = ripple_shift(ripples, p);
+            let whole = dx.floor();
+            let sx = x as i32 + shift + whole as i32;
+            let frac = dx - whole;
+            let mut image = sample(sx);
+            if frac > 0.0 {
+                image = mix(image, sample(sx + 1), frac);
+            }
             let fade = (reach - d) as f32 / (reach - 1) as f32;
             canvas.px[i] = mix(here, image, alpha0 * fade);
         }
@@ -377,7 +383,13 @@ fn body_mirrors(canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f32, z: u32) {
 // B. Lamp mirrors
 // ============================================================================
 
-fn lamp_mirrors(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f32, z: u32) {
+fn lamp_mirrors(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    ripples: &[WaterRipple],
+    k: f32,
+) {
     let (w, h) = (canvas.w as i32, canvas.h as i32);
     let cam_y = frame.cam.y as i32;
     let mut done = 0;
@@ -396,7 +408,7 @@ fn lamp_mirrors(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f3
         let (cx, cy) = (s.x, s.y + MIRROR_K * height);
         let rx = MIRROR_RX + height * MIRROR_RX_PER_H;
         let ry = rx * MIRROR_ASPECT;
-        let pad = MIRROR_WOBBLE_PX as f32 + 1.0;
+        let pad = MIRROR_WOBBLE_PX as f32 + RIPPLE_SHIFT_PX + 1.0;
         let x0 = ((cx - rx - pad).floor() as i32).max(0);
         let x1 = ((cx + rx + pad).ceil() as i32 + 1).min(w);
         let y0 = ((cy - ry - 1.0).floor() as i32).max(0);
@@ -416,13 +428,14 @@ fn lamp_mirrors(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f3
             if dy.abs() >= 1.0 {
                 continue;
             }
-            let shift = (wobble(cam_y + py, z, salt) * MIRROR_WOBBLE_PX) as f32;
+            let shift = (wobble(cam_y + py, salt) * MIRROR_WOBBLE_PX) as f32;
             for px in x0..x1 {
                 let i = py as usize * canvas.w + px as usize;
                 if !is_water(canvas.mat[i]) {
                     continue;
                 }
-                let dx = (px as f32 + 0.5 - cx - shift) / rx;
+                let p = Vec2::new(px as f32 + 0.5, py as f32 + 0.5);
+                let dx = (p.x - cx - shift - ripple_shift(ripples, p)) / rx;
                 let r2 = dx * dx + dy * dy;
                 if r2 >= 1.0 {
                     continue;
@@ -452,18 +465,23 @@ fn lamp_mirrors(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, k: f3
 // ============================================================================
 
 /// Value noise on [`OCT1_CELL`] cells, −128..=127.
-fn value_noise(wx: i32, wy: i32, z: u32) -> i32 {
+fn value_noise(wx: i32, wy: i32, salt: u32) -> i32 {
     let c = OCT1_CELL;
     let (cx, cy) = (wx.div_euclid(c), wy.div_euclid(c));
     let (fx, fy) = (wx.rem_euclid(c), wy.rem_euclid(c));
-    let corner = |x: i32, y: i32| (hash3(x, y, z) & 255) as i32 - 128;
+    let corner = |x: i32, y: i32| (hash3(x, y, salt) & 255) as i32 - 128;
     let (a, b) = (corner(cx, cy), corner(cx + 1, cy));
     let (d, e) = (corner(cx, cy + 1), corner(cx + 1, cy + 1));
     (a * (c - fx) * (c - fy) + b * fx * (c - fy) + d * (c - fx) * fy + e * fx * fy) / (c * c)
 }
 
-/// The outward tilt (Q0.7) of a ripple ring under canvas point `p`, if any.
-fn ring_tilt(ripples: &[WaterRipple], p: Vec2) -> Option<[i32; 2]> {
+/// Outward tilt and peak strength from the live rings under canvas point `p`.
+fn ring_wave(ripples: &[WaterRipple], p: Vec2) -> (Vec2, f32) {
+    if ripples.is_empty() {
+        return (Vec2::ZERO, 0.0);
+    }
+    let mut tilt = Vec2::ZERO;
+    let mut strength = 0.0f32;
     for r in ripples {
         if r.rx <= 0.0 || r.ry <= 0.0 {
             continue;
@@ -471,16 +489,21 @@ fn ring_tilt(ripples: &[WaterRipple], p: Vec2) -> Option<[i32; 2]> {
         let d = p - r.centre;
         let (ex, ey) = (d.x / r.rx, d.y / r.ry);
         let q = (ex * ex + ey * ey).sqrt();
-        if ((q - 1.0) * (r.rx + r.ry) * 0.5).abs() > RIPPLE_BAND {
+        let distance = ((q - 1.0) * (r.rx + r.ry) * 0.5).abs();
+        if distance >= RIPPLE_BAND {
             continue;
         }
-        let len = d.len().max(0.001);
-        return Some([
-            (d.x / len * RIPPLE_TILT as f32) as i32,
-            (d.y / len * RIPPLE_TILT as f32) as i32,
-        ]);
+        let t = 1.0 - distance / RIPPLE_BAND;
+        let weight = t * t * (3.0 - 2.0 * t) * r.strength;
+        tilt += d * (weight / d.len().max(0.001));
+        strength = strength.max(weight);
     }
-    None
+    (tilt.clamp_box(Vec2::splat(-1.0), Vec2::splat(1.0)), strength)
+}
+
+#[inline]
+fn ripple_shift(ripples: &[WaterRipple], p: Vec2) -> f32 {
+    ring_wave(ripples, p).0.x * RIPPLE_SHIFT_PX
 }
 
 /// One light as a glint lobe: unit direction toward it, energy 0..1, colour.
@@ -521,7 +544,6 @@ struct GlintCtx<'a> {
     grid: &'a Grid,
     ripples: &'a [WaterRipple],
     full: bool,
-    z: u32,
     w: usize,
     h: usize,
     cam: (i32, i32),
@@ -535,18 +557,15 @@ struct GlintCtx<'a> {
 /// One pixel's glint: the per-channel lift and whether it runs on as a dash.
 fn glint_at(ctx: &GlintCtx<'_>, x: usize, y: usize) -> Option<([i32; 3], bool)> {
     let (wx, wy) = (ctx.cam.0 + x as i32, ctx.cam.1 + y as i32);
-    let hsh = hash3(wx, wy, ctx.z ^ GATE_SALT);
+    let hsh = hash3(wx, wy, GATE_SALT);
     let gate = hsh & 255;
     if gate >= GLINT_DENSITY.max(RIPPLE_DENSITY) {
         return None;
     }
     let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-    let ring = if ctx.ripples.is_empty() {
-        None
-    } else {
-        ring_tilt(ctx.ripples, p)
-    };
-    if gate >= GLINT_DENSITY && ring.is_none() {
+    let (tilt, ring_strength) = ring_wave(ctx.ripples, p);
+    let extra = gate >= GLINT_DENSITY;
+    if extra && ring_strength == 0.0 {
         return None;
     }
     let si = ctx.grid.sample_index(x, y);
@@ -593,14 +612,12 @@ fn glint_at(ctx: &GlintCtx<'_>, x: usize, y: usize) -> Option<([i32; 3], bool)> 
         return None;
     }
     // The facet: two octaves of ripple plus the ring's tilt.
-    let tilt = ring.unwrap_or([0, 0]);
-    let nx = value_noise(wx, wy, ctx.z ^ NX_SALT) * OCT1_TILT / 128
-        + (((hsh >> 16) & 255) as i32 - 128) * OCT2_TILT / 128
-        + tilt[0];
-    let ny = value_noise(wx, wy, ctx.z ^ NY_SALT) * OCT1_TILT / 128
-        + (((hsh >> 24) & 255) as i32 - 128) * OCT2_TILT / 128
-        + tilt[1];
-    let (nx, ny) = (nx.clamp(-110, 110) as f32 / 127.0, ny.clamp(-110, 110) as f32 / 127.0);
+    let nx = value_noise(wx, wy, NX_SALT) * OCT1_TILT / 128
+        + (((hsh >> 16) & 255) as i32 - 128) * OCT2_TILT / 128;
+    let ny = value_noise(wx, wy, NY_SALT) * OCT1_TILT / 128
+        + (((hsh >> 24) & 255) as i32 - 128) * OCT2_TILT / 128;
+    let nx = (nx as f32 + tilt.x * RIPPLE_TILT as f32).clamp(-110.0, 110.0) / 127.0;
+    let ny = (ny as f32 + tilt.y * RIPPLE_TILT as f32).clamp(-110.0, 110.0) / 127.0;
     let n = [nx, ny, (1.0 - nx * nx - ny * ny).max(0.0).sqrt()];
     // The view vector, leaning toward the view centre on Full.
     let v = if ctx.full {
@@ -620,7 +637,7 @@ fn glint_at(ctx: &GlintCtx<'_>, x: usize, y: usize) -> Option<([i32; 3], bool)> 
             rgb = l.rgb;
         }
     }
-    let amount = best * ctx.peak;
+    let amount = best * ctx.peak * if extra { ring_strength } else { 1.0 };
     if amount < 1.0 {
         return None;
     }
@@ -633,7 +650,6 @@ fn glint_at(ctx: &GlintCtx<'_>, x: usize, y: usize) -> Option<([i32; 3], bool)> 
     Some((add, dash))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn glints(
     grid: &Grid,
     canvas: &mut Canvas<'_>,
@@ -641,7 +657,6 @@ fn glints(
     ripples: &[WaterRipple],
     k: f32,
     full: bool,
-    z: u32,
 ) {
     let (w, h) = (canvas.w, canvas.h);
     let low_colour = frame.depth != ColorDepth::Truecolor;
@@ -654,7 +669,6 @@ fn glints(
         grid,
         ripples,
         full,
-        z,
         w,
         h,
         cam: (frame.cam.x as i32, frame.cam.y as i32),
@@ -706,7 +720,7 @@ mod tests {
     use super::super::engine::{Grid, LightingMode};
     use super::super::fx::{testkit, FxLight, LightTag, DIR_ONE};
     use super::super::material::{self, MaterialKind};
-    use super::{run, WaterRipple, GLINT_HZ, MIRROR_REACH};
+    use super::{body_mirrors, lamp_mirrors, run, WaterRipple, MIRROR_REACH};
     use crate::game::level::{Level, LightFixtureKind, Theme};
     use crate::math::Vec2;
     use crate::render::framebuffer::PixelBuffer;
@@ -761,11 +775,12 @@ mod tests {
         let level = Level::empty(Theme::Sewer);
         let mut frame = testkit::frame(&level, mode);
         frame.elapsed = elapsed;
+        frame.step8 = super::super::fx::step8(frame.elapsed);
         frame.cam = cam;
         frame.rat = rat.map_or(Vec2::new(-5000.0, -5000.0), |r| r + cam);
         frame.lights = lights;
         let mut canvas = testkit::canvas(pb);
-        run(g, &mut canvas, &frame, &[] as &[WaterRipple], k);
+        run(g, &mut canvas, &frame, &[], k);
     }
 
     fn changed(a: &PixelBuffer, b: &PixelBuffer) -> Vec<(usize, usize)> {
@@ -818,24 +833,49 @@ mod tests {
     }
 
     #[test]
-    fn the_pattern_holds_within_a_step_and_moves_across_one() {
-        let run_at = |elapsed: f32, cam: Vec2| {
+    fn still_water_is_byte_identical_across_elapsed_times() {
+        let g = grid(220);
+        let lights = [lamp(Vec2::new(22.0, 6.0))];
+        for mode in [LightingMode::Full, LightingMode::Hard] {
+            let draw = |elapsed| {
+                let mut pb = wading(true);
+                stage(&mut pb, &g, mode, elapsed, Vec2::ZERO, None, &lights, 1.0);
+                pb
+            };
+            let first = draw(0.01);
+            assert_ne!(wading(true).pixels(), first.pixels());
+            assert_eq!(first.pixels(), draw(1.37).pixels(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn glints_slide_with_a_one_pixel_camera_move() {
+        let g = grid(220);
+        let draw = |cam| {
             let mut pb = puddle();
-            stage(&mut pb, &grid(220), LightingMode::Full, elapsed, cam, None, &[], 1.0);
+            stage(&mut pb, &g, LightingMode::Full, 0.0, cam, None, &[], 1.0);
             pb
         };
-        let step = 1.0 / GLINT_HZ;
-        let a = run_at(3.0 * step + 0.01, Vec2::ZERO);
-        let b = run_at(3.0 * step + 0.2, Vec2::ZERO);
-        assert_eq!(a.pixels(), b.pixels(), "held within a step");
-        let c = run_at(4.0 * step + 0.01, Vec2::ZERO);
-        assert_ne!(a.pixels(), c.pixels(), "a new step moves the glints");
-        // Hard has no view term and no rat lobe: also still within a step.
-        let mut h1 = puddle();
-        let mut h2 = puddle();
-        stage(&mut h1, &grid(220), LightingMode::Hard, 1.01, Vec2::ZERO, None, &[], 1.0);
-        stage(&mut h2, &grid(220), LightingMode::Hard, 1.2, Vec2::ZERO, None, &[], 1.0);
-        assert_eq!(h1.pixels(), h2.pixels());
+        let first = draw(Vec2::ZERO);
+        let next = draw(Vec2::new(1.0, 0.0));
+        let mut glints = 0;
+        let mut shared = 0;
+        let mut adjusted = 0;
+        for y in 0..SIZE.1 {
+            // Compare the same world pixels past the clipped shore and its dashes.
+            for x in 18..SIZE.0 {
+                let a = first.pixel_at(x, y);
+                let b = next.pixel_at(x - 1, y);
+                glints += usize::from(a != WATER || b != WATER);
+                if a != WATER && b != WATER {
+                    shared += 1;
+                    adjusted += usize::from(a != b);
+                    assert!(a.0.abs_diff(b.0) <= 16, "small brightness change at {x},{y}");
+                }
+            }
+        }
+        assert!(shared * 2 > glints, "most glints persist in world space");
+        assert!(adjusted > 0, "the view term still adjusts their brightness");
     }
 
     #[test]
@@ -939,6 +979,61 @@ mod tests {
         let mut none = puddle();
         stage(&mut none, &g, LightingMode::Full, 1.0, Vec2::ZERO, None, &[halo], 1.0);
         assert!(changed(&before, &none).is_empty());
+    }
+
+    #[test]
+    fn a_live_ripple_distorts_lamp_mirror_rows_as_it_expands() {
+        let g = grid(220);
+        let level = Level::empty(Theme::Sewer);
+        let lights = [lamp(Vec2::new(40.0, 6.0))];
+        let mut frame = testkit::frame(&level, LightingMode::Hard);
+        frame.lights = &lights;
+        let draw = |ripples: &[WaterRipple]| {
+            let mut pb = puddle();
+            lamp_mirrors(&g, &mut testkit::canvas(&mut pb), &frame, ripples, 1.0);
+            pb
+        };
+        let first = draw(&[]);
+        let ripple = WaterRipple {
+            centre: Vec2::new(34.0, 22.5),
+            rx: 6.5,
+            ry: 3.25,
+            strength: 0.55,
+        };
+        let passing = draw(&[ripple]);
+        let wider = draw(&[WaterRipple {
+            rx: 6.75,
+            ry: 3.375,
+            ..ripple
+        }]);
+        let moved = changed(&first, &passing);
+        assert!(moved.iter().any(|&(_, y)| y == 22));
+        assert!(moved.iter().all(|&(_, y)| (18..=26).contains(&y)));
+        assert!(!changed(&passing, &wider).is_empty());
+    }
+
+    #[test]
+    fn a_live_ripple_distorts_a_body_mirror() {
+        let level = Level::empty(Theme::Sewer);
+        let frame = testkit::frame(&level, LightingMode::Full);
+        let draw = |ripples: &[WaterRipple]| {
+            let mut pb = wading(true);
+            for x in (10..20).step_by(2) {
+                paint(&mut pb, (x, 13, 1, 1), MaterialKind::Fur, true, (0, 255, 0));
+            }
+            body_mirrors(&mut testkit::canvas(&mut pb), &frame, ripples, 1.0);
+            pb
+        };
+        let first = draw(&[]);
+        let passing = draw(&[WaterRipple {
+            centre: Vec2::new(8.0, 14.5),
+            rx: 7.0,
+            ry: 3.5,
+            strength: 0.55,
+        }]);
+        let moved = changed(&first, &passing);
+        assert!(moved.iter().any(|&(_, y)| y == 14));
+        assert!(moved.iter().all(|&(_, y)| (14..=19).contains(&y)));
     }
 
     #[test]
