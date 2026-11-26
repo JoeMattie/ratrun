@@ -1408,3 +1408,146 @@ fn shooter_pellets_leave_a_trail() {
         assert!(seen, "{key:?} never drew a pellet trail");
     }
 }
+
+#[test]
+fn outfall_trick_cards_run_their_real_rules() {
+    use crate::game::ecs::systems::floor_outfall::{
+        OutfallTellPhase, SCHOOL_BUNCHED_RADIUS, SCHOOL_LIGHT_REACH, SCHOOL_RAT_REACH,
+    };
+
+    for kind in [EnemyKind::Skater, EnemyKind::Lampfish, EnemyKind::FrySchool] {
+        let mut scene = LibraryScene::build(Key::Enemy(kind)).unwrap();
+        let subject = scene.subject().unwrap();
+        assert_eq!(scene.world.level.theme, Theme::Outfall);
+        let (mut dry, mut wet, mut dark, mut bunched, mut tell, mut strike) =
+            (false, false, false, false, false, false);
+        one_loop(&mut scene, |scene| {
+            let world = &scene.world;
+            let body = world.ecs.get::<Enemy>(subject).unwrap();
+            if kind == EnemyKind::Skater {
+                wet |= world.level.wet_at(body.pos);
+                dry |= !world.level.wet_at(body.pos);
+            }
+            if kind == EnemyKind::FrySchool {
+                dark |= body.radius == kind.radius();
+                bunched |= body.radius == SCHOOL_BUNCHED_RADIUS
+                    && body.vel == Vec2::ZERO
+                    && body.pos.dist(world.player.pos) > SCHOOL_RAT_REACH
+                    && world.level.nearest_live_sconce(body.pos, SCHOOL_LIGHT_REACH).is_some();
+            }
+            if let Some(attack) = outfall_enemy_tell(body) {
+                tell |= attack.phase == OutfallTellPhase::Tell;
+                strike |= attack.phase == OutfallTellPhase::Strike;
+            }
+        });
+        match kind {
+            EnemyKind::Skater => assert!(dry && wet && tell && strike, "Skater missed a beat"),
+            EnemyKind::Lampfish => assert!(tell && strike, "Lampfish missed its locked lunge"),
+            EnemyKind::FrySchool => assert!(dark && bunched, "the sconce never bunched the school"),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn outfall_named_cards_show_both_halves_of_the_tell_and_the_strike() {
+    for kind in roster::appointments(Theme::Outfall) {
+        let mut scene = LibraryScene::build(Key::Miniboss(kind)).unwrap();
+        let subject = scene.subject().unwrap();
+        let (mut tracking, mut locked, mut struck, mut signature) = (false, false, false, false);
+        one_loop(&mut scene, |scene| {
+            let world = &scene.world;
+            let mb = world.ecs.get::<Miniboss>(subject).unwrap();
+            struck |= mb.state == MinibossState::Active;
+            if mb.state != MinibossState::Tell {
+                return;
+            }
+            tracking |= mb.timer < crate::game::ecs::systems::miniboss::TELL_LOCK;
+            locked |= mb.timer >= crate::game::ecs::systems::miniboss::TELL_LOCK;
+            signature |= match (kind, mb.telegraph()) {
+                (MinibossKind::Gasket, Some(MinibossShape::Annulus { inner, .. })) => inner > 0.0,
+                (MinibossKind::Swell, Some(MinibossShape::Tide { from, to, .. })) => to - from > 40.0,
+                (MinibossKind::Shade, Some(MinibossShape::Umbra { origin, aim, .. })) => {
+                    let lamp = scene.script.fixture.unwrap();
+                    aim.dot(origin - lamp) > 0.0
+                }
+                (MinibossKind::FalseBulb, Some(MinibossShape::False { selected, .. })) => {
+                    selected.is_some()
+                }
+                _ => false,
+            };
+        });
+        assert!(tracking && locked && struck && signature, "{kind:?} missed a beat");
+    }
+}
+
+#[test]
+fn outfall_lantern_card_runs_arrival_feint_snuff_and_gape() {
+    let mut scene = LibraryScene::build(Key::Boss(BossKind::Lantern)).unwrap();
+    let subject = scene.subject().unwrap();
+    let (mut arrival, mut snap, mut snuff, mut paired, mut pull, mut stamp, mut restored) =
+        (false, false, false, false, false, false, false);
+    let mut art = PixelBuffer::new(44, 30);
+    one_loop(&mut scene, |scene| {
+        let view = scene.world.ecs.get::<Boss>(subject).unwrap().lantern_view().unwrap();
+        let dark = scene.world.level.objects.outfall_boss_snuff == Some(0);
+        let sample = match view.state {
+            LanternState::ArrivalLure => {
+                let showed = view.real_bulb.is_some_and(|bulb| bulb.pos.dist(view.head) > 8.0);
+                let first = showed && !arrival;
+                arrival |= showed;
+                first
+            }
+            LanternState::JawSnap => {
+                let first = !snap;
+                snap = true;
+                first
+            }
+            LanternState::GapePull => {
+                let first = !pull;
+                pull |= view.attack.is_some() && view.stamp.is_some();
+                restored |= !dark;
+                first
+            }
+            LanternState::GapeStamp => {
+                stamp = true;
+                false
+            }
+            _ => {
+                snuff |= dark;
+                let both = dark && view.decoy.is_some() && view.real_bulb.is_some();
+                let first = both && !paired;
+                paired |= both;
+                first
+            }
+        };
+        if sample {
+            plate(scene, &mut art);
+            let (lo, hi) = scene.fit_bounds().unwrap();
+            assert!(on_plate(scene, lo) && on_plate(scene, hi), "{:?} left the plate", view.state);
+        }
+    });
+    assert!(arrival && snap && snuff && paired && pull && stamp && restored);
+}
+
+#[test]
+fn outfall_floor_card_runs_a_lure_on_the_wet_bank() {
+    use crate::game::hazards::{lure_landing_clear, LurePhase};
+
+    let mut scene = LibraryScene::build(Key::Floor(Theme::Outfall)).unwrap();
+    let level = &scene.world.level;
+    let window = scene.script.window.unwrap();
+    assert!(level.puddles.iter().any(|p| window.contains_world(p.pos)));
+    assert!(level.props.iter().any(|p| p.kind == PropKind::OutfallRib
+        && window.contains_world(p.rect.center())));
+    let trap = &level.objects.lure_traps[0];
+    assert_eq!(trap.phase, LurePhase::Ready);
+    assert!(trap.landings.iter().any(|&p| lure_landing_clear(level, trap.pos, p)));
+    let (mut warned, mut released) = (false, false);
+    one_loop(&mut scene, |scene| {
+        let trap = &scene.world.level.objects.lure_traps[0];
+        warned |= trap.phase == LurePhase::Warning;
+        released |= trap.phase == LurePhase::Spent && !trap.failed;
+    });
+    assert!(warned && released);
+}

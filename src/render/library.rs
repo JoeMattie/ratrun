@@ -306,7 +306,7 @@ pub struct DrawInfo {
 /// Lazily built card scenes (miniature levels and hazard caches).
 #[derive(Default)]
 struct Scenes {
-    levels: [Option<Level>; 6],
+    levels: [Option<Level>; Theme::Outfall as usize + 1],
     steam: Option<LevelObjects>,
     ink: Option<LevelObjects>,
 }
@@ -674,12 +674,36 @@ fn draw_art(art: &mut PixelBuffer, scenes: &mut Scenes, key: Key, accent: Rgb, t
         }
         Key::Floor(theme) => {
             let level = scene_level(scenes, theme);
+            if theme == Theme::Outfall {
+                draw_outfall_floor_plate(art, level, t);
+                return;
+            }
             art_floor::draw_floor(art, level, cam, t);
             for prop in &level.props {
                 art_props::draw_prop(art, prop, cam, &level.palette);
             }
         }
     }
+}
+
+fn draw_outfall_floor_plate(art: &mut PixelBuffer, level: &Level, t: f32) {
+    if art.w == 0 || art.h == 0 {
+        return;
+    }
+    let mut bank = PixelBuffer::new(art.w * 2, art.h * 2);
+    let cam = level.start + Vec2::new(0.0, 5.0) - Vec2::new(art.w as f32, art.h as f32);
+    bank.clear(level.palette.bg);
+    art_floor::draw_floor(&mut bank, level, cam, t);
+    for puddle in &level.puddles {
+        crate::game::art_puddle::draw_puddle_among_with(
+            &mut bank, puddle, &level.puddles, cam, t, level.theme, false,
+        );
+    }
+    art_floor::draw_outfall_hazards(&mut bank, level, cam, t);
+    for prop in &level.props {
+        art_props::draw_prop(&mut bank, prop, cam, &level.palette);
+    }
+    bank.resample_to(art);
 }
 
 /// The enemy card's loop: walk, then the kind's own tell.
@@ -768,6 +792,7 @@ fn boss_extent(kind: BossKind) -> (f32, f32) {
                 2.0 * (cobra::HOOD_RADIUS + 8.0),
             )
         }
+        BossKind::Lantern => (126.0, 64.0),
     }
 }
 
@@ -780,6 +805,7 @@ fn boss_anchor_x(kind: BossKind) -> f32 {
             let (need_w, _) = boss_extent(kind);
             (art_boss_mangle::BODY_RADIUS + 10.0) / need_w
         }
+        BossKind::Lantern => 0.66,
         _ => 0.5,
     }
 }
@@ -992,6 +1018,27 @@ fn pose_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
             cobra::draw_ground(art, &v, Vec2::ZERO, accent);
             cobra::draw(art, &v, Vec2::ZERO, accent);
         }
+        BossKind::Lantern => {
+            use crate::game::art_boss_lantern::{self as lantern, LanternBulbView, LanternState, LanternView};
+            let view = LanternView {
+                head: c,
+                facing,
+                anim,
+                progress: cycle,
+                state: LanternState::Swim,
+                attack: None,
+                stamp: None,
+                real_bulb: Some(LanternBulbView {
+                    pos: c + Vec2::new(28.0, -7.0),
+                    radius: 40.0,
+                    gain: 1.0,
+                    flicker_phase: 0,
+                }),
+                decoy: None,
+            };
+            lantern::draw_ground(art, &view, Vec2::ZERO, accent);
+            lantern::draw(art, &view, Vec2::ZERO, accent);
+        }
     }
 }
 
@@ -1178,6 +1225,9 @@ fn scene_level(scenes: &mut Scenes, theme: Theme) -> &Level {
 }
 
 fn build_scene(theme: Theme) -> Level {
+    if theme == Theme::Outfall {
+        return scene::outfall_floor_patch();
+    }
     let cols = 30;
     let rows = 20;
     let tiles = crate::game::collision::TileMap::new(cols, rows, theme, 0);

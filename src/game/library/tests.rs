@@ -46,6 +46,73 @@ fn registry_is_complete() {
     }
 }
 
+#[test]
+fn legacy_floor_records_follow_discriminants_on_both_outfall_routes() {
+    use crate::game::campaign::Route;
+
+    // IDs from a save written before Outfall was appended. The picker has
+    // always put Laundry before Lab, while the save has Lab before Laundry.
+    let legacy = [
+        (2, Theme::Lab, "Lab"),
+        (3, Theme::Laundry, "Laundry"),
+        (4, Theme::Printworks, "Printworks"),
+        (5, Theme::Trailer, "Flatbed"),
+    ];
+    let mut save = LibrarySave::default();
+    for (id, _, _) in legacy {
+        save.seen[Category::Floor as usize][0] |= 1 << id;
+        save.stats.push(SavedRecord {
+            category: Category::Floor as u8,
+            kind: id,
+            record: Record {
+                seen: u32::from(id) + 10,
+                ..Record::default()
+            },
+        });
+    }
+    let loaded: Library = serde_json::from_str::<LibrarySave>(
+        &serde_json::to_string(&save).unwrap(),
+    )
+    .unwrap()
+    .into();
+    assert!(!loaded.is_seen(Key::Floor(Theme::Outfall)));
+    let rows = all_rows();
+    let floors: Vec<_> = rows
+        .iter()
+        .filter(|r| r.tab == Tab::Floors)
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(
+        floors,
+        Theme::playable().map(Key::Floor),
+        "floor cards stay in picker order"
+    );
+    let outfall = floors.iter().position(|key| *key == Key::Floor(Theme::Outfall));
+    assert_eq!(outfall, Some(3));
+    for next in [Theme::Lab, Theme::Printworks] {
+        let mut route = Route::ORIGINAL;
+        assert!(route.choose(1, Theme::Outfall));
+        assert!(route.choose(2, next));
+        assert_eq!(route.theme(1), Theme::Outfall);
+        assert_eq!(route.theme(2), next);
+        for (id, theme, name) in legacy {
+            let key = key_at(Category::Floor as usize, usize::from(id)).unwrap();
+            assert_eq!(key, Key::Floor(theme));
+            assert!(loaded.is_seen(key));
+            assert_eq!(loaded.record(key).seen, u32::from(id) + 10);
+            assert_eq!(rows.iter().find(|row| row.key == key).unwrap().name, name);
+        }
+    }
+    assert_eq!(key_at(Category::Floor as usize, 6), Some(Key::Floor(Theme::Outfall)));
+    let resaved: LibrarySave = loaded.into();
+    assert_eq!(resaved.seen, save.seen);
+    for (before, after) in save.stats.iter().zip(&resaved.stats) {
+        assert_eq!((before.category, before.kind, before.record),
+                   (after.category, after.kind, after.record));
+    }
+    assert_eq!(resaved.stats.len(), save.stats.len());
+}
+
 /// A category cannot silently hold more kinds than its bitset.
 #[test]
 fn no_category_overflows_its_bitset() {
