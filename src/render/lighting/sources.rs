@@ -292,7 +292,8 @@ impl LightMap {
                 half_angle: HEADLAMP_HALF_ANGLE,
             };
             light.falloff = Falloff::Linear;
-            light.scatter = 0.0;
+            // Add a warm core so the beam reads on dark floor albedo in a blackout.
+            light.scatter = 0.18;
             // The grid clips this light with the same tile rays as the fog.
             light.casts_shadow = false;
             self.push_shaped(light, HEADLAMP_LIGHT_PRIORITY);

@@ -2496,7 +2496,7 @@ fn pickup_facts(k: PickupKind, f: &mut Facts) {
             f.push("LASTS", format!("{:.0}s", powerups::COLLAR_SECS));
         }
         PickupKind::Headlamp => {
-            f.push("EFFECT", "reveals ground and parts the horde");
+            f.push("EFFECT", "reveals ground, parts the horde");
             f.push("REACH", format!("{:.0} px", powerups::HEADLAMP_RANGE));
             f.push("LASTS", format!("{:.0}s", powerups::HEADLAMP_SECS));
         }

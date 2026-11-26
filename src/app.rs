@@ -8259,6 +8259,112 @@ mod tests {
         hh.frame(&[]);
 
         match target.as_str() {
+            "w11-headlamp" | "w11-headlamp-off" | "w11-headlamp-pickup"
+            | "w11-mudlark-walk" | "w11-carton-walk" | "w11-milk-teeth" => {
+                use crate::game::art_walls::{WallAxis, WallKind};
+                use crate::game::collision::{cell_of, TileKind, TileMap};
+                use crate::game::ecs::components::MilkTooth;
+                use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
+                use crate::game::enemy::Enemy;
+                use crate::game::fog::Fog;
+                use crate::game::gem::Pickup;
+
+                let theme = if target == "w11-carton-walk" { Theme::Kitchen } else { Theme::Sewer };
+                hh.app.start_practice(theme);
+                hh.frame(&[KeyCode::Enter]);
+                hh.app.scores.minimap_size = if matches!(target.as_str(), "w11-headlamp" | "w11-headlamp-off") {
+                    minimap::MinimapSize::Normal
+                } else {
+                    minimap::MinimapSize::Hidden
+                };
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.clear_enemies();
+                w.player.loadout.weapons.clear();
+                w.shake_scale = 0.0;
+                let hall = w.player.pos;
+                let (x, y) = cell_of(hall);
+                w.level.tiles.fill_cells(x - 10, y - 4, 21, 9, TileKind::Open);
+                w.level.tiles.rebuild_masks();
+                w.level.props.clear();
+                let east = Vec2::new(1.0, 0.0);
+                let dt = 1.0 / 60.0;
+                w.player.face = east;
+                match target.as_str() {
+                    "w11-headlamp" | "w11-headlamp-off" => {
+                        let rat = TileMap::tile_rect(x - 4, y).center();
+                        w.level.puddles.clear();
+                        for row in y - 10..=y + 10 {
+                            w.level.tiles.set(x + 1, row, TileKind::Wall(WallKind::Solid));
+                        }
+                        w.level.tiles.set(x + 1, y, TileKind::Wall(WallKind::RatHole { axis: WallAxis::Vertical }));
+                        w.level.tiles.rebuild_masks();
+                        w.player.pos = rat;
+                        w.cam_focus = Some(rat + east * 35.0);
+                        w.elapsed = 304.0;
+                        w.fog = Fog::new(w.level.tiles.cols(), w.level.tiles.rows());
+                        let enabled = target == "w11-headlamp";
+                        if enabled {
+                            w.spawn_pickup(Pickup { pos: rat, kind: PickupKind::Headlamp, bob: 0.0 });
+                        }
+                        let offsets = [Vec2::new(47.0, -4.0), Vec2::new(57.0, 5.0), Vec2::new(66.0, -14.0)];
+                        let bodies = offsets.map(|offset| w.spawn_enemy(EnemyKind::Skitterer, rat + offset, 2.0));
+                        for _ in 0..43 {
+                            w.update_with_aim(dt, Vec2::ZERO, false, false, Some(rat + east * 100.0));
+                        }
+                        assert_eq!(w.fog.is_seen(x + 3, y), enabled);
+                        let positions = bodies.map(|e| w.ecs.get::<Enemy>(e).unwrap().pos - rat);
+                        eprintln!("Headlamp enabled={enabled}, seen cells={}, body offsets={positions:?}", w.fog.seen_count());
+                    }
+                    "w11-headlamp-pickup" => {
+                        w.cam_focus = Some(hall);
+                        w.player.pos = hall - Vec2::new(17.0, 8.0);
+                        let pos = hall + Vec2::new(24.0, -14.0);
+                        w.spawn_pickup(Pickup { pos, kind: PickupKind::Headlamp, bob: 0.3 });
+                    }
+                    "w11-mudlark-walk" | "w11-carton-walk" => {
+                        let kind = if theme == Theme::Kitchen { MinibossKind::MilkCarton } else { MinibossKind::Mudlark };
+                        let start = hall - Vec2::new(49.0, 9.0);
+                        w.player.pos = hall + east * 24.0;
+                        let entity = w.spawn_miniboss(kind, 0, start);
+                        {
+                            let mut body = w.ecs.get_mut::<Miniboss>(entity).unwrap();
+                            body.announced = true;
+                            body.state = MinibossState::Cooldown;
+                            body.timer = 0.0;
+                            body.aim = east;
+                        }
+                        for _ in 0..29 {
+                            w.update(dt, Vec2::ZERO, false);
+                        }
+                        let body = w.ecs.get::<Enemy>(entity).unwrap();
+                        assert!(body.pos.x > start.x + 4.0, "the miniboss must walk");
+                        w.cam_focus = Some(body.pos + (w.player.pos - body.pos) * 0.43);
+                    }
+                    "w11-milk-teeth" => {
+                        let rat = hall - east * 30.0;
+                        w.player.pos = rat;
+                        w.cam_focus = Some(hall);
+                        w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::Gnaw));
+                        let weapon = &mut w.player.loadout.weapons[0];
+                        weapon.level = 5;
+                        weapon.evolved = true;
+                        weapon.timer = 0.0;
+                        w.spawn_enemy(EnemyKind::Pillbug, rat + east * 16.0, 20.0);
+                        w.spawn_enemy(EnemyKind::Brute, rat + east * 60.0, 5.0);
+                        for _ in 0..17 {
+                            w.update_with_aim(dt, Vec2::ZERO, false, false, Some(rat + east * 56.0));
+                        }
+                        let mut teeth = w.ecs.query::<&MilkTooth>();
+                        assert!(teeth.iter(&w.ecs).any(|tooth| tooth.height() > 10.0));
+                    }
+                    _ => unreachable!(),
+                }
+                hh.app.hud.tick(0.0, w, &[], hh.app.muted);
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+
             "sector-transfer" => {
                 hh.enter_playing();
                 let world = hh.app.world.as_mut().unwrap();
@@ -11313,7 +11419,7 @@ mod tests {
                 hh.frame(&[]);
             }
         }
-        // Reframe scripted Outfall poses without ticking their tells.
+        // Reframe staged poses without advancing their simulation.
         let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
         let frozen_pose = posed_outfall
             || target.starts_with("horseshoe-")
@@ -11321,7 +11427,8 @@ mod tests {
             || target.starts_with("w8-")
             || target.starts_with("dropping-")
             || target.starts_with("miniboss-milk-")
-            || target == "sweeper-run";
+            || target.starts_with("w11-")
+            || matches!(target.as_str(), "sweeper-run" | "giant");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())

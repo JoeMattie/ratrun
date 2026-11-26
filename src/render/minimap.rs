@@ -2336,12 +2336,14 @@ fn draw_expanded_sidebar(
     }
 
     // Tall-terminal visibility key + controls footer (120×40 and 200×60).
-    if !compact && y + 7 <= bottom {
-        y += 1;
-        for i in 0..max_w.min(24) {
-            buf[(x + i as u16, y)].set_char('─').set_fg(EDGE).set_bg(PLATE);
+    if !compact && y + 6 <= bottom {
+        // Reserve four rows for the full key and two for the footer.
+        if y + 7 <= bottom {
+            for i in 0..max_w.min(24) {
+                buf[(x + i as u16, y)].set_char('─').set_fg(EDGE).set_bg(PLATE);
+            }
+            y += 1;
         }
-        y += 1;
         buf.set_stringn(
             x,
             y,
@@ -2364,9 +2366,6 @@ fn draw_expanded_sidebar(
             ),
         ];
         for &(swatch, col, lbl) in vis_rows {
-            if y + 2 >= bottom {
-                break;
-            }
             buf.set_stringn(x, y, swatch, 2, Style::default().fg(col).bg(PLATE));
             buf.set_stringn(
                 x + 2,
