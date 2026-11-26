@@ -253,6 +253,16 @@ pub struct LevelOutcome {
     /// Seconds each evolution was owned on this level.
     #[serde(default)]
     pub evolution_uptime: BTreeMap<String, f32>,
+    #[serde(default)]
+    pub hp_samples_10s: Vec<f32>,
+    #[serde(default)]
+    pub min_hp_fraction: Option<f32>,
+    #[serde(default)]
+    pub hp_lost: Option<f32>,
+    #[serde(default)]
+    pub boss_hp_lost: Option<f32>,
+    #[serde(default)]
+    pub level_up_times: Vec<f32>,
 }
 
 /// One named miniboss fight as it appears in a report.
@@ -371,6 +381,11 @@ impl LevelOutcome {
                 .iter()
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect(),
+            hp_samples_10s: s.hp_samples_10s.clone(),
+            min_hp_fraction: Some(s.min_hp_fraction),
+            hp_lost: Some(s.hp_lost),
+            boss_hp_lost: s.reached_boss.then_some(s.boss_hp_lost),
+            level_up_times: s.level_up_times.clone(),
         }
     }
 }
@@ -610,6 +625,14 @@ pub struct RunSummary {
     /// batch can be split by skill after the fact.
     #[serde(default)]
     pub levels: Vec<RunLevelSummary>,
+    /// One-based campaign slot of the last floor entered.
+    #[serde(default)]
+    pub floor_reached: Option<usize>,
+    /// Floor clocks reset on entry. This death time uses the campaign clock.
+    #[serde(default)]
+    pub death_campaign_seconds: Option<f32>,
+    #[serde(default)]
+    pub dropped_below_30_percent_hp: Option<bool>,
 }
 
 /// One level of one run, as [`RunSummary::levels`] carries it.
@@ -628,6 +651,19 @@ pub struct RunLevelSummary {
     pub minibosses: Vec<MinibossOutcome>,
     #[serde(default)]
     pub boss_states: BTreeMap<String, [f32; 3]>,
+    /// Samples on the floor clock, starting at 10 s and spaced 10 s apart.
+    #[serde(default)]
+    pub hp_samples_10s: Vec<f32>,
+    #[serde(default)]
+    pub min_hp_fraction: Option<f32>,
+    /// Actual damage taken after mitigation, capped at remaining HP per hit.
+    #[serde(default)]
+    pub hp_lost: Option<f32>,
+    /// Damage taken from all sources during the boss encounter.
+    #[serde(default)]
+    pub boss_hp_lost: Option<f32>,
+    #[serde(default)]
+    pub level_up_times: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1246,6 +1282,11 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                 .max()
                 .unwrap_or(0),
             death: outcome.death.clone(),
+            floor_reached: outcome.levels.last().map(|l| l.level + 1),
+            death_campaign_seconds: outcome.death.as_ref().map(|_| outcome.total_time),
+            dropped_below_30_percent_hp: Some(
+                outcome.levels.iter().any(|l| l.min_hp_fraction.is_some_and(|hp| hp < 0.3)),
+            ),
             levels: outcome
                 .levels
                 .iter()
@@ -1262,6 +1303,11 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                     shop_purchases: l.shop_purchases,
                     minibosses: l.minibosses.clone(),
                     boss_states: l.boss_states.clone(),
+                    hp_samples_10s: l.hp_samples_10s.clone(),
+                    min_hp_fraction: l.min_hp_fraction,
+                    hp_lost: l.hp_lost,
+                    boss_hp_lost: l.boss_hp_lost,
+                    level_up_times: l.level_up_times.clone(),
                 })
                 .collect(),
         });
@@ -3679,5 +3725,16 @@ mod tests {
         assert!(v["levels"].is_array());
         assert!(v["damage"].is_array());
         assert!(v["deaths"].is_array());
+        let run = &v["run_summaries"][0];
+        assert_eq!(run["floor_reached"], 1);
+        assert!(run["death_campaign_seconds"].is_null());
+        assert!(run["dropped_below_30_percent_hp"].is_boolean());
+        let floor = &run["levels"][0];
+        let samples = floor["hp_samples_10s"].as_array().expect("HP samples");
+        assert_eq!(samples.len(), (floor["time"].as_f64().unwrap() / 10.0) as usize);
+        assert!(floor["min_hp_fraction"].is_number());
+        assert!(floor["hp_lost"].is_number());
+        assert!(floor["boss_hp_lost"].is_null());
+        assert!(floor["level_up_times"].is_array());
     }
 }

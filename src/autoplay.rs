@@ -746,6 +746,16 @@ pub struct LevelStats {
     /// Cumulative XP collected on this level (`xp_to_reach(level) + xp`), the
     /// number the geometric cost curve is fitted against.
     pub xp_total: u32,
+    /// End-of-tick HP fraction at 10 s, 20 s, and so on, on the floor clock.
+    pub hp_samples_10s: Vec<f32>,
+    /// Lowest fraction observed, including before healing on the same tick.
+    pub min_hp_fraction: f32,
+    /// HP removed by landed hits, after mitigation and excluding overkill.
+    pub hp_lost: f32,
+    /// HP removed by all hits during the main boss encounter.
+    pub boss_hp_lost: f32,
+    /// Floor-clock time each level-up was offered, including simultaneous cards.
+    pub level_up_times: Vec<f32>,
 }
 
 /// One named miniboss fight on a level (the wave 3 appointment system).
@@ -825,6 +835,7 @@ impl LevelStats {
     fn new(level: usize) -> LevelStats {
         LevelStats {
             level,
+            min_hp_fraction: 1.0,
             ..LevelStats::default()
         }
     }
@@ -1009,6 +1020,10 @@ impl AutoRun {
         let hp_before = self.world.player.hp;
         let regen = self.world.player.loadout.stats.regen * dt;
         let boss_before = self.boss_state();
+        self.world.player.observed_damage = Some(crate::game::player::ObservedDamage {
+            hp_lost: 0.0,
+            min_hp_fraction: self.world.player.health_fraction(),
+        });
         // `update` with the bot's Super Dash charge passed through: with
         // `charge == 0.0` (every tick the bot is not holding for a lane) this
         // is exactly `World::update`. The charge used to be dropped here, so
@@ -1029,6 +1044,8 @@ impl AutoRun {
         }
         while self.world.pending_levelups > 0 && !self.world.game_over {
             self.world.pending_levelups -= 1;
+            let elapsed = self.world.elapsed;
+            self.level_stats().level_up_times.push(elapsed);
             self.take_upgrade();
         }
         let before_chests = self.world.gold;
@@ -1372,6 +1389,8 @@ impl AutoRun {
         let kills = self.world.kills;
         let player_level = self.world.player.level;
         let xp_total = self.world.player.total_xp();
+        let health_fraction = self.world.player.health_fraction();
+        let damage = self.world.player.observed_damage.take();
         let hp_frac = (self.world.player.hp / self.world.player.max_hp().max(1.0))
             .clamp(0.0, 1.0);
         let pos = self
@@ -1386,6 +1405,17 @@ impl AutoRun {
         stats.xp_total = stats.xp_total.max(xp_total);
         stats.max_player_level = stats.max_player_level.max(player_level);
         stats.max_analytic_dps = stats.max_analytic_dps.max(dps_now);
+        stats.min_hp_fraction = stats.min_hp_fraction.min(health_fraction);
+        if let Some(damage) = damage {
+            stats.min_hp_fraction = stats.min_hp_fraction.min(damage.min_hp_fraction);
+            stats.hp_lost += damage.hp_lost;
+            if boss_before.is_some() || boss_after.is_some() {
+                stats.boss_hp_lost += damage.hp_lost;
+            }
+        }
+        if elapsed >= (stats.hp_samples_10s.len() + 1) as f32 * 10.0 {
+            stats.hp_samples_10s.push(health_fraction);
+        }
         if near {
             stats.near_seconds += dt;
         }
@@ -2487,6 +2517,27 @@ pub fn run_to_end(run: &mut AutoRun, dt: f32, max_seconds: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_records_hp_lost_before_same_tick_healing() {
+        let mut run = AutoRun::new(1, AutoOpts::default());
+        let player = &mut run.world.player;
+        let max_hp = player.max_hp();
+        player.observed_damage = Some(crate::game::player::ObservedDamage {
+            hp_lost: 0.0,
+            min_hp_fraction: 1.0,
+        });
+        assert!(player.take_damage(max_hp * 0.75));
+        player.heal(max_hp);
+        run.world.elapsed = 10.0;
+        run.account_tick(1.0 / 60.0, max_hp, 0.0, None);
+        let level = &run.stats.levels[0];
+        assert_eq!(level.hp_samples_10s, [1.0]);
+        assert_eq!(level.min_hp_fraction, 0.25);
+        assert_eq!(level.hp_lost, max_hp * 0.75);
+        assert_eq!(level.boss_hp_lost, 0.0);
+        assert!(run.world.player.observed_damage.is_none());
+    }
 
     /// Every warned floor attack has its own row in the damage table, and a
     /// named body's contact is not booked as a Brute's.
