@@ -104,6 +104,7 @@ section!(Director {
     pressure_recovery_budget_cut: f32 = 0.19937819; "Fraction of the live ordinary budget removed during recovery",
     pressure_recovery_heal: f32 = 0.67160283; "Fraction of non-heal rare finds converted to Medkits during recovery",
     pressure_sector_scale: [f32; 4] = [0.4145341, 1.1853494, 1.3945287, 1.603708]; "Beat strength by campaign sector. Zero skips beats and warnings",
+    fresh_pressure_sector_scale: [f32; 3] = [0.88, 0.95, 0.80]; "Beat strength in sectors two to four with campaign carry disabled",
     pressure_sewer_opening_secs: f32 = 167.557_22; "Length of Sewer opening contact grace in seconds",
     pressure_sewer_opening_cut: f32 = 0.26234644; "Fraction of ordinary contact damage removed during Sewer opening grace",
 });
@@ -232,7 +233,7 @@ section!(Boss {
 section!(Bosses {
     hp_mult: f32 = 0.76265487; "Global named boss HP multiplier",
     build_level: [f32; 4] = [0.9580967, 0.65357122, 0.380501, 0.77749956]; "Boss-only build HP multipliers by campaign sector",
-    fresh_build_level: [f32; 3] = [0.80, 0.72, 0.75]; "Boss-only build HP multipliers with campaign carry disabled",
+    fresh_build_level: [f32; 3] = [1.18, 1.08, 1.08]; "Boss-only build HP multipliers with campaign carry disabled",
     contact_damage_mult: f32 = 1.0; "Global named boss grounded contact damage multiplier",
     kinds: BTreeMap<BossKind, Boss> = boss_defaults(); "Per-kind named boss stats",
 });
@@ -755,10 +756,12 @@ mod tests {
         let at = fresh.director.boss_time;
         assert_eq!(fresh.horde_hp_mult_for(0, at), legacy.horde_hp_mult_for(0, at));
         assert_eq!(fresh.boss_hp_mult_for(0), legacy.boss_hp_mult_for(0));
+        assert_eq!(fresh.pressure_scale_for(0), legacy.pressure_scale_for(0));
         assert_eq!(fresh.miniboss_hp(0, 0), legacy.miniboss_hp(0, 0));
         for level in 1..4 {
             assert!(fresh.horde_hp_mult_for(level, at) < legacy.horde_hp_mult_for(level, at));
             assert!(fresh.boss_hp_mult_for(level) < legacy.boss_hp_mult_for(level));
+            assert!(fresh.pressure_scale_for(level) < legacy.pressure_scale_for(level));
             for appointment in 0..4 {
                 assert!(fresh.miniboss_hp(level, appointment) < legacy.miniboss_hp(level, appointment));
             }

@@ -351,7 +351,7 @@ pub fn director_system(
     // rng, no spawn, no position) before anything else this tick.
     boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
     let boss_phase = director.boss_spawned;
-    director.pressure.tick(&tuning.director, difficulty.0, level.theme, elapsed, boss_phase);
+    director.pressure.tick(&tuning, difficulty.0, level.theme, elapsed, boss_phase);
     director.pressure.warning &= !console.debug.peace;
     if director.pressure.warning {
         sfx.0.push(crate::audio::Sfx::Warn);
