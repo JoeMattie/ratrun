@@ -204,7 +204,7 @@ pub mod lantern;
 // ============================================================================
 
 /// Which themed boss this is (one per campaign level).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum BossKind {
     /// Sewer — the Jungle Cat (Apex Jaguar).
     Cat,
@@ -371,17 +371,24 @@ impl BossKind {
     }
 
     /// Full starting HP on the supplied difficulty row.
-    pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
-        let scale = if self == BossKind::Lantern && difficulty == 0 {
+    pub(crate) fn hp_scale_for(self, difficulty: usize) -> f32 {
+        if self == BossKind::Lantern && difficulty == 0 {
             art_boss_lantern::BOSS_PRACTICE_HP_SCALE
         } else {
             self.hp_scale()
-        };
-        self.base_hp() * scale * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
+        }
     }
 
-    fn encounter_hp(self, difficulty: usize, weapons: &[Weapon]) -> f32 {
-        let hp = self.hp_pool(difficulty);
+    pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
+        self.base_hp() * self.hp_scale_for(difficulty) * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
+    }
+
+    fn encounter_hp(self, difficulty: usize, weapons: &[Weapon], tuning: &crate::tuning::Tuning) -> f32 {
+        let row = &tuning.bosses.kinds[&self];
+        let scale = if difficulty == 0 { row.first_sector_hp_scale } else { row.hp_scale };
+        let hp = row.base_hp * scale
+            * tuning.director.boss_hp_mult_for(difficulty, &tuning.bosses.build_level)
+            * tuning.bosses.hp_mult;
         if self == BossKind::Lantern && difficulty > 0
             && weapons.iter().filter(|w| {
                 w.is_max() && matches!(
@@ -1670,6 +1677,27 @@ pub const LEAP_COOLDOWN: f32 = 3.0;
 /// `boss_update_system`): one is plenty, since the rectangle is 34 x 28 cells.
 pub const RECENTRE_COOLDOWN: f32 = 6.0;
 
+#[derive(Clone, Copy, Debug)]
+struct BossAttackTuning {
+    damage_mult: f32,
+    tell_time_mult: f32,
+    swipe_damage: f32,
+    swipe_windup_mult: f32,
+    swipe_chain_gap: f32,
+}
+
+impl From<&crate::tuning::Boss> for BossAttackTuning {
+    fn from(row: &crate::tuning::Boss) -> Self {
+        Self {
+            damage_mult: row.attack_damage_mult.unwrap_or(1.0),
+            tell_time_mult: row.tell_time_mult.unwrap_or(1.0),
+            swipe_damage: row.swipe_damage.unwrap_or(art_boss_cat::SWIPE_DAMAGE),
+            swipe_windup_mult: row.swipe_windup_mult.unwrap_or(1.0),
+            swipe_chain_gap: row.swipe_chain_gap.unwrap_or(0.0),
+        }
+    }
+}
+
 /// The boss entity's authoritative state.
 #[derive(Component, Clone, Debug)]
 pub struct Boss {
@@ -1754,6 +1782,7 @@ pub struct Boss {
     /// Seconds before the fight rectangle may be recentred again.
     pub recentre_cd: f32,
     pub hazards: Vec<BossHazard>,
+    attack_tuning: BossAttackTuning,
     lantern: lantern::LanternRuntime,
 }
 
@@ -1803,6 +1832,7 @@ impl Boss {
             leap_cd: 0.0,
             recentre_cd: RECENTRE_COOLDOWN,
             hazards: Vec::with_capacity(16),
+            attack_tuning: BossAttackTuning::from(&crate::tuning::Boss::default()),
             lantern: lantern::LanternRuntime::default(),
         }
     }
@@ -1984,8 +2014,13 @@ impl Boss {
 
     /// Queue a hazard. Returns false when the ring is full.
     #[inline]
-    pub fn push_hazard(&mut self, hazard: BossHazard) -> bool {
+    pub fn push_hazard(&mut self, mut hazard: BossHazard) -> bool {
         if self.hazards.len() < self.hazards.capacity() {
+            hazard.warn *= self.attack_tuning.tell_time_mult;
+            if hazard.damage > 0.0 && self.attack_tuning.damage_mult != 1.0 {
+                // Zero damage denotes a sustained push instead of a one-shot hit.
+                hazard.damage = (hazard.damage * self.attack_tuning.damage_mult).max(f32::MIN_POSITIVE);
+            }
             self.hazards.push(hazard);
             true
         } else {
@@ -3926,10 +3961,15 @@ pub(crate) struct Arrival {
 /// ([`boss_spawn_system`]) and the console's `boss <kind> here`
 /// (`World::force_boss_here`), so the two cannot drift apart. The caller picks
 /// the place, emits the arrival burst from `fight.rng`, and spawns the body.
-pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival, weapons: &[Weapon]) -> Boss {
+pub(crate) fn open_fight(
+    fight: &mut BossFight,
+    a: Arrival,
+    weapons: &[Weapon],
+    tuning: &crate::tuning::Tuning,
+) -> Boss {
     let hunting = !a.arena.contains_world(a.rat);
     // The director's curve freezes at BOSS_TIME; the boss spawns then.
-    let hp = a.kind.encounter_hp(a.difficulty, weapons);
+    let hp = a.kind.encounter_hp(a.difficulty, weapons, tuning);
     let mut boss = Boss::new(a.kind, a.pos, hp, a.arena, a.dock, hunting);
     boss.id = a.id;
     boss.facing = (a.rat - a.pos).normalized();
@@ -3964,6 +4004,7 @@ pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival, weapons: &[Weapon]) 
 #[allow(clippy::too_many_arguments)]
 pub fn boss_spawn_system(
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     mut due: ResMut<BossDue>,
     mut fight: ResMut<BossFight>,
     mut next_enemy_id: ResMut<NextEnemyId>,
@@ -4040,6 +4081,7 @@ pub fn boss_spawn_system(
             seed: level.seed,
         },
         &player.loadout.weapons,
+        &tuning,
     );
     let accent = level.palette.accent;
     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
@@ -4633,7 +4675,7 @@ pub fn boss_update_system(
     mut commands: Commands,
     mut fight: ResMut<BossFight>,
     mut counters: ResMut<RunCounters>,
-    tick: Res<TickInput>,
+    (tick, tuning): (Res<TickInput>, Res<crate::tuning::RunTuning>),
     mut level: ResMut<Level>,
     mut player: ResMut<Player>,
     flow: Res<FlowField>,
@@ -4655,6 +4697,8 @@ pub fn boss_update_system(
     fight.scratch.dt = dt;
     out.trace.init();
     for (entity, mut boss) in bosses.iter_mut() {
+        let balance = &tuning.bosses.kinds[&boss.kind];
+        boss.attack_tuning = BossAttackTuning::from(balance);
         if out.trace.on {
             out.trace.flow_hint = flow.dir_at(SizeClass::Large, boss.pos).normalized();
             out.trace
@@ -4769,7 +4813,7 @@ pub fn boss_update_system(
                     // clear, so it cannot be lost on the floor.
                     counters.gold = counters
                         .gold
-                        .saturating_add(crate::game::shop::BOSS_GOLD);
+                        .saturating_add(crate::game::shop::scaled(tuning.loot.boss_gold, tuning.loot.gold_value_mult));
                     sfx.0.push(Sfx::Gold);
                 }
                 if out.trace.on {
@@ -5003,10 +5047,12 @@ pub fn boss_update_system(
         // slipper passes overhead), and only when the state deals contact
         // damage at all (`contact_damage == 0` is the art's "blades stopped" /
         // "safe pocket" state).
-        if !boss.is_airborne() && boss.contact_cd <= 0.0 && boss.contact_damage > 0.0 {
+        let contact = boss.contact_damage * tuning.bosses.contact_damage_mult
+            * balance.contact_damage_mult;
+        if !boss.is_airborne() && boss.contact_cd <= 0.0 && contact > 0.0 {
             let shapes = boss.hit_shapes();
             if shapes.circle_hits_grounded(player.pos, player.buffs.hurt_radius())
-                && player.take_damage(boss.contact_damage) {
+                && player.take_damage(contact) {
                     boss.contact_cd = if boss.kind == BossKind::Lantern {
                         art_boss_lantern::CONTACT_INTERVAL
                     } else {

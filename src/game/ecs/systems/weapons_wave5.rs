@@ -361,7 +361,9 @@ pub(crate) fn plumb_bob_system(
         return;
     }
 
-    let damage_mult = player.damage_mult() * cvars.damage_mult.max(0.0);
+    let damage_mult = player.damage_mult() * cvars.damage_mult.max(0.0)
+        * player.loadout.weapon_damage_mult(BOB);
+    let cooldown_mult = player.loadout.weapon_cooldown_mult(BOB);
     let fire_rate = player.loadout.stats.fire_rate_mult;
     let pos = player.pos;
     let face = player.face;
@@ -381,7 +383,7 @@ pub(crate) fn plumb_bob_system(
         hits: BTreeSet::new(),
     };
     bob.pos = bob_endpoint(&hits.level, &bob, pos, 0.0);
-    weapon.timer = (weapon.cooldown() / fire_rate).max(0.05);
+    weapon.timer = (weapon.cooldown() * cooldown_mult / fire_rate).max(0.05);
     commands.spawn((bob, next_id.take()));
     sfx.0.push(Sfx::ShootWhip);
 }
@@ -437,7 +439,9 @@ pub(crate) fn hold_point_system(
     mut sfx: ResMut<SfxQueue>,
     mut hits: Wave5Hits,
 ) {
-    let damage_mult = player.damage_mult() * cvars.damage_mult.max(0.0);
+    let damage_mult = player.damage_mult() * cvars.damage_mult.max(0.0)
+        * player.loadout.weapon_damage_mult(WeaponKind::HoldPoint);
+    let cooldown_mult = player.loadout.weapon_cooldown_mult(WeaponKind::HoldPoint);
     let shove = player.loadout.stats.shove(HOLD_SHOVE);
     let centre = player.pos;
     let giant = player.buffs.is_giant();
@@ -508,7 +512,7 @@ pub(crate) fn hold_point_system(
         return;
     }
 
-    weapon.timer = weapon.cooldown();
+    weapon.timer = weapon.cooldown() * cooldown_mult;
     fx.phase = HoldPhase::Spent { age: 0.0, evolved: weapon.evolved };
     sfx.0.push(Sfx::ShootNova);
     hold_pulse(centre, weapon.damage() * damage_mult, shove, &mut grid, &mut hits);

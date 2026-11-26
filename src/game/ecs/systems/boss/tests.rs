@@ -1990,11 +1990,18 @@ fn lantern_campaign_pool_scales_for_two_max_rank_area_weapons() {
         weapon
     });
     let kind = BossKind::Lantern;
-    assert_eq!(kind.encounter_hp(1, &weapons), kind.hp_pool(1) * art_boss_lantern::BOSS_AREA_KIT_HP_MULT);
-    assert_eq!(kind.encounter_hp(0, &weapons), kind.hp_pool(0));
-    assert_eq!(BossKind::Cat.encounter_hp(1, &weapons), BossKind::Cat.hp_pool(1));
+    let tuning = crate::tuning::Tuning::default();
+    assert_eq!(
+        kind.encounter_hp(1, &weapons, &tuning),
+        kind.hp_pool(1) * art_boss_lantern::BOSS_AREA_KIT_HP_MULT,
+    );
+    assert_eq!(kind.encounter_hp(0, &weapons, &tuning), kind.hp_pool(0));
+    assert_eq!(
+        BossKind::Cat.encounter_hp(1, &weapons, &tuning),
+        BossKind::Cat.hp_pool(1),
+    );
     weapons[1].level -= 1;
-    assert_eq!(kind.encounter_hp(1, &weapons), kind.hp_pool(1));
+    assert_eq!(kind.encounter_hp(1, &weapons, &tuning), kind.hp_pool(1));
 }
 
 fn set_lantern_hp(w: &mut World, hp: f32) {

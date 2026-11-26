@@ -983,8 +983,8 @@ impl AiOpts {
     }
 }
 
-/// What the wall needs to know about a worker, shared by atomics (no locks on
-/// the hot path; the main loop never waits for a worker).
+/// A worker's fixed tuning and the wall's atomic controls. The main loop
+/// never waits for a worker.
 struct WorkerShared {
     stop: AtomicBool,
     paused: AtomicBool,
@@ -995,10 +995,11 @@ struct WorkerShared {
     restart_gen: AtomicU32,
     /// The new per-tile seed base when `restart_gen` changes.
     restart_seed: AtomicU64,
+    tuning: crate::tuning::RunTuning,
 }
 
 impl WorkerShared {
-    fn new(speed: f32, sw: u16, sh: u16) -> Arc<WorkerShared> {
+    fn new(speed: f32, sw: u16, sh: u16, tuning: crate::tuning::RunTuning) -> Arc<WorkerShared> {
         Arc::new(WorkerShared {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -1006,6 +1007,7 @@ impl WorkerShared {
             size: AtomicU32::new(((sw as u32) << 16) | sh as u32),
             restart_gen: AtomicU32::new(0),
             restart_seed: AtomicU64::new(0),
+            tuning,
         })
     }
 
@@ -1051,13 +1053,17 @@ pub struct LiveWall {
 impl LiveWall {
     /// Start `games` workers, one `AutoRun` each.
     pub fn spawn(games: usize, opts: &AiOpts, base_seed: u64) -> LiveWall {
+        Self::spawn_with_tuning(games, opts, base_seed, crate::tuning::RunTuning::default())
+    }
+
+    fn spawn_with_tuning(games: usize, opts: &AiOpts, base_seed: u64, tuning: crate::tuning::RunTuning) -> LiveWall {
         let games = games.clamp(1, MAX_GAMES);
         let once = opts.once;
         let mut workers = Vec::with_capacity(games);
         let (outcome_tx, outcomes) = mpsc::channel();
         let speed_idx = opts.speed_idx.min(SPEEDS.len() - 1);
         for i in 0..games {
-            let shared = WorkerShared::new(SPEEDS[speed_idx], HIDDEN_W, HIDDEN_H);
+            let shared = WorkerShared::new(SPEEDS[speed_idx], HIDDEN_W, HIDDEN_H, tuning.clone());
             let (tx, rx) = mpsc::sync_channel(1);
             let outcome_tx = outcome_tx.clone();
             let auto_opts = opts.auto_opts(i);
@@ -1220,7 +1226,7 @@ fn worker_loop(
 
         // Build the run (the first thing that can fail: level generation).
         if run.is_none() && failure.is_none() {
-            match contained(|| AutoRun::new(seed, auto_opts)) {
+            match contained(|| AutoRun::with_tuning(seed, auto_opts, shared.tuning.clone())) {
                 Ok(active) => {
                     run = Some(active);
                     acc = 0.0;
@@ -1636,10 +1642,11 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<crate::present::FrameOut>>,
     kitty: bool,
     opts: AiOpts,
+    tuning: crate::tuning::RunTuning,
 ) -> Result<()> {
     let games = opts.games.clamp(1, MAX_GAMES);
     let base_seed = opts.seed.unwrap_or_else(entropy_seed);
-    let mut wall = LiveWall::spawn(games, &opts, base_seed);
+    let mut wall = LiveWall::spawn_with_tuning(games, &opts, base_seed, tuning);
     // Same reader thread as normal play: dropping the guard stops and joins it
     // before the terminal is restored.
     let (_input_thread, rx) = crate::InputThread::spawn();

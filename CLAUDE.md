@@ -11,6 +11,8 @@ cargo run --release                 # play (needs a real TTY)
 cargo run --release -- --ai 16      # wall of 16 self-playing games
 cargo run --release -- --testbed --floor sewer   # interactive testbed (floor defaults to sewer)
 cargo run --release -- --bot-batch 30 --seed 1000 --json > batch.json
+cargo run --release -- --tuning-dump defaults.toml
+cargo run --release -- --tuning defaults.toml
 cargo build
 cargo test                          # full suite (see Testing strategy)
 cargo test <name>
@@ -294,6 +296,8 @@ keeping selections. Capture the panel with `RATRUN_DUMP=testbed` or
 `RATRUN_DUMP=testbed-boss`.
 
 ## Bot and batch tooling
+
+- **Balance files** (`src/tuning.rs`, [TUNING.md](TUNING.md)). Pass `--tuning file.toml` or set `RATRUN_TUNING` before launch. Use `--tuning-dump defaults.toml` to get the commented schema and shipped values. The App, wall, and batch pass an immutable shared tuning into each world's ECS. Effective changes mark the run TUNED and void records and discoveries. Batch reports include the effective hash, file path, and changed fields.
 
 - **`ratrun --ai [N]`** (`spectate.rs`): a wall of N (default 16, max 32) self-playing games on worker threads, each rendering a real `World::draw` into its own pixel buffer, with captions, outcome plates and a summary strip. No audio is ever constructed. Keys: `+`/`-` speed, Space pause, `1`–`9` or a click zoom a game, `Esc` unzoom, `R` restart the wall, `Q` quit. Flags: `--seed S`, `--skill expert|casual`, `--level 1|2|3`, `--once`.
 - **`ratrun --bot-batch N`** (`autoplay/batch.rs`): headless seeded campaigns at full speed on `--threads` workers, no terminal, no render, no audio; prints win/clear rates with Wilson intervals, death causes, boss fight lengths, damage by source, boss DPS and timings (`--json` for the machine form). Flags that exist: `--seed`, `--level`, `--practice`, `--carry none|typical`, `--route <floor>` (a campaign takes that floor at its own stage, so `--route laundry` is Sewer → Laundry → Lab; with `--practice` it is the floor played, and `--practice --route flatbed` is the ride), `--skill expert|skilled|casual`, `--cycle-skills`, `--seed-exact`, `--max-sim-seconds`, `--threads`, `--analyze`, `--json`, `--trace`, `--caps W:P`, `--meta none|mid|max`. Companions: `--bot-compare a.json b.json`, `--bot-render a.json`. The report also splits gold by source, counts each miniboss's signatures started and landed, breaks each boss fight down by controller state (share of time, dps landed, distance), and `--json` carries every run's levels (`run_summaries[].levels`) so a mixed-skill batch can be split by skill. Determinism: run `i` uses seed `base + i` and the aggregate is built in run order, so identical batches print identically whatever the thread count.

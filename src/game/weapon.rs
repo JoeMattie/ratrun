@@ -304,7 +304,7 @@ pub const LASH_SHAKE: f32 = 2.4;
 /// so a dragged body lands at its feet instead of inside it.
 pub const LASH_DRAG_GAP: f32 = 9.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum WeaponKind {
     Gnaw,        // homing dart at nearest enemy
     CheeseSpray, // forward spread of darts

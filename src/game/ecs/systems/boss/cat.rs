@@ -66,6 +66,7 @@
 //! * `scratch[0]` — seconds since the last roar (the phase-2 territory call).
 //! * `scratch[1]` — the hp observed last tick, which is how a single-tick burst
 //!   (a trap snap, a nuke) is told apart from chip damage.
+//! * `scratch[2]` — the swipe state time when an opted-in chain gap ends.
 //!
 //! Both are initialised on the first tick ([`F_READY`]) from the boss's own hp.
 //! The art view's own fields (`pounce_origin`, `swipe_side`) are the leap arc
@@ -101,11 +102,14 @@ const F_FANGS_2: u32 = 1 << 6;
 const F_CHAINED: u32 = 1 << 7;
 /// The death cue has been queued (the collapse plays it once).
 const F_DEATH_CUE: u32 = 1 << 8;
+/// A phase-2 chain was selected and its additional recovery is still running.
+const F_CHAIN_PENDING: u32 = 1 << 9;
 
 /// `scratch[0]`: seconds since the last roar.
 const S_ROAR_CD: usize = 0;
 /// `scratch[1]`: the hp observed last tick (burst detection).
 const S_LAST_HP: usize = 1;
+const S_SWIPE_CHAIN_AT: usize = 2;
 
 /// Stalk beat bounds (art: `2.0–3.5 s` P1, `1.4–2.4 s` P2).
 const STALK_BEAT_P1: (f32, f32) = (2.0, 3.5);
@@ -322,12 +326,13 @@ fn enter_swipe_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
         boss.facing = to.normalized();
     }
     boss.swipe_side = if boss.swipe_side >= 0.0 { -1.0 } else { 1.0 };
-    boss.flags &= !(F_DAZED | F_MISS | F_LATCH | F_LOCKED | F_FANGS_1 | F_FANGS_2);
+    boss.flags &= !(F_DAZED | F_MISS | F_LATCH | F_LOCKED | F_FANGS_1 | F_FANGS_2 | F_CHAIN_PENDING);
     let duration = if boss.phase >= 2 {
         art_boss_cat::SWIPE_WINDUP_P2
     } else {
         art_boss_cat::SWIPE_WINDUP_P1
     };
+    let duration = duration * boss.attack_tuning.swipe_windup_mult * boss.attack_tuning.tell_time_mult;
     boss.set_state(BossState::Cat(BossCatState::SwipeWindup), duration);
 }
 
@@ -706,7 +711,7 @@ impl BossController for CatController {
                             },
                             warn,
                             active,
-                            art_boss_cat::SWIPE_DAMAGE,
+                            boss.attack_tuning.swipe_damage,
                         )
                         .with_knockback(SWIPE_KNOCKBACK)
                         .with_enemies(),
@@ -715,18 +720,35 @@ impl BossController for CatController {
             }
 
             // ---------------------------------------------------------------
-            // Swipe: the arc is queued; phase 2 may chain the other paw once.
+            // Swipe: phase 2 may chain the other paw once the arc has expired.
             // ---------------------------------------------------------------
             BossCatState::Swipe => {
                 boss.target = ctx.player_pos;
-                if boss.progress() >= 1.0 {
+                if flagged(boss, F_CHAIN_PENDING) {
+                    if boss.elapsed >= boss.scratch[S_SWIPE_CHAIN_AT] {
+                        if swipe_fits(ctx, boss) {
+                            enter_swipe_windup(ctx, boss);
+                        } else {
+                            enter_stalk(ctx, boss);
+                        }
+                    }
+                } else if boss.progress() >= 1.0
+                    && !boss.hazards.iter().any(|h| matches!(h.shape, HazardShape::Arc { .. }))
+                {
                     let chain = phase2
                         && !flagged(boss, F_CHAINED)
                         && ctx.rng.random::<f32>() < SWIPE_CHAIN_CHANCE_P2
                         && swipe_fits(ctx, boss);
                     if chain {
                         set_flag(boss, F_CHAINED, true);
-                        enter_swipe_windup(ctx, boss);
+                        let gap = boss.attack_tuning.swipe_chain_gap;
+                        if gap > 0.0 {
+                            // Keep the finished swipe pose while the chain rests.
+                            boss.scratch[S_SWIPE_CHAIN_AT] = boss.elapsed + gap;
+                            set_flag(boss, F_CHAIN_PENDING, true);
+                        } else {
+                            enter_swipe_windup(ctx, boss);
+                        }
                     } else {
                         enter_stalk(ctx, boss);
                     }
@@ -811,7 +833,11 @@ mod tests {
 
     impl Cat {
         fn new(seed: u64) -> Self {
-            let mut w = World::new(Theme::Sewer, seed);
+            Self::with_tuning(seed, crate::tuning::RunTuning::default())
+        }
+
+        fn with_tuning(seed: u64, tuning: crate::tuning::RunTuning) -> Self {
+            let mut w = World::with_tuning(Theme::Sewer, seed, tuning);
             w.level = Level::empty(Theme::Sewer);
             w.flow = FlowField::new(&w.level.tiles);
             w.player.pos = Vec2::new(800.0, 800.0);
@@ -1234,6 +1260,76 @@ mod tests {
                 .all(|h| h.damage != art_boss_cat::SWIPE_DAMAGE),
             "the arc expires with its active window"
         );
+    }
+
+    #[test]
+    fn tuned_swipe_uses_both_tell_scales_and_delivers_tuned_damage() {
+        let tuning = crate::tuning::Tuning::parse(r#"
+            [bosses.kinds.Cat]
+            swipe_damage = 16.0
+            attack_damage_mult = 0.5
+            swipe_windup_mult = 1.5
+            tell_time_mult = 2.0
+        "#).unwrap();
+        let mut c = Cat::with_tuning(23, crate::tuning::RunTuning::new(tuning));
+        c.set_player(Vec2::new(833.0, 800.0));
+        let windup = c.run_until(400, BossCatState::SwipeWindup).expect("windup");
+        assert_eq!(windup.duration, art_boss_cat::SWIPE_WINDUP_P1 * 1.5 * 2.0);
+        let swipe = c.run_until(180, BossCatState::Swipe).expect("swipe");
+        let arc = swipe.hazards.iter().find(|h| matches!(h.shape, HazardShape::Arc { .. }))
+            .expect("swipe arc");
+        let duration = art_boss_cat::SWIPE_DURATION;
+        assert_eq!(swipe.duration, duration);
+        assert_eq!(arc.warn, art_boss_cat::SWIPE_ACTIVE_START * duration * 2.0);
+        assert_eq!(arc.active, (art_boss_cat::SWIPE_ACTIVE_END - art_boss_cat::SWIPE_ACTIVE_START) * duration);
+        assert_eq!(arc.damage, 8.0);
+
+        c.set_player(swipe.pos + swipe.facing * 40.0);
+        c.w.player.loadout.stats.regen = 0.0;
+        let hp = c.player().hp;
+        assert_eq!(c.count_hits(14), 1, "the swipe must hit once");
+        assert_eq!(hp - c.player().hp, 8.0);
+    }
+
+    #[test]
+    fn tuned_swipe_chain_waits_before_the_second_windup() {
+        let tuning = crate::tuning::Tuning::parse(r#"
+            [bosses.kinds.Cat]
+            swipe_chain_gap = 0.5
+        "#).unwrap();
+        let seed = (0..64).find(|&seed| {
+            BossRng::for_run(seed, BossKind::Cat).next_f32() < SWIPE_CHAIN_CHANCE_P2
+        }).expect("a boss seed that chains on its first draw");
+        let prepare = |c: &mut Cat| {
+            c.set_player(Vec2::new(833.0, 800.0));
+            c.edit(|boss| {
+                boss.pos = Vec2::new(800.0, 800.0);
+                boss.phase = 2;
+                boss.hp = boss.max_hp * 0.45;
+                boss.flags = F_READY;
+                boss.set_state(BossState::Cat(BossCatState::Swipe), art_boss_cat::SWIPE_DURATION);
+                boss.elapsed = boss.duration;
+            });
+        };
+
+        let mut baseline = Cat::new(seed);
+        prepare(&mut baseline);
+        baseline.tick();
+        assert_eq!(baseline.cat_state(), BossCatState::SwipeWindup);
+
+        let mut tuned = Cat::with_tuning(seed, crate::tuning::RunTuning::new(tuning));
+        prepare(&mut tuned);
+        tuned.tick();
+        let waiting = tuned.boss();
+        assert_eq!(waiting.state, BossState::Cat(BossCatState::Swipe));
+        assert!(waiting.hazards.is_empty());
+        for _ in 0..29 {
+            tuned.tick();
+            assert_eq!(tuned.cat_state(), BossCatState::Swipe);
+        }
+        let chained = tuned.run_until(3, BossCatState::SwipeWindup).expect("the chain resumes");
+        assert_eq!(chained.duration, art_boss_cat::SWIPE_WINDUP_P2);
+        assert_eq!(chained.swipe_side, -waiting.swipe_side);
     }
 
     #[test]

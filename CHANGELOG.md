@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Balance tuning file.** Load balance overrides with `--tuning`, or use
+  `--tuning-dump` to export the shipped values. See [TUNING.md](TUNING.md).
+
 ## 0.4.1 (2026-11-26)
 
 - The Lantern swims over walls, stays opaque when it dives, and strikes more

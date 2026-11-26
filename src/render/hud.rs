@@ -68,15 +68,14 @@ const BOSS_STAGE: u8 = 7;
 
 /// Is the elite warning badge due?
 ///
-/// The director's elite gate is on the *curve* clock, which each campaign
-/// level shifts by `director::LEVEL_CLOCK_OFFSET` (the first elite arrives at
-/// 60 s on the Sewer, 40 s on the Kitchen and 15 s on the Lab). Reading the
-/// wall clock here announced the Sewer's schedule on every level.
+/// The warning reads the director's curve clock and the same difficulty row
+/// as its elite gate. Practice uses sector one's row on the selected floor.
 pub fn elite_badge_due(world: &World) -> bool {
+    let difficulty = world.difficulty_override.unwrap_or(world.level_index);
     !(world.testbed && world.peace)
         && !world.director.boss_spawned
-        && director::curve_clock(world.level_index(), world.elapsed)
-            >= director::ELITE_START - 5.0
+        && world.curve_clock_at(world.elapsed)
+            >= world.tuning().director.elite_start_for(difficulty) - 5.0
         && world.director.elite_timer <= 4.0
 }
 
@@ -1060,10 +1059,7 @@ impl HudState {
             self.escalation_stage = if world.boss_time_reached() {
                 BOSS_STAGE
             } else {
-                Self::stage_for_curve(director::curve_clock(
-                    world.level_index(),
-                    world.elapsed,
-                ))
+                Self::stage_for_curve(world.curve_clock_at(world.elapsed))
             };
             return;
         }
@@ -1240,10 +1236,7 @@ impl HudState {
         let stage = if world.boss_time_reached() {
             BOSS_STAGE
         } else {
-            Self::stage_for_curve(director::curve_clock(
-                world.level_index(),
-                world.elapsed,
-            ))
+            Self::stage_for_curve(world.curve_clock_at(world.elapsed))
         };
         //    The wording names the roster *role* that unlocks (flying fodder,
         //    chaser, elite, shooter, heavy), never a Sewer body: every floor
@@ -1416,7 +1409,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     let boss_soon = !world.testbed
         && !world.director.boss_spawned
         && !boss_phase
-        && world.elapsed >= director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS;
+        && world.elapsed >= world.tuning().director.boss_time - crate::render::overlay::BOSS_WARNING_SECS;
     let elite_due = elite_badge_due(world);
     let pulse = 0.5 + 0.5 * (state.clock * 7.5).sin();
 
@@ -1426,7 +1419,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
             fmt_time_into(b, world.elapsed);
         } else if boss_phase {
             // Time *into* the fight since the boss arrived.
-            fmt_time_into(b, world.elapsed - director::BOSS_TIME);
+            fmt_time_into(b, world.elapsed - world.tuning().director.boss_time);
         } else {
             fmt_time_into(b, time_left);
         }
@@ -1495,7 +1488,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         } else if boss_soon {
             // The precise countdown outranks the generic urgency pill once the
             // 25 s warning window opens; `urgent` still styles the rail.
-            let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
+            let rem = (world.tuning().director.boss_time - world.elapsed).ceil().max(1.0) as u32;
             let _ = write!(b, " ▲ BOSS {:02}s ", rem);
         } else if urgent {
             b.push_str(" ▲ BOSS INBOUND ");
@@ -1601,7 +1594,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // 2. Threat escalation micro-pips on wider screens (`▪▪▪▫▫`).
     if show_threat {
         let tier = threat_tier(
-            director::curve_clock(world.level_index(), world.elapsed),
+            world.curve_clock_at(world.elapsed),
             boss_alive || boss_phase,
         );
         put(" ", Style::default().bg(PLATE));
@@ -2413,7 +2406,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     let charging = world.player.dash_charging;
     let dash_charge = world.player.dash_charge.clamp(0.0, 1.0);
     let charge_full = charging && dash_charge >= 1.0;
-    let dash_max_cd = world.player.loadout.stats.dash_cd.max(0.1);
+    let dash_max_cd = world.player.dash_cooldown().max(0.1);
     let dash_fill = if charging {
         dash_charge
     } else if dash_ready || dashing {

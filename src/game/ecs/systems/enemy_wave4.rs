@@ -776,7 +776,7 @@ fn snake_tick(
             let sway = base.perp() * e.anim.dsin() * SNAKE_SLITHER_SWAY;
             let dir = (base + sway).normalized();
             e.facing += (dir - e.facing) * (5.0 * dt).min(1.0);
-            let speed = e.kind.speed() * e.speed_scale * e.slow_mult * speed_mult;
+            let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
             e.pos += dir * speed * dt;
             e.vel = dir * speed;
             let class = SizeClass::of_enemy(e.kind);
@@ -856,7 +856,7 @@ fn centipede_tick(
     e.w4.flee_t = (e.w4.flee_t - dt).max(0.0);
     e.w4.cd = (e.w4.cd - dt).max(0.0);
     let class = SizeClass::of_enemy(e.kind);
-    let speed = e.kind.speed() * e.speed_scale * e.slow_mult * speed_mult;
+    let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
     match e.w4.phase {
         CENTIPEDE_PHASE_FLUTTER => {
             e.w4.t -= dt;
@@ -1063,7 +1063,7 @@ fn hornet_tick(
                 Vec2::ZERO
             };
             let dir = (radial + orbit).normalized();
-            let speed = e.kind.speed() * e.speed_scale * e.slow_mult * speed_mult;
+            let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
             e.pos += dir * speed * dt;
             e.vel = dir * speed;
             e.anim += dt * 18.0;
@@ -1129,7 +1129,7 @@ fn lilliputian_tick(
     commands: &mut Commands,
     next_id: &mut NextSpawnId,
 ) {
-    let speed = e.kind.speed() * e.speed_scale * e.slow_mult * speed_mult;
+    let speed = e.speed() * e.speed_scale * e.slow_mult * speed_mult;
     let dist = e.pos.dist(target);
 
     // ---- Panic -----------------------------------------------------------

@@ -53,12 +53,14 @@ use crate::detmath::DetF32;
 use crate::game::collision::SizeClass;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
+#[cfg(test)]
 use crate::game::director::MINIBOSS_TIMES;
 use crate::game::ecs::resources::{
     NextEnemyId, NextSpawnId, RatTrack, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
 };
 use super::miniboss_shapes::{self as shapes, SignatureTrack, WakeTrail};
 use crate::game::ecs::systems::spawn::{in_maze, spawn_point_reachable, widest_view, SpawnScratch};
+#[cfg(test)]
 use crate::game::director::BOSS_TIME;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Gold;
@@ -95,7 +97,8 @@ pub const SPAWN_GRACE_HALF: f32 = 20.0;
 /// Seconds with no fresh ordinary spawns after a miniboss dies.
 pub const SPAWN_GRACE_SUPPRESS: f32 = 8.0;
 /// Gold dropped with the chest (§6): the shop's gold table owns the number.
-pub use crate::game::shop::MINIBOSS_GOLD;
+#[cfg(test)]
+use crate::game::shop::MINIBOSS_GOLD;
 /// Half-angle of the cone signature (a 45° cone).
 pub const CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_8; // 22.5°
 /// Length of the cone.
@@ -957,6 +960,13 @@ pub struct Miniboss {
 }
 
 impl Miniboss {
+    pub fn with_tuning(kind: MinibossKind, appointment: usize, tuning: &crate::tuning::Minibosses) -> Self {
+        let mut boss = Self::new(kind, appointment);
+        boss.signature_damage = tuning.strike_damage[appointment.min(3)];
+        boss.xp = tuning.xp[appointment.min(3)];
+        boss
+    }
+
     pub fn new(kind: MinibossKind, appointment: usize) -> Self {
         Miniboss {
             kind,
@@ -1171,8 +1181,8 @@ impl MinibossSchedule {
 
     /// The next appointment's clock, or `None` after the last one.
     #[inline]
-    pub fn next_appointment(&self) -> Option<f32> {
-        MINIBOSS_TIMES.get(self.next).copied()
+    pub fn next_appointment(&self, times: &[f32]) -> Option<f32> {
+        times.get(self.next).copied()
     }
 }
 
@@ -1187,20 +1197,21 @@ fn spawn_miniboss(
     next_id: &mut NextSpawnId,
     next_enemy_id: &mut NextEnemyId,
     rng: &mut StdRng,
+    tuning: &crate::tuning::Minibosses,
 ) {
     // A Brute body carries the miniboss so every existing weapon, trap and
     // bullet path already targets it. The stats are overwritten below.
     let mut e = Enemy::spawn(EnemyKind::Brute, pos, 1.0, rng);
-    e.hp = appointment_hp_for(level, appointment);
+    e.hp = tuning.hp[level.min(3)][appointment.min(3)];
     e.max_hp = e.hp;
     e.radius = kind.body_radius();
-    e.damage = MINIBOSS_CONTACT_DAMAGE;
+    e.damage = tuning.contact_damage;
     // Faster than an ordinary brute so the approach reads as a named arrival.
     e.speed_scale = kind.speed_scale();
     e.elite = false;
     e.named = true;
     e.id = next_enemy_id.take();
-    commands.spawn((e, Miniboss::new(kind, appointment), next_id.take()));
+    commands.spawn((e, Miniboss::with_tuning(kind, appointment, tuning), next_id.take()));
 }
 
 /// The ordinary spawn ring needs only 4 px of clearance. Fit the larger
@@ -1249,7 +1260,7 @@ pub(crate) struct MinibossScratch {
 /// grid sees the named body and any fodder it called on their new cells.
 pub fn miniboss_system(
     mut commands: Commands,
-    (input, rat_track): (Res<TickInput>, Res<RatTrack>),
+    (input, rat_track, tuning): (Res<TickInput>, Res<RatTrack>, Res<crate::tuning::RunTuning>),
     counters: ResMut<RunCounters>,
     mut schedule: ResMut<MinibossSchedule>,
     mut level: ResMut<Level>,
@@ -1270,7 +1281,7 @@ pub fn miniboss_system(
     let ppos = player.pos;
     let pvel = player.vel;
     let retiring = !counters.testbed
-        && schedule.next_appointment().map_or(elapsed >= BOSS_TIME, |at| elapsed >= at);
+        && schedule.next_appointment(&tuning.minibosses.times).filter(|&at| at < tuning.director.boss_time).map_or(elapsed >= tuning.director.boss_time, |at| elapsed >= at);
     owners.clear();
 
     // 1. Tick the living minibosses.
@@ -1416,7 +1427,7 @@ pub fn miniboss_system(
 
     // 2. Appointments. A surviving miniboss retreats without loot when the
     //    next one arrives, so only one is ever on the floor.
-    if let Some(at) = schedule.next_appointment() {
+    if let Some(at) = schedule.next_appointment(&tuning.minibosses.times).filter(|&at| at < tuning.director.boss_time) {
         if elapsed >= at {
             // Retreat every living miniboss (no loot, no chest).
             for &(_, entity) in order.iter() {
@@ -1446,12 +1457,13 @@ pub fn miniboss_system(
                     &mut movement.next_id,
                     &mut movement.next_enemy_id,
                     &mut rng.0,
+                    &tuning.minibosses,
                 );
                 schedule.grace_half_until = elapsed + SPAWN_GRACE_HALF;
             }
             schedule.next += 1;
         }
-    } else if elapsed >= BOSS_TIME {
+    } else if elapsed >= tuning.director.boss_time {
         // The level's boss is the fifth appointment: a miniboss that outlived
         // the 12:00 slot retreats without loot when the boss is due, by the
         // same "one named enemy at a time" rule. No rng, no spawn.
@@ -1848,6 +1860,7 @@ pub fn drop_loot(
     elapsed: f32,
     corpse: Vec2,
     mb: &mut Miniboss,
+    gold: u32,
 ) {
     if mb.chest_dropped {
         return;
@@ -1856,7 +1869,9 @@ pub fn drop_loot(
     schedule.grace_suppress_until = elapsed + SPAWN_GRACE_SUPPRESS;
     let pos = chest_floor_near(level, corpse);
     commands.queue(crate::game::ecs::components::ChestSpawn { pos });
-    commands.spawn((Gold::new(pos, MINIBOSS_GOLD), next_id.take()));
+    if gold > 0 {
+        commands.spawn((Gold::new(pos, gold), next_id.take()));
+    }
 }
 
 /// Where a miniboss's chest lands: the corpse's own spot when the rat can walk

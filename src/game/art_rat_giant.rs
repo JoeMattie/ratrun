@@ -27,7 +27,6 @@ use crate::render::lighting::{rat_helmet_pen, rat_visor_pen};
 use crate::render::palette::{mix, scale as scale_rgb, Rgb};
 
 use super::art_rat::{bubble_hash, draw_charge_ring, tail_charge, RatOutfit, TailCharge, DIVER_LIFT};
-use super::ecs::systems::player::DASH_SECS;
 use super::ecs::systems::powerups::{GIANT_STOMP_INTERVAL, GROWTH_SECS};
 use super::player::Player;
 
@@ -273,7 +272,7 @@ impl GiantPose {
         let speed = player.vel.len();
         let top = player.loadout.stats.move_speed.max(1.0);
         let moving = (speed / top).clamp(0.0, 1.0);
-        let dash = (player.dash_active / DASH_SECS).clamp(0.0, 1.0).sqrt();
+        let dash = (player.dash_active / player.dash_base_duration()).clamp(0.0, 1.0).sqrt();
         let coil = if player.dash_charging {
             player.dash_charge.clamp(0.0, 1.0) * (1.0 - dash)
         } else {

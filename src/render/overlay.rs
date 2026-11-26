@@ -11,6 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 use crate::game::collision::{cell_of, TILE_F};
+#[cfg(test)]
 use crate::game::director;
 use crate::game::gem::{Chest, Pickup, PickupKind};
 use crate::game::world::World;
@@ -466,7 +467,7 @@ fn draw_boss_warning(
     if game.width < 30 {
         return 0;
     }
-    let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
+    let rem = (world.tuning().director.boss_time - world.elapsed).ceil().max(1.0) as u32;
     // The widest wording that fits **whole**: the width tiers are only a
     // first guess (they assume a short codename), so each one is measured and
     // falls through to the next when a long name would lose its tail.
@@ -509,8 +510,8 @@ fn draw_boss_warning(
 fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudState) -> u16 {
     let boss_soon = !world.testbed
         && !world.director.boss_spawned
-        && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
-        && world.elapsed < director::BOSS_TIME;
+        && world.elapsed >= world.tuning().director.boss_time - BOSS_WARNING_SECS
+        && world.elapsed < world.tuning().director.boss_time;
     let pulse = 0.5 + 0.5 * (state.clock * 8.0).sin();
     // The fight's own boss name: a floor can pool more than one boss
     // (`BossKind::pool_for_theme`), so a living boss names itself and the

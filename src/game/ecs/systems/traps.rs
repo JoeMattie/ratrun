@@ -144,7 +144,7 @@ use crate::game::art_traps::{
     STICKY_TRAP_SLOW_MULT,
 };
 use crate::game::ecs::components::{ChestSpawn, Entity, SpawnId};
-use crate::game::director::{self, Director};
+use crate::game::director::Director;
 use crate::game::ecs::constants::{ENEMY_CAP, PLAYER_RADIUS};
 use crate::game::ecs::resources::{
     BossDue, BossOverride, Cvars, DebugFlags, DifficultyLevel, NextEnemyId, NextSpawnId, RngRes,
@@ -975,6 +975,7 @@ pub fn traps_system(
     mut traps: ResMut<TrapRuntime>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut commands: Commands,
+    tuning: Res<crate::tuning::RunTuning>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut damage_numbers: ResMut<DamageNumbers>,
@@ -1007,7 +1008,7 @@ pub fn traps_system(
             let elapsed = counters.elapsed;
             let blocked = debug.peace
                 || appointments.suppress(elapsed)
-                || (!counters.testbed && appointments.next_appointment().is_some_and(|at| elapsed >= at))
+                || (!counters.testbed && appointments.next_appointment(&tuning.minibosses.times).is_some_and(|at| elapsed >= at))
                 || director.boss_spawned
                 || due.due
                 || due.claimed
@@ -1020,14 +1021,14 @@ pub fn traps_system(
                 enemy.kind == EnemyKind::ShoreCrab && enemy.alive()
             }).count();
             for (pos, facing) in scratch.empty_pots.drain(..) {
-                if blocked || room == 0 || elapsed >= director::BOSS_TIME {
+                if blocked || room == 0 || elapsed >= tuning.director.boss_time {
                     break;
                 }
                 let facing = safe_dir(facing);
                 let mouth = POT_HALF + DOOR_DEPTH;
                 if let Some(mut enemy) = [mouth, mouth + 4.0, mouth + 8.0].into_iter().find_map(|offset| {
-                    crab::release_pot_crab(
-                        &level, pos + facing * offset, player.pos, difficulty.0, elapsed, live, blocked,
+                    crab::release_pot_crab_with(
+                        &level, pos + facing * offset, player.pos, difficulty.0, elapsed, live, blocked, &tuning.director,
                     )
                 }) {
                     enemy.id = next_enemy_id.take();

@@ -328,7 +328,7 @@ pub fn director_system(
     level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
-    (schedule, opening): (Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>),
+    (schedule, opening, tuning): (Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>, Res<crate::tuning::RunTuning>),
     // Console tunables: `set enemy_cap/spawn_rate`, `peace`. Neutral defaults.
     console: DirectorConsole,
     mut boss_due: ResMut<BossDue>,
@@ -350,13 +350,13 @@ pub fn director_system(
     if counters.testbed && console.debug.peace {
         return;
     }
-    // The campaign level shifts the whole curve (`director::curve_clock`), which
+    // The campaign level shifts the whole curve (`tuning.director.curve_clock`), which
     // also freezes at the boss time, so the horde keeps its late-curve rate for
     // as long as the boss fight lasts.
-    let curve = director::curve_clock(difficulty.0, elapsed);
+    let curve = tuning.director.curve_clock(difficulty.0, elapsed);
     // The level's own horde modifiers: damage and speed ramp over the level
-    // (`director::enemy_mods_for`); level 1 is exactly `EnemyMods::NONE`.
-    let mods = director::enemy_mods_for(difficulty.0, elapsed);
+    // (`tuning.director.enemy_mods_for`); level 1 is exactly `EnemyMods::NONE`.
+    let mods = tuning.director.enemy_mods_for(difficulty.0, elapsed);
     // Keep one slot reserved for the level's boss until it is due, so the live
     // count stays `<= ENEMY_CAP` for the whole level: the boss framework spends
     // the reservation on the boss itself. A living miniboss also has its own
@@ -405,10 +405,10 @@ pub fn director_system(
         } else {
             0.01
         };
-        director.spawn_timer = director::horde_interval(elapsed, boss_phase) * grace / rate;
-        let count = director::horde_pulse(elapsed, boss_phase);
+        director.spawn_timer = tuning.director.horde_interval(difficulty.0, elapsed, boss_phase) * grace / rate;
+        let count = tuning.director.horde_pulse(difficulty.0, elapsed, boss_phase);
         // The fixed opening pair arrives after this pass and spends the same budget.
-        let reserved = if elapsed < director::BOSS_TIME
+        let reserved = if elapsed < tuning.director.boss_time
             && level.objects.sewer_opening.is_some()
             && !opening.pillbugs
         {
@@ -416,7 +416,8 @@ pub fn director_system(
         } else {
             0
         };
-        let budget = director::horde_live_budget(elapsed, boss_phase).saturating_sub(reserved);
+        let budget = tuning.director.horde_live_budget(difficulty.0, elapsed, boss_phase)
+            .saturating_sub(reserved);
         let live = enemies.iter_mut().count();
         let guests = if level.theme == Theme::Outfall {
             enemies.iter_mut().filter(|(_, e)| e.kind == EnemyKind::ShoreCrab).count()
@@ -427,13 +428,13 @@ pub fn director_system(
             // Quiet after the death, or `peace on`: hold every fresh spawn,
             // but keep the boss hand-off alive.
             if !counters.testbed {
-                director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+                director::raise_boss_due_at(&mut director, &mut boss_due, elapsed, level_index.0, tuning.director.boss_time);
             }
             return;
         }
         // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
         // pool stays on `hp_mult_for`, so this cannot stretch a boss fight).
-        let mult = director::horde_hp_mult_for(difficulty.0, elapsed);
+        let mult = tuning.director.horde_hp_mult_for(difficulty.0, elapsed);
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
         // of all of it materialising on the ring.
@@ -470,7 +471,12 @@ pub fn director_system(
             // the caps cost no retry and no extra rng. The snake's own live cap
             // and every slot cap arrive the same way.
             let caps = roster::SlotCaps::from_counts(level.theme, slot_counts);
-            let mut kind = roster::pick_kind(level.theme, curve, &caps, &mut rng.0);
+            let roster_clock = if elapsed >= tuning.director.boss_time {
+                curve.max(director::BOSS_TIME)
+            } else {
+                curve
+            };
+            let mut kind = roster::pick_kind(level.theme, roster_clock, &caps, &mut rng.0);
             // A lilliputian roll brings a whole squad instead of one body.
             // The cap keeps it to two squads on the floor; over the cap the
             // roll is substituted with fodder, and the squad itself is
@@ -602,10 +608,10 @@ pub fn director_system(
     // appointment (one named threat at a time): a due elite waits, with its
     // timer left spent and no rng drawn, and fires when the window closes.
     if director.elite_timer <= 0.0
-        && curve > director::ELITE_START
-        && !director::near_appointment(elapsed)
+        && curve > tuning.director.elite_start_for(difficulty.0)
+        && !tuning.minibosses.times.iter().any(|&at| (elapsed - at).abs() < tuning.director.elite_appointment_gap)
     {
-        director.elite_timer = director::elite_interval_at(curve);
+        director.elite_timer = tuning.director.elite_interval_at(difficulty.0, curve);
         let elites = enemies.iter_mut().filter(|(_, e)| e.elite).count();
         if enemies.iter_mut().count() + queued < cap && elites < 3 {
             if let Some(pos) = spawn_point_reachable(
@@ -621,7 +627,7 @@ pub fn director_system(
             }) {
                 #[cfg(test)]
                 log_spawn(pos, player.pos, 2);
-                let mult = director::horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
+                let mult = tuning.director.horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
                 // The elite wears the floor's own heavy (the roster's H slot):
                 // its elite is that body with the double stripe and the
                 // attachment, so the silhouette the rat has been fighting since
@@ -678,7 +684,7 @@ pub fn director_system(
             boss_phase: director.boss_spawned || boss_due.due || boss_due.claimed,
             miniboss_alive: schedule.active > 0,
             live_drakes,
-            hp_mult: director::horde_hp_mult_for(difficulty.0, elapsed),
+            hp_mult: tuning.director.horde_hp_mult_for(difficulty.0, elapsed),
             mods,
             spawner: &mut ids.guest,
             scratch: &mut scratch,
@@ -692,7 +698,7 @@ pub fn director_system(
     // Boss hand-off (no generic boss spawn any more): the boss framework reads
     // `BossDue` and spawns the level's boss in its arena.
     if !counters.testbed {
-        director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+        director::raise_boss_due_at(&mut director, &mut boss_due, elapsed, level_index.0, tuning.director.boss_time);
     }
 }
 
@@ -2241,6 +2247,32 @@ mod tests {
             .run_system_cached(director_system)
             .expect("director system must run");
         w.end_tick();
+    }
+
+    #[test]
+    fn practice_director_uses_sector_one_overrides_on_a_later_floor() {
+        let tuning = crate::tuning::Tuning::parse(r#"
+            [director.sectors.1]
+            live_budget = [[0, 0], [150, 0], [300, 0], [450, 0], [600, 0], [750, 0], [900, 0]]
+            spawn_interval = [[0, 2.5], [150, 2.5], [300, 2.5], [450, 2.5], [600, 2.5], [750, 2.5], [900, 2.5]]
+            elite_start = 300.0
+        "#).unwrap();
+        let run = crate::tuning::RunTuning::new(tuning);
+        let make_world = |tuning| World::new_level_tuned(
+            3, Theme::Trailer, 61, Loadout::starting(), Default::default(), tuning,
+        );
+        let mut campaign = make_world(run.clone());
+        let mut practice = make_world(run);
+        practice.difficulty_override = Some(0);
+
+        let at = 255.0;
+        director_tick(&mut campaign, 0.1, at);
+        director_tick(&mut practice, 0.1, at);
+        assert_eq!(campaign.director.spawn_timer, director::horde_interval(at, false));
+        assert!(campaign.director.elite_timer > 0.0);
+        assert_eq!(practice.director.spawn_timer, 2.5);
+        assert!(practice.director.elite_timer <= 0.0);
+        assert!(practice.enemies().is_empty());
     }
 
     /// Legacy `spawn_point_stays_in_bounds_clear_of_walls_and_player`: the ring
