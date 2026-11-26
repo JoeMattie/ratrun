@@ -313,6 +313,20 @@ fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
     if kind == EnemyKind::SumpLeech {
         return r + 34.0;
     }
+    // Outfall: Lampfish's bulb sits 16 px forward on its stalk, Skater's legs
+    // splay wide across water, Conger trails a sinuous tail, Grouper carries
+    // rowing paddles + elite split stalk, and Fry School spans r=12 dark.
+    match kind {
+        EnemyKind::Lampfish => return r + 24.0,
+        EnemyKind::Skater => return r * 2.5 + 4.0,
+        EnemyKind::Conger => return r * 3.5 + 4.0,
+        EnemyKind::Grouper => return r * 2.2 + 4.0,
+        EnemyKind::FrySchool => return r + 5.0,
+        EnemyKind::SandHopper | EnemyKind::GlassShrimp | EnemyKind::PistolShrimp => {
+            return r * 3.0 + 4.0;
+        }
+        _ => {}
+    }
     let kind = kind.archetype();
     match kind {
         EnemyKind::Skitterer => r * 2.2 + 2.0, // 5.5 * (r/2.5) + 2
@@ -406,6 +420,11 @@ pub fn draw_w3_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
     // Printworks: the Staple Crawler's two marked holes (its own geometry).
     if e.kind == EnemyKind::StapleCrawler {
         crate::game::art_roster_printworks::draw_staple_tell(pb, e, cam);
+        return;
+    }
+    // Outfall: Skater's 22×4 splash and Lampfish's bulb ring + 18 px lunge.
+    if matches!(e.kind, EnemyKind::Skater | EnemyKind::Lampfish) {
+        crate::game::art_roster_outfall::draw_tell(pb, e, cam, accent);
         return;
     }
     // The tell belongs to the archetype: a registered body that inherits the
@@ -688,6 +707,14 @@ fn bespoke_body(kind: EnemyKind) -> Option<BodyDraw> {
         (EnemyKind::PepperMill, crate::game::art_roster_kitchen::draw_peppermill as BodyDraw),
         (EnemyKind::PieWeight, crate::game::art_roster_kitchen::draw_pieweight as BodyDraw),
         (EnemyKind::SinkCrab, crate::game::art_roster_kitchen::draw_sinkcrab as BodyDraw),
+        (EnemyKind::SandHopper, crate::game::art_roster_outfall::draw_sand_hopper as BodyDraw),
+        (EnemyKind::GlassShrimp, crate::game::art_roster_outfall::draw_glass_shrimp as BodyDraw),
+        (EnemyKind::Conger, crate::game::art_roster_outfall::draw_conger as BodyDraw),
+        (EnemyKind::Skater, crate::game::art_roster_outfall::draw_skater as BodyDraw),
+        (EnemyKind::PistolShrimp, crate::game::art_roster_outfall::draw_pistol_shrimp as BodyDraw),
+        (EnemyKind::Lampfish, crate::game::art_roster_outfall::draw_lampfish as BodyDraw),
+        (EnemyKind::Grouper, crate::game::art_roster_outfall::draw_grouper as BodyDraw),
+        (EnemyKind::FrySchool, crate::game::art_roster_outfall::draw_fry_school as BodyDraw),
     ];
     TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
 }
@@ -729,6 +756,14 @@ fn bespoke_lod(kind: EnemyKind) -> Option<BodyDraw> {
         (EnemyKind::PepperMill, crate::game::art_roster_kitchen::draw_peppermill_lod as BodyDraw),
         (EnemyKind::PieWeight, crate::game::art_roster_kitchen::draw_pieweight_lod as BodyDraw),
         (EnemyKind::SinkCrab, crate::game::art_roster_kitchen::draw_sinkcrab_lod as BodyDraw),
+        (EnemyKind::SandHopper, crate::game::art_roster_outfall::draw_sand_hopper_lod as BodyDraw),
+        (EnemyKind::GlassShrimp, crate::game::art_roster_outfall::draw_glass_shrimp_lod as BodyDraw),
+        (EnemyKind::Conger, crate::game::art_roster_outfall::draw_conger_lod as BodyDraw),
+        (EnemyKind::Skater, crate::game::art_roster_outfall::draw_skater_lod as BodyDraw),
+        (EnemyKind::PistolShrimp, crate::game::art_roster_outfall::draw_pistol_shrimp_lod as BodyDraw),
+        (EnemyKind::Lampfish, crate::game::art_roster_outfall::draw_lampfish_lod as BodyDraw),
+        (EnemyKind::Grouper, crate::game::art_roster_outfall::draw_grouper_lod as BodyDraw),
+        (EnemyKind::FrySchool, crate::game::art_roster_outfall::draw_fry_school_lod as BodyDraw),
     ];
     TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
 }

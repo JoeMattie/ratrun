@@ -1530,6 +1530,35 @@ pub fn emit_enemy_death(
             4.0,
         );
     }
+    // Outfall: one ocean-floor accent per Outfall body (wet sand chitin, glass
+    // shards, eel scales, water spray, coral cavitation sparks, shattered cyan
+    // lure bulb, heavy brine scales, scattering silver minnows).
+    let outfall_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::SandHopper => Some(((234, 206, 156), (96, 78, 52), 4, 46.0)),
+        EnemyKind::GlassShrimp => Some(((220, 252, 255), (56, 132, 162), 5, 58.0)),
+        EnemyKind::Conger => Some(((186, 214, 224), (34, 58, 78), 7, 66.0)),
+        EnemyKind::Skater => Some(((232, 252, 255), (64, 156, 192), 6, 74.0)),
+        EnemyKind::PistolShrimp => Some(((255, 168, 120), (128, 44, 34), 7, 78.0)),
+        EnemyKind::Lampfish => Some(((164, 255, 255), (28, 118, 146), 8, 68.0)),
+        EnemyKind::Grouper => Some(((192, 222, 214), (36, 56, 62), 11, 52.0)),
+        EnemyKind::FrySchool => Some(((244, 252, 255), (74, 138, 168), 10, 64.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = outfall_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.34,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
     match kind.archetype() {
         EnemyKind::Skitterer => {
             // Crisp chitin flecks + small ichor pop.
@@ -2226,6 +2255,44 @@ pub fn emit_enemy_death(
                 Shape::Dot,
                 3.0,
             );
+        }
+        // Outfall self-archetype fallbacks: if `outfall-roster` graduates any
+        // Outfall kind to be its own archetype, keep a rich ocean-floor death
+        // burst + brine stain instead of falling through to the no-op arm.
+        EnemyKind::Skater | EnemyKind::Lampfish | EnemyKind::FrySchool => {
+            let spray = ps.budget_count(8, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                spray,
+                58.0,
+                radius * 0.6,
+                Ramp::Custom(
+                    if kind == EnemyKind::Lampfish {
+                        (140, 250, 255)
+                    } else {
+                        (214, 244, 252)
+                    },
+                    (36, 92, 120),
+                ),
+                0.40,
+                kind == EnemyKind::Lampfish,
+                if kind == EnemyKind::Lampfish {
+                    Shape::Ember
+                } else {
+                    Shape::Dot
+                },
+                4.5,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: (radius * 0.6).clamp(2.0, 4.5),
+                color: stain_col,
+                life: 5.5,
+                max_life: 5.5,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Splat,
+            });
         }
         // Unreachable: `archetype()` answers one of the sixteen kinds above.
         _ => {}
