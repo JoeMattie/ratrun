@@ -1,5 +1,6 @@
-//! Short, self-lit wave crests. The grid drifts in world space for the whole
-//! warning and surge, and is reseeded during the invisible part of the cycle.
+//! Short, self-lit streaks with their bright tips pointing downstream.
+//! The grid drifts in world space through the warning and surge, and is
+//! reseeded during the invisible part of the cycle.
 
 use crate::game::hazards::{
     outfall_surge, outfall_surge_distance, SurgePhase, SURGE_ACTIVE_SECS, SURGE_PERIOD,
@@ -17,6 +18,10 @@ const MAX_CRESTS: usize = 60;
 const DRIFT_PX_PER_SEC: f32 = 9.0;
 // Two terminal rows in the half-block picture.
 const RAT_CLEAR_PX: f32 = 4.0;
+const TAIL_ALPHA: f32 = 0.35;
+const DIAG: f32 = std::f32::consts::FRAC_1_SQRT_2;
+// One sine period in eighths, with exact zero offsets at both ends.
+const WAVE: [f32; 9] = [0.0, DIAG, 1.0, DIAG, 0.0, -DIAG, -1.0, -DIAG, 0.0];
 
 struct Current {
     dir: Vec2,
@@ -102,6 +107,60 @@ fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+struct Stroke {
+    dir: Vec2,
+    offsets: [Vec2; WAVE.len()],
+}
+
+impl Stroke {
+    fn new(dir: Vec2, strength: f32, zoom: f32) -> Self {
+        let length = (4.4 + 1.1 * strength) * zoom;
+        let across = dir.perp() * (0.85 * zoom);
+        let offsets = std::array::from_fn(|i| {
+            let t = i as f32 / (WAVE.len() - 1) as f32;
+            dir * ((t - 0.5) * length) + across * WAVE[i]
+        });
+        Self { dir, offsets }
+    }
+
+    fn visit(&self, centre: Vec2, mut visit: impl FnMut(i32, i32, f32)) {
+        let points = self.offsets.map(|offset| {
+            let p = centre + offset;
+            (p.x.round() as i32, p.y.round() as i32)
+        });
+        let tail = points[0];
+        let head = points[WAVE.len() - 1];
+        let along = |(x, y): (i32, i32)| {
+            Vec2::new((x - tail.0) as f32, (y - tail.1) as f32).dot(self.dir)
+        };
+        let span = along(head).max(1.0);
+        // At up to 2× each segment spans at most two raster steps.
+        // Blend each pixel once, even where rounded segments overlap.
+        let mut painted = [tail; 2 * (WAVE.len() - 1) + 1];
+        let mut count = 1;
+        visit(tail.0, tail.1, TAIL_ALPHA);
+        for segment in points.windows(2) {
+            let (x, y) = segment[0];
+            let (dx, dy) = (segment[1].0 - x, segment[1].1 - y);
+            let steps = dx.abs().max(dy.abs());
+            // Integer DDA along the segment's major axis, rounding the minor axis.
+            let advance = |delta: i32, step: i32| {
+                (delta * step + delta.signum() * (steps / 2)) / steps
+            };
+            for step in 1..=steps {
+                let p = (x + advance(dx, step), y + advance(dy, step));
+                if painted[..count].contains(&p) {
+                    continue;
+                }
+                let t = (along(p) / span).clamp(0.0, 1.0);
+                visit(p.0, p.1, TAIL_ALPHA + (1.0 - TAIL_ALPHA) * t);
+                painted[count] = p;
+                count += 1;
+            }
+        }
+    }
+}
+
 /// Draw in the lit world-resolution picture, before hostile information.
 pub fn draw(pb: &mut PixelBuffer, level: &Level, cam: Vec2, rat: Vec2, zoom: f32, elapsed: f32) {
     if level.theme != Theme::Outfall || pb.w == 0 || pb.h == 0 {
@@ -117,40 +176,22 @@ pub fn draw(pb: &mut PixelBuffer, level: &Level, cam: Vec2, rat: Vec2, zoom: f32
     let (w, h) = (pb.w, pb.h);
     let rat = rat - cam;
     let clear_sq = (RAT_CLEAR_PX * zoom) * (RAT_CLEAR_PX * zoom);
-    let across = current.dir.perp();
-    let length = (4.4 + 1.1 * current.strength) * zoom;
-    let amplitude = 0.85 * zoom;
-    // Sample the shared sine once per frame so consecutive points are at most
-    // one world pixel apart, even at 2×. Duplicate raster points blend once.
-    const SAMPLES: usize = 24;
-    let offsets: [Vec2; SAMPLES] = std::array::from_fn(|i| {
-        let t = i as f32 / (SAMPLES - 1) as f32;
-        across * ((t - 0.5) * length)
-            + current.dir * ((t * std::f32::consts::TAU).sin() * amplitude)
-    });
+    let stroke = Stroke::new(current.dir, current.strength, zoom);
     let pixels = pb.pixels_mut();
     current.visit_crests(level.seed, cam, Vec2::new(w as f32, h as f32), zoom, |centre| {
-        let mut painted = [(0, 0); SAMPLES];
-        let mut count = 0;
-        for offset in offsets {
-            let p = centre + offset;
-            let (x, y) = (p.x.round() as i32, p.y.round() as i32);
-            if x < 0 || y < 0 || x as usize >= w || y as usize >= h
-                || painted[..count].contains(&(x, y))
-            {
-                continue;
+        stroke.visit(centre, |x, y, weight| {
+            if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+                return;
             }
             let pixel_pos = Vec2::new(x as f32, y as f32);
             if pixel_pos.dist_sq(rat) <= clear_sq
                 || !level.tiles.get_at(cam + pixel_pos).is_open()
             {
-                continue;
+                return;
             }
             let pixel = &mut pixels[y as usize * w + x as usize];
-            *pixel = mix(*pixel, CYAN, current.alpha);
-            painted[count] = (x, y);
-            count += 1;
-        }
+            *pixel = mix(*pixel, CYAN, current.alpha * weight);
+        });
     });
 }
 
@@ -233,5 +274,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn outfall_strokes_point_downstream_with_bright_heads_in_all_eight_directions() {
+        let mut seen = Vec::new();
+        for seed in 0..64 {
+            let warning = Current::sample(seed, 8.9).unwrap();
+            if seen.contains(&warning.dir) {
+                continue;
+            }
+            seen.push(warning.dir);
+            let active = Current::sample(seed, 9.55).unwrap();
+            for current in [warning, active] {
+                for zoom in [0.5, 1.0, 2.0] {
+                    let stroke = Stroke::new(current.dir, current.strength, zoom);
+                    for centre in [Vec2::new(16.0, 16.0), Vec2::new(16.25, 16.5)] {
+                        let mut pixels: Vec<(Vec2, Rgb)> = Vec::new();
+                        stroke.visit(centre, |x, y, weight| {
+                            let point = Vec2::new(x as f32, y as f32);
+                            assert!(
+                                pixels.is_empty() || pixels.iter().any(|(p, _)| {
+                                    (p.x - point.x).abs().max((p.y - point.y).abs()) == 1.0
+                                }),
+                                "gap in the raster for {:?} at {zoom}×",
+                                current.dir,
+                            );
+                            pixels.push((point, mix(BASE, CYAN, current.alpha * weight)));
+                        });
+                        let (tail, tail_color) = pixels[0];
+                        let tip = centre + stroke.offsets[WAVE.len() - 1];
+                        let head = Vec2::new(tip.x.round(), tip.y.round());
+                        let (_, head_color) = pixels.iter().copied().find(|&(p, _)| p == head).unwrap();
+                        let heading = head - tail;
+                        assert!(heading.dot(current.dir) > 0.9 * heading.len());
+                        assert!(head_color.1 > tail_color.1);
+                    }
+                }
+            }
+        }
+        assert_eq!(seen.len(), 8);
     }
 }
