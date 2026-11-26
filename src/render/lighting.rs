@@ -141,6 +141,13 @@ pub fn theme_ambient(theme: Theme) -> ThemeAmbient {
             hard_pools: true,
             rat_tint: (220, 246, 248),
         },
+        // Deep abyssal seabed: blue-black cold ambient with soft pools and a
+        // warm amber rat aura contrasting against the cyan lures.
+        Theme::Outfall => ThemeAmbient {
+            mul: [84, 108, 132],
+            hard_pools: false,
+            rat_tint: (255, 218, 152),
+        },
     }
 }
 

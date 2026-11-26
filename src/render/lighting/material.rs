@@ -122,6 +122,9 @@ pub(super) fn resolve(b: u8, theme: Theme, wall: bool) -> MaterialKind {
         (Theme::Printworks, _) => MaterialKind::Stone,
         (Theme::Trailer, false) => MaterialKind::Wood,
         (Theme::Trailer, true) => MaterialKind::Metal,
+        // Wet seabed sand catches the sewer streak; pier pilings are weathered timber.
+        (Theme::Outfall, false) => MaterialKind::WetBrick,
+        (Theme::Outfall, true) => MaterialKind::Wood,
     }
 }
 
@@ -210,5 +213,11 @@ mod tests {
     fn a_flat_normal_points_straight_up() {
         assert_eq!(nz([0, 0]), 127);
         assert_eq!(nz([127, 0]), 0);
+    }
+
+    #[test]
+    fn outfall_resolves_wet_sand_floor_and_timber_piling_walls() {
+        assert_eq!(resolve(0, Theme::Outfall, false), MaterialKind::WetBrick);
+        assert_eq!(resolve(0, Theme::Outfall, true), MaterialKind::Wood);
     }
 }

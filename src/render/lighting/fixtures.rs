@@ -4,7 +4,7 @@ use super::{
     Falloff, Flicker, Light, LightMap, LightScene, LightShape, ShadowColor, ShadowSoftness,
     ThemeAmbient,
 };
-use crate::game::level::{LightFixture, LightFixtureKind as Kind, Theme};
+use crate::game::level::{Level, LightFixture, LightFixtureKind as Kind, Theme};
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
@@ -17,6 +17,7 @@ pub(super) fn colors(theme: Theme) -> (Rgb, Rgb) {
         Theme::Laundry => ((161, 184, 255), (218, 163, 247)),
         Theme::Printworks => ((108, 230, 225), (246, 125, 157)),
         Theme::Trailer => ((255, 223, 159), (138, 168, 226)),
+        Theme::Outfall => ((92, 232, 236), (214, 168, 114)),
     }
 }
 
@@ -85,6 +86,15 @@ pub(super) fn sconce_color(theme: Theme, seed: u32) -> Rgb {
             }
         }
         Theme::Trailer => (255, 162, 60),
+        Theme::Outfall => {
+            if seed.is_multiple_of(5) {
+                // Subdued warm sodium-brass fallback on occasional pilings.
+                (226, 178, 116)
+            } else {
+                // Cold marine cyan-aqua storm-gate bulkhead lens.
+                (96, 236, 232)
+            }
+        }
     }
 }
 
@@ -159,6 +169,12 @@ fn housing(theme: Theme) -> Housing {
             lens: 1,
             cage: false,
         },
+        // A heavy caged marine bulkhead lamp on a pier piling.
+        Theme::Outfall => Housing {
+            half: 3,
+            lens: 2,
+            cage: true,
+        },
     }
 }
 
@@ -175,18 +191,25 @@ pub(super) fn sconce_sputter(seed: u32, elapsed: f32) -> bool {
     (elapsed * 7.7 + (seed & 63) as f32 * 0.43).sin() > 0.86
 }
 
+/// Whether `fixture` at `index` is a wall lamp currently snuffed by an Outfall
+/// elite or The Lantern. Snuffed sconces reject housing emission, fan and wash.
+#[inline]
+pub(super) fn sconce_snuffed(level: &Level, index: usize, fixture: LightFixture) -> bool {
+    fixture.kind == Kind::Sconce && level.sconce_snuffed(index)
+}
+
 pub(crate) fn draw_fixtures(
     map: &mut LightMap,
     pb: &mut PixelBuffer,
-    fixtures: &[LightFixture],
-    theme: Theme,
+    level: &Level,
     cam: Vec2,
     elapsed: f32,
     blackout: f32,
 ) {
+    let theme = level.theme;
     let (primary, alternate) = colors(theme);
     let power = 1.0 - blackout;
-    for fixture in fixtures {
+    for (index, fixture) in level.objects.lights.iter().enumerate() {
         let p = fixture.pos - cam;
         if p.x < -6.0 || p.y < -4.0 || p.x >= pb.w as f32 + 6.0 || p.y >= pb.h as f32 + 4.0 {
             continue;
@@ -213,6 +236,7 @@ pub(crate) fn draw_fixtures(
             Kind::Broken => (3, alternate),
             // A wall lamp is drawn at its face, not on the hanging jig.
             Kind::Sconce => {
+                let power = if level.sconce_snuffed(index) { None } else { Some(power) };
                 draw_sconce(map, pb, theme, fixture, (x, y), elapsed, power);
                 continue;
             }
@@ -248,6 +272,7 @@ pub(crate) fn draw_fixtures(
 /// that wall. The art is deliberately orientation-free — the shape comes from
 /// the theme (a cage, a strip, an indicator, a bracket, a safelight, a rail
 /// marker) and the colours from [`sconce_color`].
+#[allow(clippy::too_many_arguments)]
 fn draw_sconce(
     map: &mut LightMap,
     pb: &mut PixelBuffer,
@@ -255,18 +280,21 @@ fn draw_sconce(
     fixture: &LightFixture,
     (x, y): (i32, i32),
     elapsed: f32,
-    power: f32,
+    power: Option<f32>,
 ) {
     let casing = (39, 43, 49);
     let tint = sconce_color(theme, fixture.seed);
-    let lit = power > 0.0 && (!sconce_spent(fixture.seed) || sconce_sputter(fixture.seed, elapsed));
     let housing = housing(theme);
-    // A lit lamp is a near-white lens inside a frame of its own tint; a spent
-    // one is dark glass and a cold rim.
-    let glass = (71, 52, 46);
-    let cold_rim = (48, 42, 40);
-    let lens = if lit { palette::mix(glass, lens_color(tint), power) } else { glass };
-    let rim = if lit { palette::mix(cold_rim, rim_color(tint), power) } else { cold_rim };
+    let (lens, rim, lit) = if let Some(power) = power {
+        let glass = (71, 52, 46);
+        let cold_rim = (48, 42, 40);
+        let lit = power > 0.0 && (!sconce_spent(fixture.seed) || sconce_sputter(fixture.seed, elapsed));
+        let lens = if lit { palette::mix(glass, lens_color(tint), power) } else { glass };
+        let rim = if lit { palette::mix(cold_rim, rim_color(tint), power) } else { cold_rim };
+        (lens, rim, lit)
+    } else {
+        ((54, 48, 46), (38, 40, 44), false)
+    };
     // The cage's bars sit at the ends of the lens (a bulkhead's wire cage), in
     // the lens colour at a little under half, so the bulkhead reads as a lit
     // pane behind bars rather than one wide light.
@@ -337,6 +365,7 @@ pub(super) fn sconce_flicker_gain(seed: u32, elapsed: f32) -> f32 {
 }
 
 pub(super) fn light(
+    index: usize,
     fixture: LightFixture,
     theme: Theme,
     ambient: ThemeAmbient,
@@ -391,7 +420,10 @@ pub(super) fn light(
             light.height = SCONCE_HEIGHT;
             light.energy = SCONCE_ENERGY;
             light.scatter = SCONCE_SCATTER;
-            if sconce_spent(fixture.seed) {
+            if scene.level.sconce_snuffed(index) {
+                light.energy = 0.0;
+                light.scatter = 0.0;
+            } else if sconce_spent(fixture.seed) {
                 // One in eight is spent: dead, with an occasional sputter. The
                 // drawn lens follows the same rule (`sconce_sputter`), and the
                 // sputter stays a fraction of a live lamp's core so a dead wall
@@ -562,15 +594,7 @@ mod tests {
         pb.clear(FLOOR);
         let mut map = LightMap::new();
         let scene = scene(w);
-        draw_fixtures(
-            &mut map,
-            &mut pb,
-            &w.level.objects.lights,
-            w.level.theme,
-            Vec2::ZERO,
-            scene.elapsed,
-            scene.blackout,
-        );
+        draw_fixtures(&mut map, &mut pb, &w.level, Vec2::ZERO, scene.elapsed, scene.blackout);
         map.apply_scene(&mut pb, &scene);
         pb
     }
@@ -670,6 +694,12 @@ mod tests {
                 assert!(g > 240 && r < 160, "register lamp: {:?}", (r, g, b));
             } else {
                 assert!(r > 200 && g < 80 && b < 80, "safelight: {:?}", (r, g, b));
+            }
+            let (r, g, b) = sconce_color(Theme::Outfall, seed);
+            if seed % 5 == 0 {
+                assert!(r > g && g > b && r > 200, "outfall warm fallback: {:?}", (r, g, b));
+            } else {
+                assert!(g > 220 && b > 220 && r < 140, "outfall cyan lens: {:?}", (r, g, b));
             }
             // One lamp in eight is spent.
             assert_eq!(sconce_spent(seed), seed.is_multiple_of(8));
@@ -806,15 +836,7 @@ mod tests {
         let mut pb = PixelBuffer::new(160, 160);
         pb.clear(FLOOR);
         let mut map = LightMap::new();
-        draw_fixtures(
-            &mut map,
-            &mut pb,
-            &lamp.level.objects.lights,
-            Theme::Sewer,
-            Vec2::ZERO,
-            0.0,
-            0.0,
-        );
+        draw_fixtures(&mut map, &mut pb, &lamp.level, Vec2::ZERO, 0.0, 0.0);
         let h = housing(Theme::Sewer);
         let (x, y) = (fixture.pos.x.round() as i32, fixture.pos.y.round() as i32);
         let drawn: Vec<(i32, i32, Rgb)> = (-h.half..=h.half)
@@ -842,5 +864,50 @@ mod tests {
         }
         // ...and the floor around it *was* darkened, so that is not vacuous.
         assert!(luminance(pb.pixel_at(60, 24)) < luminance(FLOOR));
+    }
+
+    #[test]
+    fn a_snuffed_outfall_sconce_rejects_housing_emission_fan_and_wash() {
+        let mut live = test_world(Theme::Outfall);
+        let fixture = mount(&mut live.level, 4, 2, 3);
+        let live_pb = lit(&live);
+
+        let mut bare = test_world(Theme::Outfall);
+        bare.level
+            .tiles
+            .fill_cells(3, 2, 3, 1, TileKind::Wall(WallKind::Solid));
+        let bare_pb = lit(&bare);
+
+        let x = fixture.pos.x.round() as usize;
+        let y = fixture.pos.y.round() as usize;
+        assert!(
+            luminance(live_pb.pixel_at(x, y)) > 150,
+            "live Outfall sconce lens must stay emissive"
+        );
+        assert!(
+            luminance(live_pb.pixel_at(x, 60)) > luminance(bare_pb.pixel_at(x, 60)) + 25,
+            "live Outfall sconce lights the floor in front of it"
+        );
+
+        // Snuff via elite slot, then boss slot: housing emission, fan and wash all go dark.
+        for use_boss in [false, true] {
+            let mut snuffed = test_world(Theme::Outfall);
+            mount(&mut snuffed.level, 4, 2, 3);
+            if use_boss {
+                snuffed.level.objects.outfall_boss_snuff = Some(0);
+            } else {
+                snuffed.level.objects.outfall_elite_snuff = Some(0);
+            }
+            let snuffed_pb = lit(&snuffed);
+            assert!(
+                luminance(snuffed_pb.pixel_at(x, y)) < 60,
+                "snuffed lens must not stay emissive (boss={use_boss})"
+            );
+            assert_eq!(
+                luminance(snuffed_pb.pixel_at(x, 60)),
+                luminance(bare_pb.pixel_at(x, 60)),
+                "snuffed sconce must emit no fan or wash (boss={use_boss})"
+            );
+        }
     }
 }

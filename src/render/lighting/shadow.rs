@@ -54,6 +54,10 @@ fn prop_occluder(kind: PropKind) -> (u8, u16) {
         PropKind::Tank | PropKind::Clothespin | PropKind::PressIsland | PropKind::PaperReel => {
             (25, 0xffff)
         }
+        // Outfall: curved shipwreck rib, heavy ballast crate, tall rounded piling.
+        PropKind::OutfallRib => (15, 0x6666),
+        PropKind::OutfallBallast => (18, 0xffff),
+        PropKind::OutfallPiling => (22, 0x6ff6),
     }
 }
 

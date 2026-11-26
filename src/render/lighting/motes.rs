@@ -69,8 +69,19 @@ const CAUSTIC_AX: i32 = 12;
 const CAUSTIC_AY: i32 = 6;
 const CAUSTIC_BX: i32 = -8;
 const CAUSTIC_BY: i32 = 14;
-/// Phase advance per 8 Hz step, in 256ths of a cycle (≈ 0.63 cycles a second).
+/// Phase advance per 8 Hz step, in 256ths of a cycle (≈ 0.63 cycles a second),
+/// kept for the legacy stepped test override.
 const CAUSTIC_PHASE_STEP: u32 = 20;
+/// Continuous Outfall caustic drift speed, in 256ths of a cycle per second
+/// (~3.5–4.2 world px/s across the two fronts) so water light glides smoothly
+/// without held-step judder.
+const CAUSTIC_DRIFT_PER_SEC: f32 = 56.0;
+/// Mean downward drift speed of Outfall marine snow, in world pixels per second
+/// (individual flakes stagger from 5.0..=7.0 px/s with sub-pixel start phases
+/// so only a few flakes step 1 px on any 60 Hz frame).
+const MARINE_SNOW_BASE_PX_S: f32 = 5.0;
+const MARINE_SNOW_STEP_PX_S: f32 = 0.5;
+const MARINE_SNOW_SWAY_PX_S: f32 = 1.5;
 /// The brightest a caustic lifts a floor pixel, in output levels before
 /// `fx::strength::CAUSTICS` (0.5), and the flat step it is quantised to (the
 /// edges of a slack-water pattern must not repaint cells one level at a time).
@@ -79,6 +90,8 @@ const CAUSTIC_LEVEL_STEP: i32 = 3;
 /// The cool cast a beam's own colour is pulled toward: water light reads cold
 /// even under a warm lamp.
 const CAUSTIC_COOL: Rgb = (120, 200, 255);
+/// Cool pale cyan-blue cast for Outfall marine snow.
+const MARINE_SNOW_COOL: Rgb = (176, 226, 248);
 
 /// The per-stage strength, Q8. The game always uses [`Gains::live`]; the tests
 /// zero it to prove that strength 0 draws nothing.
@@ -112,33 +125,33 @@ enum Flavour {
     Steam,
     /// Sparse cold motes (the Lab).
     Cold,
+    /// Sparse, cool, downward-drifting marine snow (The Outfall).
+    MarineSnow,
 }
 
 const fn flavour(theme: Theme) -> Flavour {
     match theme {
         Theme::Kitchen | Theme::Laundry => Flavour::Steam,
         Theme::Lab => Flavour::Cold,
+        Theme::Outfall => Flavour::MarineSnow,
         Theme::Sewer | Theme::Printworks | Theme::Trailer => Flavour::Dust,
     }
 }
 
-/// Does this theme/zone show caustics? Off everywhere by default.
-///
-/// No water-light floor ships yet: every theme is dry. The under-ocean level
-/// adds its arm in the `match` below (`Theme::Ocean => true`) and its floor
-/// lights up — the pattern, its 8 Hz stepping, its floor and light gates and
-/// its churn are all built and tested here already.
+/// Does this theme/zone show caustics? On for The Outfall outside Blackout
+/// zones; dry everywhere else.
 pub(super) fn caustics_here(theme: Theme, zone: Option<LightZoneKind>) -> bool {
-    #[cfg(test)]
-    {
-        if caustics_override() {
-            return true;
-        }
-    }
-    let water: bool = match theme {
-        Theme::Sewer | Theme::Kitchen | Theme::Lab | Theme::Laundry | Theme::Printworks
+    let water = match theme {
+        Theme::Outfall => true,
+        Theme::Sewer
+        | Theme::Kitchen
+        | Theme::Lab
+        | Theme::Laundry
+        | Theme::Printworks
         | Theme::Trailer => false,
     };
+    #[cfg(test)]
+    let water = water || caustics_override();
     // A blacked-out zone has its lamps dead: no water light there either.
     water && !matches!(zone, Some(LightZoneKind::Blackout))
 }
@@ -160,14 +173,23 @@ fn caustics_override() -> bool {
 }
 
 /// Last pixel stage: motes inside lit air, caustics where flagged
-/// (`fx::strength::MOTES`, `CAUSTICS`).
-pub(super) fn draw(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>) {
-    draw_with(grid, canvas, frame, Gains::live());
+/// (`fx::strength::MOTES`, `CAUSTICS`). `elapsed` drives continuous smooth
+/// motion for Outfall caustics and marine snow; other floors keep their stepped
+/// `frame.step8` clock.
+pub(super) fn draw(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, elapsed: f32) {
+    draw_with(grid, canvas, frame, elapsed, Gains::live());
 }
 
-fn draw_with(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, gains: Gains) {
-    // §5: 8 Hz at Full, 4 Hz at Hard, off at Coarse/Compact (and fx-off never
-    // calls this at all).
+fn draw_with(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    elapsed: f32,
+    gains: Gains,
+) {
+    // §5: Full and Hard run motes/caustics; Coarse/Compact skip them.
+    // Non-Outfall floors keep 8 Hz at Full / 4 Hz at Hard; Outfall uses
+    // continuous `elapsed` for smooth water light and falling marine snow.
     let clock = match frame.mode {
         LightingMode::Full => frame.step8,
         LightingMode::Hard => frame.step8 / 2,
@@ -176,9 +198,9 @@ fn draw_with(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, gains: G
     if canvas.w == 0 || canvas.h == 0 {
         return;
     }
-    caustics(grid, canvas, frame, clock, gains);
+    caustics(grid, canvas, frame, clock, elapsed, gains);
     if gains.motes > 0 {
-        particulate(grid, canvas, frame, clock, gains);
+        particulate(grid, canvas, frame, clock, elapsed, gains);
     }
 }
 
@@ -187,6 +209,7 @@ fn particulate(
     canvas: &mut Canvas<'_>,
     frame: &FxFrame<'_>,
     clock: u32,
+    elapsed: f32,
     gains: Gains,
 ) {
     let Some(beam) = Beam::measure(grid) else {
@@ -196,32 +219,53 @@ fn particulate(
     let count = mote_count(canvas.w, canvas.h, frame.mode, flavour);
     let seed = (frame.level.seed as u32) ^ (frame.level.seed >> 32) as u32;
     let field = (canvas.w * canvas.h) as u32;
-    let cold = flavour == Flavour::Cold;
+    let cold = matches!(flavour, Flavour::Cold | Flavour::MarineSnow);
     let cam = (frame.cam.x as i64, frame.cam.y as i64);
+    let t = elapsed.max(0.0);
     for i in 0..count {
         // Ambience's hashing, cloned: the mote's whole life comes from these
-        // bits, so two runs (or two frames in a step) agree exactly.
+        // bits, so two runs (or two frames at the same time) agree exactly.
         let h0 = hash(seed ^ (i as u32).wrapping_mul(0x9e37_79b9));
         let h1 = hash(h0 ^ 0x5bf0_3635);
         let cell = (h0 % field) as i32;
         let (base_x, base_y) = (cell % canvas.w as i32, cell / canvas.w as i32);
-        let (vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
-        match flavour {
-            // A wisp rises whether or not its hash wanted to drift.
-            Flavour::Steam => vy = -1,
+        let (dx, dy) = match flavour {
+            // Marine snow drifts smoothly downward at ~6 px/s (5.0..=7.0 px/s)
+            // from continuous `elapsed`, with hash-staggered sub-pixel phases
+            // so flakes step 1 px smoothly across frames instead of jumping on
+            // an 8 Hz boundary.
+            Flavour::MarineSnow => {
+                let sway_dir = match h1 % 5 {
+                    0 => -1i64,
+                    1 => 1i64,
+                    _ => 0i64,
+                };
+                let speed_y =
+                    MARINE_SNOW_BASE_PX_S + ((h1 >> 16) % 5) as f32 * MARINE_SNOW_STEP_PX_S;
+                let phase_y = ((h1 >> 8) & 255) as f32 / 256.0;
+                let phase_x = ((h0 >> 8) & 255) as f32 / 256.0;
+                let dy = (t * speed_y + phase_y).floor() as i64;
+                let dx = sway_dir * (t * MARINE_SNOW_SWAY_PX_S + phase_x).floor() as i64;
+                (dx, dy)
+            }
             _ => {
-                if vx == 0 && vy == 0 {
+                let (vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
+                if flavour == Flavour::Steam {
+                    // A wisp rises whether or not its hash wanted to drift.
+                    vy = -1;
+                } else if vx == 0 && vy == 0 {
                     vy = 1;
                 }
+                // Each mote steps on every other 8 Hz step, so about half the field
+                // moves a pixel at a time: 30 moves ≈ 60 changed cells, the budget.
+                let moves = (i64::from(clock) + 1 + i64::from(i as u32 & 1)) / 2;
+                (i64::from(vx) * moves, i64::from(vy) * moves)
             }
-        }
-        // Each mote steps on every other 8 Hz step, so about half the field
-        // moves a pixel at a time: 30 moves ≈ 60 changed cells, the budget.
-        let moves = (i64::from(clock) + 1 + i64::from(i as u32 & 1)) / 2;
-        // Anchored to the world (tiled at the view size), so the dust rides
+        };
+        // Anchored to the world (tiled at the view size), so the dust/snow rides
         // the floor under a moving camera instead of sticking to the screen.
-        let x = (i64::from(base_x) + i64::from(vx) * moves - cam.0).rem_euclid(canvas.w as i64) as i32;
-        let y = (i64::from(base_y) + i64::from(vy) * moves - cam.1).rem_euclid(canvas.h as i64) as i32;
+        let x = (i64::from(base_x) + dx - cam.0).rem_euclid(canvas.w as i64) as i32;
+        let y = (i64::from(base_y) + dy - cam.1).rem_euclid(canvas.h as i64) as i32;
         // A mote in the dark tries its other homes (fixed per mote, so it
         // is the same mote every step): most of the field then floats where
         // there is a beam to show it, and the count stays the budget.
@@ -233,9 +277,9 @@ fn particulate(
             }
             hr = hash(hr ^ 0x2545_f491);
             let cell = (hr % field) as i32;
-            let rx = (i64::from(cell % canvas.w as i32) + i64::from(vx) * moves - cam.0)
+            let rx = (i64::from(cell % canvas.w as i32) + dx - cam.0)
                 .rem_euclid(canvas.w as i64) as i32;
-            let ry = (i64::from(cell / canvas.w as i32) + i64::from(vy) * moves - cam.1)
+            let ry = (i64::from(cell / canvas.w as i32) + dy - cam.1)
                 .rem_euclid(canvas.h as i64) as i32;
             found = beam.at(grid, rx as usize, ry as usize).map(|hit| (rx, ry, hit));
         }
@@ -246,6 +290,15 @@ fn particulate(
         if lift <= 0 {
             continue;
         }
+        let tint = if flavour == Flavour::MarineSnow {
+            (
+                ((u16::from(tint.0) + u16::from(MARINE_SNOW_COOL.0)) / 2) as u8,
+                ((u16::from(tint.1) + u16::from(MARINE_SNOW_COOL.1)) / 2) as u8,
+                ((u16::from(tint.2) + u16::from(MARINE_SNOW_COOL.2)) / 2) as u8,
+            )
+        } else {
+            tint
+        };
         if flavour == Flavour::Steam {
             // A soft wisp: a core with two dimmer companions leaning whichever
             // way this mote's hash points.
@@ -364,13 +417,19 @@ fn caustics_q8(wx: i32, wy: i32, phase: i32) -> i32 {
     (fil * fil) >> 8
 }
 
-fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u32, gains: Gains) {
+fn caustics(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    clock: u32,
+    elapsed: f32,
+    gains: Gains,
+) {
     if gains.caustics <= 0 {
         return;
     }
     // A view-wide flag (or any flagged zone in this level) gates the pass; the
-    // per-sample `Surface::zone` then decides pixel by pixel. Today this is
-    // false for every theme, so the pass costs one comparison.
+    // per-sample `Surface::zone` then decides pixel by pixel.
     let whole_view = caustics_here(frame.theme, None);
     if !whole_view
         && !frame
@@ -382,7 +441,11 @@ fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u3
     {
         return;
     }
-    let phase = ((u64::from(clock) * u64::from(CAUSTIC_PHASE_STEP)) & 255) as i32;
+    let phase = if frame.theme == Theme::Outfall {
+        ((elapsed.max(0.0) * CAUSTIC_DRIFT_PER_SEC).floor() as i64).rem_euclid(256) as i32
+    } else {
+        ((u64::from(clock) * u64::from(CAUSTIC_PHASE_STEP)) & 255) as i32
+    };
     let cam = (frame.cam.x.round() as i32, frame.cam.y.round() as i32);
     let (w, h) = (canvas.w, canvas.h);
     for py in 0..h {
@@ -404,7 +467,7 @@ fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u3
             if info.dom == 0 {
                 continue;
             }
-            if !whole_view && !caustics_here(frame.theme, surface.zone) {
+            if !caustics_here(frame.theme, surface.zone) {
                 continue;
             }
             let index = py * w + px;
@@ -413,8 +476,10 @@ fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u3
             if material::is_creature(byte) || emissive {
                 continue;
             }
+            let dom_att = i32::from(info.dom).min(128);
             let level = (caustics_q8(wx, wy, phase) * CAUSTIC_GAIN) >> 8;
-            let level = ((level * gains.caustics) >> 8) / CAUSTIC_LEVEL_STEP * CAUSTIC_LEVEL_STEP;
+            let level = (((level * gains.caustics) >> 8) * dom_att) >> 7;
+            let level = level / CAUSTIC_LEVEL_STEP * CAUSTIC_LEVEL_STEP;
             if level <= 0 {
                 continue;
             }
@@ -440,6 +505,10 @@ fn mote_count(w: usize, h: usize, mode: LightingMode, flavour: Flavour) -> usize
     match flavour {
         Flavour::Steam => STEAM_PUFFS,
         Flavour::Cold => (base * 3 / 5).max(MOTE_COUNT_MIN),
+        Flavour::MarineSnow => match mode {
+            LightingMode::Hard => (base * 3 / 10).max(MOTE_COUNT_MIN / 2),
+            _ => (base * 3 / 5).max(MOTE_COUNT_MIN),
+        },
         Flavour::Dust => match mode {
             LightingMode::Hard => (base / 2).max(MOTE_COUNT_MIN / 2),
             _ => base,
@@ -493,7 +562,7 @@ mod tests {
         pb.set_pen(0);
         pb.clear((85, 71, 78));
         let mut canvas = testkit::canvas(&mut pb);
-        draw_with(grid, &mut canvas, frame, gains);
+        draw_with(grid, &mut canvas, frame, frame.elapsed, gains);
         pb.pixels().to_vec()
     }
 
@@ -600,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_theme_is_dry() {
+    fn every_non_outfall_theme_is_dry_and_outfall_respects_blackout() {
         let zones = [
             None,
             Some(LightZoneKind::Corridor),
@@ -612,13 +681,115 @@ mod tests {
         ];
         for theme in Theme::playable() {
             for zone in zones {
-                assert!(
-                    !caustics_here(theme, zone),
-                    "{} shows caustics in {zone:?}",
+                let expected = theme == Theme::Outfall && zone != Some(LightZoneKind::Blackout);
+                assert_eq!(
+                    caustics_here(theme, zone),
+                    expected,
+                    "{} caustics in {zone:?}",
                     theme.name()
                 );
             }
         }
+    }
+
+    #[test]
+    fn outfall_caustics_skip_blackout_creatures_and_emissives() {
+        let lvl = level(Theme::Outfall);
+        let (w, h) = (64, 32);
+        let mut grid = caustic_grid(w, h);
+        // Right half is a Blackout zone: no water light there even on Outfall.
+        for y in 0..h {
+            for x in (w / 2)..w {
+                grid.surfaces[y * w + x].zone = Some(LightZoneKind::Blackout);
+            }
+        }
+        let mut pb = PixelBuffer::new(w, h);
+        pb.set_materials(true);
+        pb.set_pen(0);
+        pb.clear((85, 71, 78));
+        // Stamp a creature pixel and an emissive pixel in the lit left half.
+        let creature_pen = super::material::pen(super::material::MaterialKind::Slime, true, 3);
+        let emissive_pen = super::material::pen(super::material::MaterialKind::Emissive, false, 0);
+        pb.set_pen(creature_pen);
+        pb.plot(10, 10, (85, 71, 78));
+        pb.set_pen(emissive_pen);
+        pb.plot(12, 10, (85, 71, 78));
+        pb.set_pen(0);
+
+        let f = frame(&lvl, LightingMode::Full, 3.0);
+        let mut canvas = testkit::canvas(&mut pb);
+        draw_with(&grid, &mut canvas, &f, f.elapsed, Gains::live());
+
+        assert_eq!(pb.pixel_at(10, 10), (85, 71, 78), "creature excluded");
+        assert_eq!(pb.pixel_at(12, 10), (85, 71, 78), "emissive excluded");
+        let mut lit_left = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let changed = pb.pixel_at(x, y) != (85, 71, 78);
+                if x >= w / 2 {
+                    assert!(!changed, "blackout zone must stay dry at ({x}, {y})");
+                } else if changed {
+                    lit_left += 1;
+                }
+            }
+        }
+        assert!(lit_left > 0, "lit non-blackout Outfall floor gets caustics");
+    }
+
+    #[test]
+    fn outfall_marine_snow_is_sparse_cool_and_gated_to_lit_air() {
+        let lvl = level(Theme::Outfall);
+        let (w, h) = (120, 80);
+        let full = mote_count(w, h, LightingMode::Full, Flavour::MarineSnow);
+        let hard = mote_count(w, h, LightingMode::Hard, Flavour::MarineSnow);
+        assert!((MOTE_COUNT_MIN..=MOTE_COUNT_MAX).contains(&full));
+        assert!(hard < full && hard >= MOTE_COUNT_MIN / 2);
+
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        // Air on left half only; zero dom so caustics are off and we measure snow alone.
+        for y in 0..h {
+            for x in 0..w / 2 {
+                grid.info[y * w + x].air = [1200, 1200, 1200];
+            }
+        }
+        // Continuous motion: moves smoothly inside a single 8 Hz window (1.00 -> 1.05 s)
+        // rather than holding on 8 Hz steps, while staying well within per-frame churn.
+        let f0 = frame(&lvl, LightingMode::Full, 1.000);
+        let f1 = frame(&lvl, LightingMode::Full, 1.050);
+        assert_eq!(f0.step8, f1.step8, "same 8 Hz bucket");
+        let p0 = run(&grid, &f0, Gains::live(), w, h);
+        let p1 = run(&grid, &f1, Gains::live(), w, h);
+        assert_ne!(p0, p1, "marine snow advances smoothly from continuous time");
+        let f_next = frame(&lvl, LightingMode::Full, 1.000 + 1.0 / 60.0);
+        let p_next = run(&grid, &f_next, Gains::live(), w, h);
+        let step_px = (0..w * h).filter(|&i| p0[i] != p_next[i]).count();
+        assert!(
+            step_px <= 24,
+            "staggered continuous snow moved {step_px} pixels in one 60 Hz frame"
+        );
+        let hit: Vec<usize> = (0..w * h).filter(|&i| p0[i] != (85, 71, 78)).collect();
+        assert!(!hit.is_empty(), "marine snow appears in lit air");
+        for i in hit {
+            assert!(i % w < w / 2, "snow must stay inside lit air");
+            let c = p0[i];
+            assert!(c.2 >= c.0, "marine snow carries a cool cast: {c:?}");
+        }
+    }
+
+    #[test]
+    fn outfall_caustics_drift_continuously_without_eight_hz_holds() {
+        let lvl = level(Theme::Outfall);
+        let (w, h) = (64, 32);
+        let grid = caustic_grid(w, h);
+        let a = frame(&lvl, LightingMode::Full, 2.000);
+        let b = frame(&lvl, LightingMode::Full, 2.040);
+        assert_eq!(a.step8, b.step8, "both times fall inside the same 8 Hz bucket");
+        let pa = run(&grid, &a, Gains::live(), w, h);
+        let pb = run(&grid, &b, Gains::live(), w, h);
+        assert_ne!(
+            pa, pb,
+            "Outfall caustics advance continuously instead of freezing on 8 Hz steps"
+        );
     }
 
     fn caustic_grid(w: usize, h: usize) -> Grid {

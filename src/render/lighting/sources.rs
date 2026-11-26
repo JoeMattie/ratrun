@@ -157,10 +157,10 @@ impl LightMap {
         // 1. Player rat soft personal aura (always present, priority 3).
         let px = scene.player.pos.x - cam.x;
         let py = scene.player.pos.y - cam.y;
-        let rat_radius = if scene.level.theme == Theme::Lab {
-            58.0
-        } else {
-            66.0
+        let rat_radius = match scene.level.theme {
+            Theme::Lab => 58.0,
+            Theme::Outfall => 54.0,
+            _ => 66.0,
         };
         // With the effects on the pool is a smooth gradient, and a continuous
         // 3 % breath repainted all of it every frame: hold it in 4 Hz steps
@@ -176,15 +176,15 @@ impl LightMap {
             y: py,
             radius: rat_radius,
             color: theme_prof.rat_tint,
-            intensity: ((if scene.level.theme == Theme::Trailer {
-                62.0
-            } else {
-                196.0
+            intensity: ((match scene.level.theme {
+                Theme::Trailer => 62.0,
+                Theme::Outfall => 184.0,
+                _ => 196.0,
             }) * rat_flicker) as u16,
-            scatter: if scene.level.theme == Theme::Trailer {
-                7
-            } else {
-                22
+            scatter: match scene.level.theme {
+                Theme::Trailer => 7,
+                Theme::Outfall => 20,
+                _ => 22,
             },
             priority: 3,
             occlude: true,
@@ -814,6 +814,10 @@ impl LightMap {
                             MinibossKind::AxleNut => (168, 180, 198),
                             MinibossKind::ChainDog => (206, 136, 56),
                             MinibossKind::RoadAtlas => (122, 142, 164),
+                            MinibossKind::Gasket => (126, 214, 220),
+                            MinibossKind::Swell => (96, 206, 246),
+                            MinibossKind::Shade => (124, 152, 208),
+                            MinibossKind::FalseBulb => (92, 244, 234),
                         };
                         let pulse = 0.84 + 0.16 * (elapsed * 7.0).sin();
                         let entrance =
@@ -1209,7 +1213,8 @@ impl LightMap {
     /// kind's own colour; the live strike is the shared hostile red.
     fn gather_floor_tells(&mut self, e: &Enemy, cam: Vec2, vw: f32, vh: f32, elapsed: f32) {
         use crate::game::ecs::systems::{
-            floor_flatbed, floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer,
+            floor_flatbed, floor_kitchen, floor_lab, floor_laundry, floor_outfall,
+            floor_printworks, floor_sewer,
         };
         const LIVE: Rgb = (255, 92, 66);
         let own = emissive_rgb(e.kind.color());
@@ -1278,6 +1283,43 @@ impl LightMap {
                         pool(foot, 15.0, live, 1.0);
                     }
                 }
+            EnemyKind::Lampfish => {
+                if let Some(bulb) = floor_outfall::lampfish_bulb(e) {
+                    let sx = bulb.x - cam.x;
+                    let sy = bulb.y - cam.y;
+                    let attacking = floor_outfall::outfall_enemy_tell(e).is_some();
+                    let r = if attacking { 28.0 } else { 26.0 };
+                    let reach = r * TAIL_REACH;
+                    if sx + reach >= 0.0
+                        && sy + reach >= 0.0
+                        && sx - reach < vw
+                        && sy - reach < vh
+                    {
+                        let (color, intensity, scatter) = if attacking {
+                            // 3 Hz held-step attack flicker; moving small halo leaves air steady.
+                            let held = (elapsed * 3.0).floor() / 3.0;
+                            let flick = 0.72 + 0.28 * (held * 19.0 + e.anim).sin().abs();
+                            ((148, 252, 255), (220.0 * flick) as u16, (52.0 * flick) as u16)
+                        } else {
+                            ((84, 238, 236), 168, 36)
+                        };
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: r,
+                            color,
+                            intensity,
+                            scatter,
+                            priority: 2,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+            EnemyKind::Skater if floor_outfall::outfall_enemy_tell(e).is_some() => {
+                pool(e.pos, 18.0, false, 0.75);
+            }
             _ => {}
         }
     }
@@ -1535,6 +1577,33 @@ impl LightMap {
             }
         }
 
+        // Outfall lure traps: cyan ground bulb while Ready, 3 Hz held-step
+        // warning pulse while armed, completely dark once Spent. Submitted via
+        // `push_ground` so stationary bulbs drive local relief and caustics
+        // without shadow bakes or fixture mirrors.
+        for trap in &scene.level.objects.lure_traps {
+            use crate::game::hazards::LurePhase;
+            let (radius, color, energy, scatter, height) = match &trap.phase {
+                LurePhase::Ready => (40.0, (78, 242, 232), 0.72, 0.16, 7.0),
+                LurePhase::Warning => {
+                    let held = (elapsed * 3.0).floor() / 3.0;
+                    let flick = 0.80 + 0.20 * (held * 18.0 + trap.pos.x * 0.17).sin().abs();
+                    (46.0, (128, 252, 255), 0.96 * flick, 0.24 * flick, 8.0)
+                }
+                LurePhase::Spent => continue,
+            };
+            let sx = trap.pos.x - cam.x;
+            let sy = trap.pos.y - cam.y;
+            if in_range(sx, sy, radius) {
+                let mut light = Light::radial(trap.pos, radius, color, energy);
+                light.scatter = scatter;
+                light.height = height;
+                light.falloff = Falloff::Small;
+                light.casts_shadow = false;
+                self.push_ground(light, 2);
+            }
+        }
+
         // Lab boss charging dock pad glow.
         if let Some(dock) = scene.level.boss.dock {
             let sx = dock.x - cam.x;
@@ -1602,8 +1671,16 @@ impl LightMap {
     }
 
     /// Lights for living/dying bosses: mower headlamp & lidar, cat eyes & pounce
-    /// tell, broom slam/sweep tells, and all active `BossHazard` warnings.
+    /// tell, broom slam/sweep tells, The Lantern's real/decoy lures, and all
+    /// active `BossHazard` warnings.
     fn gather_boss_lights(&mut self, boss: &Boss, cam: Vec2, vw: f32, vh: f32, elapsed: f32) {
+        // The Lantern owns its darkness: skip the generic 168 px presence aura
+        // so Arrival, DarkTell and Death stay abyssal around the cyan lure.
+        if let Some(view) = boss.lantern_view() {
+            self.gather_lantern_lights(&view, boss, cam, vw, vh, elapsed);
+            return;
+        }
+
         // A boss's own small tells and halos reach past their stated radius.
         let in_range = |sx: f32, sy: f32, r: f32| -> bool {
             let r = r * TAIL_REACH;
@@ -2384,6 +2461,100 @@ impl LightMap {
                     },
                     intensity: if active { 260 } else { 205 },
                     scatter: if active { 68 } else { 44 },
+                    priority: 3,
+                    occlude: false,
+                    hard: false,
+                });
+            }
+        }
+    }
+
+    /// The Lantern (Outfall boss): at most one dominant real lure (`Falloff::Smooth`,
+    /// steady bioluminescent air channel independent of its 3 Hz tell flicker, no
+    /// per-frame shadow bake) plus at most one cheap steady non-dominant decoy bulb.
+    fn gather_lantern_lights(
+        &mut self,
+        view: &crate::game::art_boss_lantern::LanternView,
+        boss: &Boss,
+        cam: Vec2,
+        vw: f32,
+        vh: f32,
+        elapsed: f32,
+    ) {
+        const LURE_CYAN: Rgb = (66, 255, 214);
+        let in_range = |sx: f32, sy: f32, r: f32| -> bool {
+            let r = r * TAIL_REACH;
+            sx + r >= 0.0 && sy + r >= 0.0 && sx - r < vw && sy - r < vh
+        };
+
+        if let Some(bulb) = view.real_bulb.as_ref() {
+            if bulb.radius > 0.5 && bulb.gain > 0.001 {
+                let sx = bulb.pos.x - cam.x;
+                let sy = bulb.pos.y - cam.y;
+                if in_range(sx, sy, bulb.radius) {
+                    let steady_energy = (1.35 * bulb.gain).clamp(0.0, 2.4);
+                    let steady_scatter = (0.30 * bulb.gain).clamp(0.0, 0.45);
+                    // 3 Hz held-step surface modulation during feint tells (gameplay
+                    // cue); air scatter and `FxLight::steady` remain strictly steady.
+                    let flick = if bulb.flicker > 0.0 {
+                        let held = (elapsed * 3.0).floor() / 3.0;
+                        0.76 + 0.24
+                            * (held * std::f32::consts::TAU * 1.5 + bulb.flicker)
+                                .sin()
+                                .abs()
+                    } else {
+                        1.0
+                    };
+                    let mut light =
+                        Light::radial(bulb.pos, bulb.radius, LURE_CYAN, steady_energy * flick);
+                    light.scatter = steady_scatter * flick;
+                    light.height = if bulb.planted { 10.0 } else { 12.0 };
+                    light.falloff = Falloff::Smooth;
+                    light.casts_shadow = false;
+                    let lure_air = bulb.gain.clamp(0.0, 1.35);
+                    self.push_lantern_lure(light, steady_energy + steady_scatter, lure_air);
+                }
+            }
+        }
+
+        if let Some(decoy) = view.decoy.as_ref() {
+            if decoy.radius > 0.5 && decoy.gain > 0.001 {
+                let sx = decoy.pos.x - cam.x;
+                let sy = decoy.pos.y - cam.y;
+                if in_range(sx, sy, decoy.radius) {
+                    let mut light = Light::radial(
+                        decoy.pos,
+                        decoy.radius,
+                        LURE_CYAN,
+                        (0.72 * decoy.gain).clamp(0.0, 1.4),
+                    );
+                    light.scatter = (0.16 * decoy.gain).clamp(0.0, 0.30);
+                    light.height = 10.0;
+                    light.falloff = Falloff::Small;
+                    light.casts_shadow = false;
+                    self.push_shaped(light, 2);
+                }
+            }
+        }
+
+        // Only live strikes emit a restrained coral flash; dark tells rely on
+        // the self-lit hostile layer outlines so DarkTell stays truly dark.
+        for hazard in &boss.hazards {
+            if hazard.is_expired() || !hazard.is_active() {
+                continue;
+            }
+            let c = hazard.shape.center();
+            let sx = c.x - cam.x;
+            let sy = c.y - cam.y;
+            let r = 38.0;
+            if in_range(sx, sy, r) {
+                self.lights.push(PointLight {
+                    x: sx,
+                    y: sy,
+                    radius: r,
+                    color: (255, 92, 66),
+                    intensity: 210,
+                    scatter: 52,
                     priority: 3,
                     occlude: false,
                     hard: false,
