@@ -5,18 +5,19 @@
 //! Calibrated directly against the orthographic concept plates
 //! (`scene-g1-ocean-lure.png` and `scene-g2-ocean-anglerfish.png`):
 //! - **In darkness (`ArrivalLure`, `DarkTell`, `DarkLunge`)**: a blazing `6 px`
-//!   cyan-white esca bulb suspended on a dark arched fishing-rod stalk, a
-//!   single glowing golden-yellow `+` eye, and razor-thin `1 px` self-lit
-//!   curved needle teeth catching the lure spill out of an almost-black abyss.
+//!   cyan-white esca bulb suspended on a dark arched fishing-rod stalk, paired
+//!   glowing golden-yellow `+` brow eyes, and razor-thin `1 px` self-lit curved
+//!   needle teeth catching the lure spill out of an almost-black abyss.
 //! - **Revealed (`Swim`, `Feint*`, `Gape*`)**: a huge ~88 px deep-sea
-//!   anglerfish with a bulbous dark mottled forehead dome, protruding underbite
-//!   lower jaw, pitch-black cavernous maw framed by spaced vertical needle
-//!   fangs, spiny dorsal ridge, lateral pectoral fins, and a tapering sinuous
+//!   anglerfish seen top-down with a bulbous dark mottled forehead dome,
+//!   pitch-black crescent maw framed by spaced curved needle fangs, spiny dorsal
+//!   ridge down the spine, flared lateral pectoral fins, and a tapering sinuous
 //!   caudal tail.
-//! - **360° orthographic readability**: horizontal and diagonal headings render
-//!   the iconic 3/4 deep-sea profile (never upside-down); vertical headings
-//!   (`±90°`) smoothly transition to a symmetrical top-down crescent maw with
-//!   paired golden brow eyes and flared pectoral fins.
+//! - **360° orthographic readability**: top-down everywhere — every heading
+//!   (horizontal, diagonal, and vertical, including exact `(0, ±1)`) rotates the
+//!   same symmetrical top-down silhouette cleanly along `facing` using an
+//!   orthogonal `(facing, facing.perp())` frame with no side-profile roll and no
+//!   snapping jaws.
 //!
 //! # Move-set contract (this file owns the view/state types & constants)
 //!
@@ -27,15 +28,15 @@
 //! | 2 (`35..=65%`) | `DarkSwim`, `DecoyLeapTell` (0.5 s) → `DecoyLeap` (up to 80 px, 12 px trench, 20 dmg) → `DecoyRecover` (0.8 s); `DarkTell` (0.8 s, bulb out 1.6 s) → `DarkLunge` (56×12 trench, 0.3 s, 22 dmg) → `DarkRecover` (0.5 s) | steady r22 decoy bulb (hit r4, no stalk, no jaw); looming outlines visible at zero FX |
 //! | 3 (`<= 35%`) | `DropLamp`, `GapeSwim`, `GapeTell` (0.7 s, lock 0.5 s), `GapePull` (1.4 s, 28 px/s), `GapeStamp` (0.2 s, 24 dmg), `GapeRecover` (1.6 s) | real bulb planted on seabed (r52) with consistent anchor; 90 px × 50° pull cone with readable negative space; 24×24 mouth stamp |
 //! | Transition | `PhaseShift` | clean threshold handoff |
-//! | Death | `Death` (2.4 s) | eye & teeth go dark first, hull sinks, planted bulb keeps glowing |
+//! | Death | `Death` (2.4 s) | eyes & teeth go dark first, hull sinks, planted bulb keeps glowing |
 //!
 //! # Layering contract for the renderer
 //! 1. **Ground layer** (`draw_ground`): seabed drop shadow (stamped with pen `0`
 //!    so the bump/specular pass never embosses it), planted bulb anchor cradle,
 //!    subtle cone edge wash, and death silt rings.
-//! 2. **Entity layer** (`draw`): the ~88 px anglerfish silhouette, self-lit
-//!    needle teeth (`>= 232` channel peaks for `mark_emissive_highlights`),
-//!    golden `+` eye, arched illicium stalk (or snapped stump), and both
+//! 2. **Entity layer** (`draw`): the ~88 px top-down anglerfish silhouette,
+//!    self-lit needle teeth (`>= 232` channel peaks for `mark_emissive_highlights`),
+//!    paired golden `+` eyes, arched illicium stalk (or snapped stump), and both
 //!    world-space bulbs.
 //! 3. **Hostile / post-lighting overlay** (`draw_tell_overlay`): runs after
 //!    lighting and foreground; keeps bulb cores, dark-state teeth/eye glints,
@@ -459,9 +460,7 @@ pub fn mouth_pos(view: &LanternView) -> Vec2 {
 /// Forehead ridge where the arched illicium stalk emerges.
 #[inline]
 pub fn brow_anchor(view: &LanternView) -> Vec2 {
-    let f = unit_facing(view);
-    let (side, d_up) = dorsal_frame(f);
-    view.pos + f * 4.5 + d_up * (14.5 * side)
+    view.pos + unit_facing(view) * 4.5
 }
 
 /// Whether the boss deals ordinary body-contact damage (`8`) in `state`.
@@ -651,24 +650,11 @@ fn safe_unit(v: Vec2, fallback: Vec2) -> Vec2 {
 // Internal Projection & Animation Helpers
 // ============================================================================
 
-/// Returns `(side_factor, dorsal_up)`:
-/// - `side_factor` in `0.0..=1.0`: `1.0` on horizontal/diagonal headings (3/4
-///   iconic `scene-g1`/`scene-g2` profile), `0.0` on straight vertical headings
-///   (symmetrical top-down crescent jaw with paired dorsal eyes).
-/// - `dorsal_up`: unit vector perpendicular to `f`, always flipped toward
-///   screen-up (`-Y`) so the fish is never upside down when swimming left/right.
+/// Unit lateral axis perpendicular to unit heading `f`, non-degenerate at
+/// every heading (including exact vertical `(0, ±1)`).
 #[inline]
-fn dorsal_frame(f: Vec2) -> (f32, Vec2) {
-    let side = smoothstep((f.x.abs() - 0.16) / 0.44);
-    let p = f.perp();
-    let d_up = if p.y > 0.0 {
-        -p
-    } else if p.y < 0.0 {
-        p
-    } else {
-        Vec2::new(0.0, -1.0)
-    };
-    (side, d_up)
+fn body_perp(f: Vec2) -> Vec2 {
+    f.perp()
 }
 
 #[inline]
@@ -788,13 +774,12 @@ fn plot_blend(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
     }
 }
 
-/// Screen-space body basis shared by hull, teeth, eyes, and stalk helpers.
+/// Screen-space top-down body basis shared by hull, teeth, eyes, and stalk helpers.
 #[derive(Clone, Copy)]
 struct BodyFrame {
     sc: Vec2,
     f: Vec2,
-    d_up: Vec2,
-    side: f32,
+    p: Vec2,
 }
 
 /// Line/outline stroke parameters (keeps helper arities clippy-clean).
@@ -911,7 +896,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent:
         return;
     }
     let f = unit_facing(view);
-    let (side, d_up) = dorsal_frame(f);
+    let perp = body_perp(f);
     let vis = head_visibility(view);
     let p = clamp01(view.progress);
     let sc = w2s(view.pos, cam);
@@ -923,9 +908,9 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent:
         for i in 0..9 {
             let t = i as f32 / 8.0;
             let u = lerp(0.0, -58.0, t);
-            let sway = (view.anim * 2.6 - t * 3.4).sin() * (1.5 + 5.0 * t * t);
+            let sway = (view.anim * 2.5 - t * 4.2).sin() * (5.6 * t * t);
             let r = lerp(16.0, 4.0, t.powf(0.85));
-            let pos = sc + f * u + d_up * (-sway * (1.0 - side * 0.55) - 2.0) + Vec2::new(0.0, 3.0);
+            let pos = sc + f * u + perp * sway + Vec2::new(0.0, 3.0);
             disc_blend(pb, pos, r, SHADOW_COL, shadow_alpha * lerp(1.0, 0.55, t));
         }
     }
@@ -987,31 +972,25 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent:
 // 2. Entity Layer (giant anglerfish silhouette + teeth + eyes + stalk + bulbs)
 // ============================================================================
 
-/// Cross-section `(v_min, v_max)` along local spine coordinate `u in [-72, +16]`.
-/// Total length = `88 px` (snout/chin `+16` to notched caudal tail tip `-72`).
+/// Symmetric top-down half-width along local spine coordinate `u in [-72, +16]`.
+/// Returns a negative value outside the `88 px` hull (snout `+16` to notched
+/// caudal tail tip `-72`).
 #[inline]
-fn body_profile_bounds(u: f32, side: f32) -> (f32, f32) {
+fn body_profile_half(u: f32) -> f32 {
     if !(-72.0..=16.0).contains(&u) {
-        return (1.0, -1.0);
+        return -1.0;
     }
     if u >= 0.0 {
-        let tu_top = (u / lerp(15.0, 14.2, side)).clamp(0.0, 1.0);
-        let tu_bot = (u / 16.0).clamp(0.0, 1.0);
-        let v_max = lerp(19.5, 20.5, side) * (1.0 - (tu_top * 0.96).powi(2)).max(0.0).sqrt();
-        let v_min = -lerp(19.5, 19.0, side) * (1.0 - (tu_bot * 0.95).powi(2)).max(0.0).sqrt();
-        return (v_min, v_max);
+        let tu = (u / 15.6).clamp(0.0, 1.0);
+        return 19.5 * (1.0 - (tu * 0.96).powi(2)).max(0.0).sqrt();
     }
     if u >= -54.0 {
         let t = -u / 54.0;
-        let half = lerp(19.5, 3.2, t.powf(1.15)) + 2.0 * (t * PI).sin() * (1.0 - t);
-        let v_max = half + 1.2 * side * (1.0 - t);
-        let v_min = -half + 0.6 * side * t;
-        return (v_min, v_max);
+        return lerp(19.5, 3.2, t.powf(1.15)) + 2.0 * (t * PI).sin() * (1.0 - t);
     }
     let t = (-u - 54.0) / 18.0;
     let taper = 1.0 - 0.22 * ((t - 0.72).max(0.0) / 0.28);
-    let half = lerp(3.2, 13.5, smoothstep(t)) * taper;
-    (-half, half)
+    lerp(3.2, 13.5, smoothstep(t)) * taper
 }
 
 /// Draw **The Lantern** in the entity pass (with the caller's creature material
@@ -1021,7 +1000,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
         return;
     }
     let f = unit_facing(view);
-    let (side, d_up) = dorsal_frame(f);
+    let p = body_perp(f);
     let vis = head_visibility(view);
     let gape = jaw_open_factor(view);
     let tglow = tooth_glow_factor(view);
@@ -1037,10 +1016,10 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
     // Screen-space bounding box of the 88 px hull, clipped directly to `pb` so
     // narrow terminals cleanly crop rear tail overhang without disturbing head/teeth.
     let corners = [
-        sc + f * 20.0 + d_up * 26.0,
-        sc + f * 20.0 - d_up * 26.0,
-        sc - f * 74.0 + d_up * 26.0,
-        sc - f * 74.0 - d_up * 26.0,
+        sc + f * 20.0 + p * 28.0,
+        sc + f * 20.0 - p * 28.0,
+        sc - f * 74.0 + p * 28.0,
+        sc - f * 74.0 - p * 28.0,
     ];
     let mut min_xf = corners[0].x;
     let mut max_xf = corners[0].x;
@@ -1057,9 +1036,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
     let min_y = (min_yf.floor() as i32).max(0);
     let max_y = (max_yf.ceil() as i32).min(pb.h as i32 - 1);
 
-    let jaw_top = lerp(5.2, 11.4, gape);
-    let jaw_bot = -lerp(6.4, 14.8, gape);
-    let maw_back_u = lerp(2.5, -5.0, gape);
+    let jaw_hw = lerp(9.5, 14.8, gape);
 
     let swim_freq = match view.state {
         LanternState::DecoyLeap | LanternState::DarkLunge | LanternState::GapeSwim => 4.6,
@@ -1085,19 +1062,19 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
                 if !(-73.0..=17.0).contains(&u) {
                     continue;
                 }
-                let v_raw = rx * d_up.x + ry * d_up.y;
+                let v_raw = rx * p.x + ry * p.y;
 
                 // Sinuous tail swim undulation behind head (`u < -14`).
                 let v = if u < -14.0 {
                     let bt = clamp01((-u - 14.0) / 58.0);
-                    let sway = (view.anim * swim_freq - bt * 4.2).sin() * (6.2 * bt * bt) * swim_amp;
-                    v_raw - sway * (1.0 - side * 0.45)
+                    let sway = (view.anim * swim_freq - bt * 4.2).sin() * (5.6 * bt * bt) * swim_amp;
+                    v_raw - sway
                 } else {
                     v_raw
                 };
 
-                let (v_min, v_max) = body_profile_bounds(u, side);
-                if v_min > v_max {
+                let half_h = body_profile_half(u);
+                if half_h < 0.0 {
                     continue;
                 }
 
@@ -1109,107 +1086,70 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
                     }
                 }
 
-                // Spiny dorsal fin crest along upper back in profile view.
-                let mut in_dorsal_fin = false;
-                if side > 0.35 && (-48.0..=-10.0).contains(&u) && v > v_max - 0.5 {
-                    let spine_wave = 0.5 + 0.5 * (u * 0.95).sin();
-                    let fin_h = (2.8 + 3.0 * spine_wave)
-                        * side
-                        * (((-u - 10.0) / 38.0) * PI).sin();
-                    if v <= v_max + fin_h {
-                        in_dorsal_fin = true;
-                    }
-                }
-
-                // Lateral pectoral fins (flared both sides in top-down, ventral nub in profile).
+                // Flared lateral pectoral fins on both sides in top-down view.
                 let mut in_pec_fin = false;
-                if (-26.0..=-8.0).contains(&u) {
-                    let ft = (-u - 8.0) / 18.0;
+                if (-26.0..=-6.0).contains(&u) {
+                    let ft = (-u - 6.0) / 20.0;
                     let flap = (view.anim * 3.4 + ft * 1.4).sin() * 1.5;
                     let arc = (ft * PI).sin();
-                    if side < 0.72 {
-                        let pec_reach = v_max + (7.0 + flap) * (1.0 - side * 0.65) * arc;
-                        if v.abs() <= pec_reach && (v > v_max - 1.0 || v < v_min + 1.0) {
-                            in_pec_fin = true;
-                        }
-                    } else if v < v_min + 1.0 && v >= v_min - 3.4 * arc {
+                    let pec_reach = half_h + (7.5 + flap) * arc;
+                    if v.abs() <= pec_reach && v.abs() > half_h - 1.0 {
                         in_pec_fin = true;
                     }
                 }
 
-                let in_body = (v_min..=v_max).contains(&v);
-                if !(in_body || in_dorsal_fin || in_pec_fin) {
+                let in_body = v.abs() <= half_h;
+                if !(in_body || in_pec_fin) {
                     continue;
                 }
 
-                // Gaping front abyssal maw cutout (no nose wall blocking the mouth!).
-                if side >= 0.45 {
-                    if u >= maw_back_u && (jaw_bot..=jaw_top).contains(&v) {
-                        let v_mid = 0.5 * (jaw_top + jaw_bot);
-                        let v_half = (0.5 * (jaw_top - jaw_bot)).max(1.0);
-                        let vn = (v - v_mid) / v_half;
-                        let back_curve = maw_back_u + (9.5 - maw_back_u) * (vn * vn * 0.45);
-                        // Sloped upper lip + protruding underbite lower jaw.
-                        let front_edge = lerp(15.2, 11.2, (vn + 1.0) * 0.5);
-                        if u >= back_curve {
-                            if u > front_edge {
-                                continue;
-                            }
-                            if v >= jaw_top - 1.3 || v <= jaw_bot + 1.3 {
-                                let mut col = GUM_DARK;
-                                if hit > 0.0 {
-                                    col = mix(col, (235, 246, 250), hit * 0.7);
-                                }
-                                plot_blend(pb, sx, sy, col, vis);
-                            } else {
-                                plot_blend(pb, sx, sy, MAW_BLACK, vis);
-                            }
+                // Gaping front abyssal crescent maw cutout (no nose wall blocking the mouth!).
+                if u >= 2.5 && v.abs() <= jaw_hw {
+                    let vn = v / jaw_hw.max(1.0);
+                    let back_u = lerp(8.0, 3.2, gape) + 5.8 * vn * vn;
+                    let front_u = 15.2 - 2.6 * vn * vn;
+                    if u >= back_u {
+                        if u > front_u {
                             continue;
                         }
-                    }
-                } else {
-                    let jaw_hw = lerp(9.0, 14.2, gape);
-                    if u >= 3.5 && v.abs() <= jaw_hw {
-                        let vn = v / jaw_hw.max(1.0);
-                        let back_u = lerp(7.5, 4.0, gape) + 5.5 * vn * vn;
-                        let front_u = 14.8 - 2.2 * vn * vn;
-                        if u >= back_u {
-                            if u > front_u {
-                                continue;
+                        if u <= back_u + 1.3 {
+                            let mut col = GUM_DARK;
+                            if hit > 0.0 {
+                                col = mix(col, (235, 246, 250), hit * 0.7);
                             }
+                            plot_blend(pb, sx, sy, col, vis);
+                        } else {
                             plot_blend(pb, sx, sy, MAW_BLACK, vis);
-                            continue;
                         }
+                        continue;
                     }
                 }
 
-                // Slimy abyssal hide shading + cyan lure rim sheen.
-                let mut col = if in_dorsal_fin || in_pec_fin {
-                    let edge = if in_dorsal_fin && (u.abs() as i32) % 3 == 0 {
+                // Slimy abyssal top-down hide shading + spiny dorsal ridge + cyan lure rim sheen.
+                let mut col = if in_pec_fin {
+                    let ray = if ((u.abs() * 0.75) as i32) % 2 == 0 {
                         0.65
                     } else {
-                        0.30
+                        0.28
                     };
-                    mix(FIN_DARK, FIN_EDGE, edge * (0.4 + 0.6 * bulb_lit))
+                    mix(FIN_DARK, FIN_EDGE, ray * (0.45 + 0.55 * bulb_lit))
                 } else {
-                    let half_h = (0.5 * (v_max - v_min)).max(1.0);
-                    let v_center = 0.5 * (v_max + v_min);
-                    let nv = (v - v_center) / half_h;
-                    let m = hash2((u * 0.55).floor() as i32, (v * 0.55).floor() as i32);
+                    let nv = (v / half_h.max(1.0)).clamp(-1.0, 1.0);
+                    let m = hash2((u * 0.55).floor() as i32, (v.abs() * 0.55).floor() as i32);
                     let bdist = ((sx as f32 - bulb_s.x).powi(2) + (sy as f32 - bulb_s.y).powi(2))
                         .sqrt();
                     let bulb_kiss = clamp01(1.0 - bdist / 54.0).powf(1.65) * bulb_lit;
 
-                    let dorsal_shade = clamp01(0.42 + 0.45 * nv * (0.45 + 0.55 * side));
+                    let crown = (1.0 - nv * nv).clamp(0.0, 1.0);
                     let tail_fade =
                         (1.0 - ((-u - 16.0).max(0.0) / 56.0) * 0.68).clamp(0.25, 1.0);
 
-                    let mut base = mix(HIDE_ABYSS, HIDE_MID, dorsal_shade * tail_fade);
+                    let mut base = mix(HIDE_ABYSS, HIDE_MID, (0.28 + 0.64 * crown) * tail_fade);
                     if m > 0.66 {
                         base = mix(base, HIDE_MOTTLE, 0.45);
                     }
 
-                    let rim_dist = (v_max - v).min(v - v_min);
+                    let rim_dist = half_h - v.abs();
                     let mut c = if rim_dist < 1.8 {
                         let rim_strength = clamp01(0.28 + 0.72 * bulb_kiss) * tail_fade;
                         if u > -18.0 {
@@ -1219,27 +1159,28 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
                         }
                     } else {
                         let mut inner = mix(base, HIDE_RIM, bulb_kiss * 0.52);
-                        if (-10.0..=10.0).contains(&u) && (0.38..=0.80).contains(&nv) {
-                            inner = mix(inner, HIDE_SHEEN, bulb_kiss * 0.48);
+                        if (-6.0..=8.0).contains(&u) && nv.abs() <= 0.55 {
+                            inner = mix(inner, HIDE_SHEEN, bulb_kiss * 0.48 * crown);
                         }
                         inner
                     };
 
-                    // Painted lateral pectoral fin on flank in profile view.
-                    if side >= 0.55 && (-26.0..=-12.0).contains(&u) && (-7.0..=1.0).contains(&v) {
-                        let fu = (-u - 12.0) / 14.0;
-                        if (v + 3.0).abs() < 3.6 * (fu * PI).sin() {
-                            let ray = if ((v * 1.5).abs() as i32) % 2 == 0 {
-                                0.65
+                    // Spiny top-down dorsal ridge running down the spine centre (`v = 0`).
+                    if (-48.0..=-4.0).contains(&u) && v.abs() < 1.8 {
+                        let spine_wave = 0.5 + 0.5 * (u * 0.85).sin();
+                        let ridge_w = 0.9 + 0.8 * spine_wave;
+                        if v.abs() <= ridge_w {
+                            let ridge_col = if spine_wave > 0.55 {
+                                HIDE_SHEEN
                             } else {
-                                0.20
+                                HIDE_RIM
                             };
-                            c = mix(FIN_DARK, FIN_EDGE, ray);
+                            c = mix(c, ridge_col, (0.45 + 0.45 * spine_wave) * tail_fade);
                         }
                     }
 
-                    // Subtle gill slit crease behind the head cheek.
-                    if (-14.5..=-11.5).contains(&u) && v.abs() < half_h * 0.55 {
+                    // Subtle gill creases behind both cheeks.
+                    if (-14.5..=-11.5).contains(&u) && (0.42..=0.85).contains(&nv.abs()) {
                         c = mix(c, HIDE_ABYSS, 0.65);
                     }
 
@@ -1249,8 +1190,8 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
                         c = mix(c, FLANK_GOLD, edge_t * (0.45 + 0.30 * recover_pulse));
                     }
 
-                    // Phase 2+ pale battle scar on cheek.
-                    if view.phase >= 2 && (-10.0..=2.0).contains(&u) && (v - 3.0).abs() < 0.7 {
+                    // Phase 2+ pale battle scar lines along the brow flanks.
+                    if view.phase >= 2 && (-10.0..=0.0).contains(&u) && (v.abs() - 5.0).abs() < 0.7 {
                         c = mix(c, (40, 78, 92), 0.50);
                     }
                     c
@@ -1269,7 +1210,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
         }
     }
 
-    let frame = BodyFrame { sc, f, d_up, side };
+    let frame = BodyFrame { sc, f, p };
     draw_teeth(pb, view, frame, gape, tglow, hit, false);
     draw_eyes(pb, view, frame, hit);
     draw_stalk_and_bulbs(pb, view, cam, frame);
@@ -1284,7 +1225,7 @@ fn draw_teeth(
     hit: f32,
     overlay_only: bool,
 ) {
-    let BodyFrame { sc, f, d_up, side } = frame;
+    let BodyFrame { sc, f, p } = frame;
     let dead = matches!(view.state, LanternState::Death);
     if tglow <= 0.02 && !dead {
         return;
@@ -1293,151 +1234,90 @@ fn draw_teeth(
         return;
     }
 
-    if side >= 0.45 {
-        // Profile view: 5 tall spaced upper needle fangs & 6 protruding underbite lower fangs.
-        let jaw_top = lerp(5.2, 11.4, gape);
-        let jaw_bot = -lerp(6.4, 14.8, gape);
-        for (row_sign, count) in [(1.0_f32, 5usize), (-1.0_f32, 6usize)] {
-            for i in 0..count {
-                if overlay_only && i >= 4 {
-                    continue;
-                }
-                let t = i as f32 / (count - 1).max(1) as f32;
-                let u_front = if row_sign < 0.0 { 13.8 } else { 11.8 };
-                let u_base = lerp(u_front, -1.5, t);
-                let v_lip = if row_sign > 0.0 { jaw_top } else { jaw_bot };
-                let v_base = v_lip - row_sign * (0.9 * t * t);
-
-                let bell = 1.0 - 0.34 * (t - 0.25).abs();
-                let mut base_len =
-                    lerp(4.2, 10.2, gape) * bell * if row_sign < 0.0 { 1.06 } else { 0.94 };
-                if i % 2 == 1 {
-                    base_len *= 0.88;
-                }
-                let u_tip = u_base - lerp(0.5, 1.4, t);
-                let v_tip = v_base - row_sign * base_len;
-
-                let front_bright = (1.0 - t * 0.56).clamp(0.26, 1.0) * tglow;
-                let (col_base, mut col_tip) = if dead {
-                    let fade = clamp01(view.progress * 1.4);
-                    let c = mix(TOOTH_DEAD, HIDE_ABYSS, fade);
-                    (c, c)
-                } else {
-                    let tip = if front_bright > 0.72 {
-                        mix(
-                            TOOTH_GLINT_HI,
-                            TOOTH_GLINT_WHITE,
-                            (front_bright - 0.72) / 0.28,
-                        )
-                    } else {
-                        mix(TOOTH_GLINT_DIM, TOOTH_GLINT_HI, front_bright / 0.72)
-                    };
-                    let base = mix(TOOTH_GLINT_DIM, TOOTH_GLINT_MID, front_bright);
-                    (base, tip)
-                };
-                if hit > 0.0 {
-                    col_tip = mix(col_tip, (255, 255, 255), hit * 0.65);
-                }
-
-                let u_ctrl = u_base + 0.6;
-                let v_ctrl = (v_base + v_tip) * 0.5;
-                let steps = ((base_len * 1.35).ceil() as usize).max(5);
-                let start_s = if overlay_only { steps / 3 } else { 0 };
-                let overlay_alpha = clamp01(0.65 + 0.35 * tglow);
-                for s in start_s..=steps {
-                    let st = s as f32 / steps as f32;
-                    let omt = 1.0 - st;
-                    let uu = omt * omt * u_base + 2.0 * omt * st * u_ctrl + st * st * u_tip;
-                    let vv = omt * omt * v_base + 2.0 * omt * st * v_ctrl + st * st * v_tip;
-                    let pt = sc + f * uu + d_up * vv;
-                    let c = mix(col_base, col_tip, st);
-                    let (ix, iy) = (pt.x.round() as i32, pt.y.round() as i32);
-                    if overlay_only {
-                        plot_blend(pb, ix, iy, c, overlay_alpha);
-                    } else {
-                        pb.plot(ix, iy, c);
-                    }
-                }
-            }
+    // 7 curved self-lit needle fangs fanning symmetrically across the front crescent jaw.
+    let jaw_hw = lerp(9.5, 14.8, gape);
+    let count = 7usize;
+    let overlay_alpha = clamp01(0.65 + 0.35 * tglow);
+    for i in 0..count {
+        let vn = (2 * i as i32 - (count as i32 - 1)) as f32 / (count - 1) as f32;
+        let v_base = vn * (jaw_hw - 1.0);
+        let u_base = 15.0 - 2.6 * vn * vn;
+        let mut length = lerp(4.2, 8.2, gape) * (1.0 - 0.22 * vn.abs());
+        if i % 2 == 1 {
+            length *= 0.90;
         }
-    } else {
-        // Top-down vertical heading: 7 curved fangs fanning across the front crescent jaw.
-        let jaw_hw = lerp(9.0, 14.2, gape);
-        let count = 7usize;
-        for i in 0..count {
-            let vn = -1.0 + 2.0 * (i as f32 / (count - 1) as f32);
-            let v_base = vn * (jaw_hw - 1.0);
-            let u_base = 14.5 - 2.6 * vn * vn;
-            let length = lerp(4.0, 7.6, gape) * (1.0 - 0.25 * vn.abs());
-            let u_tip = u_base - length * 0.85;
-            let v_tip = v_base * 0.82;
-            let front_bright = (1.0 - vn.abs() * 0.42).clamp(0.35, 1.0) * tglow;
-            let (col_base, mut col_tip) = if dead {
-                let c = mix(TOOTH_DEAD, HIDE_ABYSS, clamp01(view.progress * 1.4));
-                (c, c)
-            } else {
-                let tip = mix(
+        let u_tip = u_base - length * 0.88;
+        let v_tip = v_base * 0.80;
+        let u_ctrl = 0.5 * (u_base + u_tip) + 0.6;
+        let v_ctrl = 0.5 * (v_base + v_tip) * 0.94;
+        let front_bright = (1.0 - vn.abs() * 0.42).clamp(0.35, 1.0) * tglow;
+        let (col_base, mut col_tip) = if dead {
+            let c = mix(TOOTH_DEAD, HIDE_ABYSS, clamp01(view.progress * 1.4));
+            (c, c)
+        } else {
+            let tip = if front_bright > 0.55 {
+                mix(
                     TOOTH_GLINT_HI,
                     TOOTH_GLINT_WHITE,
                     clamp01((front_bright - 0.55) / 0.45),
-                );
-                let base = mix(TOOTH_GLINT_DIM, TOOTH_GLINT_MID, front_bright);
-                (base, tip)
+                )
+            } else {
+                mix(TOOTH_GLINT_DIM, TOOTH_GLINT_HI, front_bright / 0.55)
             };
-            if hit > 0.0 {
-                col_tip = mix(col_tip, (255, 255, 255), hit * 0.65);
-            }
-            let steps = ((length * 1.3).ceil() as usize).max(4);
-            let start_s = if overlay_only { steps / 2 } else { 0 };
-            for s in start_s..=steps {
-                let st = s as f32 / steps as f32;
-                let pt = sc + f * lerp(u_base, u_tip, st) + d_up * lerp(v_base, v_tip, st);
-                let c = mix(col_base, col_tip, st);
-                pb.plot(pt.x.round() as i32, pt.y.round() as i32, c);
+            let base = mix(TOOTH_GLINT_DIM, TOOTH_GLINT_MID, front_bright);
+            (base, tip)
+        };
+        if hit > 0.0 {
+            col_tip = mix(col_tip, (255, 255, 255), hit * 0.65);
+        }
+        let steps = ((length * 1.35).ceil() as usize).max(5);
+        let start_s = if overlay_only { steps / 3 } else { 0 };
+        for s in start_s..=steps {
+            let st = s as f32 / steps as f32;
+            let omt = 1.0 - st;
+            let uu = omt * omt * u_base + 2.0 * omt * st * u_ctrl + st * st * u_tip;
+            let vv = omt * omt * v_base + 2.0 * omt * st * v_ctrl + st * st * v_tip;
+            let pt = sc + f * uu + p * vv;
+            let c = mix(col_base, col_tip, st);
+            let (ix, iy) = (pt.x.round() as i32, pt.y.round() as i32);
+            if overlay_only {
+                plot_blend(pb, ix, iy, c, overlay_alpha);
+            } else {
+                pb.plot(ix, iy, c);
             }
         }
     }
 }
 
 fn draw_eyes(pb: &mut PixelBuffer, view: &LanternView, frame: BodyFrame, hit: f32) {
-    let BodyFrame { sc, f, d_up, side } = frame;
+    let BodyFrame { sc, f, p } = frame;
     let eglow = eye_glow_factor(view);
     if eglow <= 0.04 {
         return;
     }
 
-    let eye_u = lerp(-0.5, 2.8, side);
-    let eye_v = lerp(9.5, 11.8, side);
+    let eye_u = 1.0_f32;
+    let eye_v = 9.8_f32;
     let mut col_hi = mix(HIDE_ABYSS, EYE_BRIGHT, eglow);
     let col_ring = mix(HIDE_ABYSS, EYE_GOLD, eglow);
     if hit > 0.0 {
         col_hi = mix(col_hi, (255, 255, 255), hit * 0.7);
     }
 
-    let eyes = [
-        (sc + f * eye_u + d_up * eye_v, 1.0_f32),
-        (
-            sc + f * eye_u - d_up * eye_v,
-            clamp01((0.62 - side) / 0.44),
-        ),
-    ];
-
-    for (ep, alpha) in eyes {
-        if alpha <= 0.05 {
-            continue;
-        }
+    for sign in [-1.0_f32, 1.0] {
+        let ep = sc + f * eye_u + p * (sign * eye_v);
         let ex = ep.x.round() as i32;
         let ey = ep.y.round() as i32;
         for (dx, dy) in [(-2, 0), (2, 0), (0, -2), (0, 2)] {
-            plot_blend(pb, ex + dx, ey + dy, HIDE_ABYSS, 0.75 * alpha);
+            plot_blend(pb, ex + dx, ey + dy, HIDE_ABYSS, 0.75);
         }
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            plot_blend(pb, ex + dx, ey + dy, col_hi, alpha);
+            plot_blend(pb, ex + dx, ey + dy, col_hi, 1.0);
         }
         for (dx, dy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
-            plot_blend(pb, ex + dx, ey + dy, col_ring, 0.45 * alpha);
+            plot_blend(pb, ex + dx, ey + dy, col_ring, 0.45);
         }
-        plot_blend(pb, ex, ey, EYE_PUPIL, alpha);
+        plot_blend(pb, ex, ey, EYE_PUPIL, 1.0);
     }
 }
 
@@ -1491,19 +1371,21 @@ fn draw_bulb_sprite(
 }
 
 fn draw_stalk_and_bulbs(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, frame: BodyFrame) {
-    let BodyFrame { f, d_up, side, .. } = frame;
+    let BodyFrame { f, p, .. } = frame;
     let brow_s = w2s(brow_anchor(view), cam);
     let is_feint_tell = matches!(view.state, LanternState::FeintTell);
+    // Smooth, singularity-free projection of screen-up `(0, -1)` perpendicular to `f`.
+    let up_perp = Vec2::new(f.x * f.y, -(f.x * f.x));
 
     if let Some(b) = view.real_bulb {
         let bs = w2s(b.pos, cam);
         if !b.planted {
             // Flexible quadratic Bezier fishing-rod arch over the forehead & teeth.
             let dist = brow_s.dist(bs);
-            let arch_h = (dist * 0.48).clamp(10.0, 20.0) * (0.45 + 0.55 * side);
+            let arch_h = (dist * 0.34).clamp(6.0, 14.0);
             let wobble = (view.anim * 3.1).sin() * 1.4;
             let mid = (brow_s + bs) * 0.5;
-            let ctrl = mid + d_up * (arch_h + wobble) + f * 3.0;
+            let ctrl = mid + up_perp * arch_h + p * wobble + f * 2.0;
             let steps = ((dist * 1.65).ceil() as usize).max(14);
             let gain = clamp01(b.gain);
             for i in 0..=steps {
@@ -1521,7 +1403,7 @@ fn draw_stalk_and_bulbs(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, fra
             }
         } else if head_visibility(view) > 0.10 {
             // Snapped stalk stump on the brow once the bulb is planted on the seabed.
-            let stump_end = brow_s + f * 5.0 + d_up * (5.0 * side + 2.0);
+            let stump_end = brow_s + f * 5.5 + up_perp * 3.0;
             line_blend(pb, brow_s, stump_end, Stroke::solid(STALK_DARK, 0.90));
             plot_blend(
                 pb,
@@ -1677,9 +1559,9 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _a
         return;
     }
     let f = unit_facing(view);
-    let (side, d_up) = dorsal_frame(f);
+    let p = body_perp(f);
     let sc = w2s(view.pos, cam);
-    let frame = BodyFrame { sc, f, d_up, side };
+    let frame = BodyFrame { sc, f, p };
     let dash_phase = (view.anim * 10.0) as i32;
 
     // 1. Self-lit real & decoy bulb cores above foreground / darkness.
@@ -2051,8 +1933,8 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _a
         let pulse = 0.5 + 0.5 * (view.anim * 8.0).sin();
         let chev = Stroke::solid(FLANK_GOLD, 0.65 + 0.25 * pulse);
         for sign in [-1.0_f32, 1.0] {
-            let flank = sc - f * 5.0 + d_up * (sign * (HEAD_RADIUS + 3.0));
-            let in_d = -(d_up * sign);
+            let flank = sc - f * 5.0 + p * (sign * (HEAD_RADIUS + 3.0));
+            let in_d = -(p * sign);
             line_blend(pb, flank + f * 3.0 - in_d * 2.0, flank + in_d * 1.5, chev);
             line_blend(pb, flank - f * 3.0 - in_d * 2.0, flank + in_d * 1.5, chev);
         }
@@ -2597,5 +2479,194 @@ mod tests {
 
         let tagged_body = a.mat().iter().filter(|&&m| m == 42).count();
         assert!(tagged_body > 400, "body pixels should inherit caller material pen ({tagged_body})");
+    }
+
+    #[test]
+    fn top_down_silhouette_rotates_cleanly_at_cardinals_and_diagonals() {
+        const BG: Rgb = (8, 16, 22);
+        const CX: i32 = 100;
+        const CY: i32 = 100;
+        let center = Vec2::new(CX as f32, CY as f32);
+
+        let render_body = |facing: Vec2| -> PixelBuffer {
+            let mut pb = PixelBuffer::new(200, 200);
+            pb.clear(BG);
+            let mut view = sample_view(center, 0.0, LanternState::Swim, 0.4);
+            view.facing = facing;
+            view.attack_facing = facing;
+            view.real_bulb = None;
+            draw(&mut pb, &view, Vec2::ZERO, (94, 244, 255));
+            pb
+        };
+
+        let bounds = |pb: &PixelBuffer| -> (usize, usize, usize, usize) {
+            let mut min_x = pb.w;
+            let mut max_x = 0usize;
+            let mut min_y = pb.h;
+            let mut max_y = 0usize;
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    if pb.pixel_at(x, y) != BG {
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
+            }
+            assert!(min_x <= max_x && min_y <= max_y, "rendered body was empty");
+            (min_x, max_x, min_y, max_y)
+        };
+
+        let is_golden_eye = |(r, g, b): Rgb| r >= 180 && g >= 150 && b < 130;
+
+        // Exact cardinal headings (including exact `(0, ±1)` where `dorsal_frame`
+        // previously collapsed to a 1-px vertical sliver).
+        let pb_r = render_body(Vec2::new(1.0, 0.0));
+        let pb_d = render_body(Vec2::new(0.0, 1.0));
+        let pb_l = render_body(Vec2::new(-1.0, 0.0));
+        let pb_u = render_body(Vec2::new(0.0, -1.0));
+
+        let (r_x0, r_x1, r_y0, r_y1) = bounds(&pb_r);
+        let (d_x0, d_x1, d_y0, d_y1) = bounds(&pb_d);
+        let (l_x0, l_x1, l_y0, l_y1) = bounds(&pb_l);
+        let (u_x0, u_x1, u_y0, u_y1) = bounds(&pb_u);
+
+        let (r_w, r_h) = (r_x1 - r_x0 + 1, r_y1 - r_y0 + 1);
+        let (d_w, d_h) = (d_x1 - d_x0 + 1, d_y1 - d_y0 + 1);
+        let (l_w, l_h) = (l_x1 - l_x0 + 1, l_y1 - l_y0 + 1);
+        let (u_w, u_h) = (u_x1 - u_x0 + 1, u_y1 - u_y0 + 1);
+
+        assert!((80..=96).contains(&r_w) && (38..=56).contains(&r_h), "right bbox {r_w}x{r_h}");
+        assert!(r_w > r_h, "facing (1,0) must be wider than tall ({r_w}x{r_h})");
+        assert!(r_x0 < 40 && r_x1 > 110, "facing (1,0) tail behind head: x in [{r_x0}..={r_x1}]");
+
+        assert!((38..=56).contains(&d_w) && (80..=96).contains(&d_h), "down bbox {d_w}x{d_h}");
+        assert!(d_h > d_w, "facing (0,1) must be taller than wide ({d_w}x{d_h})");
+        assert!(d_y0 < 40 && d_y1 > 110, "facing (0,1) tail behind head: y in [{d_y0}..={d_y1}]");
+
+        assert_eq!((l_w, l_h), (r_w, r_h), "(-1,0) bbox must match (1,0)");
+        assert!(l_x1 > 160 && l_x0 < 90, "facing (-1,0) tail behind head: x in [{l_x0}..={l_x1}]");
+
+        assert_eq!((u_w, u_h), (d_w, d_h), "(0,-1) bbox must match (0,1)");
+        assert!(u_y1 > 160 && u_y0 < 90, "facing (0,-1) tail behind head: y in [{u_y0}..={u_y1}]");
+
+        // Rotating the heading by 90°, 180°, 270° rotates the silhouette pixel-for-pixel.
+        for dy in -95i32..=95 {
+            for dx in -95i32..=95 {
+                let px_r = pb_r.pixel_at((CX + dx) as usize, (CY + dy) as usize);
+                assert_eq!(
+                    px_r,
+                    pb_d.pixel_at((CX - dy) as usize, (CY + dx) as usize),
+                    "90 deg rotation mismatch at ({dx}, {dy})"
+                );
+                assert_eq!(
+                    px_r,
+                    pb_l.pixel_at((CX - dx) as usize, (CY - dy) as usize),
+                    "180 deg rotation mismatch at ({dx}, {dy})"
+                );
+                assert_eq!(
+                    px_r,
+                    pb_u.pixel_at((CX + dy) as usize, (CY - dx) as usize),
+                    "270 deg rotation mismatch at ({dx}, {dy})"
+                );
+            }
+        }
+
+        // `(-1,0)` horizontally mirrors `(1,0)` across the head/brow/fins/maw/teeth
+        // and preserves the exact column-by-column silhouette width down the tail.
+        for dy in -30i32..=30 {
+            for dx in -14i32..=20 {
+                assert_eq!(
+                    pb_r.pixel_at((CX + dx) as usize, (CY + dy) as usize),
+                    pb_l.pixel_at((CX - dx) as usize, (CY + dy) as usize),
+                    "head horizontal mirror mismatch at ({dx}, {dy})"
+                );
+            }
+        }
+        for dx in -80i32..=80 {
+            let col_r = (0..pb_r.h)
+                .filter(|&y| pb_r.pixel_at((CX + dx) as usize, y) != BG)
+                .count();
+            let col_l = (0..pb_l.h)
+                .filter(|&y| pb_l.pixel_at((CX - dx) as usize, y) != BG)
+                .count();
+            assert_eq!(col_r, col_l, "horizontal column mirror mismatch at dx={dx}");
+        }
+
+        // Paired golden brow eyes appear symmetrically on BOTH horizontal and vertical
+        // headings (confirming top-down everywhere with no side-profile roll).
+        let r_eyes_top = (0..95usize)
+            .flat_map(|y| (85..118usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| is_golden_eye(pb_r.pixel_at(x, y)))
+            .count();
+        let r_eyes_bot = (105..200usize)
+            .flat_map(|y| (85..118usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| is_golden_eye(pb_r.pixel_at(x, y)))
+            .count();
+        assert!(
+            r_eyes_top >= 2 && r_eyes_bot >= 2,
+            "horizontal (1,0) must keep paired top-down eyes ({r_eyes_top}, {r_eyes_bot})"
+        );
+        let d_eyes_left = (85..118usize)
+            .flat_map(|y| (0..95usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| is_golden_eye(pb_d.pixel_at(x, y)))
+            .count();
+        let d_eyes_right = (85..118usize)
+            .flat_map(|y| (105..200usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| is_golden_eye(pb_d.pixel_at(x, y)))
+            .count();
+        assert!(
+            d_eyes_left >= 2 && d_eyes_right >= 2,
+            "vertical (0,1) must keep paired top-down eyes ({d_eyes_left}, {d_eyes_right})"
+        );
+
+        // Diagonals rotate cleanly with non-degenerate bounds, trailing tail mass,
+        // and paired golden eyes on both sides of the spine.
+        for diag in [
+            Vec2::new(1.0, 1.0),
+            Vec2::new(-1.0, 1.0),
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -1.0),
+        ] {
+            let dir = diag.normalized();
+            let perp = dir.perp();
+            let pb = render_body(dir);
+            let (x0, x1, y0, y1) = bounds(&pb);
+            let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+            assert!(w >= 55 && h >= 55, "diagonal {dir:?} bbox too small: {w}x{h}");
+
+            let mut sum_x = 0.0_f32;
+            let mut sum_y = 0.0_f32;
+            let mut count = 0u32;
+            let mut eye_pos = 0usize;
+            let mut eye_neg = 0usize;
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let px = pb.pixel_at(x, y);
+                    if px != BG {
+                        sum_x += x as f32;
+                        sum_y += y as f32;
+                        count += 1;
+                        if is_golden_eye(px) {
+                            let rel = Vec2::new(x as f32 - center.x, y as f32 - center.y);
+                            let lat = rel.dot(perp);
+                            if lat > 4.0 {
+                                eye_pos += 1;
+                            } else if lat < -4.0 {
+                                eye_neg += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let centroid = Vec2::new(sum_x / count as f32, sum_y / count as f32);
+            let along = (centroid - center).dot(dir);
+            assert!(along < -10.0, "diagonal {dir:?} tail should trail behind head (along={along})");
+            assert!(
+                eye_pos >= 2 && eye_neg >= 2,
+                "diagonal {dir:?} must keep paired eyes ({eye_pos}, {eye_neg})"
+            );
+        }
     }
 }
