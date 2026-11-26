@@ -1,0 +1,141 @@
+# Rat Run pressure beats candidate.
+# Fresh seeds 7000–7299, measured campaign wins expert 88.7%, skilled 63.0%, casual 12.7%.
+# See report.md for target conformance, uncertainty and predictions.
+
+[director]
+# Shipped false. Enable pressure beats.
+pressure_beats = true
+# Shipped [205.0, 675.0]. Pair of buildup windows in simulation seconds.
+pressure_starts = [198.854, 694.324]
+# Shipped [125.0, 125.0]. Pair of buildup windows in simulation seconds.
+pressure_lengths = [104.285, 101.29]
+# Shipped [220.0, 90.0]. Pair of buildup windows in simulation seconds.
+pressure_recovery_lengths = [268.076, 68.965]
+# Shipped 0.4. Fractional cadence uplift, automatically balanced by recovery.
+pressure_rate_bonus = 0.24262717
+# Shipped 0.35. Fractional live-budget uplift in a surge.
+pressure_budget_bonus = 0.33028942
+# Shipped 0.4. Fractional contact damage uplift in a surge.
+pressure_contact_bonus = 1.1266887
+# Shipped 0.25. Fractional live-budget cut in recovery.
+pressure_recovery_budget_cut = 0.19937819
+# Shipped 0.25. Fraction of other rare finds converted to Medkits in recovery.
+pressure_recovery_heal = 0.67160283
+# Shipped 150.0. Time for Sewer opening contact grace.
+pressure_sewer_opening_secs = 167.5572142
+# Shipped 0.35. Fractional contact damage cut in the Sewer opening.
+pressure_sewer_opening_cut = 0.26234644
+# Shipped [0.65, 1.0, 1.15, 1.25]. Beat strength for Kitchen, Lab and Flatbed, with later-floor weighting.
+pressure_sector_scale = [0.41453409, 1.18534939, 1.3945287, 1.603708]
+# Shipped [0.8, 2.2, 2.4, 2.6]. Independent ordinary enemy HP scales by sector.
+build_hp_level = [0.62624162, 2.6255746, 3.59526003, 2.27395626]
+# Shipped [1.0, 1.6, 1.9, 2.1]. Independent end-of-buildup contact damage scales by sector.
+level_damage_top = [0.61121884, 1.03196621, 1.23444857, 2.01584772]
+
+[director.sectors.1]
+# Shipped [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Sewer live budget by buildup time.
+live_budget = [[0.0, 15], [60.0, 35], [180.0, 59], [360.0, 95], [540.0, 124], [720.0, 152], [900.0, 152]]
+# Shipped [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Sewer pulse interval.
+spawn_interval = [[0.0, 1.79213613], [60.0, 1.71746379], [180.0, 1.56811912], [360.0, 1.3441021], [540.0, 1.12008508], [720.0, 0.89606807], [900.0, 0.67205105]]
+# Shipped 1.0. Sewer elite arrival interval.
+elite_interval_mult = 1.20339881
+
+[director.sectors.2]
+# Shipped [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Kitchen live budget by buildup time.
+live_budget = [[0.0, 23], [60.0, 54], [180.0, 93], [360.0, 148], [540.0, 193], [720.0, 239], [900.0, 239]]
+# Shipped [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Kitchen pulse interval.
+spawn_interval = [[0.0, 2.18661089], [60.0, 2.0955021], [180.0, 1.91328453], [360.0, 1.63995817], [540.0, 1.36663181], [720.0, 1.09330545], [900.0, 0.81997909]]
+# Shipped 1.0. Kitchen elite arrival interval.
+elite_interval_mult = 1.33312945
+
+[director.sectors.3]
+# Shipped [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Lab live budget by buildup time.
+live_budget = [[0.0, 24], [60.0, 55], [180.0, 94], [360.0, 150], [540.0, 196], [720.0, 242], [900.0, 242]]
+# Shipped [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Lab pulse interval.
+spawn_interval = [[0.0, 1.26033163], [60.0, 1.20781781], [180.0, 1.10279018], [360.0, 0.94524872], [540.0, 0.78770727], [720.0, 0.63016582], [900.0, 0.47262436]]
+# Shipped 1.0. Lab elite arrival interval.
+elite_interval_mult = 1.33629892
+
+[director.sectors.4]
+# Shipped [[0.0, 18], [60.0, 42], [180.0, 72], [360.0, 115], [540.0, 150], [720.0, 185], [900.0, 185]]. Flatbed live budget by buildup time.
+live_budget = [[0.0, 23], [60.0, 53], [180.0, 91], [360.0, 146], [540.0, 190], [720.0, 234], [900.0, 234]]
+# Shipped [[0.0, 1.6], [60.0, 1.53333333], [180.0, 1.4], [360.0, 1.2], [540.0, 1.0], [720.0, 0.8], [900.0, 0.6]]. Flatbed pulse interval.
+spawn_interval = [[0.0, 1.34939073], [60.0, 1.29316612], [180.0, 1.18071689], [360.0, 1.01204305], [540.0, 0.84336921], [720.0, 0.67469537], [900.0, 0.50602152]]
+# Shipped 1.0. Flatbed elite arrival interval.
+elite_interval_mult = 1.30036033
+
+[enemies]
+# Shipped 1.0. Ordinary movement speed relative to shipped.
+speed_mult = 0.85838351
+
+[player]
+# Shipped 130.0. Starting health before upgrades.
+max_hp = 158.95399192
+# Shipped 0.9. Protection after a projectile, boss or hazard hit.
+hit_iframes = 1.18948404
+# Shipped 0.65. Protection after ordinary enemy contact.
+contact_iframes = 1.11702878
+# Shipped 0.4. Starting regeneration relative to shipped.
+regen = 0.46474266
+
+[xp]
+# Shipped 6.0. XP cost of each geometric progression step relative to shipped.
+base = 4.84805895
+
+[bosses]
+# Shipped 1.0. Effective health of each boss relative to shipped.
+hp_mult = 0.76265487
+# Shipped [0.75, 0.78, 0.57, 0.68]. Cancels sector enemy HP scaling in the boss HP formula.
+build_level = [0.95809666, 0.65357122, 0.38050099, 0.77749956]
+
+[bosses.kinds.Cat]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+# Shipped 22.0. Jaguar swipe damage before the attack multiplier and armor.
+swipe_damage = 17.50976381
+# Shipped 1.0. Jaguar swipe windup multiplier, compounded with tell_time_mult.
+swipe_windup_mult = 0.97908978
+
+[bosses.kinds.HorseshoeCrab]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+
+[bosses.kinds.Broom]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+
+[bosses.kinds.MegaRat]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+
+[bosses.kinds.Mower]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+
+[bosses.kinds.Cobra]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+
+[bosses.kinds.Magpie]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446
+
+[bosses.kinds.Hawk]
+# Shipped 1.0. Multiplier for this boss's hazard damage.
+attack_damage_mult = 1.17798989
+# Shipped 1.0. Multiplier for this boss's hazard warning time.
+tell_time_mult = 1.33331446

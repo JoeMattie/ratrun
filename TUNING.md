@@ -110,3 +110,5 @@ ratrun --bot-compare baseline.json harder.json
 ```
 
 The text report shows the file path, the effective tuning hash and changed fields. The JSON carries the same information in `tuning.path`, `tuning.hash` and `tuning.diff`. Files with equivalent effective values share the hash even when their paths or formatting differ. `--bot-compare` also accepts reports written before the tuning fields existed. When checking exact replay, compare simulation fields separately from the file path, thread count and measured wall-clock fields.
+
+See [`docs/balance/README.md`](docs/balance/README.md) for the campaign balance studies, solved overlays, and the 5-run tweak-testing protocol.

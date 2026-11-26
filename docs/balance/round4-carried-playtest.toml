@@ -1,0 +1,24 @@
+# Owner-anchored playtest for the power-scaling build on v0.4.2.
+# Starts the Sewer at the half-HP experiment's 79.477 base HP. Directed
+# ordinary arrivals have 2.205–2.8175x shipped HP, versus 2x in that experiment.
+# Later floors restore the rat's full base HP and reduce ordinary and boss HP.
+
+[player]
+sector_hp_mult = [0.5, 1.0, 1.0, 1.0]
+
+[enemies]
+sector_hp_mult = [2.45, 0.84, 0.80, 0.75]
+
+[director]
+power_scaling = true
+power_hp_exponent = 0.45
+power_hp_floor = 0.90
+power_hp_ceiling = 1.15
+power_memory_secs = 18.0
+power_reference_hp = [31.85, 13.44, 20.0, 11.25]
+
+[bosses]
+build_level = [0.9580967, 0.58821410, 0.32342585, 0.62199965]
+
+[campaign]
+carry = true
