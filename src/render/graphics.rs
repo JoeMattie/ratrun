@@ -1,11 +1,10 @@
 //! The **Graphics** page: the render-only picture settings that used to live on
 //! console commands and environment variables alone.
 //!
-//! It is reached from the Options plate's `GRAPHICS` row, exactly the way
-//! `CONTROLS` opens the Controls screen, and drawn over whatever opened Options
-//! (the title plate, or the frozen play field behind the pause overlay). Every
-//! row shows its current value and cycles it with Left/Right, Enter or a click;
-//! `BACK` / Esc / a right click returns to Options.
+//! Open it with the Graphics action from play or pause, or from the Options
+//! plate's `GRAPHICS` row. It draws over the frozen field or the title. Every
+//! row cycles with Left/Right, Enter or a click. S cycles smoothing from any
+//! row, and the Graphics action or Back returns to the screen that opened it.
 //!
 //! **Nothing here is simulated.** The lighting quality, the light effects, the
 //! 1× edge smoothing, the parallax foreground, the round-glyph particles and the
@@ -43,11 +42,6 @@ pub const PANEL_H: u16 = 14;
 /// The label column, two cells wider than the longest label (`GLYPH PARTICLES`,
 /// fifteen) so a value strip never butts against its label.
 const LABEL_W: u16 = 17;
-
-/// Keyboard hint under the rows.
-const LEGEND: &str = "↑↓ row · ←→ change · wheel · Enter open · Esc back";
-/// The same hint where the legend above does not fit (a narrow terminal).
-const LEGEND_SHORT: &str = "↑↓ · ←→ · Esc back";
 
 /// The shares of the simulation's shake the SCREEN SHAKE row cycles, ascending.
 /// `0.65` is the value every effect had before the row existed, so a fresh
@@ -108,14 +102,14 @@ impl Row {
             Row::Foreground => " overhead pipes, lines and proofs",
             Row::GlyphFx => " motes, sparks and rising bubbles",
             Row::Shake => " how much a hit moves the camera",
-            Row::Back => " Esc or a right click",
+            Row::Back => " right click to go back",
         }
     }
 }
 
 /// One frame of page state, filled in by the app.
 #[derive(Clone, Copy, Debug)]
-pub struct GraphicsView {
+pub struct GraphicsView<'a> {
     pub lighting: crate::render::lighting::LightingMode,
     pub fx: bool,
     pub smooth: Smooth,
@@ -127,6 +121,8 @@ pub struct GraphicsView {
     pub row: usize,
     /// Accent for the panel edge and the selected row (theme or level material).
     pub accent: Color,
+    pub graphics_key: &'a str,
+    pub back_key: &'a str,
 }
 
 /// Rows for one terminal area.
@@ -241,7 +237,7 @@ fn on_off(on: bool) -> String {
 }
 
 /// The value strip's text for `row` (the strip draws its own `‹ ›`).
-pub fn value_text(view: &GraphicsView, row: Row) -> String {
+pub fn value_text(view: &GraphicsView<'_>, row: Row) -> String {
     match row {
         Row::Lighting => lighting_label(view.lighting).to_string(),
         Row::Fx => on_off(view.fx),
@@ -254,7 +250,7 @@ pub fn value_text(view: &GraphicsView, row: Row) -> String {
 }
 
 /// Draw the Graphics plate and register its mouse targets.
-pub fn draw(f: &mut Frame, area: Rect, view: &GraphicsView, hits: &mut HitMap) {
+pub fn draw(f: &mut Frame, area: Rect, view: &GraphicsView<'_>, hits: &mut HitMap) {
     // Only this page's controls are interactive while it is open (it clears the
     // targets the plate behind it registered, exactly like the Options screen).
     hits.clear();
@@ -367,10 +363,10 @@ pub fn draw(f: &mut Frame, area: Rect, view: &GraphicsView, hits: &mut HitMap) {
     // Legend and a note on what the selected row actually changes.
     let legend_y = lay.rows[ROW_COUNT - 1].y.saturating_add(1);
     if inner.height > ROW_COUNT as u16 + 2 {
-        let legend = if inner.width >= LEGEND.chars().count() as u16 {
-            LEGEND
+        let legend = if view.graphics_key == "—" || view.graphics_key == view.back_key {
+            format!("S smoothing · {} back", view.back_key)
         } else {
-            LEGEND_SHORT
+            format!("S smoothing · {} or {} back", view.graphics_key, view.back_key)
         };
         f.render_widget(
             Line::styled(legend, ink(MUTED)).centered(),
@@ -405,7 +401,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn view(row: usize) -> GraphicsView {
+    fn view(row: usize) -> GraphicsView<'static> {
         GraphicsView {
             lighting: LightingMode::Full,
             fx: true,
@@ -415,10 +411,12 @@ mod tests {
             shake_scale: crate::game::world::SHAKE_SCALE,
             row,
             accent: Color::Rgb(144, 184, 173),
+            graphics_key: "G",
+            back_key: "Esc",
         }
     }
 
-    fn frame(w: u16, h: u16, v: &GraphicsView) -> (String, HitMap) {
+    fn frame(w: u16, h: u16, v: &GraphicsView<'_>) -> (String, HitMap) {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         let mut hits = HitMap::default();
         term.draw(|f| draw(f, f.area(), v, &mut hits)).unwrap();
@@ -465,7 +463,7 @@ mod tests {
                 }
             }
             let (text, _) = frame(w, h, &view(LIGHTING_ROW));
-            assert!(text.contains("Esc back"), "{w}x{h}: no legend:\n{text}");
+            assert!(text.contains("S smoothing · G or Esc back"), "{w}x{h}: no legend:\n{text}");
             assert!(text.contains("GRAPHICS"), "{w}x{h}: no plate title:\n{text}");
         }
     }
@@ -492,6 +490,8 @@ mod tests {
             shake_scale: 0.0,
             row: SHAKE_ROW,
             accent: Color::Rgb(0, 0, 0),
+            graphics_key: "G",
+            back_key: "Esc",
         };
         assert_eq!(value_text(&off, Row::Lighting), "COMPACT");
         assert_eq!(value_text(&off, Row::Fx), "OFF");

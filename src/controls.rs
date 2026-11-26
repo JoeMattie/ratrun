@@ -41,7 +41,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKe
 use crate::math::Vec2;
 
 /// How many actions the table holds (index into every binding array).
-pub const ACTION_COUNT: usize = 26;
+pub const ACTION_COUNT: usize = 27;
 
 /// One thing the player can bind a key, a mouse button or a pad button to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,6 +80,8 @@ pub enum Action {
     Quit,
     /// Refund every Nest track; reset the scheme on the Controls screen.
     Reset,
+    /// Open the Graphics page from play or pause, or close it there.
+    Graphics,
 }
 
 /// Every action in table order; the index is the array index everywhere.
@@ -110,6 +112,7 @@ pub const ACTIONS: [Action; ACTION_COUNT] = [
     Action::Nest,
     Action::Quit,
     Action::Reset,
+    Action::Graphics,
 ];
 
 impl Action {
@@ -146,6 +149,7 @@ impl Action {
             Action::Nest => "THE NEST",
             Action::Quit => "QUIT/TO MENU",
             Action::Reset => "REFUND/RESET",
+            Action::Graphics => "GRAPHICS",
         }
     }
 
@@ -823,6 +827,7 @@ impl Bindings {
         b.kbm[Action::Nest.index()] = Binding::Key(KeyBind::Char('b'));
         b.kbm[Action::Quit.index()] = Binding::Key(KeyBind::Char('q'));
         b.kbm[Action::Reset.index()] = Binding::Key(KeyBind::Char('r'));
+        b.kbm[Action::Graphics.index()] = Binding::Key(KeyBind::Char('g'));
 
         // Pad defaults: d-pad/stick move, RB dashes, X fires the actives,
         // Start pauses, View opens the map, Y flips the cursor, LB mutes,
@@ -1200,6 +1205,11 @@ impl Controls {
             primary
         };
         let pause = pair(Action::Pause);
+        let graphics = if self.device == Device::Pad && !b.pad_of(Action::Graphics).is_none() {
+            pad(Action::Graphics)
+        } else {
+            key(Action::Graphics)
+        };
 
         if self.device == Device::Pad {
             // The HUD names the pad glyphs when the pad drove the last input.
@@ -1223,7 +1233,7 @@ impl Controls {
                     pad(Action::ZoomOut),
                 ),
                 format!(
-                    "{} map · {} minimap · {} reset zoom · {} options",
+                    "{} map · {} minimap · {} reset zoom · {} options · {graphics} graphics",
                     pad(Action::Map),
                     pad(Action::MinimapSize),
                     pad(Action::ResetZoom),
@@ -1234,7 +1244,7 @@ impl Controls {
                 format!("stick/d-pad move · {} dash · {} actives", pad(Action::Dash), pad(Action::FireActives)),
                 format!("R-stick aim · {} pause · {} confirm · {} back", pad(Action::Pause), pad(Action::Confirm), pad(Action::Back)),
                 format!("{} cursor · {} mute · {} map · {} zoom", pad(Action::ToggleCursor), pad(Action::Mute), pad(Action::Map), pad(Action::ZoomIn)),
-                format!("{} reset zoom · {} options", pad(Action::ResetZoom), pad(Action::Options)),
+                format!("{} reset zoom · {} options · {graphics} graphics", pad(Action::ResetZoom), pad(Action::Options)),
             ];
             self.pause_wide = vec![
                 format!(
@@ -1244,7 +1254,7 @@ impl Controls {
                     pad(Action::Pause),
                 ),
                 format!(
-                    "{} cursor · {} mute · {} options · {} back to menu",
+                    "{} cursor · {} mute · {} options · {} back to menu · {graphics} graphics",
                     pad(Action::ToggleCursor),
                     pad(Action::Mute),
                     pad(Action::Options),
@@ -1253,7 +1263,7 @@ impl Controls {
             ];
             self.pause_narrow = vec![
                 format!("move stick · dash {} · actives {}", pad(Action::Dash), pad(Action::FireActives)),
-                format!("{} unpause · {} options", pad(Action::Pause), pad(Action::Options)),
+                format!("{} unpause · {} options · {graphics} graphics", pad(Action::Pause), pad(Action::Options)),
             ];
             return;
         }
@@ -1360,7 +1370,7 @@ impl Controls {
                 key(Action::Mute)
             ),
             format!(
-                "{} {} music · {} {} effects · {} story · {} · {} quit",
+                "{} {} music · {} {} effects · {} story · {} · {} quit · {graphics} graphics",
                 key(Action::MusicDown),
                 key(Action::MusicUp),
                 key(Action::EffectsDown),
@@ -1377,7 +1387,7 @@ impl Controls {
         };
         self.title_narrow = vec![
             narrow_first,
-            format!("{click_tail}{pause} pause"),
+            format!("{click_tail}{pause} pause · {graphics} graphics"),
             format!(
                 "wheel or {} zoom · {} reset · {} map · {} minimap",
                 key(Action::ZoomIn),
@@ -1401,7 +1411,7 @@ impl Controls {
         self.pause_wide = vec![
             pause_first,
             format!(
-                "{} {} music · {} {} effects · {} options · {pause} unpause · {} quit",
+                "{} {} music · {} {} effects · {} options · {pause} unpause · {} quit · {graphics} graphics",
                 key(Action::MusicDown),
                 key(Action::MusicUp),
                 key(Action::EffectsDown),
@@ -1412,7 +1422,7 @@ impl Controls {
         ];
         self.pause_narrow = vec![
             format!("move WASD · dash {dash} · actives {actives}"),
-            format!("{click_tail}{pause} unpause"),
+            format!("{click_tail}{pause} unpause · {graphics} graphics"),
         ];
     }
 
@@ -1553,7 +1563,8 @@ impl Controls {
                 }
                 // An action newer than the file takes its default key only
                 // when the player has not already given that key to something
-                // else; otherwise it starts unbound, never double-bound. A key
+                // else (for example, G for Graphics in a 26-action save);
+                // otherwise it starts unbound, never double-bound. A key
                 // an older action holds *by default* is not the player's doing:
                 // the defaults share it on purpose (Esc is Pause and Back), so
                 // it does not count as taken.
@@ -2422,6 +2433,7 @@ mod tests {
             "L story",
             "pause",
             "Q quit",
+            "G graphics",
         ] {
             assert!(title.contains(needle), "title legend misses {needle:?}: {title}");
         }
@@ -2540,6 +2552,38 @@ mod tests {
         assert_eq!(back.active().get(Action::Mute), Binding::Key(KeyBind::Char('b')));
         assert!(back.active().get(Action::Nest).is_none(), "B is on two actions");
         assert_eq!(back.active().get(Action::Quit), Binding::Key(KeyBind::Char('q')));
+    }
+
+    #[test]
+    fn graphics_is_appended_and_old_controls_get_its_free_default() {
+        let key = Binding::Key(KeyBind::Char('g'));
+        assert_eq!(ACTION_COUNT, 27);
+        assert_eq!(ACTIONS[26], Action::Graphics);
+        assert_eq!(Action::Graphics.index(), 26);
+
+        let mut saved = Controls::default().to_saved();
+        for s in saved.schemes.iter_mut().flatten() {
+            s.kbm.truncate(26);
+            s.alt.truncate(26);
+            s.pad.truncate(26);
+        }
+        let mut loaded = Controls::from_saved(&saved);
+        for scheme in SCHEMES {
+            loaded.set_scheme(scheme);
+            let b = loaded.active();
+            assert_eq!(b.get(Action::Graphics), key);
+            assert!(b.alt_of(Action::Graphics).is_none());
+            assert!(b.pad_of(Action::Graphics).is_none());
+            assert_eq!(ACTIONS.iter().filter(|&&a| b.kbm_slots(a).contains(&key)).count(), 1);
+        }
+        assert!(loaded.pause_legend_lines(false).join(" ").contains("G graphics"));
+
+        // An existing assignment in a pre-Graphics save keeps its key.
+        let classic = saved.schemes[0].as_mut().unwrap();
+        classic.alt[Action::Mute.index()] = key.as_str();
+        let loaded = Controls::from_saved(&saved);
+        assert_eq!(loaded.active().alt_of(Action::Mute), key);
+        assert!(loaded.active().get(Action::Graphics).is_none());
     }
 
     #[test]
