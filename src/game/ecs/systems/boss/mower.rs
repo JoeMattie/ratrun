@@ -962,7 +962,9 @@ mod tests {
     }
 
     fn lab_world(seed: u64) -> World {
-        let mut w = World::new(Theme::Lab, mower_seed(seed));
+        let mut w = World::with_tuning(
+            Theme::Lab, mower_seed(seed), crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Mower),
+        );
         // Campaign slot 2 is the Lab, i.e. the mower.
         w.level_index = 2;
         w
@@ -1120,6 +1122,8 @@ mod tests {
                 });
                 if let Some(hazard) = due {
                     place_in(w, &hazard);
+                    // Isolate this hazard from immunity granted by an earlier hit.
+                    w.player.iframes = 0.0;
                     parked = true;
                 }
             }

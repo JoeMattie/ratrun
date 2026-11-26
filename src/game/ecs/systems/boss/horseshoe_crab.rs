@@ -830,7 +830,9 @@ mod tests {
     const CRAB_SEED: u64 = 3;
 
     fn crab_world(seed: u64) -> World {
-        let w = World::new(Theme::Sewer, seed);
+        let w = World::with_tuning(
+            Theme::Sewer, seed, crate::tuning::RunTuning::with_base_boss_hazards(BossKind::HorseshoeCrab),
+        );
         assert_eq!(
             BossKind::pool_pick(Theme::Sewer, w.level.seed),
             BossKind::HorseshoeCrab,
@@ -997,9 +999,7 @@ mod tests {
         assert!(boss.arena.contains_world(boss.pos) || centre.dist(boss.pos) > 0.0);
         assert!(boss.hp > 0.0);
         // The pool is the framework's: art pool x scale x the director's curve.
-        let expect = art::BOSS_BASE_HP
-            * BossKind::HorseshoeCrab.hp_scale()
-            * crate::game::director::boss_hp_mult_for(0, crate::game::director::BOSS_TIME);
+        let expect = BossKind::HorseshoeCrab.hp_pool(0);
         assert!((boss.max_hp - expect).abs() < 1.0, "pool {} vs {expect}", boss.max_hp);
         assert_eq!(boss.kind.body_radius(), art::BODY_RADIUS);
         assert_eq!(boss.kind.contact_damage(), art::CONTACT_DAMAGE);

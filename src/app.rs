@@ -7580,6 +7580,29 @@ mod tests {
         assert!(h.app.last_summary.as_ref().is_some_and(|s| s.tuned && !s.console_used));
     }
 
+    #[test]
+    fn shipped_balance_banks_and_scores_with_or_without_a_file() {
+        let dump = crate::tuning::Tuning::commented_defaults();
+        for tuning in [
+            crate::tuning::RunTuning::default(),
+            crate::tuning::RunTuning::new(crate::tuning::Tuning::parse(&dump).unwrap()),
+        ] {
+            let mut h = Harness::new(90, 32);
+            h.app.tuning = tuning;
+            h.enter_playing();
+            let world = h.app.world.as_mut().unwrap();
+            assert!(world.tuning().director.pressure_beats);
+            world.gold = 130;
+            world.player.hp = -1.0;
+            let frame = h.frame(&[]);
+            assert!(!frame.contains("TUNED"));
+            let tally = h.app.bank_tally.expect("the run banks");
+            assert!(!tally.voided && tally.banked == 130);
+            assert_eq!(h.app.scores.entries.len(), 1);
+            assert!(h.app.last_summary.as_ref().is_some_and(|summary| !summary.tuned));
+        }
+    }
+
     /// A CONSOLE USED run banks nothing and enters no score, whether it ends
     /// in a death or a quit from the pause screen.
     #[test]
@@ -7989,7 +8012,6 @@ mod tests {
     /// multipliers, not the sector's own.
     #[test]
     fn practice_run_spawns_the_first_levels_enemy_stats() {
-        use crate::game::director;
         use crate::game::enemy::EnemyKind;
         // 100 s is inside every stage's opening grace for hp (the damage ramp
         // already differs there); 600 s is where the stages' hp differs too.
@@ -8020,12 +8042,11 @@ mod tests {
                 }
                 assert!(!spawned.is_empty(), "sector {sector}: nothing spawned at {t} s");
                 let now = w.elapsed;
-                let hp0 = director::horde_hp_mult_for(0, now);
-                let mods0 = director::enemy_mods_for(0, now);
-                assert_eq!(mods0.damage, 1.0, "level 0 has no damage ramp");
-                // The sector's own curve is measurably different, so the
-                // assertions below can tell the two apart.
-                assert!(director::enemy_mods_for(sector, now).damage > 1.005);
+                let director = &w.tuning().director;
+                let hp0 = director.horde_hp_mult_for(0, now);
+                let mods0 = director.enemy_mods_for(0, now);
+                // The sector's own curve is measurably different.
+                assert!((director.enemy_mods_for(sector, now).damage - mods0.damage).abs() > 0.005);
                 for e in &spawned {
                     let rel = e.max_hp / e.kind.base_hp();
                     assert!(
@@ -8142,16 +8163,9 @@ mod tests {
         assert!(!text.contains("Enter equip"), "a stale Confirm key:\n{text}");
     }
 
-    fn capture_pressure_tuning() -> crate::tuning::RunTuning {
-        crate::tuning::RunTuning::new(crate::tuning::Tuning::parse(
-            "[director]\npressure_beats = true\npressure_sector_scale = [1.3, 1.0, 1.15, 1.25]",
-        ).unwrap())
-    }
-
     #[test]
     fn pressure_warning_uses_the_lead_time_and_fires_once_per_beat() {
         let mut hh = Harness::new(120, 46);
-        hh.app.tuning = capture_pressure_tuning();
         hh.enter_playing();
         for i in 0..2 {
             let world = hh.app.world.as_mut().unwrap();
@@ -8207,7 +8221,6 @@ mod tests {
 
         match target.as_str() {
             "pressure-warning" | "pressure-active" => {
-                hh.app.tuning = capture_pressure_tuning();
                 hh.enter_playing();
                 let world = hh.app.world.as_mut().unwrap();
                 let tuning = &world.tuning().director;
@@ -8225,6 +8238,8 @@ mod tests {
                     }
                     let world = hh.app.world.as_ref().unwrap();
                     assert!(world.director.pressure.cadence > 1.0);
+                    assert!(world.director.pressure.budget > 1.0);
+                    assert!(world.director.pressure.contact > 1.0);
                     assert!(world.enemy_count() > 18);
                     hh.frame(&[]);
                 }

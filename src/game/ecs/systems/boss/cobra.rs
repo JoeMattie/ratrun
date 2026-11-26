@@ -1190,7 +1190,9 @@ mod tests {
     }
 
     fn lab_world(seed: u64) -> World {
-        let mut w = World::new(Theme::Lab, cobra_seed(seed));
+        let mut w = World::with_tuning(
+            Theme::Lab, cobra_seed(seed), crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Cobra),
+        );
         // Campaign slot 2 is the Lab, i.e. the mower's floor.
         w.level_index = 2;
         w
@@ -1380,9 +1382,7 @@ mod tests {
         assert_eq!(boss.kind, BossKind::Cobra);
         let arena = arena_rect(&w);
         assert!(arena.contains_world(boss.pos), "it spawns in its arena");
-        let expect = art::BOSS_BASE_HP
-            * BossKind::Cobra.hp_scale()
-            * crate::game::director::boss_hp_mult_for(w.level_index(), crate::game::director::BOSS_TIME);
+        let expect = BossKind::Cobra.hp_pool(w.level_index());
         assert!(
             (boss.max_hp - expect).abs() < 1.0,
             "pool {} vs {expect}",

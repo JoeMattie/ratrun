@@ -1072,8 +1072,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_tuning_director_matches_the_shared_curves_in_every_sector() {
-        let tuning = crate::tuning::Director::default();
+    fn director_without_sector_overrides_matches_the_shared_curves() {
+        let mut tuning = crate::tuning::Director::default();
+        tuning.sectors.clear();
         for level in 0..4 {
             for elapsed in [0.0, 0.1, 11.99, 12.0, 180.0, 255.5, 600.0, BOSS_TIME, BOSS_TIME + 5.0] {
                 for boss_phase in [false, true] {
@@ -1114,12 +1115,13 @@ mod tests {
         assert_eq!(tuned.horde_pulse(0, at, true), CLEANUP_PULSE);
         assert_eq!(tuned.horde_live_budget(0, at, true), CLEANUP_LIVE_BUDGET);
 
+        let shipped = crate::tuning::Director::default();
         for level in 1..4 {
-            assert_eq!(tuned.horde_interval(level, at, false), horde_interval(at, false));
-            assert_eq!(tuned.horde_pulse(level, at, false), horde_pulse(at, false));
-            assert_eq!(tuned.horde_live_budget(level, at, false), horde_live_budget(at, false));
-            assert_eq!(tuned.elite_start_for(level), ELITE_START);
-            assert_eq!(tuned.elite_interval_at(level, at), elite_interval_at(at));
+            assert_eq!(tuned.horde_interval(level, at, false), shipped.horde_interval(level, at, false));
+            assert_eq!(tuned.horde_pulse(level, at, false), shipped.horde_pulse(level, at, false));
+            assert_eq!(tuned.horde_live_budget(level, at, false), shipped.horde_live_budget(level, at, false));
+            assert_eq!(tuned.elite_start_for(level), shipped.elite_start_for(level));
+            assert_eq!(tuned.elite_interval_at(level, at), shipped.elite_interval_at(level, at));
         }
     }
 

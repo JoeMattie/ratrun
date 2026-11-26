@@ -2262,8 +2262,9 @@ mod tests {
 
     #[test]
     fn pressure_keeps_spawn_totals_and_xp_supply_close_with_room_to_spawn() {
-        let enabled = crate::tuning::RunTuning::new(
-            crate::tuning::Tuning::parse("[director]\npressure_beats = true").unwrap(),
+        let enabled = crate::tuning::RunTuning::default();
+        let disabled = crate::tuning::RunTuning::new(
+            crate::tuning::Tuning::parse("[director]\npressure_beats = false").unwrap(),
         );
         for (sector, theme) in [Theme::Sewer, Theme::Kitchen, Theme::Lab, Theme::Trailer]
             .into_iter().enumerate()
@@ -2288,7 +2289,7 @@ mod tests {
                 }
                 (bodies, xp as usize)
             };
-            let (base_bodies, base_xp) = measure(crate::tuning::RunTuning::default());
+            let (base_bodies, base_xp) = measure(disabled.clone());
             let (beat_bodies, beat_xp) = measure(enabled.clone());
             assert!(base_bodies.abs_diff(beat_bodies) <= base_bodies / 20,
                 "{theme:?} bodies: {base_bodies} → {beat_bodies}");
@@ -2316,7 +2317,7 @@ mod tests {
         let at = 255.0;
         director_tick(&mut campaign, 0.1, at);
         director_tick(&mut practice, 0.1, at);
-        assert_eq!(campaign.director.spawn_timer, director::horde_interval(at, false));
+        assert_eq!(campaign.director.spawn_timer, campaign.tuning().director.horde_interval(3, at, false));
         assert!(campaign.director.elite_timer > 0.0);
         assert_eq!(practice.director.spawn_timer, 2.5);
         assert!(practice.director.elite_timer <= 0.0);
@@ -2633,13 +2634,13 @@ mod tests {
         assert_eq!(brute.kind, EnemyKind::SluiceToad);
         assert_eq!(
             w.director.elite_timer,
-            director::elite_interval_at(director::curve_clock(0, open))
+            w.tuning().director.elite_interval_at(0, w.tuning().director.curve_clock(0, open))
         );
         let expected = crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
             .base_hp()
             // The horde's own curve: the shared ramp times level one's
             // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate).
-            * director::horde_hp_mult_for(0, open)
+            * w.tuning().director.horde_hp_mult_for(0, open)
             * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
     }
@@ -2829,7 +2830,7 @@ mod tests {
         );
         // The scalars are level 0's: hp is the kind's own pool times the level-0
         // curve at spawn, with no per-stage extra.
-        let expected_mult = director::horde_hp_mult_for(0, spawned_at);
+        let expected_mult = w.tuning().director.horde_hp_mult_for(0, spawned_at);
         let spawned = w.enemies();
         for e in spawned.iter() {
             assert!(
@@ -2865,7 +2866,7 @@ mod tests {
             let elites: Vec<&Enemy> = snapshot.iter().filter(|e| e.elite).collect();
             assert_eq!(elites.len(), 1, "{theme:?}: no elite arrived");
             assert_eq!(elites[0].kind, heavy, "{theme:?}: the wrong elite body");
-            let expected = heavy.base_hp() * director::horde_hp_mult_for(0, open) * 1.6;
+            let expected = heavy.base_hp() * w.tuning().director.horde_hp_mult_for(0, open) * 1.6;
             assert!(
                 (elites[0].max_hp - expected).abs() < 1e-3,
                 "{theme:?}: elite hp {} is not the 1.6x pool {expected}",
@@ -3867,7 +3868,7 @@ mod tests {
             director_tick(&mut w, 0.1, 300.0);
             let enemies = w.enemies();
             assert!(!enemies.is_empty(), "level {level} spawned nothing");
-            let expected = director::horde_hp_mult_for(level, 300.0);
+            let expected = w.tuning().director.horde_hp_mult_for(level, 300.0);
             for e in enemies.iter().filter(|e| !e.elite) {
                 // (The elite branch stacks its own 1.6x on top of the curve.)
                 let base = e.max_hp / expected;

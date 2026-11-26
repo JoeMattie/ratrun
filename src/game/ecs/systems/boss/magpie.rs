@@ -806,7 +806,9 @@ mod tests {
     }
 
     fn trailer_world(seed: u64) -> World {
-        let mut w = World::new(Theme::Trailer, magpie_seed(seed));
+        let mut w = World::with_tuning(
+            Theme::Trailer, magpie_seed(seed), crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Magpie),
+        );
         w.level_index = campaign::LEVEL_COUNT - 1;
         w
     }
@@ -927,9 +929,7 @@ mod tests {
         assert_eq!(boss.kind, BossKind::Magpie);
         assert!(boss.hp > 0.0);
         // The pool is the framework's: art pool x scale x the director's curve.
-        let expect = art::BOSS_BASE_HP
-            * BossKind::Magpie.hp_scale()
-            * crate::game::director::boss_hp_mult_for(campaign::LEVEL_COUNT - 1, crate::game::director::BOSS_TIME);
+        let expect = BossKind::Magpie.hp_pool(w.level_index());
         assert!((boss.max_hp - expect).abs() < 1.0, "pool {} vs {expect}", boss.max_hp);
     }
 

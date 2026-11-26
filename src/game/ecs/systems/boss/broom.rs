@@ -998,7 +998,10 @@ mod tests {
 
     impl Rig {
         fn new(seed: u64) -> Self {
-            let mut w = World::new(Theme::Kitchen, seed);
+            let mut w = World::with_tuning(
+                Theme::Kitchen, seed,
+                crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Broom),
+            );
             w.level = Level::empty(Theme::Kitchen);
             w.flow = FlowField::new(&w.level.tiles);
             w.flow.update(&w.level.tiles, CENTER, NavBudget::FULL);

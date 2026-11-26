@@ -841,7 +841,6 @@ fn the_arsenal_lists_lava_breath_and_its_shared_evolution_partner() {
 /// hit points and "DIES IN 2.6s" (its death animation).
 #[test]
 fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
-    use crate::game::director;
     for kind in BossKind::all() {
         let rows = facts(Key::Boss(kind));
         let rows = rows.rows();
@@ -865,7 +864,7 @@ fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
                     .unwrap_or(0)
             })
             .unwrap_or(0);
-        let pool = kind.base_hp() * kind.hp_scale() * director::boss_hp_mult_for(level, director::BOSS_TIME);
+        let pool = kind.hp_pool(level);
         let expected = if kind == BossKind::Lantern {
             let high = pool * crate::game::art_boss_lantern::BOSS_AREA_KIT_HP_MULT;
             format!("{pool:.0}–{high:.0}")

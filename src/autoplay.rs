@@ -2533,8 +2533,8 @@ mod tests {
         run.account_tick(1.0 / 60.0, max_hp, 0.0, None);
         let level = &run.stats.levels[0];
         assert_eq!(level.hp_samples_10s, [1.0]);
-        assert_eq!(level.min_hp_fraction, 0.25);
-        assert_eq!(level.hp_lost, max_hp * 0.75);
+        assert!((level.min_hp_fraction - 0.25).abs() < f32::EPSILON);
+        assert!((level.hp_lost - max_hp * 0.75).abs() < 1e-4);
         assert_eq!(level.boss_hp_lost, 0.0);
         assert!(run.world.player.observed_damage.is_none());
     }

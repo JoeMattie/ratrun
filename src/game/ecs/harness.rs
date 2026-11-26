@@ -27,6 +27,11 @@
 //! dash every 157 ticks. The longer movement and immunity, and the extra
 //! trail emissions on those ticks, change the subsequent world state.
 //!
+//! Round-three shipped tuning regenerated all six traces in v0.4.2. The
+//! scripts run for 60 s, so the starting rat stats, XP costs and opening
+//! horde balance affect these traces before the first surge. Map generation
+//! inputs did not change.
+//!
 //! No environment variables: `cargo test` runs everything here.
 
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -322,12 +327,12 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// traces relative to the opening stage. The three pickups left those traces
 /// unchanged.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 18152150635025892068),
-    (Script::Wander, Theme::Kitchen, 29, 17368225903596540833),
-    (Script::Wander, Theme::Lab, 1234, 14774050848858181013),
-    (Script::Evade, Theme::Sewer, 11, 11606876522150128351),
-    (Script::Evade, Theme::Kitchen, 29, 5112286223871731906),
-    (Script::Evade, Theme::Lab, 1234, 16359532536623401585),
+    (Script::Wander, Theme::Sewer, 11, 17025260782478789895),
+    (Script::Wander, Theme::Kitchen, 29, 12233205193706444105),
+    (Script::Wander, Theme::Lab, 1234, 14555140171925699943),
+    (Script::Evade, Theme::Sewer, 11, 2784913122960156366),
+    (Script::Evade, Theme::Kitchen, 29, 15668702812670542744),
+    (Script::Evade, Theme::Lab, 1234, 8669835692121009913),
 ];
 
 #[test]
