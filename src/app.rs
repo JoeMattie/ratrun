@@ -9815,51 +9815,61 @@ mod tests {
             }
         }
 
-        // `RATRUN_DUMP_FORE=n` walks the capture to the n-th nearest foreground
-        // item (the layer keeps clear of the start room, where most captures
-        // stand): the rat is put 50 px below it and the camera on the item.
-        // `RATRUN_DUMP_FORE_KIND=span|edge|drop|<KindName>` narrows the list,
+        // `RATRUN_DUMP_FORE=n` stages the n-th nearest band at the centre
+        // of the frame. `RATRUN_DUMP_FORE_KIND=horizontal|vertical|<KindName>`
+        // narrows the list, `room-span` and `corridor-span` select its source,
         // `RATRUN_DUMP_FORE_RAT=dx,dy` moves the rat relative to the anchor
         // (`0,0` stands it directly under the item) and
         // `RATRUN_DUMP_FORE_HORDE=n` rings the rat with fodder.
+        use crate::render::foreground::{self, ForeKind};
+        let kind_named = |name: &str| {
+            let name = name.trim().to_ascii_lowercase().replace(['-', '_'], "");
+            match name.as_str() {
+                "branch" => Some(ForeKind::BranchCanopy),
+                "wires" => Some(ForeKind::PowerLines),
+                "cloud" => Some(ForeKind::CloudBand),
+                _ => ForeKind::all().into_iter()
+                    .find(|kind| format!("{kind:?}").to_ascii_lowercase() == name),
+            }
+        };
+        let mut sky_kind = std::env::var("RATRUN_DUMP_SKY").ok().as_deref().and_then(kind_named);
         if let Some(n) = std::env::var("RATRUN_DUMP_FORE").ok().and_then(|v| v.parse::<usize>().ok()) {
-            use crate::render::foreground::{ATTACH_DROP, ATTACH_EDGE, ATTACH_SPAN};
             let want = std::env::var("RATRUN_DUMP_FORE_KIND").unwrap_or_default().to_ascii_lowercase();
+            let kind_filter = kind_named(&want);
             let rat_off = std::env::var("RATRUN_DUMP_FORE_RAT")
                 .ok()
                 .and_then(|v| {
                     let (a, b) = v.split_once(',')?;
                     Some(Vec2::new(a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))
-                })
-                .unwrap_or(Vec2::new(0.0, 50.0));
+                });
             let horde = std::env::var("RATRUN_DUMP_FORE_HORDE")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
             if let Some(w) = hh.app.world.as_mut() {
-                let level = &w.level;
-                w.foreground_layer.sync(level);
+                w.foreground_layer.sync(&w.level);
                 let p = w.player.pos;
                 let mut items: Vec<_> = w
                     .foreground_layer
-                    .items()
-                    .iter()
-                    .filter(|i| match want.as_str() {
-                        "" => true,
-                        "span" => i.kind.attach_class() == ATTACH_SPAN,
-                        "edge" => i.kind.attach_class() == ATTACH_EDGE,
-                        "drop" => i.kind.attach_class() == ATTACH_DROP,
-                        "room-span" => i.kind.attach_class() == ATTACH_SPAN && i.len >= 100.0,
-                        "corridor-span" => i.kind.attach_class() == ATTACH_SPAN && i.len < 100.0,
-                        name => format!("{:?}", i.kind).to_ascii_lowercase() == name,
+                    .capture_items()
+                    .filter(|(i, _, corridor)| match want.as_str() {
+                        "" | "band" | "span" => true,
+                        "horizontal" => i.horizontal,
+                        "vertical" => !i.horizontal,
+                        "room-span" => !*corridor,
+                        "corridor-span" => *corridor,
+                        _ => kind_filter == Some(i.kind),
                     })
-                    .copied()
                     .collect();
-                items.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
-                if let Some(item) = items.get(n).copied() {
-                    let at = item.pos;
+                items.sort_by(|a, b| a.1.dist_sq(p).total_cmp(&b.1.dist_sq(p)));
+                if let Some((item, at, _)) = items.get(n).copied() {
                     eprintln!("dump fore: {item:?}");
                     w.clear_enemies();
+                    let rat_off = rat_off.unwrap_or(if item.horizontal {
+                        Vec2::new(0.0, 50.0)
+                    } else {
+                        Vec2::new(50.0, 0.0)
+                    });
                     w.player.pos = w
                         .level
                         .tiles
@@ -9878,56 +9888,40 @@ mod tests {
                         }
                     }
                     w.cam_focus = Some(at);
+                    hh.app.foreground = hh.app.foreground_env.unwrap_or(true);
                     hh.app.picture_dirty = true;
                     hh.app.console_paused = true;
                     hh.frame(&[]);
+                } else if w.level.theme == Theme::Trailer {
+                    sky_kind = sky_kind.or(kind_filter).or_else(|| {
+                        [ForeKind::BranchCanopy, ForeKind::PowerLines, ForeKind::CloudBand]
+                            .get(n).copied().filter(|_| want.is_empty())
+                    });
                 } else {
                     eprintln!("dump fore: no item matches {want:?} #{n}");
                 }
             }
         }
-        // `RATRUN_DUMP_SKY=branch|pole|cloud` (the Flatbed) winds the clock on
-        // to the next moment that mover is mid-view; `cloud` also puts the
-        // camera on the cloud's floor shadow.
-        if let Ok(kind) = std::env::var("RATRUN_DUMP_SKY") {
-            use crate::render::foreground::{self, ForeKind};
+        // `RATRUN_DUMP_SKY=branch|wires|cloud` advances the Flatbed clock
+        // to a frame with the requested band at the centre of its track.
+        if let Some(kind) = sky_kind {
             if let Some(w) = hh.app.world.as_mut() {
-                let size = (w.render_viewport.x, w.render_viewport.y);
-                let mut t = w.elapsed;
-                for _ in 0..(40 * 30) {
-                    t += 1.0 / 30.0;
-                    let cam = w.cam;
-                    let sky = foreground::sky_probe(&w.level, cam, size, t);
-                    let hit = sky.iter().find(|i| match kind.as_str() {
-                        "branch" => {
-                            i.kind == ForeKind::TreeBranch
-                                && (i.pos.x - cam.x - size.0 * 0.5).abs() < 12.0
-                        }
-                        "pole" => {
-                            i.kind == ForeKind::PowerLine
-                                && !i.horizontal
-                                && (i.pos.x - cam.x - size.0 * 0.5).abs() < 14.0
-                        }
-                        _ => i.kind == ForeKind::Cloud,
-                    });
-                    if let Some(i) = hit {
-                        eprintln!("dump sky: t={t:.2} {i:?}");
-                        if kind == "cloud" {
-                            let at = Vec2::new(i.pos.x, w.player.pos.y);
-                            w.player.pos = w
-                                .level
-                                .tiles
-                                .nearest_open_center(at, crate::game::collision::SizeClass::Small, 40)
-                                .unwrap_or(w.player.pos);
-                        }
-                        break;
-                    }
+                let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
+                    .and_then(|v| v.parse::<f32>().ok()).map(crate::render::zoom::snap)
+                    .unwrap_or(w.zoom_view);
+                let size = w.render_viewport * zoom;
+                let size = Vec2::new(size.x.round().max(1.0), size.y.round().max(1.0));
+                if let Some(t) = foreground::sky_capture_time(&w.level, w.cam, size, zoom, w.elapsed, kind) {
+                    eprintln!("dump sky: t={t:.2} {kind:?}");
+                    w.elapsed = t;
+                    w.clear_enemies();
+                    hh.app.foreground = hh.app.foreground_env.unwrap_or(true);
+                    hh.app.picture_dirty = true;
+                    hh.app.console_paused = true;
+                    hh.frame(&[]);
+                } else {
+                    eprintln!("dump sky: no staged frame for {kind:?}");
                 }
-                w.elapsed = t;
-                w.clear_enemies();
-                hh.app.picture_dirty = true;
-                hh.app.console_paused = true;
-                hh.frame(&[]);
             }
         }
         // `RATRUN_DUMP_SCONCE=n` stands the rat 34 px in front of the n-th
