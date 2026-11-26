@@ -3527,7 +3527,9 @@ impl World {
                         }
                     }
                     BossArtView::Lantern(v) => {
-                        art_boss_lantern::draw_tell_overlay(pb, &v, cam, self.level.palette.accent);
+                        art_boss_lantern::draw_tell_overlay(
+                            pb, &v.floating_body(), cam, self.level.palette.accent,
+                        );
                     }
                     _ => {}
                 }
@@ -3721,10 +3723,12 @@ impl World {
                 (id, lash, catch_pos)
             })
         };
-        self.whip_chain.sync(
+        let outfit = art_rat::RatOutfit::for_theme(self.level.theme);
+        self.whip_chain.sync_with_outfit(
             &self.player,
             self.elapsed,
             live_lash.as_ref().map(|(id, l, c)| (*id, l, *c)),
+            outfit,
         );
         let lash = self.lash_visual();
         let flash = art_rat::tail_ready_flash(
@@ -3742,8 +3746,8 @@ impl World {
             crate::render::lighting::rat_pen()
         });
         match scale {
-            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash, bob_lean),
-            None => art_rat::draw_rat_with_whip(
+            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash, bob_lean, outfit),
+            None => art_rat::draw_rat_with_outfit(
                 pb,
                 &self.player,
                 self.elapsed,
@@ -3751,6 +3755,7 @@ impl World {
                 flash,
                 lash,
                 Some(&self.whip_chain),
+                outfit,
             ),
         }
         if self.player.buffs.collar > 0.0 {
@@ -3818,8 +3823,17 @@ impl World {
         scale: f32,
         tail_flash: f32,
         lean: Vec2,
+        outfit: art_rat::RatOutfit,
     ) {
-        art_rat_giant::draw_giant_rat(pb, &self.player, self.elapsed, cam - lean, scale, tail_flash);
+        art_rat_giant::draw_giant_rat_with_outfit(
+            pb,
+            &self.player,
+            self.elapsed,
+            cam - lean,
+            scale,
+            tail_flash,
+            outfit,
+        );
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
             art_rat::draw_live_whip(
@@ -3879,7 +3893,9 @@ impl World {
                 BossArtView::Cobra(v) => {
                     art_boss_cobra::draw_ground(pb, &v, cam, accent);
                 }
-                BossArtView::Lantern(v) => art_boss_lantern::draw_ground(pb, &v, cam, accent),
+                BossArtView::Lantern(v) => {
+                    art_boss_lantern::draw_ground(pb, &v, cam, accent);
+                }
             }
         }
     }
@@ -3930,7 +3946,9 @@ impl World {
                 BossArtView::MegaRat(v) => art_boss_megarat::draw_megarat(pb, &v, cam, accent),
                 BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
                 BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
-                BossArtView::Lantern(v) => art_boss_lantern::draw(pb, &v, cam, accent),
+                BossArtView::Lantern(v) => {
+                    art_boss_lantern::draw(pb, &v.floating_body(), cam, accent);
+                }
             }
             pb.set_pen(pen);
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
@@ -6127,5 +6145,191 @@ mod trap_order_tests {
             let share = intact_share(&mut w, &format!("snap-{}", kind.name()));
             assert!(share > 0.9, "{}: only {share:.2} of the body is over the trap", kind.name());
         }
+    }
+}
+
+#[cfg(test)]
+mod outfall_diver_tests {
+    use super::*;
+
+    const BG: palette::Rgb = (24, 28, 30);
+
+    fn count_brass(pb: &PixelBuffer) -> usize {
+        pb.pixels()
+            .iter()
+            .filter(|&&(r, g, b)| r >= 165 && g >= 95 && r > g && r >= b.saturating_add(65))
+            .count()
+    }
+
+    fn draw_rat_on_theme(
+        w: &mut World,
+        theme: Theme,
+        size: (usize, usize),
+        elapsed: f32,
+        giant: f32,
+        tiny: f32,
+    ) -> PixelBuffer {
+        w.level.theme = theme;
+        w.elapsed = elapsed;
+        w.player.buffs.giant = giant;
+        w.player.buffs.tiny = tiny;
+        let mut pb = PixelBuffer::new(size.0, size.1);
+        pb.set_materials(true);
+        pb.clear(BG);
+        w.draw_player(&mut pb, Vec2::ZERO);
+        pb
+    }
+
+    #[test]
+    fn outfall_draws_diving_suit_and_other_themes_stay_byte_identical() {
+        let mut w = World::new(Theme::Sewer, 42);
+        w.player.pos = Vec2::new(60.0, 38.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.vel = Vec2::ZERO;
+
+        let sewer = draw_rat_on_theme(&mut w, Theme::Sewer, (120, 76), 0.45, 0.0, 0.0);
+        let outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 76), 0.45, 0.0, 0.0);
+
+        assert_ne!(
+            sewer.pixels(),
+            outfall.pixels(),
+            "Outfall rat must differ from the Sewer rat"
+        );
+        assert!(
+            count_brass(&outfall) >= 6,
+            "Outfall rat must draw brass diving helmet pixels (found {})",
+            count_brass(&outfall)
+        );
+        assert!(
+            outfall.mat().contains(&crate::render::lighting::rat_helmet_pen(false)),
+            "Outfall rat helmet must stamp Metal pen"
+        );
+        assert!(
+            outfall.mat().contains(&crate::render::lighting::rat_visor_pen(false)),
+            "Outfall rat faceplate must stamp Glass pen"
+        );
+
+        // Every non-Outfall floor must remain pixel- and material-identical to Sewer.
+        for theme in Theme::playable() {
+            if theme == Theme::Outfall {
+                continue;
+            }
+            let frame = draw_rat_on_theme(&mut w, theme, (120, 76), 0.45, 0.0, 0.0);
+            assert_eq!(
+                frame.pixels(),
+                sewer.pixels(),
+                "{theme:?} must be pixel-identical to the standard rat"
+            );
+            assert_eq!(
+                frame.mat(),
+                sewer.mat(),
+                "{theme:?} must be material-identical to the standard rat"
+            );
+        }
+
+        // Swim bob animates over time on Outfall without moving player.pos or hurt_radius.
+        let orig_pos = w.player.pos;
+        let orig_hurt = w.player.buffs.hurt_radius();
+        let bob_a = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 76), 0.0, 0.0, 0.0);
+        let bob_b = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 76), 0.65, 0.0, 0.0);
+        assert_eq!(w.player.pos, orig_pos);
+        assert_eq!(w.player.buffs.hurt_radius(), orig_hurt);
+        assert_ne!(bob_a.pixels(), bob_b.pixels(), "Outfall swim bob must animate over time");
+
+        // Growth Serum (5x) and Shrink Draught (0.35x) both draw the diving suit on Outfall.
+        w.player.pos = Vec2::new(110.0, 74.0);
+        let giant_sewer = draw_rat_on_theme(&mut w, Theme::Sewer, (220, 148), 0.35, 15.0, 0.0);
+        let giant_outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (220, 148), 0.35, 15.0, 0.0);
+        assert_ne!(giant_sewer.pixels(), giant_outfall.pixels());
+        assert!(count_brass(&giant_outfall) >= 40, "5x giant Outfall rat must wear the brass helmet");
+
+        w.player.pos = Vec2::new(32.0, 32.0);
+        let tiny_sewer = draw_rat_on_theme(&mut w, Theme::Sewer, (64, 64), 0.35, 0.0, 8.0);
+        let tiny_outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (64, 64), 0.35, 0.0, 8.0);
+        assert_ne!(tiny_sewer.pixels(), tiny_outfall.pixels());
+        assert!(count_brass(&tiny_outfall) >= 2, "0.35x tiny Outfall rat must wear the brass helmet");
+    }
+
+    #[test]
+    fn outfall_rat_and_fish_float_above_true_position_shadows_while_sewer_body_stays_grounded() {
+        let mut w = World::new(Theme::Outfall, 7);
+        w.player.pos = Vec2::new(60.0, 44.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.vel = Vec2::ZERO;
+
+        // 1. Outfall diver rat: detached shadow at true ground pos (pen 0), helmet lifted above.
+        let rat_pb = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 88), 0.0, 0.0, 0.0);
+        let gx = w.player.pos.x as usize;
+        let gy = w.player.pos.y as usize;
+        assert!(
+            rat_pb.pixel_at(gx, gy).0 < BG.0,
+            "rat detached shadow must darken true ground position"
+        );
+        assert_eq!(rat_pb.mat()[gy * rat_pb.w + gx], 0, "rat seabed shadow uses pen 0");
+        let hpen = crate::render::lighting::rat_helmet_pen(false);
+        let (mut sum_y, mut cnt) = (0.0f32, 0usize);
+        for y in 0..rat_pb.h {
+            for x in 0..rat_pb.w {
+                if rat_pb.mat()[y * rat_pb.w + x] == hpen {
+                    sum_y += y as f32;
+                    cnt += 1;
+                }
+            }
+        }
+        assert!(cnt >= 4 && sum_y / cnt as f32 <= w.player.pos.y - 3.0);
+
+        // 2. Outfall swimmer fish (Conger): detached shadow at true e.pos, sprite lifted above.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(19);
+        let mut fish = Enemy::spawn(EnemyKind::Conger, Vec2::new(60.0, 44.0), 1.0, &mut rng);
+        fish.id = 9;
+        fish.facing = Vec2::new(1.0, 0.0);
+        fish.anim = 0.5;
+        let fish_pen = crate::render::lighting::enemy_pen(EnemyKind::Conger, None);
+        let mut fish_pb = PixelBuffer::new(120, 88);
+        fish_pb.set_materials(true);
+        fish_pb.clear(BG);
+        fish_pb.set_pen(fish_pen);
+        art_enemy::draw_enemy(
+            &mut fish_pb,
+            &fish,
+            Vec2::ZERO,
+            crate::game::level::Palette::for_theme(Theme::Outfall).accent,
+        );
+        fish_pb.set_pen(0);
+        assert!(
+            fish_pb.pixel_at(60, 44).0 < BG.0 && fish_pb.mat()[44 * fish_pb.w + 60] == 0,
+            "Outfall fish shadow must sit at true ground position with pen 0"
+        );
+        let (mut fy_sum, mut fn_cnt) = (0.0f32, 0usize);
+        for y in 0..fish_pb.h {
+            for x in 0..fish_pb.w {
+                if fish_pb.mat()[y * fish_pb.w + x] == fish_pen {
+                    fy_sum += y as f32;
+                    fn_cnt += 1;
+                }
+            }
+        }
+        assert!(fn_cnt >= 15 && fy_sum / fn_cnt as f32 <= 44.0 - 2.5);
+
+        // 3. Sewer body (Brute) stays centred on its true ground position (unchanged).
+        let mut sewer_e = Enemy::spawn(EnemyKind::Brute, Vec2::new(60.0, 44.0), 1.0, &mut rng);
+        sewer_e.facing = Vec2::new(1.0, 0.0);
+        let brute_pen = crate::render::lighting::enemy_pen(EnemyKind::Brute, None);
+        let mut brute_pb = PixelBuffer::new(120, 88);
+        brute_pb.set_materials(true);
+        brute_pb.clear(BG);
+        brute_pb.set_pen(brute_pen);
+        art_enemy::draw_enemy(
+            &mut brute_pb,
+            &sewer_e,
+            Vec2::ZERO,
+            crate::game::level::Palette::for_theme(Theme::Sewer).accent,
+        );
+        brute_pb.set_pen(0);
+        assert_eq!(
+            brute_pb.mat()[44 * brute_pb.w + 60],
+            brute_pen,
+            "Sewer body must stay grounded at its true position"
+        );
     }
 }

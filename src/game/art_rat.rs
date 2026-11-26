@@ -21,14 +21,40 @@
 
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::lighting::{rat_helmet_pen, rat_visor_pen};
 use crate::render::palette::{mix, scale, Rgb};
 
 use super::collision::TileMap;
 use super::ecs::components::{BiteSnap, Lash, LashPhase, WhipCrack};
+use super::level::Theme;
 use super::player::Player;
 use super::weapon::{
     WeaponKind, LASH_DRAG_GAP, LASH_RECOIL_AT, LASH_TOTAL, LASH_WINDUP, WHIP_ARC_HALF,
 };
+
+/// Visual outfit worn by the player's rat. Render-only: never changes
+/// collision, speed, hurt radius, or any simulated number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RatOutfit {
+    /// Ordinary lab rat on every non-Outfall floor.
+    #[default]
+    Standard,
+    /// Classic brass diving helmet, rubber diving suit, flippers, and
+    /// swimming animation on the Outfall.
+    Diver,
+}
+
+impl RatOutfit {
+    /// Outfit for `theme`: diving suit on [`Theme::Outfall`], standard lab rat
+    /// everywhere else.
+    #[inline]
+    pub const fn for_theme(theme: Theme) -> Self {
+        match theme {
+            Theme::Outfall => Self::Diver,
+            _ => Self::Standard,
+        }
+    }
+}
 
 /// Collision radius of the rat in world pixels (the sim's `PLAYER_RADIUS`).
 /// The sprite may extend past it (tail, ears, whiskers) but the body should
@@ -48,6 +74,39 @@ const TAIL_TIP: Rgb = (255, 188, 198);
 const EYE: Rgb = (18, 12, 22);
 const HURT: Rgb = (255, 56, 64);
 const GHOST: Rgb = (130, 200, 255);
+
+// --- Outfall diving suit palette -------------------------------------------
+// Classic copper-brass helmet with aqua porthole over a rubbery slate-teal
+// diving suit and brass-trimmed flippers: warm brass contrasts cleanly against
+// the Outfall's cool blue seabed and caustics.
+const SUIT_SHADOW: Rgb = (52, 74, 88);
+const SUIT_BASE: Rgb = (108, 138, 152);
+const SUIT_LIGHT: Rgb = (176, 206, 214);
+const SUIT_SEAM: Rgb = (34, 48, 60);
+const BRASS_DEEP: Rgb = (116, 66, 22);
+const BRASS_SHADOW: Rgb = (170, 102, 32);
+const BRASS_BASE: Rgb = (224, 160, 58);
+const BRASS_LIGHT: Rgb = (255, 220, 122);
+const BRASS_SPEC: Rgb = (255, 248, 210);
+const VISOR_DARK: Rgb = (30, 82, 106);
+const VISOR_BASE: Rgb = (78, 174, 206);
+const VISOR_LIGHT: Rgb = (168, 236, 248);
+const VISOR_GLINT: Rgb = (242, 254, 255);
+const FLIPPER_BASE: Rgb = (58, 78, 94);
+const FLIPPER_TIP: Rgb = (218, 168, 56);
+const TANK_BODY: Rgb = (214, 166, 58);
+const TANK_SHADOW: Rgb = (138, 92, 28);
+const HOSE_DARK: Rgb = (38, 48, 56);
+const BUBBLE_RING: Rgb = (158, 224, 242);
+const BUBBLE_SPEC: Rgb = (236, 252, 255);
+
+/// Local spine station and radius of the round diving helmet (normalised rat units).
+const HELMET_U: f32 = 3.2;
+const HELMET_R: f32 = 2.30;
+
+/// Base upward float altitude (world px at 1×) of the diving rat above its
+/// true ground position on the Outfall seabed. Render-only.
+pub const DIVER_LIFT: f32 = 5.0;
 
 /// Direction *toward* the light in screen space (up-left), matching the
 /// down-right drop shadow.
@@ -160,6 +219,17 @@ struct Pose {
     moving: f32,
     /// 0..1 while dashing.
     dash: f32,
+    /// True on the Outfall (`RatOutfit::Diver`): underwater swimming kinematics.
+    diver: bool,
+    /// True ground/hitbox world position (`player.pos`), where the detached
+    /// seabed shadow stays anchored while the diver floats above it.
+    ground: Vec2,
+    /// Current screen-upward float altitude above `ground` (world px).
+    lift: f32,
+    /// Continuous analytic swim stroke clock (radians).
+    swim_phase: f32,
+    /// Continuous analytic idle hover clock (radians).
+    hover_phase: f32,
 }
 
 impl Pose {
@@ -167,8 +237,16 @@ impl Pose {
     /// body while scurrying, fading out toward the head so the eyes stay put.
     #[inline]
     fn spine(&self, u: f32) -> f32 {
-        let steady = ((3.2 - u) * 0.22).clamp(0.0, 1.0);
-        self.wig * steady * (self.phase - u * 0.7).sin()
+        if self.diver {
+            // Keep the rigid brass helmet steady while the rubber suit undulates behind it.
+            let steady = ((2.4 - u) * 0.24).clamp(0.0, 1.0);
+            let idle_w = 0.14 * (self.hover_phase - u * 0.55).sin() * (1.0 - self.moving);
+            let swim_w = 0.58 * (self.swim_phase - u * 0.75).sin() * self.moving;
+            (idle_w + swim_w) * steady * (1.0 - 0.85 * self.dash)
+        } else {
+            let steady = ((3.2 - u) * 0.22).clamp(0.0, 1.0);
+            self.wig * steady * (self.phase - u * 0.7).sin()
+        }
     }
 
     /// World offset → local `(u, v)` in unstretched body units.
@@ -211,6 +289,13 @@ impl Pose {
         let du = u - eu;
         let dv = v.abs() - ev;
         du * du + dv * dv <= r * r
+    }
+
+    #[inline]
+    fn in_helmet(&self, u: f32, v: f32, margin: f32) -> bool {
+        let r = HELMET_R + margin;
+        let du = u - HELMET_U;
+        du * du + v * v <= r * r
     }
 }
 
@@ -522,7 +607,19 @@ impl WhipChain {
         elapsed: f32,
         lash: Option<(u64, &Lash, Option<Vec2>)>,
     ) {
-        let pose = pose_of(player, elapsed);
+        self.sync_with_outfit(player, elapsed, lash, RatOutfit::Standard);
+    }
+
+    /// [`WhipChain::sync`] with the active [`RatOutfit`] so the whip root and
+    /// resting settle match the Outfall's swimming pose.
+    pub fn sync_with_outfit(
+        &mut self,
+        player: &Player,
+        elapsed: f32,
+        lash: Option<(u64, &Lash, Option<Vec2>)>,
+        outfit: RatOutfit,
+    ) {
+        let pose = pose_of_with_outfit(player, elapsed, outfit);
         let tail = tail_charge(player);
         let rest_len = tail.map_or(TAIL_LEN, |t| t.tail_len()) + 3.0 * pose.dash;
         let rest_pts = sample_rest_tail(&pose, player.vel, elapsed, rest_len);
@@ -924,8 +1021,17 @@ fn sample_rest_tail(pose: &Pose, vel: Vec2, elapsed: f32, rest_len: f32) -> [Vec
     out[0] = p;
     for (i, slot) in out.iter_mut().enumerate().skip(1) {
         let s = (i as f32 - 0.5) / (WHIP_NODES - 1) as f32;
-        let idle = 1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin();
-        let run = 0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip;
+        let (idle, run) = if pose.diver {
+            (
+                0.35 * s + 0.52 * s * (elapsed * 2.6 - s * 3.4).sin(),
+                0.10 * s + 0.85 * s * (elapsed * 8.5 - s * 4.8).sin() * whip,
+            )
+        } else {
+            (
+                1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin(),
+                0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip,
+            )
+        };
         let theta = lag * s + idle * (1.0 - m) + run * m;
         p += back.rotate(theta) * step;
         *slot = p;
@@ -982,7 +1088,35 @@ pub fn draw_rat_with_whip(
     lash: Option<LashVisual>,
     whip: Option<&WhipChain>,
 ) {
-    let pose = pose_of(player, elapsed);
+    draw_rat_with_outfit(
+        pb,
+        player,
+        elapsed,
+        cam,
+        tail_flash,
+        lash,
+        whip,
+        RatOutfit::Standard,
+    );
+}
+
+/// [`draw_rat_with_whip`], selecting the rat's outfit (`RatOutfit::Diver` on
+/// the Outfall, `RatOutfit::Standard` everywhere else). Render-only.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_rat_with_outfit(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    elapsed: f32,
+    cam: Vec2,
+    tail_flash: f32,
+    lash: Option<LashVisual>,
+    whip: Option<&WhipChain>,
+    outfit: RatOutfit,
+) {
+    if pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let pose = pose_of_with_outfit(player, elapsed, outfit);
     let tint = tint_of(player, elapsed);
 
     if pose.dash > 0.0 {
@@ -992,10 +1126,21 @@ pub fn draw_rat_with_whip(
     if let Some(t) = tail.as_mut() {
         t.flash = tail_flash.clamp(0.0, 1.0);
     }
-    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
-    draw_feet(pb, &pose, tint, cam);
-    draw_body(pb, &pose, tint, cam);
-    draw_face(pb, &pose, elapsed, tint, cam);
+    if pose.diver {
+        if !tint.ghost {
+            draw_diver_shadow(pb, &pose, tint, cam);
+        }
+        draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
+        draw_diver_limbs(pb, &pose, tint, cam);
+        draw_diver_body(pb, &pose, tint, cam);
+        draw_diver_face(pb, &pose, elapsed, tint, cam);
+        draw_diver_bubbles(pb, &pose, player.vel, elapsed, tint, cam);
+    } else {
+        draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
+        draw_feet(pb, &pose, tint, cam);
+        draw_body(pb, &pose, tint, cam);
+        draw_face(pb, &pose, elapsed, tint, cam);
+    }
     // Under the rat, so it never hides the body: the Super Dash charge ring
     // (nothing at all unless a charge is being held).
     draw_dash_charge(pb, player, elapsed, cam);
@@ -1027,12 +1172,15 @@ pub fn draw_live_whip(
 /// redraw one layer — the body mask for the tail's "never covers the rat"
 /// check — from the same numbers the real pass uses).
 fn pose_of(player: &Player, elapsed: f32) -> Pose {
-    let face = if player.face.len_sq() > 1e-4 {
+    pose_of_with_outfit(player, elapsed, RatOutfit::Standard)
+}
+
+fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose {
+    let raw_face = if player.face.len_sq() > 1e-4 {
         player.face.normalized()
     } else {
         Vec2::new(0.0, -1.0)
     };
-    let perp = face.perp();
     let speed = player.vel.len();
     let top = player.loadout.stats.move_speed.max(1.0);
     let moving = (speed / top).clamp(0.0, 1.0);
@@ -1046,19 +1194,67 @@ fn pose_of(player: &Player, elapsed: f32) -> Pose {
     } else {
         0.0
     };
+    if outfit == RatOutfit::Diver {
+        let hover_phase = elapsed * 2.5;
+        let swim_phase = elapsed * 8.5;
+        // Smooth analytic float lift + buoyancy bob and stroke surge
+        // (render-only: never alters `player.pos` or the hitbox).
+        let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash);
+        let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash);
+        let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash);
+        let lift = DIVER_LIFT - bob_y;
+        let pos = player.pos + Vec2::new(bob_x, -lift) + raw_face * surge;
+
+        // Slight continuous tilt into the direction of travel plus gentle
+        // swim-kick yaw.
+        let turn_lean = if player.vel.len_sq() > 4.0 {
+            let vd = player.vel.normalized();
+            let cross = raw_face.x * vd.y - raw_face.y * vd.x;
+            cross.atan2(raw_face.dot(vd)).clamp(-0.55, 0.55) * 0.22 * moving
+        } else {
+            0.0
+        };
+        let swim_yaw = 0.09 * moving * (1.0 - dash) * swim_phase.sin()
+            + 0.045 * (1.0 - moving) * (hover_phase + 0.6).cos();
+        let face = raw_face.rotate(turn_lean + swim_yaw);
+        let perp = face.perp();
+        return Pose {
+            pos,
+            face,
+            perp,
+            su: 1.0 + 0.06 * moving + 0.36 * dash - CHARGE_COIL_SQUASH * coil,
+            sv: 1.0 - 0.04 * moving - 0.16 * dash + CHARGE_COIL_SPREAD * coil,
+            phase: swim_phase,
+            wig: (0.14 * (1.0 - moving) + 0.58 * moving) * (1.0 - 0.85 * dash),
+            breathe: 0.12 * (1.0 - moving) * hover_phase.sin(),
+            moving,
+            dash,
+            diver: true,
+            ground: player.pos,
+            lift,
+            swim_phase,
+            hover_phase,
+        };
+    }
+    let perp = raw_face.perp();
     Pose {
         pos: player.pos,
-        face,
+        face: raw_face,
         perp,
         su: 1.0 + 0.32 * dash - CHARGE_COIL_SQUASH * coil,
         sv: 1.0 - 0.14 * dash + CHARGE_COIL_SPREAD * coil,
         // Keyed to distance along the facing: feet step with the ground and
         // stop dead when the rat does.
-        phase: player.pos.dot(face) * 1.15,
+        phase: player.pos.dot(raw_face) * 1.15,
         wig: 0.45 * moving * (1.0 - dash),
         breathe: 0.18 * (1.0 - moving) * (elapsed * 3.2).sin(),
         moving,
         dash,
+        diver: false,
+        ground: player.pos,
+        lift: 0.0,
+        swim_phase: 0.0,
+        hover_phase: 0.0,
     }
 }
 
@@ -1571,8 +1767,22 @@ fn plot_add(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb) {
     pb.plot_add(x, y, c);
 }
 
-/// Speed lines peeling off the haunches during a dash.
+/// Speed lines peeling off the haunches during a dash (hydro-wake streaks underwater).
 fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
+    if pose.diver {
+        let prev_pen = pb.set_pen(0);
+        for side in [-1.0f32, 1.0] {
+            for j in 0..7 {
+                let t = j as f32 / 7.0;
+                let p = pose.place(-3.4 - j as f32 * 0.95, side * (2.0 - 0.7 * t));
+                let s = w2s(p, cam);
+                let f = pose.dash * (1.0 - t) * 0.85;
+                pb.plot_add(s.0, s.1, scale((110, 200, 235), f));
+            }
+        }
+        pb.set_pen(prev_pen);
+        return;
+    }
     for side in [-1.0f32, 1.0] {
         for j in 0..7 {
             let t = j as f32 / 7.0;
@@ -1653,8 +1863,17 @@ fn draw_tail(
     let mut p = pose.place(-3.2, 0.0);
     for (i, slot) in pts.iter_mut().take(steps).enumerate() {
         let s = (i as f32 + 0.5) / steps as f32;
-        let idle = 1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin();
-        let run = 0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip;
+        let (idle, run) = if pose.diver {
+            (
+                0.35 * s + 0.52 * s * (elapsed * 2.6 - s * 3.4).sin(),
+                0.10 * s + 0.85 * s * (elapsed * 8.5 - s * 4.8).sin() * whip,
+            )
+        } else {
+            (
+                1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin(),
+                0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip,
+            )
+        };
         let theta = lag * s + idle * (1.0 - m) + run * m;
         let mut dir = back.rotate(theta);
         if snap > 0.0 {
@@ -1678,7 +1897,9 @@ fn draw_tail(
     let a = tint.alpha();
 
     // Shadow pass first so it never lands on the tail itself.
-    if !tint.ghost {
+    // On the Outfall the diver floats above the seabed and casts one detached
+    // ground shadow under `player.pos`, so the floating tail skips a mid-water shadow.
+    if !tint.ghost && !pose.diver {
         let mut last = (i32::MIN, i32::MIN);
         for &(x, y) in pts.iter() {
             if (x, y) != last {
@@ -2345,6 +2566,380 @@ fn draw_face(pb: &mut PixelBuffer, pose: &Pose, elapsed: f32, tint: Tint, cam: V
             pb.plot_add(w.0, w.1, (g, g, g));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Outfall diving suit & swimming (1× scale)
+// ---------------------------------------------------------------------------
+
+/// Deterministic integer hash in `[0, 1]` for analytic helmet valve bubbles.
+#[inline]
+pub(super) fn bubble_hash(slot: u32, cycle: u32, salt: u32) -> f32 {
+    let mut n = slot
+        .wrapping_mul(374_761_393)
+        .wrapping_add(cycle.wrapping_mul(668_265_263))
+        .wrapping_add(salt.wrapping_mul(1_442_695_041));
+    n = (n ^ (n >> 13)).wrapping_mul(1_274_126_177);
+    n ^= n >> 16;
+    (n & 0xFFFF) as f32 / 65535.0
+}
+
+/// Soft detached seabed shadow left on the floor under the rat's TRUE ground
+/// position (`pose.ground`), shrinking and fading as the rat floats higher.
+/// Stamped with pen `0` so the lighting pass treats it as seabed floor.
+fn draw_diver_shadow(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
+    let prev_pen = pb.set_pen(0);
+    let g = pose.ground - cam;
+    let h_frac = (pose.lift / DIVER_LIFT).clamp(0.70, 1.35);
+    let r_scale = 1.0 / (0.80 + 0.20 * h_frac);
+    let rx = 3.6 * r_scale;
+    let ry = 2.2 * r_scale;
+    let core = (0.32 / (0.70 + 0.30 * h_frac)).clamp(0.14, 0.36) * tint.alpha();
+
+    let cx = g.x.round() as i32;
+    let cy = g.y.round() as i32;
+    let px_r = rx.ceil() as i32 + 1;
+    let py_r = ry.ceil() as i32 + 1;
+    let x0 = (cx - px_r).max(0);
+    let x1 = (cx + px_r).min(pb.w as i32 - 1);
+    let y0 = (cy - py_r).max(0);
+    let y1 = (cy + py_r).min(pb.h as i32 - 1);
+    if x0 <= x1 && y0 <= y1 {
+        let inv_rx = 1.0 / rx.max(0.5);
+        let inv_ry = 1.0 / ry.max(0.5);
+        for y in y0..=y1 {
+            let dy = (y as f32 - g.y) * inv_ry;
+            let dy2 = dy * dy;
+            if dy2 >= 1.0 {
+                continue;
+            }
+            for x in x0..=x1 {
+                let dx = (x as f32 - g.x) * inv_rx;
+                let r2 = dx * dx + dy2;
+                if r2 < 1.0 {
+                    let fall = 1.0 - r2;
+                    darken(pb, x, y, core * (0.35 + 0.65 * fall));
+                }
+            }
+        }
+    }
+    pb.set_pen(prev_pen);
+}
+
+/// Paddling rubber front mitts and kicking brass-trimmed diving flippers.
+fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
+    let a = tint.alpha();
+    let m = pose.moving;
+    let g = pose.dash;
+
+    // 1. Front paddling mitts: gentle tread when idle, smooth stroke when
+    //    swimming, tucked tight along the flanks during a kick-glide dash.
+    for side in [-1.0f32, 1.0] {
+        let ph_i = pose.hover_phase + side * 0.9;
+        let ph_s = pose.swim_phase + if side > 0.0 { 0.0 } else { 0.85 };
+        let u_idle = 0.65 + 0.32 * ph_i.sin();
+        let v_idle = side * (2.05 + 0.30 * ph_i.cos());
+        let u_swim = 0.50 + 0.90 * ph_s.cos();
+        let v_swim = side * (2.15 + 0.68 * ph_s.sin().max(-0.25));
+        let u = (u_idle * (1.0 - m) + u_swim * m) * (1.0 - g) + (-0.30) * g;
+        let v = (v_idle * (1.0 - m) + v_swim * m) * (1.0 - g) + (side * 2.05) * g;
+        let s = w2s(pose.place(u, v), cam);
+        let root = w2s(pose.place(u * 0.5 + 0.3, v * 0.72), cam);
+        blend(pb, root.0, root.1, tint.apply(SUIT_SHADOW), a);
+        blend(pb, s.0, s.1, tint.apply(FLIPPER_BASE), a);
+    }
+
+    // 2. Hind webbed diving flippers: alternating flutter kick while swimming,
+    //    slow hover tread when idle, swept back together in a kick-glide dash.
+    for side in [-1.0f32, 1.0] {
+        let off = if side > 0.0 { 0.0 } else { std::f32::consts::PI };
+        let kick = (pose.hover_phase + off).sin() * (1.0 - m) + (pose.swim_phase + off).sin() * m;
+        let u_root = -2.75 - 0.35 * g;
+        let v_root = side * (1.75 - 0.45 * g + 0.18 * kick * (1.0 - g));
+        let u_tip = -4.25 - 0.65 * m - 0.55 * g - 0.45 * kick * (1.0 - g);
+        let v_tip = side * (2.10 - 0.72 * g + 0.55 * kick * (1.0 - g));
+
+        let p0 = pose.place(u_root, v_root);
+        let p1 = pose.place(
+            (u_root + u_tip) * 0.5,
+            (v_root + v_tip) * 0.5 + side * 0.25 * (1.0 - 0.4 * g),
+        );
+        let p2 = pose.place(u_tip, v_tip);
+        let p2_edge = pose.place(u_tip + 0.25, v_tip - side * 0.55);
+
+        let s0 = w2s(p0, cam);
+        let s1 = w2s(p1, cam);
+        let s2 = w2s(p2, cam);
+        let s2e = w2s(p2_edge, cam);
+        blend(pb, s0.0, s0.1, tint.apply(SUIT_SEAM), a);
+        blend(pb, s1.0, s1.1, tint.apply(FLIPPER_BASE), a);
+        blend(pb, s2e.0, s2e.1, tint.apply(FLIPPER_BASE), a);
+        blend(pb, s2.0, s2.1, tint.apply(FLIPPER_TIP), a);
+    }
+}
+
+/// Diving suit body, dorsal air tank + hose, brass neck corselet, round brass
+/// diving helmet, and aqua glass porthole faceplate (with Metal and Glass
+/// material pens so the lighting effects make the helmet and visor gleam).
+fn draw_diver_body(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
+    let c = w2s(pose.pos, cam);
+    let x0 = (c.0 - REACH).max(0);
+    let x1 = (c.0 + REACH).min(pb.w as i32 - 1);
+    let y0 = (c.1 - REACH).max(0);
+    let y1 = (c.1 + REACH).min(pb.h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+
+    let body_pen = pb.pen();
+    let helmet_pen = rat_helmet_pen(false);
+    let visor_pen = rat_visor_pen(false);
+    let a_all = tint.alpha();
+    let rim_colour: Rgb = if tint.hurt > 0.0 { (90, 0, 10) } else { (8, 14, 22) };
+    let light_u = pose.face.dot(LIGHT);
+    let light_v = pose.perp.dot(LIGHT);
+
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let d = Vec2::new(x as f32 + cam.x, y as f32 + cam.y) - pose.pos;
+            if d.len_sq() > (REACH * REACH) as f32 {
+                continue;
+            }
+            let (u, v) = pose.local(d);
+
+            // 3x3 coverage: round brass diving helmet over rubber suit torso.
+            let mut body = 0u32;
+            let mut helmet = 0u32;
+            for sy in -1..=1 {
+                for sx in -1..=1 {
+                    let o = Vec2::new(sx as f32 * 0.33, sy as f32 * 0.33);
+                    let (su, sv) = pose.local(d + o);
+                    if pose.in_helmet(su, sv, 0.0) {
+                        helmet += 1;
+                    } else if pose.in_body(su, sv, 0.0) {
+                        body += 1;
+                    }
+                }
+            }
+            let total = body + helmet;
+            let cover = ((total as f32 / 9.0 - 0.18) / 0.5).clamp(0.0, 1.0);
+
+            // Crisp dark silhouette rim only: the seabed ground shadow is drawn
+            // detached under `pose.ground` (`draw_diver_shadow`).
+            let dark = if cover < 1.0 && (pose.in_body(u, v, 0.95) || pose.in_helmet(u, v, 0.90)) {
+                0.64
+            } else {
+                0.0
+            };
+            if cover <= 0.0 && dark <= 0.0 {
+                continue;
+            }
+
+            let bg = pb.pixel_at(x as usize, y as usize);
+            let mut out = mix(bg, rim_colour, dark * a_all);
+            let mut px_pen = body_pen;
+
+            if cover > 0.0 {
+                let colour = if helmet * 2 >= total && helmet > 0 {
+                    // Front-facing oval porthole faceplate inside the round brass dome.
+                    let vu = (u - 4.25) / 0.95;
+                    let vv = v / 1.30;
+                    let vp = vu * vu + vv * vv;
+                    if vp <= 1.0 {
+                        px_pen = visor_pen;
+                        let v_lit = (0.5 + 0.5 * (vu * light_u + vv * light_v)).clamp(0.0, 1.0);
+                        let mut c = if v_lit < 0.55 {
+                            mix(VISOR_DARK, VISOR_BASE, v_lit / 0.55)
+                        } else {
+                            mix(VISOR_BASE, VISOR_LIGHT, (v_lit - 0.55) / 0.45)
+                        };
+                        if vp > 0.78 {
+                            c = mix(c, VISOR_DARK, 0.45);
+                        }
+                        c
+                    } else {
+                        px_pen = helmet_pen;
+                        let hu = (u - HELMET_U) / HELMET_R;
+                        let hv = v / HELMET_R;
+                        let r2 = (hu * hu + hv * hv).min(1.0);
+                        let hz = (1.0 - r2).sqrt();
+                        let lit = (0.42 + 0.42 * hz + 0.58 * (hu * light_u + hv * light_v))
+                            .clamp(0.0, 1.25);
+                        let mut c = if lit < 0.35 {
+                            mix(BRASS_DEEP, BRASS_SHADOW, lit / 0.35)
+                        } else if lit < 0.75 {
+                            mix(BRASS_SHADOW, BRASS_BASE, (lit - 0.35) / 0.40)
+                        } else if lit < 1.04 {
+                            mix(BRASS_BASE, BRASS_LIGHT, (lit - 0.75) / 0.29)
+                        } else {
+                            mix(BRASS_LIGHT, BRASS_SPEC, ((lit - 1.04) / 0.21).clamp(0.0, 1.0))
+                        };
+                        // Beveled copper rim framing the porthole.
+                        if vp <= 1.55 {
+                            c = mix(c, BRASS_DEEP, 0.32);
+                        }
+                        c
+                    }
+                } else {
+                    let uc = u.clamp(U_TAIL + 0.3, U_NOSE - 0.3);
+                    let w = half_width(uc).max(0.7);
+                    let vs = v - pose.spine(uc);
+                    let n = (vs / w).clamp(-1.0, 1.0);
+                    let along = ((u - 0.6) / 4.4).clamp(-1.0, 1.0);
+                    let dome = 1.0 - n * n;
+                    let lit = n * light_v + 0.55 * along * along * along.signum() * light_u;
+                    let lum = (0.48 + 0.34 * dome + 0.58 * lit).clamp(0.0, 1.15);
+
+                    if (0.95..=1.68).contains(&u) && vs.abs() <= 1.85 {
+                        // Brass neck corselet collar joining helmet and suit.
+                        px_pen = helmet_pen;
+                        let clit = (0.5 + 0.45 * n * light_v).clamp(0.0, 1.0);
+                        if clit < 0.5 {
+                            mix(BRASS_SHADOW, BRASS_BASE, clit * 2.0)
+                        } else {
+                            mix(BRASS_BASE, BRASS_LIGHT, (clit - 0.5) * 2.0)
+                        }
+                    } else if (-2.05..=0.35).contains(&u) && vs.abs() <= 1.05 {
+                        // Compact brass/ochre diving air tank strapped on the back.
+                        if (-0.95..=-0.48).contains(&u) {
+                            SUIT_SEAM
+                        } else {
+                            px_pen = helmet_pen;
+                            let tlit = (0.52 + 0.48 * (vs / 1.05) * light_v).clamp(0.0, 1.0);
+                            if tlit < 0.55 {
+                                mix(TANK_SHADOW, TANK_BODY, tlit / 0.55)
+                            } else {
+                                mix(TANK_BODY, BRASS_LIGHT, (tlit - 0.55) / 0.45)
+                            }
+                        }
+                    } else if (0.25..=1.35).contains(&u)
+                        && (-1.50..=-0.55).contains(&vs)
+                        && ((u - 0.8) * 0.65 + (vs + 1.0)).abs() < 0.42
+                    {
+                        // Curved dark rubber air hose linking tank to helmet rear.
+                        HOSE_DARK
+                    } else if u <= -3.0 && vs.abs() <= 0.95 {
+                        // Brass tail-gland cuff at the rump.
+                        px_pen = helmet_pen;
+                        mix(BRASS_SHADOW, BRASS_BASE, (0.5 + 0.4 * lit).clamp(0.0, 1.0))
+                    } else {
+                        // Rubbery slate-teal diving suit with subtle wet highlight & seam.
+                        let mut c = if lum < 0.70 {
+                            mix(SUIT_SHADOW, SUIT_BASE, lum / 0.70)
+                        } else {
+                            mix(SUIT_BASE, SUIT_LIGHT, (lum - 0.70) / 0.45)
+                        };
+                        if (-0.75..=-0.45).contains(&u) && vs.abs() > 1.05 {
+                            c = mix(c, SUIT_SEAM, 0.55);
+                        }
+                        c
+                    }
+                };
+                out = mix(out, tint.apply(colour), cover * a_all);
+            } else if dark < 0.5 {
+                // Buoyant seabed shadow alone is floor, not creature body.
+                px_pen = 0;
+            }
+            pb.set_pen(px_pen);
+            pb.plot(x, y, out);
+        }
+    }
+    pb.set_pen(body_pen);
+}
+
+/// Rat eyes peeking through the diving helmet's porthole, glass highlight,
+/// exhaust valve rivet, and gently swaying whiskers poking past the helmet.
+fn draw_diver_face(pb: &mut PixelBuffer, pose: &Pose, elapsed: f32, tint: Tint, cam: Vec2) {
+    let prev_pen = pb.pen();
+    let a = tint.alpha();
+
+    // Eyes visible inside the aqua porthole + crisp top-left glass glint.
+    pb.set_pen(rat_visor_pen(false));
+    for side in [-1.0f32, 1.0] {
+        let e = w2s(pose.place(4.05, side * 0.62), cam);
+        blend(pb, e.0, e.1, tint.apply(EYE), a);
+    }
+    let glint = w2s(pose.place(4.35, 0.0) + LIGHT * 0.65, cam);
+    blend(pb, glint.0, glint.1, tint.apply(VISOR_GLINT), 0.78 * a);
+
+    // Helmet exhaust valve on the rear-left dome (origin of the bubble stream).
+    pb.set_pen(rat_helmet_pen(false));
+    let valve = w2s(pose.place(1.85, -1.75), cam);
+    blend(pb, valve.0, valve.1, tint.apply(BRASS_LIGHT), 0.85 * a);
+
+    // Subtle whiskers poking out beside the helmet, drifting gently in the water.
+    pb.set_pen(0);
+    let sway = 0.28 * (elapsed * 4.5).sin();
+    for side in [-1.0f32, 1.0] {
+        for (k, &(u, v)) in [(4.85f32, 2.0f32), (5.15, 2.95)].iter().enumerate() {
+            let w = w2s(pose.place(u + sway * (k as f32 + 1.0) * 0.5, side * v), cam);
+            let g = if k == 0 { 64 } else { 36 };
+            pb.plot_add(w.0, w.1, (g, g, g));
+        }
+    }
+    pb.set_pen(prev_pen);
+}
+
+/// Sparse analytic stream of tiny rising bubbles from the helmet valve (and a
+/// short bubble burst during a dash). Zero rng, zero state, drawn pre-lighting
+/// with pen `0` so the underwater scene tints and lights them naturally.
+fn draw_diver_bubbles(
+    pb: &mut PixelBuffer,
+    pose: &Pose,
+    vel: Vec2,
+    elapsed: f32,
+    tint: Tint,
+    cam: Vec2,
+) {
+    let prev_pen = pb.set_pen(0);
+    let valve = pose.place(1.85, -1.75);
+    let alpha_mul = tint.alpha();
+
+    for slot in 0..8u32 {
+        let (weight, period) = if slot < 3 {
+            (1.0, 1.15 + 0.55 * bubble_hash(slot, 0, 3))
+        } else if slot < 5 {
+            (
+                ((pose.moving - 0.10) / 0.45).clamp(0.0, 1.0),
+                0.78 + 0.35 * bubble_hash(slot, 0, 5),
+            )
+        } else {
+            (
+                (pose.dash * 1.4).clamp(0.0, 1.0),
+                0.38 + 0.20 * bubble_hash(slot, 0, 7),
+            )
+        };
+        if weight <= 0.02 {
+            continue;
+        }
+        let offset = bubble_hash(slot, 0, 13) * period;
+        let phase = (elapsed + offset) / period;
+        let floor_p = phase.floor();
+        let cycle = (floor_p as i32) as u32;
+        let t = phase - floor_p;
+        let env = (t / 0.14).min(1.0) * ((1.0 - t) / 0.32).clamp(0.0, 1.0);
+        let a = env * weight * 0.85 * alpha_mul;
+        if a <= 0.04 {
+            continue;
+        }
+        let h1 = bubble_hash(slot, cycle, 19);
+        let h2 = bubble_hash(slot, cycle, 31);
+        let origin = match slot {
+            6 => pose.place(-3.8, -1.2),
+            7 => pose.place(-3.8, 1.2),
+            _ => valve,
+        };
+        let rise = -t * (6.5 + 5.5 * h1);
+        let drag = (vel * (-0.13 * t)).clamp_len(11.0);
+        let wobble = (t * 7.2 + h2 * std::f32::consts::TAU).sin() * (0.5 + 1.1 * t);
+        let bp = origin + drag + Vec2::new(wobble, rise);
+        let s = w2s(bp, cam);
+        blend(pb, s.0, s.1, tint.apply(BUBBLE_SPEC), a);
+        if t < 0.55 && h1 > 0.45 {
+            blend(pb, s.0 + 1, s.1 + 1, tint.apply(BUBBLE_RING), a * 0.40);
+        }
+    }
+    pb.set_pen(prev_pen);
 }
 
 #[cfg(test)]
@@ -3328,5 +3923,191 @@ mod tests {
         draw_tail_whip_crack(&mut zero, &crack, Vec2::ZERO);
         draw_tail_thrash(&mut zero, &p, Some((0.4, 34.0, 0.9)), Vec2::ZERO);
         draw_rat_with_whip(&mut zero, &p, 0.5, Vec2::ZERO, 0.0, None, Some(&bchain));
+    }
+
+    #[test]
+    fn rat_outfit_selects_diver_only_on_outfall() {
+        assert_eq!(RatOutfit::for_theme(Theme::Outfall), RatOutfit::Diver);
+        for theme in Theme::playable() {
+            if theme != Theme::Outfall {
+                assert_eq!(
+                    RatOutfit::for_theme(theme),
+                    RatOutfit::Standard,
+                    "{theme:?} must keep the standard rat"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn outfall_diver_differs_from_standard_with_brass_helmet_and_materials() {
+        let p = rat(rig_pos(), 0.0);
+        let base_pen = crate::render::lighting::rat_pen();
+        let helmet_pen = crate::render::lighting::rat_helmet_pen(false);
+        let visor_pen = crate::render::lighting::rat_visor_pen(false);
+
+        let mut plain = PixelBuffer::new(RIG_W, RIG_H);
+        plain.set_materials(true);
+        plain.clear(RIG_BG);
+        plain.set_pen(base_pen);
+        draw_rat(&mut plain, &p, 0.4, Vec2::ZERO);
+
+        let mut std_explicit = PixelBuffer::new(RIG_W, RIG_H);
+        std_explicit.set_materials(true);
+        std_explicit.clear(RIG_BG);
+        std_explicit.set_pen(base_pen);
+        draw_rat_with_outfit(
+            &mut std_explicit,
+            &p,
+            0.4,
+            Vec2::ZERO,
+            0.0,
+            None,
+            None,
+            RatOutfit::Standard,
+        );
+        assert_eq!(
+            plain.pixels(),
+            std_explicit.pixels(),
+            "Standard outfit must be pixel-identical to draw_rat"
+        );
+        assert_eq!(
+            plain.mat(),
+            std_explicit.mat(),
+            "Standard outfit must be material-identical to draw_rat"
+        );
+
+        let mut diver = PixelBuffer::new(RIG_W, RIG_H);
+        diver.set_materials(true);
+        diver.clear(RIG_BG);
+        diver.set_pen(base_pen);
+        draw_rat_with_outfit(
+            &mut diver,
+            &p,
+            0.4,
+            Vec2::ZERO,
+            0.0,
+            None,
+            None,
+            RatOutfit::Diver,
+        );
+
+        let mut diff_px = 0usize;
+        let mut brass_px = 0usize;
+        let mut helmet_mat_px = 0usize;
+        let mut visor_mat_px = 0usize;
+        for (i, (&a, &b)) in plain.pixels().iter().zip(diver.pixels().iter()).enumerate() {
+            if a != b {
+                diff_px += 1;
+            }
+            if b.0 >= 165 && b.1 >= 95 && b.0 > b.1 && b.0 >= b.2.saturating_add(70) {
+                brass_px += 1;
+            }
+            let m = diver.mat()[i];
+            if m == helmet_pen {
+                helmet_mat_px += 1;
+            } else if m == visor_pen {
+                visor_mat_px += 1;
+            }
+        }
+        assert!(diff_px >= 20, "diver should visibly differ from standard rat ({diff_px} px)");
+        assert!(brass_px >= 6, "diver helmet should paint warm brass pixels ({brass_px} px)");
+        assert!(helmet_mat_px >= 6, "diver helmet should stamp Metal pen ({helmet_mat_px} px)");
+        assert!(visor_mat_px >= 2, "diver porthole should stamp Glass pen ({visor_mat_px} px)");
+    }
+
+    #[test]
+    fn diver_swim_bob_changes_pixels_without_moving_hitbox_or_position() {
+        let p = rat(rig_pos(), 0.25);
+        let orig_pos = p.pos;
+        let orig_hurt = p.buffs.hurt_radius();
+
+        let render_diver = |player: &Player, t: f32| {
+            let mut pb = PixelBuffer::new(RIG_W, RIG_H);
+            pb.clear(RIG_BG);
+            draw_rat_with_outfit(&mut pb, player, t, Vec2::ZERO, 0.0, None, None, RatOutfit::Diver);
+            pb
+        };
+        let a = render_diver(&p, 0.0);
+        let b = render_diver(&p, 0.65);
+        assert_eq!(p.pos, orig_pos, "render must never move player.pos");
+        assert_eq!(p.buffs.hurt_radius(), orig_hurt, "render must never alter hurt_radius");
+        let changed = a
+            .pixels()
+            .iter()
+            .zip(b.pixels().iter())
+            .filter(|(pa, pb)| pa != pb)
+            .count();
+        assert!(
+            changed >= 8,
+            "idle hover bob + bubbles should smoothly animate the diver over time ({changed} px)"
+        );
+
+        // Moving swim + dash kick-glide + edge/zero-size clipping must not panic.
+        let mut swimmer = p;
+        swimmer.vel = swimmer.face * 55.0;
+        let swim_a = render_diver(&swimmer, 0.10);
+        let swim_b = render_diver(&swimmer, 0.35);
+        assert_ne!(swim_a.pixels(), swim_b.pixels(), "swimming cycle must advance smoothly");
+        swimmer.dash_active = 0.14;
+        let _dash = render_diver(&swimmer, 0.35);
+
+        let mut zero = PixelBuffer::new(0, 0);
+        draw_rat_with_outfit(&mut zero, &swimmer, 0.35, Vec2::ZERO, 0.0, None, None, RatOutfit::Diver);
+    }
+
+    #[test]
+    fn diver_rat_floats_above_detached_ground_shadow_at_true_position() {
+        let p = rat(rig_pos(), 0.0);
+        let base_pen = crate::render::lighting::rat_pen();
+        let helmet_pen = crate::render::lighting::rat_helmet_pen(false);
+
+        let render = |t: f32| {
+            let mut pb = PixelBuffer::new(RIG_W, RIG_H);
+            pb.set_materials(true);
+            pb.clear(RIG_BG);
+            pb.set_pen(base_pen);
+            draw_rat_with_outfit(&mut pb, &p, t, Vec2::ZERO, 0.0, None, None, RatOutfit::Diver);
+            pb
+        };
+        let pb = render(0.0);
+        // True ground point is darkened by the detached seabed shadow (pen 0).
+        let gx = p.pos.x as usize;
+        let gy = p.pos.y as usize;
+        let ground_px = pb.pixel_at(gx, gy);
+        assert!(
+            ground_px.0 < RIG_BG.0 && ground_px.1 < RIG_BG.1 && ground_px.2 < RIG_BG.2,
+            "true ground position should carry the detached shadow, got {ground_px:?} vs {RIG_BG:?}"
+        );
+        assert_eq!(pb.mat()[gy * pb.w + gx], 0, "detached seabed shadow must use floor pen 0");
+
+        // Helmet pixels sit clearly above `player.pos.y`.
+        let mut sum_y = 0.0f32;
+        let mut n = 0usize;
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                if pb.mat()[y * pb.w + x] == helmet_pen {
+                    sum_y += y as f32;
+                    n += 1;
+                }
+            }
+        }
+        assert!(n >= 4, "expected helmet pixels");
+        let mean_y = sum_y / n as f32;
+        assert!(
+            mean_y <= p.pos.y - 3.0,
+            "lifted diver helmet should sit well above ground y={} (mean_y={mean_y:.2})",
+            p.pos.y
+        );
+
+        // Higher bob (`sin(2.5*t) < 0` -> larger lift) casts a fainter shadow than lower dip.
+        let high = render(std::f32::consts::PI * 1.5 / 2.5);
+        let low = render(std::f32::consts::FRAC_PI_2 / 2.5);
+        assert!(
+            high.pixel_at(gx, gy).0 > low.pixel_at(gx, gy).0,
+            "higher bob should cast a fainter seabed shadow ({:?} vs {:?})",
+            high.pixel_at(gx, gy),
+            low.pixel_at(gx, gy)
+        );
     }
 }

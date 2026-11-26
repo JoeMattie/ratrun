@@ -368,6 +368,27 @@ pub struct LanternView {
     pub decoy: Option<LanternBulbView>,
 }
 
+impl LanternView {
+    fn lift(&self) -> f32 {
+        if self.state == LanternState::Death {
+            return 0.0;
+        }
+        (7.0 + 1.4 * (self.anim * 1.4).sin()) * BODY_SCALE
+    }
+
+    /// Lift the visible hull and its attached lure. Planted bulbs, decoys and
+    /// locked attack footprints retain their world positions.
+    pub(crate) fn floating_body(mut self) -> Self {
+        let lift = self.lift();
+        self.pos.y -= lift;
+        if let Some(bulb) = self.real_bulb.as_mut().filter(|bulb| !bulb.planted) {
+            bulb.pos.y -= lift;
+        }
+        self
+    }
+}
+
+
 // ============================================================================
 // Palette — calibrated directly to scene-g1-ocean-lure & scene-g2-ocean-anglerfish
 // ============================================================================
@@ -922,7 +943,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent:
     // Stamp seabed drop shadow with material pen 0 so surface bump never embosses it.
     let prev_pen = pb.set_pen(0);
     if vis > 0.06 {
-        let shadow_alpha = 0.42 * vis;
+        let shadow_alpha = (0.42 - view.lift() * (0.014 / BODY_SCALE)) * vis;
         for i in 0..9 {
             let t = i as f32 / 8.0;
             let u = lerp(0.0, -58.0, t);

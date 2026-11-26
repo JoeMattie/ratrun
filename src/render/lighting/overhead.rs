@@ -31,11 +31,12 @@
 use super::engine::{Grid, LayerMask, LightingMode};
 use super::fx::{strength, Canvas};
 use super::material::{self, MaterialKind};
+use crate::game::art_roster_outfall;
 use crate::game::collision::{TileMap, TILE_F};
 use crate::game::ecs::components::SpawnId;
-use crate::game::ecs::systems::boss::{Boss, BossState};
+use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::{Level, Pit};
+use crate::game::level::{Level, Pit, Theme};
 use crate::game::player::Player;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
@@ -300,14 +301,21 @@ fn cast(pb: &mut PixelBuffer, scene: &OverheadScene<'_>, defer: bool) {
         let s: &mut Scratch = &mut guard;
         s.items.clear();
 
-        // The rat first (a Library plate casts none).
+        // The rat first (a Library plate casts none). On the Outfall the
+        // swimming diver floats above the seabed, so its shadow uses the flyer
+        // slide rule and a slightly smaller footprint under `player.pos`.
         if !scene.hide_rat {
+            let (rat_half, rat_height, rat_flyer) = if scene.level.theme == Theme::Outfall {
+                (RAT_HALF - 1, HEIGHT_FLYER, true)
+            } else {
+                (RAT_HALF, HEIGHT_MEDIUM, false)
+            };
             push_body(
                 &mut s.items,
                 scene.player.pos,
-                RAT_HALF,
-                HEIGHT_MEDIUM,
-                false,
+                rat_half,
+                rat_height,
+                rat_flyer,
                 0,
                 scene,
                 centre,
@@ -321,7 +329,7 @@ fn cast(pb: &mut PixelBuffer, scene: &OverheadScene<'_>, defer: bool) {
         for entity in scene.ecs.iter_entities() {
             let spid = entity.get::<SpawnId>().map_or(u64::MAX, |id| id.0);
             if let Some(boss) = entity.get::<Boss>() {
-                if boss.dead {
+                if boss.dead || boss.kind == BossKind::Lantern {
                     continue;
                 }
                 let flying = boss.is_airborne()
@@ -499,11 +507,13 @@ fn enemy_body(e: &Enemy) -> (i32, i32, bool) {
     let r = e.radius.max(1.0);
     let archetype = e.kind.archetype();
     // Flyers: the Bat's whole family (every registered moth, fly and wasp is a
-    // Bat), the hornet, and the moth that carries a fuse.
-    let flyer = matches!(
-        archetype,
-        EnemyKind::Bat | EnemyKind::MurderHornet | EnemyKind::WickMoth
-    );
+    // Bat), the hornet, the moth that carries a fuse, and the Outfall's
+    // pelagic swimmers (Conger, Glass Shrimp, Lampfish, Grouper, Fry School).
+    let flyer = art_roster_outfall::is_swimmer(e.kind)
+        || matches!(
+            archetype,
+            EnemyKind::Bat | EnemyKind::MurderHornet | EnemyKind::WickMoth
+        );
     if e.named {
         // A named miniboss is an `Enemy` with the Brute's radius; its art is
         // two or three times that wide.
@@ -1009,5 +1019,56 @@ mod tests {
         }
         assert_eq!(levels.len(), 1, "one flat darkness at Coarse: {levels:?}");
         assert_eq!(levels.into_iter().next(), Some(darkened(core())));
+    }
+
+    #[test]
+    fn outfall_diver_rat_and_swimmers_use_flyer_slide_while_sewer_is_unchanged() {
+        let w = world(Theme::Outfall);
+        let c = centre(&w);
+        let at = c + Vec2::new(320.0, 180.0);
+
+        // Swimmers use the flyer height/slide rule; bottom dwellers stay grounded.
+        for swimmer in [
+            EnemyKind::GlassShrimp,
+            EnemyKind::Conger,
+            EnemyKind::Lampfish,
+            EnemyKind::Grouper,
+            EnemyKind::FrySchool,
+        ] {
+            let e = enemy_at(swimmer, at);
+            let (_, h, fly) = enemy_body(&e);
+            assert!(fly && h == HEIGHT_FLYER, "{swimmer:?} must use flyer overhead rule");
+        }
+        for grounded in [
+            EnemyKind::SandHopper,
+            EnemyKind::PistolShrimp,
+            EnemyKind::Skater,
+            EnemyKind::Skitterer,
+            EnemyKind::Brute,
+        ] {
+            let e = enemy_at(grounded, at);
+            let (_, _, fly) = enemy_body(&e);
+            assert!(!fly, "{grounded:?} must stay grounded");
+        }
+
+        // Outfall rat slides further away from map centre than a Sewer rat at the same spot.
+        let mut sewer_w = world(Theme::Sewer);
+        let mut outfall_w = world(Theme::Outfall);
+        sewer_w.player.pos = at;
+        outfall_w.player.pos = at;
+        let cam = at - Vec2::splat(SIZE as f32 * 0.5);
+        let mut pb_s = canvas();
+        let mut pb_o = canvas();
+        draw(&mut pb_s, &scene(&sewer_w, cam));
+        draw(&mut pb_o, &scene(&outfall_w, cam));
+        let (sx, sy, _) = darkest(&pb_s).expect("sewer rat shadow");
+        let (ox, oy, _) = darkest(&pb_o).expect("outfall rat shadow");
+        let mid = (SIZE / 2) as f32;
+        let d_sewer = (sx as f32 - mid).hypot(sy as f32 - mid);
+        let d_outfall = (ox as f32 - mid).hypot(oy as f32 - mid);
+        assert!(
+            d_outfall > d_sewer + 1.5,
+            "Outfall floating rat should slide further ({d_outfall:.1}) than Sewer rat ({d_sewer:.1})"
+        );
     }
 }

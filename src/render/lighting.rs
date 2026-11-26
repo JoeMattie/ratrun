@@ -44,7 +44,9 @@ pub(crate) use fixtures::draw_fixtures;
 // Batch-13 effects (`.review/handoff/lighting/CONTRACT.md`).
 pub(crate) use fx::enabled_from_env as fx_enabled_from_env;
 pub(crate) use overhead::{draw_deferred as draw_overhead_shadows, OverheadScene};
-pub(crate) use specular::{boss_pen, enemy_pen, giant_rat_pen, pool_pen, prop_pen, rat_pen};
+pub(crate) use specular::{
+    boss_pen, enemy_pen, giant_rat_pen, pool_pen, prop_pen, rat_helmet_pen, rat_pen, rat_visor_pen,
+};
 #[cfg(test)]
 pub(crate) use underwater::apply_off_grade;
 pub(crate) use water::gloss_enabled as water_gloss_enabled;
