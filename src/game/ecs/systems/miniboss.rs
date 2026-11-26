@@ -957,6 +957,9 @@ pub struct Miniboss {
     signature_index: usize,
     second_unlocked: bool,
     next_secondary: bool,
+    /// Turn-rate-limited sprite heading in radians. Signature aim and movement
+    /// continue to read their own simulation state.
+    pub(crate) art_heading: Option<f32>,
 }
 
 impl Miniboss {
@@ -993,7 +996,32 @@ impl Miniboss {
             signature_index: 0,
             second_unlocked: kind.temperament().second_from_hp == 1.0,
             next_secondary: false,
+            art_heading: None,
         }
+    }
+
+    fn update_art_heading(&mut self, body: &Enemy, dt: f32) {
+        use std::f32::consts::{PI, TAU};
+
+        if self.kind == MinibossKind::Mudlark {
+            return;
+        }
+        if matches!(self.state, MinibossState::Tell | MinibossState::Active | MinibossState::Recover) {
+            self.art_heading = Some(self.aim.angle());
+            return;
+        }
+
+        let previous = self.art_heading.unwrap_or_else(|| body.facing.angle());
+        let (heading, rate) = match self.manoeuvre.motion {
+            Motion::ChargeTell { from, end, .. } | Motion::Lunge { from, end, .. } => {
+                ((end - from).angle(), TAU * 2.0)
+            }
+            _ if body.vel.len_sq() > 1.0 => (body.vel.angle(), TAU),
+            _ => (previous, TAU),
+        };
+        let turn = (heading - previous + PI).rem_euclid(TAU) - PI;
+        let step = (rate * dt).max(0.0);
+        self.art_heading = Some((previous + turn.clamp(-step, step) + PI).rem_euclid(TAU) - PI);
     }
 
     /// Where a signature centred on the rat locks to.
@@ -1418,6 +1446,7 @@ pub fn miniboss_system(
         e.position_locked = mb.holds() || mb.manoeuvre.locks_position();
         e.contact_cd = (contact_cd - dt).max(0.0);
         e.flash = (flash - dt).max(0.0);
+        mb.update_art_heading(&e, dt);
     }
     schedule.active = alive;
     movement.clean_summons(&mut commands, owners, summon_order);
@@ -1937,6 +1966,28 @@ pub fn chest_floor_near(level: &Level, pos: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sprite_restarts_from_attack_aim_and_turns_at_a_bounded_rate() {
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(21);
+        let mut enemy = Enemy::spawn(EnemyKind::Brute, Vec2::ZERO, 1.0, &mut rng);
+        let mut carton = Miniboss::new(MinibossKind::MilkCarton, 0);
+        carton.aim = Vec2::new(1.0, 0.0);
+        carton.state = MinibossState::Recover;
+        let dt = 1.0 / 60.0;
+        carton.update_art_heading(&enemy, dt);
+        carton.state = MinibossState::Cooldown;
+        enemy.facing = -carton.aim;
+        carton.update_art_heading(&enemy, dt);
+        assert!(carton.art_heading.unwrap().abs() < 1e-4);
+
+        enemy.vel = Vec2::new(0.0, 35.0);
+        carton.update_art_heading(&enemy, dt);
+        let turned = carton.art_heading.unwrap();
+        assert!(turned > 0.0 && turned <= std::f32::consts::TAU * dt + 1e-4);
+    }
 
     fn mb(kind: MinibossKind, origin: Vec2, aim: Vec2) -> Miniboss {
         let mut m = Miniboss::new(kind, 0);
