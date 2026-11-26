@@ -8,6 +8,10 @@
 //! sweep side and the charge lane, and queues the art's telegraphed attacks as
 //! shared [`BossHazard`]s.
 //!
+//! The 1.5× shell uses the same geometry for movement, contact, tells and
+//! strikes. A scheduled arrival clears the widest camera and lands on floor
+//! that can hold the shell. The 60-second determinism runs never summon it.
+//!
 //! ## The fight the level asked for
 //!
 //! The Sewer's original boss, the Apex Jaguar, is speed. This is mass. The
@@ -66,6 +70,91 @@ use crate::detmath::DetF32;
 use crate::game::art_boss_horseshoe_crab as art;
 use crate::game::art_boss_horseshoe_crab::CrabState;
 
+/// Scheduled landings need clearance for the full shell and a margin for the
+/// tail, arrival particles and camera shake, even at maximum zoom-out.
+fn landing_fits(level: &Level, rat: Vec2, viewport: Vec2, pos: Vec2) -> bool {
+    let radius = art::BODY_RADIUS;
+    pos.x >= radius && pos.y >= radius
+        && pos.x <= level.arena.x - radius && pos.y <= level.arena.y - radius
+        && out_of_arrival_view(level, rat, viewport, pos, art::CULL_MARGIN + 14.0)
+        && level.tiles.circle_clear(pos, art::BODY_RADIUS, SizeClass::Large)
+}
+
+pub(super) fn scheduled_landing(rng: &mut StdRng, level: &Level, rat: Vec2, viewport: Vec2) -> Option<Vec2> {
+    use crate::game::ecs::systems::spawn::ring_radius;
+    let arena = level.fight_rect_around(rat);
+    let radius = ring_radius(viewport + Vec2::splat(art::CULL_MARGIN + 14.0));
+    let angle = rng.random_range(0.0..std::f32::consts::TAU);
+    for distance in [radius * 0.8, radius, radius * 1.45] {
+        for spoke in 0..24 {
+            let dir = Vec2::from_angle(angle + spoke as f32 * std::f32::consts::TAU / 24.0);
+            let pos = rat + dir * distance;
+            if arena.contains_world(pos) && landing_fits(level, rat, viewport, pos) {
+                return Some(pos);
+            }
+        }
+    }
+    // A ring can cross only rooms too narrow for the shell. Search tile
+    // centres for the closest suitable floor outside the same camera bounds.
+    let mut best: Option<((bool, f32), Vec2)> = None;
+    for y in 0..level.tiles.rows() {
+        for x in 0..level.tiles.cols() {
+            if !level.tiles.passable(x, y, SizeClass::Large) {
+                continue;
+            }
+            let pos = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * collision::TILE_F;
+            let rank = (!arena.contains_world(pos), rat.dist_sq(pos));
+            if best.is_none_or(|(previous, _)| rank < previous) && landing_fits(level, rat, viewport, pos) {
+                best = Some((rank, pos));
+            }
+        }
+    }
+    best.map(|(_, pos)| pos)
+}
+
+/// Scale feedback around its own anchor so a tail clang stays at the tip and a
+/// burrow burst stays at the marked entrance or exit.
+pub(super) fn emit_cue(cue: BossCue, boss: &Boss, particles: &mut Particles, rng: &mut StdRng) {
+    let anchor = match cue {
+        BossCue::CrabTelsonSweep => art::telson_tip(&boss.crab_view()),
+        BossCue::CrabWedge => art::gill_pos(&boss.crab_view()),
+        BossCue::CrabBurrow => boss.target,
+        _ => boss.pos,
+    };
+    particles.with_scaled_emission(anchor, art::BODY_SCALE, |particles| match cue {
+        BossCue::CrabRattle => {
+            vfx::emit_boss_cat_skid(particles, rng, anchor, boss.facing, 0.12);
+        }
+        BossCue::CrabTelsonCock => {
+            vfx::emit_boss_mower_overheat_steam(particles, rng, anchor, boss.facing, 0.10);
+        }
+        BossCue::CrabTelsonSweep => {
+            vfx::emit_boss_mower_wall_impact(particles, rng, anchor, boss.facing, false);
+        }
+        BossCue::CrabCharge => {
+            vfx::emit_boss_mower_charge_trail(particles, rng, anchor, boss.facing, false, 0.10);
+        }
+        BossCue::CrabWedge => {
+            vfx::emit_boss_mower_wall_impact(particles, rng, anchor, -boss.facing, true);
+        }
+        BossCue::CrabBurrow => {
+            vfx::emit_boss_broom_stomp(
+                particles, rng, anchor, art::BURROW_LOCAL_RADIUS * 0.6, boss.phase >= 3,
+            );
+        }
+        BossCue::CrabEmerge => {
+            vfx::emit_boss_broom_stomp(particles, rng, anchor, art::BURROW_LOCAL_RADIUS, true);
+        }
+        BossCue::CrabFlip => {
+            vfx::emit_boss_mower_flipped_smoke(particles, rng, anchor, 0.12);
+        }
+        BossCue::CrabDeath => {
+            vfx::emit_boss_magpie_death(particles, rng, anchor, boss.facing, (44, 92, 190));
+        }
+        _ => unreachable!("only Horseshoe cues are routed here"),
+    });
+}
+
 // ---- scratch layout -------------------------------------------------------
 
 /// The attack rotation counter (`0..4`, persists across states).
@@ -90,8 +179,6 @@ const F_DEATH: u32 = 1 << 1;
 /// would suppress every sweep aimed at a rat already in melee.
 const ESCAPE_WALK: f32 = 48.0;
 
-/// The step used to check that a *lane* can be stepped off sideways (px).
-const LANE_STEP: f32 = 26.0;
 
 // ============================================================================
 // Controller
@@ -127,7 +214,7 @@ impl BossController for HorseshoeCrabController {
             BossState::HorseshoeCrab(CrabState::Dome) => tick_dome(ctx, boss, out),
             BossState::HorseshoeCrab(CrabState::TelsonTell) => tick_telson_tell(boss),
             BossState::HorseshoeCrab(CrabState::TelsonSweep) => tick_telson_sweep(boss),
-            BossState::HorseshoeCrab(CrabState::BulldozeTell) => tick_bulldoze_tell(ctx, boss),
+            BossState::HorseshoeCrab(CrabState::BulldozeTell) => tick_bulldoze_tell(boss),
             BossState::HorseshoeCrab(CrabState::Bulldoze) => tick_bulldoze(ctx, boss),
             BossState::HorseshoeCrab(CrabState::Wedged) => tick_wedged(ctx, boss),
             BossState::HorseshoeCrab(CrabState::BurrowTell) => tick_burrow_tell(ctx, boss),
@@ -242,19 +329,15 @@ fn tick_telson_sweep(boss: &mut Boss) {
     }
 }
 
-fn tick_bulldoze_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
-    // It is already aimed; it just lowers itself. Commit the lane at the lock,
-    // then stand still and take it.
-    let _ = ctx;
+fn tick_bulldoze_tell(boss: &mut Boss) {
+    let slot = phase_slot(boss);
+    let secs = (boss.scratch[S_LANE_LEN] / art::BULLDOZE_SPEED[slot]).max(0.15);
     if boss.flags & F_LOCK == 0 && boss.progress() >= art::BULLDOZE_LOCK_PROGRESS {
         boss.flags |= F_LOCK;
-        let slot = phase_slot(boss);
-        let len = boss.scratch[S_LANE_LEN];
-        let secs = (len / art::BULLDOZE_SPEED[slot]).max(0.15);
         let warn = (boss.duration * (1.0 - art::BULLDOZE_LOCK_PROGRESS)).max(0.05);
         let lane = BossHazard::new(
             HazardShape::Corridor {
-                from: boss.pos,
+                from: boss.pounce_origin,
                 to: boss.target,
                 half_width: art::BULLDOZE_HALF_WIDTH,
             },
@@ -265,6 +348,10 @@ fn tick_bulldoze_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
         .with_knockback(art::BULLDOZE_KNOCKBACK)
         .with_enemies();
         let _ = boss.push_hazard(lane);
+        // Keep the remaining warning on the floor before moving down the lane.
+        boss.duration = boss.elapsed + warn * boss.attack_tuning.tell_time_mult;
+    }
+    if boss.progress() >= 1.0 {
         enter(boss, CrabState::Bulldoze, secs);
     }
 }
@@ -305,33 +392,34 @@ fn tick_burrow_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let locked = boss.flags & F_LOCK != 0;
     if !locked {
         let at = ctx.player_pos;
-        if ctx.footprint_fits(at, art::BODY_RADIUS * 0.5) {
+        if ctx.footprint_fits(at, art::BODY_RADIUS) && escape_from_circle(ctx, at, art::BURROW_RADIUS) {
             boss.target = at;
         }
         if boss.progress() >= art::BURROW_LOCK_PROGRESS {
             boss.flags |= F_LOCK;
-            let remaining =
-                (boss.duration * (1.0 - art::BURROW_LOCK_PROGRESS)).max(0.05)
-                    + art::BURROW_SINK
-                    + art::BURROW_TRAVEL;
+            let remaining = (boss.duration * (1.0 - art::BURROW_LOCK_PROGRESS)).max(0.05);
+            let dive = art::BURROW_SINK + art::BURROW_TRAVEL;
             let burst = BossHazard::new(
                 HazardShape::Circle {
                     center: boss.target,
                     radius: art::BURROW_RADIUS,
                 },
-                remaining,
+                remaining + dive,
                 0.18,
                 art::EMERGE_DAMAGE,
             )
             .with_knockback(art::EMERGE_KNOCKBACK);
             let _ = boss.push_hazard(burst);
+            // Match the pre-dive wait and travel to the published warning.
+            boss.duration = boss.elapsed + remaining * boss.attack_tuning.tell_time_mult;
         }
     }
     if boss.progress() >= 1.0 {
         boss.pounce_origin = boss.pos;
         // The dive and the run under the floor are one state: it is out of
         // sight for the whole of both.
-        enter(boss, CrabState::Burrow, art::BURROW_SINK + art::BURROW_TRAVEL);
+        let travel = (art::BURROW_SINK + art::BURROW_TRAVEL) * boss.attack_tuning.tell_time_mult;
+        enter(boss, CrabState::Burrow, travel);
     }
 }
 
@@ -339,11 +427,8 @@ fn tick_burrow(ctx: &BossContext<'_>, boss: &mut Boss) {
     // Under the floor: no wall rule, no contact, nothing to hit. It arrives at
     // the mark as the dive ends.
     if boss.progress() >= 1.0 {
-        // The mark is only checked against *part* of the body (it follows a
-        // rat that hugs a wall), but `move_boss` steps the whole body: a crab
-        // surfacing where its own radius does not fit could not take a step
-        // afterwards and sat in `Dome` until the framework's rejoin rule
-        // teleported it. Surface on the nearest floor the body does fit.
+        // Live tells require full clearance. Keep a recovery path for forced
+        // states or a landing whose geometry was edited during the dive.
         boss.pos = surface_spot(ctx, boss);
         enter(boss, CrabState::Emerge, art::EMERGE);
     }
@@ -352,7 +437,7 @@ fn tick_burrow(ctx: &BossContext<'_>, boss: &mut Boss) {
 /// Where the burrowing crab comes up: its mark when the whole body fits there,
 /// otherwise the first fitting point on the way back toward where it dived
 /// (floor it was standing on a moment ago), otherwise the nearest open cell.
-/// The mark itself is the last resort, which is the old behaviour.
+/// A dive that cannot hold the mark returns to its origin.
 fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
     let radius = boss.kind.body_radius();
     let mark = boss.target;
@@ -364,7 +449,7 @@ fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
     if len > 1e-3 {
         let dir = back * (1.0 / len);
         let mut d = 2.0;
-        while d <= len.min(48.0) {
+        while d <= len.min(48.0 * art::BODY_SCALE) {
             let p = mark + dir * d;
             if ctx.footprint_fits(p, radius) {
                 return p;
@@ -376,10 +461,7 @@ fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
     if ctx.footprint_fits(open, radius) {
         return open;
     }
-    if ctx.footprint_fits(boss.pounce_origin, radius) {
-        return boss.pounce_origin;
-    }
-    mark
+    boss.pounce_origin
 }
 
 fn tick_emerge(boss: &mut Boss) {
@@ -572,7 +654,7 @@ enum Attack {
 fn commit_telson(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     let to = ctx.player_pos - boss.pos;
     let dist = to.len();
-    if dist < art::TELSON_INNER - 2.0 || dist > art::TELSON_OUTER - 2.0 {
+    if dist < art::TELSON_INNER - 2.0 * art::BODY_SCALE || dist > art::TELSON_OUTER - 2.0 * art::BODY_SCALE {
         return false;
     }
     if !ctx.los_clear(boss.pos, ctx.player_pos, 1.0) {
@@ -609,7 +691,7 @@ fn commit_telson(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     )
     .with_knockback(art::TELSON_KNOCKBACK);
     let _ = boss.push_hazard(arc);
-    enter(boss, CrabState::TelsonTell, tell);
+    enter(boss, CrabState::TelsonTell, tell + warn * (boss.attack_tuning.tell_time_mult - 1.0));
     true
 }
 
@@ -617,7 +699,7 @@ fn commit_telson(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
 /// rat can step out of it.
 fn commit_bulldoze(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     let to = ctx.player_pos - boss.pos;
-    if to.len() < 24.0 {
+    if to.len() < 24.0 * art::BODY_SCALE {
         return false;
     }
     if !ctx.los_clear(boss.pos, ctx.player_pos, 1.0) {
@@ -639,7 +721,7 @@ fn commit_bulldoze(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     let perp = dir.perp();
     let mut escapes = 0;
     for side in [1.0f32, -1.0] {
-        let p = ctx.player_pos + perp * side * LANE_STEP;
+        let p = ctx.player_pos + perp * side * (art::BULLDOZE_HALF_WIDTH + ctx.player_hurt_radius + 2.0);
         if ctx.footprint_fits(p, ctx.player_radius)
             && ctx.los_clear(ctx.player_pos, p, ctx.player_radius)
         {
@@ -679,7 +761,7 @@ fn lane_len(ctx: &BossContext<'_>, from: Vec2, dir: Vec2) -> Option<f32> {
 /// the rat can step off it.
 fn commit_burrow(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     let at = ctx.player_pos;
-    if !ctx.footprint_fits(at, art::BODY_RADIUS * 0.6) {
+    if !ctx.footprint_fits(at, art::BODY_RADIUS) {
         return false;
     }
     // A tell the rat cannot see is not a tell.
@@ -702,7 +784,7 @@ fn commit_flip(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     if !ctx.footprint_fits(center, art::BODY_RADIUS) {
         return false;
     }
-    if !escape_from_circle(ctx, ctx.player_pos, outer) {
+    if !escape_from_circle(ctx, center, outer) {
         return false;
     }
     enter(boss, CrabState::FlipTell, art::FLIP_TELL);
@@ -750,16 +832,24 @@ fn escape_from_arc(
     false
 }
 
-/// Is there a clear step off a circle of `radius` centred `at`?
-fn escape_from_circle(ctx: &BossContext<'_>, at: Vec2, radius: f32) -> bool {
-    // The step has to leave the circle, not just the middle of it, and it is
-    // the whole tell's walking budget (a marked circle is frozen before it
-    // fires, so the rat has the rest of the tell to leave).
-    let step = radius + ESCAPE_WALK;
+/// Can the rat walk outside the marked circle within the tell?
+fn escape_from_circle(ctx: &BossContext<'_>, center: Vec2, radius: f32) -> bool {
+    let at = ctx.player_pos;
+    let safe = radius + ctx.player_hurt_radius + 1.0;
+    let offset = at - center;
+    let remaining_sq = safe * safe - offset.len_sq();
+    if remaining_sq <= 0.0 {
+        return true;
+    }
     for k in 0..8 {
-        let d = Vec2::from_angle(k as f32 * std::f32::consts::TAU / 8.0);
-        let p = at + d * step;
-        if ctx.footprint_fits(p, ctx.player_radius) && ctx.los_clear(at, p, ctx.player_radius) {
+        let dir = Vec2::from_angle(k as f32 * std::f32::consts::TAU / 8.0);
+        let along = dir.dot(offset);
+        let step = (along * along + remaining_sq).sqrt() - along;
+        let p = at + dir * step;
+        if step <= ESCAPE_WALK
+            && ctx.footprint_fits(p, ctx.player_radius)
+            && ctx.los_clear(at, p, ctx.player_radius)
+        {
             return true;
         }
     }
@@ -781,10 +871,10 @@ fn shed_blood(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let mut cursor = boss.scratch[S_POOLS] as i32;
     for _ in 0..n {
         let a = cursor as f32 * 2.399_963 + 0.6;
-        let ring = 15.0 + (cursor.rem_euclid(3)) as f32 * 7.0;
+        let ring = (15.0 + (cursor.rem_euclid(3)) as f32 * 7.0) * art::BODY_SCALE;
         cursor = (cursor + 1).rem_euclid(12);
         let p = boss.pos + Vec2::from_angle(a) * ring;
-        if !ctx.footprint_fits(p, 5.0) {
+        if !ctx.footprint_fits(p, 5.0 * art::BODY_SCALE) {
             continue;
         }
         let pool = BossHazard::new(
@@ -992,11 +1082,11 @@ mod tests {
     }
 
     #[test]
-    fn the_spawn_system_fields_the_crab_for_a_crab_seed() {
+    fn the_spawn_system_fields_a_fitting_crab_outside_the_widest_view() {
         let mut w = crab_world(CRAB_SEED);
-        let centre = arena_centre(&w);
+        w.viewport = Vec2::new(120.0, 76.0);
         let boss = spawn_crab(&mut w);
-        assert!(boss.arena.contains_world(boss.pos) || centre.dist(boss.pos) > 0.0);
+        assert!(landing_fits(&w.level, w.player.pos, w.viewport, boss.pos));
         assert!(boss.hp > 0.0);
         // The pool is the framework's: art pool x scale x the director's curve.
         let expect = BossKind::HorseshoeCrab.hp_pool(0);
@@ -1087,8 +1177,9 @@ mod tests {
         let mut w = crab_world(CRAB_SEED);
         spawn_crab(&mut w);
         let c = arena_centre(&w);
-        // The rat stands behind the crab (the tail's side) at 24 px.
-        let rat = c - Vec2::new(24.0, 0.0);
+        // The rat stands in the enlarged tail band, beyond the old 40 px sweep.
+        let rat = c - Vec2::new(46.0, 0.0);
+        with_boss(&mut w, |b| b.scratch[S_ROT] = 1.0);
         place(&mut w, c, rat);
         w.player.hp = w.player.max_hp();
         w.player.iframes = 0.0;
@@ -1402,11 +1493,8 @@ mod tests {
 
     // ---- phase pose ------------------------------------------------------
 
-    /// The burrow's mark is checked against part of the body only, so it can
-    /// sit closer to a wall than the crab can stand. Surfacing exactly there
-    /// left a body `move_boss` could not step (a `Dome` that never walked until
-    /// the framework's rejoin teleported it); it now surfaces on the nearest
-    /// floor its own radius fits.
+    /// A forced burrow can still carry a stale mark by a wall. The crab needs
+    /// a safe exit for that case as well as full clearance during live tells.
     #[test]
     fn it_never_surfaces_where_its_own_body_does_not_fit() {
         let mut w = crab_world(CRAB_SEED);
@@ -1415,8 +1503,7 @@ mod tests {
         let tile = crate::game::collision::TILE_F;
         let left = arena.x as f32 * tile;
         let fits = |w: &World, p: Vec2, r: f32| w.level.tiles.circle_clear(p, r, SizeClass::Large);
-        // A mark beside the arena's left wall that the tell would accept (the
-        // half-radius check) but the whole body cannot stand on.
+        // Inject a mark beside the wall that a half-body probe would accept.
         let mut mark = None;
         'rows: for row in 1..arena.h.max(2) - 1 {
             let y = (arena.y + row) as f32 * tile + tile * 0.5;

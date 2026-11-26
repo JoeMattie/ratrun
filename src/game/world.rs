@@ -2079,7 +2079,7 @@ impl World {
         let landing = if kind == BossKind::Lantern {
             super::ecs::systems::boss::lantern_arrival_beside(&self.level, self.player.pos)
         } else {
-            self.boss_point_beside(self.player.pos, kind.body_radius())
+            self.boss_point_beside(self.player.pos, kind)
         };
         let Some(pos) = landing else {
             return false;
@@ -2116,7 +2116,7 @@ impl World {
             );
             // The arrival's burst draws from the boss's own stream, exactly as
             // the scheduled spawn's does, so it never perturbs the run rng.
-            crate::game::particle::vfx::emit_boss_spawn(&mut self.particles, &mut fight.rng.0, pos, accent);
+            super::ecs::systems::boss::emit_arrival_fx(kind, &mut self.particles, &mut fight.rng.0, pos, accent);
             boss
         };
         spawn_with_id(&mut self.ecs, boss);
@@ -2150,13 +2150,14 @@ impl World {
     /// 27 px across and does not fit a one-cell aisle, so the second pass
     /// settles for a walkable cell and lets `wall_resolve` nudge the body clear
     /// of the wall it clips. Fixed sweep, no rng draw.
-    fn boss_point_beside(&self, rat: Vec2, radius: f32) -> Option<Vec2> {
+    fn boss_point_beside(&self, rat: Vec2, kind: BossKind) -> Option<Vec2> {
         const STEPS: usize = 16;
         const DISTANCES: [f32; 6] = [48.0, 44.0, 52.0, 40.0, 56.0, 60.0];
         let large = crate::game::collision::SizeClass::Large;
         let outfall = self.level.theme == Theme::Outfall;
+        let radius = kind.body_radius();
         for strict in [true, false] {
-            if outfall && !strict {
+            if !strict && (outfall || kind == BossKind::HorseshoeCrab) {
                 break;
             }
             let mut best: Option<(f32, Vec2)> = None;
@@ -3948,6 +3949,16 @@ impl World {
             let margin_vp = self.render_viewport;
             let body_visible = on_screen(self.w2s(boss.pos, cam), margin, margin_vp);
             let target_visible = on_screen(self.w2s(boss.target, cam), margin, margin_vp);
+            if boss.kind == BossKind::HorseshoeCrab {
+                for hazard in &boss.hazards {
+                    if hazard.slow <= 0.0 || hazard.is_expired() {
+                        continue;
+                    }
+                    if let crate::game::ecs::systems::boss::HazardShape::Circle { center, radius } = hazard.shape {
+                        art_boss_horseshoe_crab::draw_blood_pool(pb, cam, center, radius, hazard.is_active());
+                    }
+                }
+            }
             if !body_visible && !target_visible {
                 continue;
             }
@@ -4040,7 +4051,12 @@ impl World {
                 }
             }
             pb.set_pen(pen);
-            self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
+            let emissive_radius = if boss.kind == BossKind::HorseshoeCrab {
+                (19.0 * art_boss_horseshoe_crab::BODY_SCALE).ceil() as i32
+            } else {
+                19
+            };
+            self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), emissive_radius);
         }
     }
 

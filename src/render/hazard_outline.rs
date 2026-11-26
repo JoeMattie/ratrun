@@ -24,7 +24,7 @@
 //! Both halves are render-only: they read `Boss.hazards` and write pixels, draw
 //! no rng and mutate no simulation state, so the goldens cannot move.
 
-use crate::game::ecs::systems::boss::{Boss, BossKind, HazardShape};
+use crate::game::ecs::systems::boss::{Boss, BossHazard, BossKind, HazardShape};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossShape, MinibossState, SignatureShape};
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
@@ -64,6 +64,13 @@ pub fn warn_colour(kind: BossKind, active: bool) -> Rgb {
     } else {
         warn
     }
+}
+
+fn hazard_colour(boss: &Boss, hazard: &BossHazard, active: bool) -> Rgb {
+    if boss.kind == BossKind::HorseshoeCrab && hazard.slow > 0.0 {
+        return if active { (110, 172, 250) } else { (92, 138, 202) };
+    }
+    warn_colour(boss.kind, active)
 }
 
 /// Samples around a circle of `radius`: 1.5 per pixel of radius keeps a big
@@ -186,15 +193,15 @@ pub fn boundary(shape: &HazardShape, out: &mut [Vec2; MAX_PTS]) -> usize {
                 push(corner);
             }
             for i in 1..cap {
-                let a = i as f32 / cap as f32 * std::f32::consts::PI;
-                push(to + Vec2::from_angle(a) * half_width);
+                let a = (0.5 - i as f32 / cap as f32) * std::f32::consts::PI;
+                push(to + dir.rotate(a) * half_width);
             }
             for corner in [to - side, from - side] {
                 push(corner);
             }
             for i in 1..cap {
-                let a = std::f32::consts::PI + i as f32 / cap as f32 * std::f32::consts::PI;
-                push(from + Vec2::from_angle(a) * half_width);
+                let a = (-0.5 - i as f32 / cap as f32) * std::f32::consts::PI;
+                push(from + dir.rotate(a) * half_width);
             }
         }
     }
@@ -219,7 +226,7 @@ pub fn draw_ground(pb: &mut PixelBuffer, boss: &Boss, cam: Vec2, elapsed: f32) {
             continue;
         }
         let active = hazard.is_active();
-        let colour = warn_colour(boss.kind, active);
+        let colour = hazard_colour(boss, hazard, active);
         // The dashes crawl along the boundary while the tell runs, and the
         // live window is solid: "this is about to happen" vs "this is happening".
         let phase = (elapsed * 10.0) as i32;
@@ -257,7 +264,7 @@ pub fn draw_ink(
             let active = hazard.is_active();
             draw_shape_ink(
                 pb, &hazard.shape, cam, scale, unit, elapsed,
-                warn_colour(boss.kind, active), active,
+                hazard_colour(boss, hazard, active), active,
             );
         }
     }
@@ -604,6 +611,22 @@ mod tests {
                 half_width: 5.0,
             },
         ]
+    }
+
+    #[test]
+    fn corridor_caps_follow_the_lane() {
+        let from = Vec2::new(30.0, 40.0);
+        let to = Vec2::new(90.0, 55.0);
+        let half_width = 21.0;
+        let shape = HazardShape::Corridor { from, to, half_width };
+        let axis = to - from;
+        let mut points = [Vec2::ZERO; MAX_PTS];
+        let count = boundary(&shape, &mut points);
+        for &point in &points[..count] {
+            let t = ((point - from).dot(axis) / axis.len_sq()).clamp(0.0, 1.0);
+            let distance = point.dist(from + axis * t);
+            assert!((distance - half_width).abs() < 1e-4, "{point:?} is inside the lane");
+        }
     }
 
     fn boss_with(kind: BossKind, hazard: BossHazard) -> Boss {
