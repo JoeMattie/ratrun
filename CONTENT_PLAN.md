@@ -10,8 +10,12 @@
 > current: the five-owner split in §8, "all three maps" in §11, the §2 note of
 > up to two mazes (the generator carves at most one), and §10's `cargo test
 > levelgeneration` (no test has that name; the generator's tests live under
-> `game::levelgen`, e.g. `cargo test levelgen`). A failing golden now prints
-> every moved row ready to paste into `CASES`.
+> `game::levelgen`, e.g. `cargo test levelgen`), and the scripted-trace harness
+> (`game/ecs/harness.rs`, `same_seed_same_run` and
+> `scripted_crowd_reaches_the_cap_curve`), which is now deleted: determinism is
+> proved by `world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom`
+> and `systems::fog::tests::fog_never_moves_the_simulation`, and no hash was
+> pinned.
 
 The owner's brief: boss fights with *a huge jungle cat, a human with a broom and a
 robot lawnmower*; *sticky traps and mousetraps*; *each level 10× larger with
@@ -67,10 +71,11 @@ placeholder map*, deliberately, so that all five workers have real data:
 * **`levelgen::validate`**: connectivity for both size classes + object checks;
   `Level::generate` retries with a salted seed (up to 4 attempts) and panics in
   debug if a map never validates.
-* **`src/game/ecs/harness.rs` goldens were regenerated** — levels are
+* **`src/game/ecs/harness.rs` became a determinism-only check** — levels are
   procedural now, so the pre-port reference can no longer reproduce a trace.
-  From this change the goldens freeze *this* build's behaviour
-  (`same_seed_same_run` still proves determinism).
+  It pins no hash, only replays a case twice. (It has since been deleted: the
+  replays cost minutes of every `cargo test` run and caught nothing the
+  narrower determinism tests above miss.)
 
 Measured on this machine (`cargo test`, dev profile `opt-level = 1`):
 
@@ -455,9 +460,9 @@ reaches).
 Re-tune the curve for the bigger map (keep `RUN_SECONDS = 300`, `BOSS_TIME =
 255`, `ENEMY_CAP = 600`, one slot reserved for the boss):
 `spawn_interval` floor 0.28 s → ~0.20 s and `pulse_count` `2 + t/22` → `3 + t/16`
-are the suggested starting points; the acceptance test is
-`cargo test scripted_crowd_reaches_the_cap_curve` (peak ≥ 40 before 60 s) plus
-`enemy_cap_holds_through_a_full_run`, and the whole horde must still arrive at
+are the suggested starting points; the acceptance tests are
+`director::tests::the_curve_fills_a_map_ten_times_larger` (the curve itself) and
+`ecs::tests::enemy_cap_holds_at_the_top_of_the_curve`, and the whole horde must still arrive at
 the player rather than piling up behind a wall (add a test: 200 s of simulation,
 every live enemy's distance to the player decreasing over a 10 s window, or
 use the existing nav benchmark).
@@ -510,7 +515,8 @@ assignments above are level infrastructure. The follow-up phase must add:
    knockback chains) sorts by `SpawnId` exactly like the existing systems; the
    per-tick `Local<Vec<..>>` scratch pattern is there for that.
 2. **Draw rng only where the old code drew.** Every `rng.0` call in a system is
-   a spec change: the number *and* order of draws is part of the golden trace.
+   a spec change: the number *and* order of draws is what makes a seed replay
+   identically, so a rate or a count is also a determinism change.
    Generation-time rng is free-form but must be one `StdRng` in call order.
 3. **No hash-map iteration** in generation, validation or per-tick code. Use
    `Vec`, sort explicitly, or index by cell.
@@ -522,10 +528,11 @@ assignments above are level infrastructure. The follow-up phase must add:
    `resources::debug_assert_enemy_index`.
 6. **Never mutate facade singletons during a tick** — use
    `world.ecs.resource_mut::<T>()`.
-7. **Goldens**: `src/game/ecs/harness.rs` must be regenerated only deliberately,
-   in the same change that alters level generation or the sim, and the report
-   must say so. `same_seed_same_run` and `scripted_crowd_reaches_the_cap_curve`
-   must keep passing at every step.
+7. **Determinism**: a seed must play out the same way twice. There is no
+   scripted-trace harness to rerun and no hash to regenerate (both were deleted);
+   `world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom` and
+   `systems::fog::tests::fog_never_moves_the_simulation` must keep passing, and a
+   deliberate gameplay change costs nothing but its own tests.
 
 ---
 
@@ -546,8 +553,6 @@ it in the report**:
 * `src/game/world.rs` (C: 2 lines in `World::new`; E: `draw` — different regions).
 * `src/game/ecs/systems/enemy_move.rs` (C: `flow_refresh_system`, `dir_at`;
   D: `wall_resolve_system` and its test — different functions).
-* `src/game/ecs/harness.rs` (anyone whose change moves a hash: regenerate
-  deliberately and say so; never "fix" a golden by editing a simulated number).
 
 Integration order if two workers must serialise: **C and D first** (D deletes
 `Level::walls`, which touches many test files), then A and B (the generator
@@ -595,10 +600,12 @@ RATRUN_DUMP=play cargo test dump_frame_ppm                    # /tmp/ratrun_play
 cargo test levelgeneration -- --nocapture                     # generator tests
 ```
 
-Golden hashes: `cargo test scripted_runs_match_the_reference_trace` fails with
-`left: <new>, right: <golden>` — take the new value from the message, replace
-the entry in `harness.rs`'s `CASES`, and note it in your report. **Never**
-change a golden to make a *logic* test pass.
+Determinism: `cargo test plays_out_identically` replays one seed at every zoom
+and with no frame drawn, and `fog_never_moves_the_simulation` replays one seed
+with the fog reveal on and off; both compare values, not stored hashes. There is
+no recorded hash to update, and a deliberate gameplay change needs no note in
+the report. **Never** bend a
+determinism check to make a *logic* test pass.
 
 Tests that must exist before a worker's change is done:
 
@@ -629,7 +636,7 @@ Tests that must exist before a worker's change is done:
 
 `cargo build`, `cargo test`, `cargo clippy --all-targets` clean; the game still
 starts and plays on all three maps (`cargo run --release`, real TTY); no art
-file edited; goldens regenerated deliberately if (and only if) the sim changed,
-with the reason in the report; `Level::walls` gone once D lands; the report names
+file edited; determinism kept (the same seed still plays out identically at
+every zoom) with no hash to regenerate; `Level::walls` gone once D lands; the report names
 the data model decisions, the numbers measured and anything in the art files
 that conflicted with the contract.

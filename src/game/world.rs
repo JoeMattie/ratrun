@@ -25,7 +25,7 @@
 //! tick), so `SpawnId` and `Entity` ids are stable across a run. Nothing is
 //! copied out of the ECS world per tick: the HUD accessors read it directly
 //! and [`World::enemies`]/[`World::bullets`]/... clone a snapshot only when a
-//! test or the determinism harness asks for one. Tests and systems spawn
+//! test asks for one. Tests and systems spawn
 //! through the helpers below, which assign `SpawnId`.
 //!
 //! Internal scratch (`SpatialGrid`, `NeighborScratch`, `PickupScratch`,
@@ -330,7 +330,7 @@ pub struct World {
     /// The share of the simulation's shake that reaches the camera
     /// ([`SHAKE_SCALE`] by default; the Graphics page's SCREEN SHAKE row, via
     /// the App). Render-only: read where `draw_scene` builds the camera and
-    /// nowhere else, so no system can see it and no golden can move.
+    /// nowhere else, so no system can see it and no scripted trace can move.
     pub shake_scale: f32,
     /// Remaining seconds (`0.0..=hud::LEVEL_RING_SECS`) of the render-only
     /// golden ring + star burst around the rat on a character level-up. Driven
@@ -1162,7 +1162,7 @@ impl World {
             .is_some_and(|door| door.slammed)
     }
 
-    // ---- Entity snapshots (tests + determinism harness) ------------------
+    // ---- Entity snapshots (tests) ----------------------------------------
     //
     // The facade used to expose `enemies`/`bullets`/`gems`/`pickups`/`pools`
     // as `pub Vec` caches rebuilt every tick (a full clone of every entity, per
@@ -1362,8 +1362,8 @@ impl World {
     /// (`0.0` = a plain tap-dash, which is what every pre-wave-3 caller gets).
     ///
     /// The bot uses this to fire a charged dash (`game::bot`): the signature of
-    /// `update`/`update_with` stays exactly as it was, so the goldens and every
-    /// older test are byte-identical.
+    /// `update`/`update_with` stays exactly as it was, so the scripted cases
+    /// and every older test are byte-identical.
     pub fn update_with_charge(
         &mut self,
         dt: f32,
@@ -5367,9 +5367,15 @@ mod zoom_tests {
     /// and when no frame is drawn at all. Zoom lives in the renderer and never
     /// reaches the simulation; the simulation's viewport is session input,
     /// set here the way the App sets it on a resize.
+    /// Both floors that have a zoom-relevant guest (the Sewer's Drake, the
+    /// Outfall's surge and lure) in the one test: it was two tests with the
+    /// same rule, so it is one loop (and the Outfall is set up beside a lure by
+    /// `assert_zoom_replay`).
     #[test]
     fn the_same_seed_plays_out_identically_at_every_zoom() {
-        assert_zoom_replay(Theme::Sewer);
+        for theme in [Theme::Sewer, Theme::Outfall] {
+            assert_zoom_replay(theme);
+        }
     }
 
     #[test]
@@ -5385,11 +5391,6 @@ mod zoom_tests {
         assert!(!w.outfall_surge_enabled(), "the manual arrival also suppresses the warning");
         w.clear_testbed_boss();
         assert!(w.outfall_surge_enabled());
-    }
-
-    #[test]
-    fn outfall_surge_and_lure_replay_identically_at_every_zoom() {
-        assert_zoom_replay(Theme::Outfall);
     }
 
     fn assert_zoom_replay(theme: Theme) {

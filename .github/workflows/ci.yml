@@ -1,4 +1,11 @@
 # Tests and lints on every push to main and on pull requests.
+#
+# One runner runs the suite. The full `cargo test` used to run on all three
+# OSes, which cost ~3x for one Rust-level answer: the other two runners are
+# there for `cfg(unix)` / `cfg(windows)` and for terminal differences, and
+# `cargo check` finds those without building every test target or running
+# 2,900 tests. Every job caches `~/.cargo` and `target` (359 packages in
+# `Cargo.lock` are otherwise rebuilt from scratch on every push).
 name: ci
 
 on:
@@ -11,24 +18,39 @@ env:
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    # The suite and the lints run once, here.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       # rodio/cpal link ALSA and the default `gamepad` feature (gilrs) links
       # libudev; both need their dev headers at build time.
       - name: Install ALSA and udev headers (Linux)
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - name: Install the pinned toolchain
         shell: bash
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup component add clippy
+      - name: Cache the cargo registry and target dir
+        uses: Swatinem/rust-cache@v2.9.3
       - name: Test
         run: cargo test --locked
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+  check:
+    # Compilation on the other two platforms, nothing more.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache the cargo registry and target dir
+        uses: Swatinem/rust-cache@v2.9.3
+      - name: Check
+        run: cargo check --locked

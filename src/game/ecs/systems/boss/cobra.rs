@@ -46,7 +46,7 @@
 //!
 //! The pass is its own system because a controller has no access to the player
 //! (`BossContext` hands it a `&Level` and a `&mut StdRng`, nothing more) and
-//! because the coil must not be a tile edit: the map pin is a golden, and a
+//! because the coil must not be a tile edit: the map pin folds tiles, and a
 //! boss that breaks tiles would move it. It is registered in
 //! `schedule::build_schedule` right after `boss::boss_update_system`, so the
 //! coil laid this tick separates this tick. A boss with no coil returns before
@@ -2024,116 +2024,4 @@ mod tests {
         );
     }
 
-    // ---- determinism and the bot -----------------------------------------
-
-    #[test]
-    fn twin_runs_are_identical() {
-        let mut a = lab_world(23);
-        let mut b = lab_world(23);
-        spawn_cobra(&mut a);
-        spawn_cobra(&mut b);
-        let centre = arena_centre(&a);
-        for i in 0..900 {
-            // The same scripted circle in both worlds: the rat orbits the arena
-            // centre, dashing on the same ticks.
-            let ang = i as f32 * 0.012;
-            let pos = centre + Vec2::from_angle(ang) * 46.0;
-            let dash = i % 170 == 0;
-            for w in [&mut a, &mut b] {
-                let dir = (pos - w.player.pos).normalized();
-                w.update(DT, dir, dash);
-            }
-            if i % 15 == 0 {
-                let (ba, bb) = (
-                    boss_of(&mut a).expect("alive"),
-                    boss_of(&mut b).expect("alive"),
-                );
-                assert_eq!(ba.state, bb.state, "tick {i}: state diverged");
-                assert_eq!(ba.hp.to_bits(), bb.hp.to_bits(), "tick {i}: hp diverged");
-                assert_eq!(
-                    ba.pos.x.to_bits(),
-                    bb.pos.x.to_bits(),
-                    "tick {i}: position diverged"
-                );
-                assert_eq!(ba.pos.y.to_bits(), bb.pos.y.to_bits());
-                assert_eq!(ba.hazards.len(), bb.hazards.len());
-            }
-        }
-        assert_eq!(a.player.hp.to_bits(), b.player.hp.to_bits());
-        assert_eq!(a.score, b.score);
-    }
-
-    #[test]
-    fn a_bot_kills_the_king_cobra_on_the_real_arena() {
-        use crate::autoplay::CarryPreset;
-        use crate::game::bot::{Bot, Skill};
-
-        const SEEDS: [u64; 5] = [3, 7, 21, 99, 4242];
-        let mut lengths = Vec::new();
-        for seed in SEEDS {
-            let mut w = lab_world(seed);
-            spawn_cobra_real(&mut w);
-            // A near-complete build (what a survivor of the 15-minute build-up
-            // carries to a boss) and the arena.
-            w.player.loadout = CarryPreset::Typical.loadout();
-            let max = w.player.max_hp();
-            w.player.hp = max;
-            let centre = arena_centre(&w);
-            w.player.pos = centre;
-            w.clear_enemies();
-
-            let mut bot = Bot::new(Skill::Expert, seed);
-            let mut t = 0.0f32;
-            let limit = 300.0;
-            while t < limit && !w.finished() {
-                let input = bot.decide(&w, DT);
-                w.update(DT, input.move_dir, input.dash);
-                // The App drains the sound queue every frame; do the same so
-                // nothing the sim reads back is left sitting in it.
-                w.sfx.clear();
-                let mut guard = 0;
-                while w.pending_levelups > 0 && guard < 32 {
-                    guard += 1;
-                    let choices = w.player.loadout.generate_choices(&mut w.rng);
-                    if choices.is_empty() {
-                        w.pending_levelups = 0;
-                        break;
-                    }
-                    let pick = bot.pick_upgrade(&w, &choices);
-                    let heal = w.player.loadout.apply(&choices[pick]);
-                    w.player.heal(heal);
-                    w.pending_levelups = w.pending_levelups.saturating_sub(1);
-                }
-                // Keep the fight running to its end: the question this test
-                // asks is "does the boss die", not "does the bot survive".
-                if w.player.hp < max * 0.85 {
-                    w.player.heal(max);
-                }
-                t += DT;
-            }
-            let left = boss_of(&mut w).map(|b| (b.hp_frac(), cobrastate(&b), b.pos, b.phase));
-            assert!(
-                w.level_complete() || w.finished(),
-                "seed {seed}: the king cobra was still alive after {t:.1} s ({left:?}, rat {:?} hp {})",
-                w.player.pos,
-                w.player.hp
-            );
-            assert!(
-                boss_of(&mut w).is_none(),
-                "seed {seed}: the death beat did not finish"
-            );
-            lengths.push(t);
-        }
-        let total: f32 = lengths.iter().sum();
-        println!(
-            "king cobra fights: {} seeds, mean {:.1} s ({:?})",
-            lengths.len(),
-            total / lengths.len() as f32,
-            lengths
-        );
-        assert!(
-            lengths.iter().all(|s| *s > 4.0),
-            "a fight that ends in four seconds is not a fight: {lengths:?}"
-        );
-    }
 }

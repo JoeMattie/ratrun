@@ -2148,64 +2148,6 @@ mod tests {
         assert_eq!(q.iter(&w.ecs).count(), 0, "an unowned weapon tagged a body");
     }
 
-    /// Same seed, same inputs, same run — with each new weapon owned and at L3,
-    /// over a full live schedule (director spawning, walls, loot).
-    #[test]
-    fn twin_runs_are_deterministic_with_each_wave3_weapon() {
-        /// `(enemies as (id, x, y, hp) in 1/64 px, kills, marked bodies, this
-        /// weapon's booked damage)` — a state trace small enough to compare
-        /// between twin runs.
-        type Trace = (Vec<(u32, i64, i64, i64)>, u32, usize, i64);
-
-        fn trace(seed: u64, kind: WeaponKind) -> Trace {
-            let mut w = World::new(Theme::Sewer, seed);
-            if !w.player.loadout.has(kind) {
-                w.player.loadout.apply(&Upgrade::NewWeapon(kind));
-            }
-            // The weapon under test alone: the opening horde is one or two
-            // bodies arriving from beyond the widest zoom's view, and the
-            // starting Gnaw picks them off before they are inside this weapon's
-            // 56 px reach.
-            w.player.loadout.weapons.retain(|weapon| weapon.kind == kind);
-            for weapon in w.player.loadout.weapons.iter_mut() {
-                weapon.level = 3;
-                weapon.timer = 0.0;
-            }
-            // Fifteen seconds: the horde arrives from beyond the widest zoom's
-            // view, and a rat on the move takes most of ten to meet it.
-            for tick in 0..900u32 {
-                let a = tick as f32 * 0.01;
-                let mv = Vec2::from_angle(a);
-                w.update(1.0 / 60.0, mv, false);
-            }
-            let enemies = w
-                .enemies()
-                .into_iter()
-                .map(|e| {
-                    (
-                        e.id,
-                        (e.pos.x * 64.0).round() as i64,
-                        (e.pos.y * 64.0).round() as i64,
-                        (e.hp * 64.0).round() as i64,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let marked = infections(&mut w).len();
-            let dealt = w.ecs.resource::<DamageLedger>().dealt[kind.index()];
-            (enemies, w.kills, marked, (dealt * 64.0).round() as i64)
-        }
-        for kind in [WeaponKind::AcidRain, WeaponKind::Hantavirus] {
-            let a = trace(4242, kind);
-            let b = trace(4242, kind);
-            assert_eq!(a.0, b.0, "{kind:?}: enemies diverged between twin runs");
-            assert_eq!(a.1, b.1, "{kind:?}: kills diverged");
-            assert_eq!(a.2, b.2, "{kind:?}: the set of marked bodies diverged");
-            assert_eq!(a.3, b.3, "{kind:?}: booked damage diverged");
-            // The trace comparison is worth nothing if the weapon never fired.
-            assert!(a.3 > 0, "{kind:?} dealt no damage in a live 15 s run");
-        }
-    }
-
     // ---- weapons-b passive hooks on the two wave-3a weapons --------------
 
     fn stack(w: &mut World, passive: crate::game::loadout::PassiveKind) {

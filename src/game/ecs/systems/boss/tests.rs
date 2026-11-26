@@ -574,28 +574,6 @@ fn boss_never_ends_a_tick_inside_a_wall() {
     }
 }
 
-// ---- determinism ---------------------------------------------------------
-
-#[test]
-fn twin_runs_with_a_boss_match() {
-    let run = |seed: u64| {
-        let mut w = World::new(Theme::Kitchen, seed);
-        spawn_boss(&mut w);
-        for _ in 0..120 {
-            update_boss(&mut w, DT);
-        }
-        let boss = boss_of(&mut w).expect("boss alive");
-        (boss.pos, boss.hp, boss.state, boss.phase, w.level_complete)
-    };
-    let a = run(4242);
-    let b = run(4242);
-    assert_eq!(a.0, b.0);
-    assert_eq!(a.1, b.1);
-    assert_eq!(a.2, b.2);
-    assert_eq!(a.3, b.3);
-    assert_eq!(a.4, b.4);
-}
-
 // ---- the siege: a rat a large body cannot follow --------------------------
 //
 // A level cannot end until the boss dies, and the level design has pockets no
@@ -1213,53 +1191,6 @@ fn a_leaping_cat_is_not_bitten_by_a_mousetrap() {
         (w.boss_hp().expect("boss alive").0 - hp_before).abs() < 1e-3,
         "a floor trap bit a cat that was in the air"
     );
-}
-
-/// Same seed, same run, with a boss on the field and the weapons firing at it:
-/// the targeting, the damage pass and the boss's own rng must all be
-/// reproducible.
-#[test]
-fn twin_runs_with_a_boss_and_weapons_match() {
-    let run = |kind: BossKind, seed: u64| -> Vec<u32> {
-        let mut w = World::new(Theme::Sewer, seed);
-        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
-        w.clear_enemies();
-        w.clear_bullets();
-        let arena = arena_rect(&w);
-        let centre = arena.center_world();
-        let mut boss = Boss::new(kind, centre, 20_000.0, arena, centre, false);
-        boss.id = 1;
-        w.ecs.spawn((boss, SpawnId(0)));
-        // In weapons range, so the aimed families have to choose between the
-        // boss points and the horde the director keeps spawning.
-        w.player.pos = centre + Vec2::new(40.0, 0.0);
-        let mut trace = Vec::with_capacity(240 * 10);
-        for k in 0..240 {
-            let dir = Vec2::new(
-                crate::detmath::sin(k as f32 * 0.13),
-                crate::detmath::cos(k as f32 * 0.09),
-            );
-            w.update(DT, dir, k % 70 == 0);
-            let (hp, _) = w.boss_hp().expect("boss alive");
-            let boss = boss_of(&mut w).expect("boss alive");
-            trace.push(hp.to_bits());
-            trace.push(boss.pos.x.to_bits());
-            trace.push(boss.pos.y.to_bits());
-            // `duration` and `flags` are state-local, so they pin the state
-            // machine without needing a `State -> u32` mapping.
-            trace.push(boss.duration.to_bits());
-            trace.push(boss.flags);
-            trace.push((boss.phase as u32) << 8 | (boss.elapsed.to_bits() & 0xff));
-            trace.push(w.player.hp.to_bits());
-            trace.push(w.enemy_count() as u32);
-            trace.push(w.player.level);
-            trace.push(w.kills);
-        }
-        trace
-    };
-    for kind in [BossKind::Cat, BossKind::Broom, BossKind::Mower] {
-        assert_eq!(run(kind, 4242), run(kind, 4242), "{kind:?} twin run diverged");
-    }
 }
 
 // ---- campaign DPS measurement (balance; gated, slow) ---------------------

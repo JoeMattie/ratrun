@@ -2181,46 +2181,4 @@ mod tests {
 
     // ---- Twin-run determinism -------------------------------------------
 
-    /// Same seed, same inputs, same pocket finds: same run. The fingerprint
-    /// covers the rat, the buffs, the key and the horde, so anything order- or
-    /// rng-sensitive in the new systems shows up here.
-    #[test]
-    fn twin_runs_with_pocket_finds_match() {
-        use rand::RngExt;
-
-        fn run() -> (Vec2, f32, [f32; 4], u32, Option<Vec2>, usize, u32) {
-            let mut w = World::new(Theme::Sewer, 2031);
-            let ppos = w.player.pos;
-            let kinds = [
-                PickupKind::BottleCap,
-                PickupKind::WindupMouse,
-                PickupKind::PocketWatch,
-                PickupKind::CleanSocks,
-            ];
-            for (i, kind) in kinds.iter().enumerate() {
-                w.spawn_pickup(Pickup {
-                    pos: ppos + Vec2::new(i as f32 * 3.0, 0.0),
-                    kind: *kind,
-                    bob: 0.0,
-                });
-            }
-            for _ in 0..240 {
-                w.update(DT, Vec2::new(1.0, 0.0), false);
-            }
-            let b = w.player.buffs;
-            let next_draw = w.rng.random::<u32>();
-            (
-                w.player.pos,
-                w.player.hp,
-                [b.shield, b.decoy, b.slow_bullets, b.socks],
-                w.kills,
-                decoy_pos(&mut w),
-                w.enemies().len(),
-                next_draw,
-            )
-        }
-        let a = run();
-        let b = run();
-        assert_eq!(a, b, "two identical runs diverged");
-    }
 }

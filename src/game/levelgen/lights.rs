@@ -7,7 +7,7 @@
 //! draw of the stage's salted rng, so it can only add fixtures: the zones, the
 //! emitters and the hanging lamps are byte-identical to before. Fixtures are
 //! render-only inputs (no system reads `objects.lights`), so this stage cannot
-//! move a determinism golden.
+//! move a scripted trace.
 use rand::RngExt;
 
 use crate::game::art_walls::{Cardinal, WallKind};
@@ -265,11 +265,11 @@ fn place_emitters(level: &mut Level, rng: &mut rand::rngs::StdRng) {
 // own admission rule**: nearly every corridor was a short door connector whose
 // faces all sat inside the room rule's three-cell doorway clearance, so they
 // carried no lamp at all. Nothing here reads a simulation value and nothing
-// moves a golden or the map pin.
+// moves a scripted trace or the map pin.
 //
 // Everything here runs on the stage's own salted rng, after every existing
 // draw, and only appends to `objects.lights`. A fixture is a render-only input:
-// no system reads the list, so nothing here can move a determinism golden. The
+// no system reads the list, so nothing here can move a scripted trace. The
 // map pin (`levelgen::mod::map_hash`) folds tiles, rat-holes, traps, doors and
 // rewards — never fixtures — so it cannot move either. The batch-12 filters add
 // no new rng draw; they only change which faces are admitted, which moves the

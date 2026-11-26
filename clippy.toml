@@ -1,12 +1,14 @@
 # Clippy configuration for Rat Run.
 #
-# ## Why: the determinism goldens are platform-independent only if the maths is
+# ## Why: a run has to be reproducible on every platform
 #
 # Rust's `f32::sin`, `cos`, `powf`, … are not specified bit-for-bit: they call
 # the platform's maths library, and macOS, Linux and Windows disagree in the
 # last bit. One such call in simulation code makes a run diverge a tick later,
-# which is what made every one of `game/ecs/harness.rs`'s six golden traces
-# differ between the macOS/arm64 recording and Linux/Windows CI.
+# which is what made the six recorded scripted traces this repo used to pin
+# differ between the macOS/arm64 recording and Linux/Windows CI, and what would
+# break the map pin (`levelgen::TRACE_HASHES`) and any cross-platform balance
+# replay today.
 #
 # Simulation code must therefore route these calls through `src/detmath.rs`
 # (the pure-Rust `libm` crate, or a written-out multiplication for a literal

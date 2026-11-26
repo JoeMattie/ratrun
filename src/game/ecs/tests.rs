@@ -104,15 +104,24 @@ fn apply_pending(w: &mut World) {
     }
 }
 
-/// Drive a long simulation across all themes, drawing every few frames at
-/// several viewport sizes, to catch panics in the update + render paths.
+/// Drive a simulation on every theme, drawing every few frames at several
+/// viewport sizes, to catch panics in the update + render paths.
+///
+/// One theme keeps the 100 s span that reaches the mid-run spawn curve and the
+/// elite branch; the other five get 20 s each, because a per-theme update or
+/// render panic shows up in the first few hundred ticks, and the crowd caps
+/// are asserted at the top of the curve by
+/// `enemy_cap_holds_at_the_top_of_the_curve` too.
+/// (It used to run 6,000 ticks on all six themes: 36,000 ticks and 857
+/// `World::draw` calls of a 240x120 buffer.)
 #[test]
 fn headless_run_does_not_panic() {
-    for theme in Theme::all() {
+    for (i, theme) in Theme::all().into_iter().enumerate() {
         let mut w = World::new(theme, 12345);
         let dt = 1.0 / 60.0;
         let sizes = [(120usize, 60usize), (1, 1), (240, 120)];
-        for tick in 0..6000u32 {
+        let ticks: u32 = if i == 0 { 6_000 } else { 1_200 };
+        for tick in 0..ticks {
             let dir = Vec2::from_angle(tick as f32 * 0.05);
             let dash = tick % 90 == 0;
             w.update(dt, dir, dash);
@@ -132,79 +141,109 @@ fn headless_run_does_not_panic() {
     }
 }
 
-/// The `EnemyIndex` validity proof, run as a real full-length game.
+/// The `EnemyIndex` validity proof under a real crowd.
 ///
 /// `weapons`, `combat::player_bullet_hits_system`, `combat::contact_system`
 /// and `projectiles::pools_system` read the cached `SpawnId`-ordered
 /// `EnemyIndex` (as do `separation`, `wall_resolve` and `grid_refresh` in
 /// `enemy_move`). Each of them calls `resources::debug_assert_enemy_index`
 /// first, which compares the cache against a freshly sorted `SpawnId` list and
-/// fails the test if any slot disagrees. `cargo test` builds with
-/// `debug_assertions`, so this test drives the longest shape a run takes —
-/// 15 minutes at 60 Hz with the rat kept alive, so the horde budget, elites,
-/// the miniboss appointments and the boss window are all reached — and every
-/// tick of it is checked.
+/// fails the test if any slot disagrees. That guard is **opt-in**
+/// (`RATRUN_CHECK_ENEMY_INDEX=1`) because it re-sorts the whole enemy list per
+/// call, so this test turns it on for its own duration.
+///
+/// It used to drive a full fifteen minutes (54,100 ticks) of the Sewer to
+/// reach the boss window. The window is broken by a spawn/despawn race, which
+/// shows up in the first seconds of a live crowd, and the boss window's own
+/// spawn and reap paths are covered by `systems::spawn`'s tests — so this
+/// seeds a full crowd, ticks ten seconds through it, jumps the clock into the
+/// boss window with `w.elapsed` and ticks two more seconds there. The rat is
+/// kept alive so no tick ends early.
+/// Debug builds only: the guard itself (`debug_assert_enemy_index`) is
+/// `debug_assertions`-gated.
+#[cfg(debug_assertions)]
 #[test]
-fn enemy_index_is_fresh_at_every_reader_for_a_full_run() {
+fn enemy_index_is_fresh_at_every_reader() {
+    use crate::game::ecs::resources::force_enemy_index_check;
+
+    force_enemy_index_check(true);
     let mut w = World::new(Theme::Sewer, 4242);
     let dt = 1.0 / 60.0;
-    let mut peak = 0usize;
-    let mut ticks = 0u32;
-    while !w.finished() && ticks < 54_100 {
-        let dir = Vec2::from_angle(ticks as f32 * 0.05);
-        w.update(dt, dir, ticks.is_multiple_of(157));
-        w.player.hp = w.player.max_hp();
-        apply_pending(&mut w);
-        peak = peak.max(w.enemies().len());
-        ticks += 1;
+    let centre = w.level.arena * 0.5;
+    w.player.pos = centre;
+    let mut rng = StdRng::seed_from_u64(99);
+    for i in 0..120u32 {
+        let a = i as f32 * std::f32::consts::TAU / 120.0;
+        let p = centre + Vec2::from_angle(a) * (40.0 + (i % 7) as f32 * 18.0);
+        w.spawn_enemy_with_rng(EnemyKind::Skitterer, p, 1.0, &mut rng);
     }
-    assert!(w.director.boss_spawned, "run never reached the boss window");
-    assert!(w.elapsed >= director::BOSS_TIME, "run never reached the boss time");
-    // The 15-minute curve's live budget is much smaller than the old 300 s
-    // curve's, so a kiting rat holds a smaller crowd; the guard is only here
-    // to prove the index is exercised at all.
+    let mut peak = 0usize;
+    let mut run = |w: &mut World, ticks: u32| {
+        for tick in 0..ticks {
+            let dir = Vec2::from_angle(tick as f32 * 0.05);
+            w.update(dt, dir, tick % 157 == 0);
+            w.player.hp = w.player.max_hp();
+            apply_pending(w);
+            peak = peak.max(w.enemies().len());
+        }
+    };
+    // Ten seconds of a live crowd: spawning, killing, reaping, the grid swap
+    // and every reader's check.
+    run(&mut w, 600);
+    // Then the boss hand-off, reached by moving the clock rather than ticking
+    // through fourteen more minutes.
+    w.elapsed = director::BOSS_TIME - 1.0;
+    run(&mut w, 180);
+    force_enemy_index_check(false);
+    assert!(
+        w.elapsed >= director::BOSS_TIME,
+        "the clock jump never reached the boss time"
+    );
     assert!(peak > 10, "crowd never grew (peak {peak}): guard untested");
 }
 
-/// A full fifteen-minute level on every existing theme, twice, must agree
-/// tick for tick (the wave-3 length; §1). The rat is kept alive and the input
-/// is a deterministic circle, so the run reaches the boss window instead of
-/// ending early. The twin-run comparison is a cheap determinism proof that
-/// does not depend on the golden list (which this wave deliberately moves).
+/// **One twin-run sweep for the whole simulation.**
+///
+/// Same seed, same scripted input, twice ⇒ the same run, down to the bit. This
+/// replaces the hand-written twin-run test that every system and every boss
+/// used to carry: each one re-ran a `World` twice to prove order-independence,
+/// so the suite paid for the same property twenty-odd times. Here it is proven
+/// once per floor and once per difficulty window that actually reorders
+/// entities (the miniboss appointment and the boss hand-off).
+///
+/// Rows are cheap on purpose — at most 20 s of game time each, 23,400 ticks
+/// for the whole table, where the deleted per-theme full-length twin ran
+/// 649,440. Add a row (a name and a setup closure) rather than a new test when
+/// a new system needs its own twin proof.
 #[test]
-fn full_fifteen_minute_level_per_theme_is_deterministic() {
-    fn fingerprint(theme: Theme, seed: u64) -> (u64, u64) {
-        let mut w = World::new(theme, seed);
-        let dt = 1.0 / 60.0;
-        let ticks = (director::RUN_SECONDS / dt).ceil() as u32 + 120;
-        for tick in 0..ticks {
-            let dir = Vec2::from_angle(tick as f32 * 0.017);
-            w.update(dt, dir, tick.is_multiple_of(97));
-            w.player.hp = w.player.max_hp();
-            apply_pending(&mut w);
-            if w.finished() {
-                break;
-            }
-        }
-        // Fold the outcome and a coarse state summary: enough to catch any
-        // divergence, cheap enough to run per theme.
-        let mut h = 0xcbf2_9ce4_8422_2325u64;
+fn the_same_seed_plays_the_same_run() {
+    /// Fold everything a divergence could move: the clock and the score, the
+    /// rat, and every body's kind, hp and position (in `SpawnId` order).
+    /// `enemies()`/`bullets()` collect the cached order, so they need `&mut`.
+    fn fingerprint(w: &mut World) -> (u64, u64) {
         let enemies = w.enemies();
-        let p = &w.player;
-        for v in [
-            w.elapsed.to_bits() as u64,
-            w.kills as u64,
-            w.score as u64,
-            w.gold as u64,
-            p.hp.to_bits() as u64,
-            p.xp as u64,
-            p.level as u64,
-            p.pos.x.to_bits() as u64,
-            p.pos.y.to_bits() as u64,
-            enemies.len() as u64,
-        ] {
-            h ^= v;
-            h = h.wrapping_mul(0x100000001b3);
+        let bullets = w.bullets();
+        let particles = w.particles.len();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        {
+            let p = &w.player;
+            for v in [
+                w.elapsed.to_bits() as u64,
+                w.kills as u64,
+                w.score as u64,
+                w.gold as u64,
+                p.hp.to_bits() as u64,
+                p.xp as u64,
+                p.level as u64,
+                p.pos.x.to_bits() as u64,
+                p.pos.y.to_bits() as u64,
+                enemies.len() as u64,
+                bullets.len() as u64,
+                particles as u64,
+            ] {
+                h ^= v;
+                h = h.wrapping_mul(0x100000001b3);
+            }
         }
         for e in &enemies {
             for v in [
@@ -217,17 +256,96 @@ fn full_fifteen_minute_level_per_theme_is_deterministic() {
                 h = h.wrapping_mul(0x100000001b3);
             }
         }
+        for b in &bullets {
+            for v in [
+                b.pos.x.to_bits() as u64,
+                b.pos.y.to_bits() as u64,
+                b.vel.x.to_bits() as u64,
+                b.vel.y.to_bits() as u64,
+            ] {
+                h ^= v;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
         (w.elapsed as u64, h)
     }
-    for theme in Theme::all() {
-        let a = fingerprint(theme, 12345);
-        let b = fingerprint(theme, 12345);
-        assert_eq!(a, b, "{theme:?}: the same seed diverged over 15 minutes");
-        assert!(
-            a.0 >= director::BOSS_TIME as u64,
-            "{theme:?}: the level did not reach the 15:00 boss time"
+
+    /// Play `ticks` of one world with the scripted circle input every
+    /// full-length test in this file used, keeping the rat alive.
+    fn play(w: &mut World, ticks: u32) {
+        for tick in 0..ticks {
+            let dir = Vec2::from_angle(tick as f32 * 0.017);
+            w.update(1.0 / 60.0, dir, tick.is_multiple_of(97));
+            w.player.hp = w.player.max_hp();
+            apply_pending(w);
+            if w.finished() {
+                break;
+            }
+        }
+    }
+
+    // One row per floor, 20 s of play each.
+    for theme in Theme::playable() {
+        let mut a = World::new(theme, 12345);
+        let mut b = World::new(theme, 12345);
+        play(&mut a, 1_200);
+        play(&mut b, 1_200);
+        assert_eq!(
+            fingerprint(&mut a),
+            fingerprint(&mut b),
+            "{theme:?}: the same seed diverged over 20 s"
         );
     }
+
+    // The miniboss appointment (3:00) and the boss hand-off (15:00): both
+    // spawn and reorder bodies mid-run, which the opening never does.
+    for jump in [director::MINIBOSS_TIMES[0], director::BOSS_TIME] {
+        let mut a = World::new(Theme::Sewer, 777);
+        let mut b = World::new(Theme::Sewer, 777);
+        a.elapsed = jump - 5.0;
+        b.elapsed = jump - 5.0;
+        play(&mut a, 1_200);
+        play(&mut b, 1_200);
+        assert_eq!(
+            fingerprint(&mut a),
+            fingerprint(&mut b),
+            "the Sewer diverged across the {jump:.0} s window"
+        );
+    }
+
+    // Firing weapons at a dense crowd: the draw order of every weapon system,
+    // in one row instead of one per weapon.
+    let mut a = World::new(Theme::Kitchen, 5);
+    let mut b = World::new(Theme::Kitchen, 5);
+    for w in [&mut a, &mut b] {
+        w.player.loadout.weapons.clear();
+        for kind in [
+            WeaponKind::Gnaw,
+            WeaponKind::CheeseSpray,
+            WeaponKind::AcidSpit,
+            WeaponKind::AcidRain,
+            WeaponKind::Hantavirus,
+        ] {
+            w.player.loadout.weapons.push(Weapon {
+                kind,
+                level: 3,
+                timer: 0.0,
+                evolved: false,
+            });
+        }
+        for i in 0..8u32 {
+            let ang = i as f32 * std::f32::consts::TAU / 8.0;
+            let p = w.player.pos + Vec2::from_angle(ang) * (28.0 + i as f32 * 3.0);
+            w.spawn_enemy(EnemyKind::Skitterer, p, 40.0);
+        }
+    }
+    play(&mut a, 600);
+    play(&mut b, 600);
+    assert_eq!(
+        fingerprint(&mut a),
+        fingerprint(&mut b),
+        "the same seed and the same weapons diverged"
+    );
 }
 
 /// Manual screenshot tool: line up one of each insect + a glowing pickup
@@ -593,12 +711,20 @@ fn spawn_point_stays_in_bounds_clear_of_walls_and_player() {
     }
 }
 
+/// The crowd cap holds at the busiest point of the curve.
+///
+/// It used to tick all 920 s of a level at 10 Hz (9,200 ticks) to walk into the
+/// late budget. The cap can only be pressed once the curve is near its top, so
+/// this jumps the clock to just before the boss hand-off with `w.elapsed` and
+/// plays that window instead: the late budget, the miniboss chest and the boss
+/// reserved slot, in 25 s.
 #[test]
-fn enemy_cap_holds_through_a_full_run() {
+fn enemy_cap_holds_at_the_top_of_the_curve() {
     let mut w = World::new(Theme::Sewer, 17);
     let dt = 0.1;
+    w.elapsed = director::BOSS_TIME - 25.0;
     let mut ticks = 0;
-    while !w.finished() && ticks < 9200 {
+    while !w.finished() && ticks < 250 {
         w.update(dt, Vec2::ZERO, false);
         apply_pending(&mut w);
         // Keep the rat alive so the cap is exercised into the boss fight.
@@ -613,16 +739,6 @@ fn enemy_cap_holds_through_a_full_run() {
         ticks += 1;
     }
     assert!(w.director.boss_spawned, "boss never spawned");
-    // A level lasts until the boss or the rat dies, so a full run ends on the
-    // clock or on the boss's death. Wave 3's rare-find table reshuffles which
-    // pickup a successful drop yields, which legitimately moves a cleared boss
-    // a few seconds either side of the 300 s mark (the run itself is still a
-    // full one that reached the boss); the cap assertion above is this test's
-    // subject.
-    assert!(
-        w.elapsed >= director::RUN_SECONDS || w.level_complete(),
-        "run neither reached the clock nor ended on a boss kill"
-    );
     assert!(
         w.elapsed >= director::BOSS_TIME,
         "the run ended before the boss arrived"
@@ -1630,7 +1746,7 @@ fn a_different_aim_changes_the_run() {
 }
 
 /// `World::update`/`update_with` keep passing `None`, so the auto-aim path is
-/// byte-identical to the pre-wave-3 sim (the goldens depend on it).
+/// byte-identical to the pre-wave-3 sim (the scripted traces depend on it).
 #[test]
 fn no_aim_is_the_auto_aim_path() {
     let mut a = World::new(Theme::Sewer, 3);

@@ -148,7 +148,7 @@ pub struct Dropping {
     /// Trigger radius in px (Lens Cap stretches it at drop time).
     pub radius: f32,
     /// Art variation seed. The drop's own `SpawnId` truncated — a drop draws
-    /// no rng, so the picture cannot move a golden.
+    /// no rng, so the picture cannot move a scripted trace.
     pub seed: u32,
     /// Hantavirus weapon rank at drop time (1–5), used by art and lighting.
     pub level: u8,

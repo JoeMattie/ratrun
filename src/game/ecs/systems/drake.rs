@@ -54,8 +54,8 @@
 //! pass also takes (`vfx::emit_player_hurt`). The guest spawner draws exactly
 //! what a placement draws: one ring angle from `spawn_point_reachable`, then
 //! `Enemy::spawn`'s three fields. Nothing here can fire before 2:30 on the
-//! curve clock, and the determinism goldens run 60 s, so **the goldens cannot
-//! see this file** (see `.review-report-duck-code.md`).
+//! curve clock, and the scripted cases run 60 s, so **they cannot see this
+//! file** (see `.review-report-duck-code.md`).
 
 use bevy_ecs::prelude::*;
 
@@ -935,17 +935,19 @@ mod tests {
         assert_eq!(rotate_toward(from, Vec2::ZERO, REAIM_MAX_RAD), from);
     }
 
-    /// The four seeded 60 s golden scripts never contain a Drake: the guest is
-    /// blind before 2:30 on the curve clock.
+    /// The guest is blind before 2:30 on the curve clock, so the first minute
+    /// of a run on any of the three opening floors is Drake-free. (This used
+    /// to guard the 60 s scripted traces; the absence of the guest in the
+    /// opening minute is still the rule worth pinning.)
     #[test]
-    fn no_golden_script_meets_a_drake() {
+    fn no_opening_run_meets_a_drake() {
         for theme in [Theme::Sewer, Theme::Kitchen, Theme::Lab] {
             let mut w = World::new(theme, 1000);
             for _ in 0..60 * 60 {
                 w.update(DT, Vec2::ZERO, false);
                 assert!(
                     !w.enemies().iter().any(|e| e.kind == EnemyKind::Drake),
-                    "{theme:?}: a Drake inside the 60 s golden window"
+                    "{theme:?}: a Drake inside the first 60 s"
                 );
             }
             assert!(w.elapsed < FROM_CLOCK, "{theme:?}: the run reached 2:30");
@@ -954,11 +956,16 @@ mod tests {
 
     /// The guest's clock really is the curve clock: a Sewer world stepped past
     /// 2:30 spawns one (the run itself, not a hand-built context).
+    ///
+    /// The clock is moved to 2:20 first instead of being ticked there: nothing
+    /// the Drake spawner reads changes before `FROM_CLOCK`, and the negative
+    /// half (no guest in the opening minute) is `no_opening_run_meets_a_drake`.
     #[test]
-    fn a_full_run_spawns_its_first_drake_after_2_30() {
+    fn a_run_walks_into_its_first_drake_after_2_30() {
         let mut w = World::new(Theme::Sewer, 4242);
+        w.elapsed = FROM_CLOCK - 10.0;
         let mut at = None;
-        while w.elapsed < 200.0 {
+        while w.elapsed < FROM_CLOCK + 10.0 {
             w.update(0.1, Vec2::ZERO, false);
             w.player.hp = w.player.max_hp();
             if w.enemies().iter().any(|e| e.kind == EnemyKind::Drake) {

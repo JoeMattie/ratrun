@@ -694,7 +694,7 @@ fn at_most_two_nearby_warned_attacks_start_together() {
 
 // ---- Determinism and the rng contract ------------------------------------
 
-/// A run with no wave-3 body on the map draws no rng at all, so the golden
+/// A run with no wave-3 body on the map draws no rng at all, so the scripted
 /// traces' openings cannot move because of this system.
 #[test]
 fn a_tick_without_wave3_bodies_draws_no_rng() {
@@ -719,70 +719,6 @@ fn a_tick_without_wave3_bodies_draws_no_rng() {
         w.rng.random::<u64>(),
         reference.rng.random::<u64>(),
         "the wave-3 system consumed rng on a map with no wave-3 enemy"
-    );
-}
-
-/// Two worlds, the same seed, the same wave-3 bodies and the same scripted rat:
-/// the full schedule must agree tick for tick. This is the twin-run witness for
-/// the new state machines (the golden harness covers the pre-port reference).
-#[test]
-fn twin_runs_with_wave3_kinds_stay_identical() {
-    fn run_once() -> u64 {
-        use rand::RngExt;
-        let mut w = World::new(Theme::Sewer, 41);
-        open_floor(&mut w);
-        w.clear_enemies();
-        let p = w.level.arena * 0.5;
-        w.player.pos = p;
-        w.viewport = Vec2::new(160.0, 168.0);
-        let kinds = [
-            EnemyKind::Pillbug,
-            EnemyKind::BellFlea,
-            EnemyKind::WickMoth,
-            EnemyKind::Porter,
-            EnemyKind::Turnkey,
-            EnemyKind::Skitterer,
-        ];
-        for (i, kind) in kinds.iter().enumerate() {
-            let a = i as f32 * 0.9;
-            let pos = p + Vec2::from_angle(a) * (18.0 + i as f32 * 3.0);
-            let e = w.spawn_enemy(*kind, pos, 1.0);
-            put(&mut w, e, |en| {
-                en.w3.armed = 0;
-                if *kind == EnemyKind::WickMoth && i == 2 {
-                    en.hp = 1.0;
-                }
-            });
-        }
-        let mut hash = 14_695_981_039_346_656_037u64;
-        for step in 0..420 {
-            let dir = Vec2::from_angle(step as f32 * 0.03);
-            w.update(DT, dir, false);
-            for e in w.enemies() {
-                for v in [
-                    e.pos.x.to_bits() as u64,
-                    e.pos.y.to_bits() as u64,
-                    e.hp.to_bits() as u64,
-                    e.w3.curl_t.to_bits() as u64,
-                    e.w3.flea_phase as u64,
-                    e.w3.flea_t.to_bits() as u64,
-                    e.w3.raise_t.to_bits() as u64,
-                    e.w3.bar_t.to_bits() as u64,
-                    e.w3.wick_t.to_bits() as u64,
-                ] {
-                    hash ^= v;
-                    hash = hash.wrapping_mul(1_099_511_628_211);
-                }
-            }
-            hash ^= w.player.hp.to_bits() as u64;
-            w.rng.random::<u64>();
-        }
-        hash
-    }
-    assert_eq!(
-        run_once(),
-        run_once(),
-        "two runs of the same seed diverged with wave-3 bodies on the field"
     );
 }
 

@@ -1517,7 +1517,7 @@ mod tests {
     ///
     /// It must be strictly harder than stage three at every instant past the
     /// hp grace window, and it must not move a single number for levels 0–2
-    /// (the determinism goldens are 60 s floors on those levels).
+    /// (the scripted cases are 60 s floors on those levels).
     #[test]
     fn the_fourth_level_is_the_ride_and_harder_than_stage_three() {
         use crate::game::campaign::{getaway_theme, theme_sector, LEVEL_COUNT};

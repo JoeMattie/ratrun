@@ -3,8 +3,8 @@
 //! Runs directly after `player::player_system` (schedule slot 2) and only
 //! writes the [`Fog`] resource: it reads the player position and the level's
 //! tile grid, floods the explored set and never touches the rng, an entity or a
-//! simulated value. Adding it to the chain therefore leaves every golden trace
-//! untouched (proved by `game::ecs::tests::fog_never_moves_the_simulation`).
+//! simulated value. Adding it to the chain therefore leaves every scripted
+//! trace untouched (proved by `game::ecs::tests::fog_never_moves_the_simulation`).
 //!
 //! The flood itself lives in [`crate::game::fog`]; the rule and radius are
 //! documented there.
@@ -101,8 +101,8 @@ mod tests {
     /// for tick, including the rng state (a `next_u64` draw compared on both
     /// sides).
     ///
-    /// This is the in-test equivalent of "the golden traces do not move": the
-    /// system reads `Player` + `Level` and writes only `Fog`.
+    /// This is the determinism check for the render-only systems: the system
+    /// reads `Player` + `Level` and writes only `Fog`.
     #[test]
     fn fog_never_moves_the_simulation() {
         use rand::Rng;

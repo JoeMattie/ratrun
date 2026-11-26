@@ -23,7 +23,8 @@
 //! identically at every zoom (see
 //! `game::world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom`).
 //! A new rung above [`MAX`] must move that constant with it (a test fails
-//! otherwise) and moves the determinism goldens.
+//! otherwise); the spawn ring is measured against it, so every scripted trace
+//! moves too.
 //!
 //! [`World`]: crate::game::world::World
 

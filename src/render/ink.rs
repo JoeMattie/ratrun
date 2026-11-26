@@ -25,8 +25,8 @@
 //! ## Rules this pass obeys
 //!
 //! - **Render-only.** It reads entities and the level and writes pixels; it
-//!   draws no rng, mutates no simulation state, so determinism and the golden
-//!   hashes are untouched.
+//!   draws no rng, mutates no simulation state, so determinism and the
+//!   scripted traces are untouched.
 //! - **No doubling at 1x.** The hostile marks are re-stamped *only when zoomed
 //!   out* (`scale > 1.05`): at 1x the hostile layer already drew them at the
 //!   right size and the art must not be drawn twice. The loot markers are

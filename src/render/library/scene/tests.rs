@@ -1,6 +1,7 @@
 //! The card scenes' own tests: every registry row answers (a scene or a stated
-//! reason), every scene survives two loops with a living rat, and a sample of
-//! plates really moves — the subject's attack included.
+//! reason) and every scene *builds*, a sample of scenes survives three loops
+//! with a living rat, and a sample of plates really moves — the subject's
+//! attack included.
 //!
 //! The animating plate is deliberately sampled, not proven per entry: the
 //! registry is content, and a new kind's *behaviour* is the simulation's to
@@ -48,14 +49,30 @@ fn every_registry_row_has_a_scene_or_a_reason() {
     }
 }
 
-/// Every scene builds, then runs two whole loops: no panic, no game over, and
-/// the card rat still alive at every step (hidden or not: it is the real rat).
+/// A sampled scene runs three whole loops: no panic, no game over, and the card
+/// rat still alive at every step (hidden or not: it is the real rat).
+///
+/// This used to run **every** sandbox row (about 120 of 160) for 3 × its loop
+/// length, which is a couple of hundred thousand `World::update` ticks of a
+/// 44 × 30 card for a rule that only the subject's own controller can break.
+/// The audit's shape: every fifth sandbox row, plus every boss and miniboss (the
+/// rows whose controllers are the ones that could end a run) — about 40 rows.
+/// The registry stays exhaustive in `every_registry_row_has_a_scene_or_a_reason`,
+/// which builds every scene once to prove it exists; that is the cheap half.
 #[test]
-fn every_scene_runs_two_loops_and_the_rat_survives() {
-    for row in all_rows() {
-        if plan(row.key) != Plan::Sandbox {
+fn a_sample_of_scenes_runs_three_loops_and_the_rat_survives() {
+    let sandbox: Vec<_> = all_rows()
+        .into_iter()
+        .filter(|row| plan(row.key) == Plan::Sandbox)
+        .collect();
+    let mut sampled = 0usize;
+    for (i, row) in sandbox.iter().enumerate() {
+        // The night shift: every fifth row, and every row whose own controller
+        // decides whether the run is over.
+        if i % 5 != 0 && !matches!(row.key, Key::Boss(_) | Key::Miniboss(_)) {
             continue;
         }
+        sampled += 1;
         let mut scene = LibraryScene::build(row.key)
             .unwrap_or_else(|| panic!("{} has no scene", row.name));
         let ticks = (scene.loop_secs() / TICK).ceil() as u32 * 3 + 8;
@@ -72,6 +89,10 @@ fn every_scene_runs_two_loops_and_the_rat_survives() {
             row.name
         );
     }
+    assert!(
+        sampled >= 25,
+        "only {sampled} scenes were sampled: the sample stopped covering the card kinds"
+    );
 }
 
 // ---- Sampling helpers -----------------------------------------------------

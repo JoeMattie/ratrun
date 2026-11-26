@@ -41,7 +41,7 @@
 //! the persisted [`Record`] counters, and the session's `fresh` (NEW) bitset.
 //! [`Library::survey`] is the only writer during a run. It is **render-side**:
 //! it reads the ECS world and the fog (line of sight) and writes nothing but
-//! the library, so it draws no rng and cannot move a golden trace.
+//! the library, so it draws no rng and cannot move a scripted trace.
 //!
 //! It is also cheap by construction: each category carries an "everything seen"
 //! early-out, so a mature run walks nothing at all; while something is still

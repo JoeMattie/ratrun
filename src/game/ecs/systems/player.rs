@@ -127,7 +127,7 @@ pub fn player_system(
     // A dash press the cooldown refused whose input is still held (Super Dash
     // only): the one hold that may start a charge without a fresh press edge.
     // Input bookkeeping, not simulation state: it is only ever set from live
-    // hold edges, which the bot and the goldens never pass.
+    // hold edges, which the bot and the scripted cases never pass.
     mut hold_buffered: Local<bool>,
     mut traps: ResMut<super::traps::TrapRuntime>,
 ) {
@@ -143,7 +143,7 @@ pub fn player_system(
     }
     // Wave 3 controls: while aiming, the rat faces the reticle (its dash and
     // every facing-based effect follow the pointer, not the walk). With no
-    // aim (`World::update`, the bot, the goldens) this changes nothing.
+    // aim (`World::update`, the bot, the scripted cases) this changes nothing.
     if let Some(d) = input.aim.map(|p| p - player.pos).filter(|v| v.len_sq() > 4.0) {
         player.face = d.normalized();
     }
@@ -1348,36 +1348,4 @@ mod tests {
         assert_eq!(w.player.dash_charge, 0.0);
     }
 
-    /// A scripted hold-and-release run is deterministic: two worlds fed the same
-    /// ticks land on the same state, bit for bit.
-    #[test]
-    fn a_scripted_hold_and_release_is_deterministic() {
-        let mut a = World::new(Theme::Sewer, 93);
-        let mut b = World::new(Theme::Sewer, 93);
-        for w in [&mut a, &mut b] {
-            own_super_dash(w);
-            w.player.pos = w.level.arena * 0.5;
-            w.player.dash_cd = 0.0;
-        }
-        for i in 0..150u32 {
-            let hold = match i {
-                0 => PRESS,
-                1..=40 => HELD,
-                41 => RELEASE,
-                _ => DashHold::NONE,
-            };
-            let mv = Vec2::new(((i % 3) as f32) - 1.0, 1.0).normalized();
-            for w in [&mut a, &mut b] {
-                w.update_with_dash_hold(DT, mv, false, false, None, hold);
-            }
-        }
-        assert_eq!(a.elapsed.to_bits(), b.elapsed.to_bits());
-        assert_eq!(a.player.pos.x.to_bits(), b.player.pos.x.to_bits());
-        assert_eq!(a.player.pos.y.to_bits(), b.player.pos.y.to_bits());
-        assert_eq!(a.player.hp.to_bits(), b.player.hp.to_bits());
-        assert_eq!(a.player.dash_charge.to_bits(), b.player.dash_charge.to_bits());
-        assert_eq!(a.kills, b.kills);
-        assert_eq!(a.score, b.score);
-        assert_eq!(a.enemies().len(), b.enemies().len());
-    }
 }

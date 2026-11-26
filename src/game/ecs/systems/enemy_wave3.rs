@@ -258,7 +258,7 @@ pub fn wave3_system(
 
     // Cheap gate: with no wave-3 body and no burning wick on the map this
     // system does nothing at all — not one sort, not one rng draw. That is what
-    // keeps an early run (and every golden trace's opening) identical.
+    // keeps an early run (and every scripted trace's opening) identical.
     let has_wave3 = enemies.iter().any(|(_, _, e)| e.kind.is_wave3());
     let has_wicks = wicks.iter().next().is_some();
     if !has_wave3 && !has_wicks {

@@ -618,7 +618,7 @@ pub struct Loadout {
     /// passive stacks → gene splices — so a from-scratch rebuild always equals
     /// the live numbers. They ride along between campaign floors
     /// (`campaign::next_loadout`) and the App builds them from the saved profile
-    /// once per run; tests, the bot batch and the determinism harness use
+    /// once per run; tests and the bot batch use
     /// [`crate::meta::RunModifiers::NONE`], which is bit-exact neutral.
     pub meta: crate::meta::RunModifiers,
 }

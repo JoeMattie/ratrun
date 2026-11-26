@@ -43,7 +43,7 @@
 //!
 //! Everything else is a pure function of the rat's position, its intent, the
 //! live enemies and the previous state, so the only other way this file moves a
-//! golden trace is through the values it *writes* (`pending_levelups`,
+//! scripted trace is through the values it *writes* (`pending_levelups`,
 //! `player.iframes`, entity positions during centring). Every loop runs over a
 //! `Vec` in `LevelObjects` order (never a hash map), and no system allocates per
 //! tick: `GateRuntime`'s buffers are sized once per level (`resize_with` on a
@@ -378,7 +378,7 @@ pub fn passage_system(
     // Tell the fog the rat crossed a hole (its `crossed` list is what lets a
     // known shortcut keep showing its far mouth). `reveal_cell` is the public
     // "the rat stood here" entry point and notes the crossing itself; it is
-    // skipped when the reveal is switched off (the determinism harness).
+    // skipped when the reveal is switched off (the fog tests do that).
     for &cell in crossed.iter() {
         if fog.reveal_enabled && !fog.hole_crossed(cell) {
             fog.reveal_cell(&level, cell);
@@ -1655,105 +1655,6 @@ mod tests {
     }
 
     // ---- Determinism ------------------------------------------------------
-
-    /// Same seed, same script, same object state — down to the bits, including
-    /// the gate runtime's latches and the HUD feed.
-    #[test]
-    fn the_object_runtime_is_deterministic() {
-        fn script(w: &mut World) {
-            for step in 0..900u64 {
-                let phase = step as f32 * 0.021;
-                let dir = Vec2::new(crate::detmath::sin(phase), crate::detmath::cos(phase * 0.7));
-                w.update(DT, dir, step % 211 == 0);
-            }
-        }
-        for theme in [Theme::Sewer, Theme::Lab] {
-            // A map that actually has a maze (mazes are rare by design), so the
-            // door latch, the slam and the cache claim are all exercised.
-            let seed = (0..400u64)
-                .find(|seed| !Level::generate(theme, *seed).mazes.is_empty())
-                .unwrap_or_else(|| panic!("no {theme:?} map in 400 seeds has a maze"));
-            let mut a = World::new(theme, seed);
-            let mut b = World::new(theme, seed);
-            a.viewport = Vec2::new(160.0, 168.0);
-            b.viewport = a.viewport;
-            script(&mut a);
-            script(&mut b);
-            assert_eq!(
-                a.level.objects.one_way_doors.len(),
-                b.level.objects.one_way_doors.len()
-            );
-            for (x, y) in a
-                .level
-                .objects
-                .one_way_doors
-                .iter()
-                .zip(&b.level.objects.one_way_doors)
-            {
-                assert_eq!(x.view.state, y.view.state);
-                assert_eq!(x.view.progress.to_bits(), y.view.progress.to_bits());
-                assert_eq!(x.view.hit_flash.to_bits(), y.view.hit_flash.to_bits());
-            }
-            for (x, y) in a
-                .level
-                .objects
-                .rat_holes
-                .iter()
-                .zip(&b.level.objects.rat_holes)
-            {
-                assert_eq!(x.view.state, y.view.state);
-                assert_eq!(x.view.progress.to_bits(), y.view.progress.to_bits());
-            }
-            for (x, y) in a
-                .level
-                .objects
-                .rewards
-                .iter()
-                .zip(&b.level.objects.rewards)
-            {
-                assert_eq!(x.state, y.state);
-                assert_eq!(x.progress.to_bits(), y.progress.to_bits());
-            }
-            for i in 0..a.level.mazes.len() {
-                assert_eq!(a.fog.maze_claimed(i), b.fog.maze_claimed(i));
-            }
-            assert_eq!(a.player.pos.x.to_bits(), b.player.pos.x.to_bits());
-            assert_eq!(a.player.pos.y.to_bits(), b.player.pos.y.to_bits());
-            assert_eq!(a.player.iframes.to_bits(), b.player.iframes.to_bits());
-            assert_eq!(a.pending_levelups, b.pending_levelups);
-            let (ra, rb) = (
-                a.ecs.resource::<GateRuntime>(),
-                b.ecs.resource::<GateRuntime>(),
-            );
-            // The three systems really are in the schedule: one full tick
-            // sized every per-object buffer from the level.
-            assert_eq!(ra.doors.len(), a.level.objects.one_way_doors.len());
-            assert_eq!(ra.holes.len(), a.level.objects.rat_holes.len());
-            assert_eq!(ra.rewards.len(), a.level.objects.rewards.len());
-            assert!(
-                !ra.doors.is_empty(),
-                "{theme:?} seed {seed}: the runtime must have been sized by a tick"
-            );
-            assert_eq!(ra.feed(), rb.feed());
-            for (x, y) in ra.doors.iter().zip(&rb.doors) {
-                assert_eq!(x.refused_latched, y.refused_latched);
-                assert_eq!(x.slammed, y.slammed);
-                assert_eq!(x.armed, y.armed);
-                assert_eq!(x.refusals, y.refusals);
-                assert_eq!(x.opens, y.opens);
-                assert_eq!(x.open_cd.to_bits(), y.open_cd.to_bits());
-            }
-            for (x, y) in ra.holes.iter().zip(&rb.holes) {
-                assert_eq!(x.inside, y.inside);
-                assert_eq!(x.squeeze.to_bits(), y.squeeze.to_bits());
-                assert_eq!(x.blocks, y.blocks);
-                assert_eq!(x.squeezes, y.squeezes);
-                assert_eq!(x.squeeze_sounds, y.squeeze_sounds);
-                assert_eq!(x.squeeze_cd.to_bits(), y.squeeze_cd.to_bits());
-            }
-            assert_eq!(a.rng.next_u64(), b.rng.next_u64());
-        }
-    }
 
     /// The squeeze/blocked windows are the art's constants, not magic numbers.
     #[test]

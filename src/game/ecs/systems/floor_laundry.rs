@@ -787,18 +787,4 @@ mod tests {
         assert!(mid < PEG_JAW_GAP * 0.5 && mid > PEG_JAW_SHUT_GAP * 0.5);
     }
 
-    #[test]
-    fn two_pegs_resolve_in_spawn_order_and_twin_runs_match() {
-        let run = || {
-            let mut w = world();
-            let rat = w.player.pos;
-            let a = ready_peg(&mut w, rat + Vec2::new(-15.0, 0.0));
-            let b = ready_peg(&mut w, rat + Vec2::new(0.0, 15.0));
-            for _ in 0..secs(2.5) {
-                tick(&mut w);
-            }
-            (w.player.hp, state(&w, a).w3.home, state(&w, b).w3.home)
-        };
-        assert_eq!(run(), run());
-    }
 }

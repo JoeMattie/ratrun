@@ -77,8 +77,8 @@
 //!
 //! `fog::reveal_system` is the only system with no legacy step: it reads the
 //! player position and the tile grid, writes the `Fog` resource and nothing
-//! else (no rng draw, no entity, no simulated value), so the golden traces are
-//! identical with it enabled or disabled.
+//! else (no rng draw, no entity, no simulated value), so every scripted trace
+//! is identical with it enabled or disabled.
 //!
 //! `gates::passage_system`, `gates::cache_system` and `gates::door_system`
 //! (the interactive-object runtime: rat-hole states and centring, the maze
@@ -460,7 +460,7 @@ pub fn build_tick_schedule() -> Schedule {
     // 13d: the King Cobra's laid body is a **moving wall**. A boss controller
     // has no player access (`BossContext` hands it a `&Level` and a
     // `&mut StdRng` and nothing else) and the coil must not be a tile edit —
-    // the map pin is a golden — so the separation pass lives here, right after
+    // the map pin folds tiles — so the separation pass lives here, right after
     // the update slot that laid the loop this tick and before the damage
     // passes. A walking rat is pushed out of the nearest body point, a dashing
     // one passes over it; a floor with no cobra on it (or a cobra that is not

@@ -5,7 +5,7 @@
 //! `levelgen::trailer`) and is drawn by `art_trailer`, so what the player sees
 //! is what this system reads. Nothing here runs on any other theme: the first
 //! line is a `Theme::Trailer` check, so the three campaign floors keep their
-//! exact tick (and their golden traces).
+//! exact tick (and their scripted traces).
 //!
 //! ## Ordering
 //!
@@ -798,46 +798,6 @@ mod tests {
             w.ecs.get::<Enemy>(e).is_none(),
             "a fatal fall did not reap the body (and so dropped no loot)"
         );
-    }
-
-    /// Twin runs on the flatbed: same seed, same bot, same inputs — the same
-    /// hazards fire, the same falls land and the same bodies end up in the same
-    /// places. (The golden harness pins the three campaign themes; this pins
-    /// the trailer's own hazards without touching those hashes.)
-    #[test]
-    fn twin_runs_on_the_flatbed_match() {
-        use crate::game::bot::{Bot, Skill};
-
-        let mut a = World::new(Theme::Trailer, 77);
-        let mut b = World::new(Theme::Trailer, 77);
-        let mut bot_a = Bot::new(Skill::Skilled, 3);
-        let mut bot_b = Bot::new(Skill::Skilled, 3);
-        bot_a.on_new_level(0);
-        bot_b.on_new_level(0);
-        let dt = 1.0 / 60.0;
-        for tick in 0..1800u32 {
-            let ia = bot_a.decide(&a, dt);
-            let ib = bot_b.decide(&b, dt);
-            a.update(dt, ia.move_dir, ia.dash);
-            b.update(dt, ib.move_dir, ib.dash);
-            assert_eq!(
-                a.player.pos.x.to_bits(),
-                b.player.pos.x.to_bits(),
-                "player x diverged at tick {tick}"
-            );
-            assert_eq!(a.player.pos.y.to_bits(), b.player.pos.y.to_bits());
-            assert_eq!(a.player.hp.to_bits(), b.player.hp.to_bits());
-            assert_eq!(a.kills, b.kills);
-            assert_eq!(a.score, b.score);
-            let ea = a.enemies();
-            let eb = b.enemies();
-            assert_eq!(ea.len(), eb.len(), "enemy count diverged at tick {tick}");
-            for (x, y) in ea.iter().zip(eb.iter()) {
-                assert_eq!(x.pos.x.to_bits(), y.pos.x.to_bits(), "tick {tick}");
-                assert_eq!(x.pos.y.to_bits(), y.pos.y.to_bits(), "tick {tick}");
-                assert_eq!(x.hp.to_bits(), y.hp.to_bits(), "tick {tick}");
-            }
-        }
     }
 
     /// The owner's floor, measured: a full 120 × 40-cell view of the flatbed is

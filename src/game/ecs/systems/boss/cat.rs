@@ -1865,19 +1865,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn twin_scripted_fights_match_tick_for_tick() {
-        let a = scripted_fight(4242, (30.0 / DT) as usize);
-        let b = scripted_fight(4242, (30.0 / DT) as usize);
-        assert_eq!(a.alive, b.alive);
-        assert_eq!(a.completions, b.completions);
-        assert_eq!(a.complete, b.complete);
-        assert_eq!(a.trace.len(), b.trace.len());
-        assert!(
-            a.trace == b.trace,
-            "the boss trace must be identical for one seed"
-        );
-        assert!(!a.trace.is_empty());
-    }
 }
 

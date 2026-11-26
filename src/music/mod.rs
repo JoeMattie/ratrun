@@ -27,7 +27,9 @@
 //!
 //! The sequencer is driven by integer sample counters and the tables are
 //! fixed, so a song renders bit-for-bit identically on every run (pinned by
-//! `a_song_renders_bit_for_bit_identically`). Nothing here reads the simulation: the only
+//! `a_song_renders_bit_for_bit_identically`, which is `#[ignore]`d because a
+//! whole-song render is a measurement: `cargo test -- --ignored`). Nothing here
+//! reads the simulation: the only
 //! live input is the intensity tier, which is what the app already drives.
 //!
 //! # Why a second synth

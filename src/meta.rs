@@ -1278,7 +1278,7 @@ mod tests {
     #[test]
     fn a_neutral_profile_is_bit_exact_and_a_maxed_one_is_strong_but_small() {
         // The neutral value leaves every stat untouched — bit-for-bit, so every
-        // existing number (and every golden trace) is unchanged.
+        // existing number (and every scripted trace) is unchanged.
         let base = Stats::default();
         let mut neutral = Stats::default();
         apply(&mut neutral, &RunModifiers::NONE);

@@ -64,8 +64,8 @@
 //! * Bestiary plates are `flat_lit`: a card is a portrait, and the pitch-dark
 //!   ambient of a floor hides the very thing it is about. The hostile layer and
 //!   the card's dummy are self-lit on top, as always.
-//! * The scene world keeps its own rng (`SEED`), so no card can move a golden
-//!   or the map pin.
+//! * The scene world keeps its own rng (`SEED`), so no card can move a
+//!   scripted trace or the map pin.
 //! * The card's dummy is painted **under** the picture. There is no mid-scene
 //!   draw hook on [`World::draw`], so the plate renders the floor layer a
 //!   second time as a reference and the cork only takes pixels the world's own
@@ -988,7 +988,7 @@ impl LibraryScene {
     /// loop starts from a fresh world and is the same loop that was measured.
     ///
     /// The scene has its own seed and no director, so the probe is a fixture:
-    /// it cannot reach a run, a golden or the map pin.
+    /// it cannot reach a run, a scripted trace or the map pin.
     pub(super) fn probe_boss_union(&mut self) -> Option<(Vec2, Vec2)> {
         let ticks = (self.script.loop_secs / TICK).ceil() as u32 + 2;
         let loops = self.loops;

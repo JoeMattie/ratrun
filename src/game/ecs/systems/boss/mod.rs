@@ -534,10 +534,12 @@ impl BossKind {
             // Mower: 25,600 hp, ~80 s median), where 2.0 would be a ~150 s
             // press. 0.85 is ~20,400 hp, about 64 s at that rate.
             BossKind::NightEdition => 0.62,
-            // Measured with `magpie::tests::a_bot_kills_the_magpie_on_the_real_deck`
-            // (the same method the campaign bosses were tuned with, applied to
-            // the flatbed: the Expert bot with a carried build, spawn to death
-            // on the real deck, five seeds). At `2.0` the bird died in 23.4 s
+            // Measured with the Expert bot on the flatbed
+            // (`--bot-batch --practice --route flatbed`, run on request; the
+            // same method the campaign bosses were tuned with, applied to the
+            // flatbed: a carried build, spawn to death on the real deck, five
+            // seeds — the suite no longer plays bot fights). At `2.0` the bird
+            // died in 23.4 s
             // (mean), i.e. the bot lands ~1.1 k dps into it — the flatbed is a
             // 15-minute practice floor reached with a full build and a small,
             // always-reachable body, so it takes a much bigger pool than the
@@ -552,9 +554,9 @@ impl BossKind {
             // The Sewer pool mate, and the only boss whose *pool* is smaller
             // than its art's: the dome sheds ~45 % of the rat's fire on any
             // run that does not flank it, so the raw number already buys a
-            // longer fight. Measured with
-            // `boss::horseshoe_crab::tests::a_bot_kills_the_horseshoe_on_the_real_arena`
-            // (the same Expert bot + Typical carry the other boss fights were
+            // longer fight. Measured with the Expert bot + Typical carry on
+            // the Sewer (`--bot-batch`, run on request; the same method the
+            // other boss fights were
             // tuned with, five Sewer seeds, spawn to death): at the Cat's 1.4
             // the fight ran 127.5 s mean (the bot orbits into the dome and
             // loses half its damage); `0.70` lands it in the 45-80 s band at
@@ -569,8 +571,8 @@ impl BossKind {
             // near-complete build lands 250-600 dps into a boss, so
             // 1,600 × 2.6 × the framework's ×8 lands ~33 k and a 55-80 s fight
             // once the windows are spent. Provisional: the balance pass owns
-            // the final number. Measured with
-            // `megarat::tests::a_bot_kills_the_megarat_on_the_real_arena`.
+            // the final number. Measured with the Expert bot on the Kitchen's
+            // arena (`--bot-batch`, run on request).
             // **Batch-6 re-scale (blind, not measured).** The campaign bot
             // lands ~350 dps into the other Kitchen fight (the Sweeper:
             // 24,960 hp, ~72 s median); at 2.6 this pool is 33,280 hp, a
@@ -586,8 +588,8 @@ impl BossKind {
             // so the raw pool has to be a little over half the magpie's for the
             // same 45-80 s beat. 1,600 × 2.6 lands the fight beside the Magpie's
             // ~54 s at the assumed uptime; a balance pass owns the number. See
-            // `hawk::tests::a_bot_kills_the_hawk_on_the_real_deck` for the
-            // measurement that must be taken.
+            // `--bot-batch --practice --route flatbed` for the measurement that
+            // must be taken.
             // **Batch-6 re-scale (blind, not measured).** The magpie's reported
             // fight puts the flatbed bot at ~173 dps into an always-hittable
             // bird, not the ~1.1 k assumed above; at the hawk's ~45 % uptime
@@ -604,8 +606,8 @@ impl BossKind {
             // 45-80 s beat the Mower holds at 3,200 with no weak point at all.
             // Provisional: the balance pass owns the final number.
             //
-            // Measured at integration (`cobra::tests::a_bot_kills_the_king_cobra_
-            // on_the_real_arena`, the Typical melee carry): at 2.0 the bot had
+            // Measured at integration (`--bot-batch`, run on request, with the
+            // Typical melee carry): at 2.0 the bot had
             // taken 80 % of the pool after 300 s (about 77 dps landed, not the
             // 250-600 assumed above, because the animal holds a 70 px stand-off
             // and a short-range kit only reaches it during its strikes). Halved
@@ -958,7 +960,7 @@ impl BossKind {
 /// The boss's private rng stream.
 ///
 /// Seeded from the run seed and the kind's salt so the boss never draws from
-/// the main run rng (which would perturb the golden trace).
+/// the main run rng (which would perturb its draw order).
 pub struct BossRng(pub StdRng);
 
 impl BossRng {

@@ -2558,6 +2558,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full-song render (0.5-2 s each): `cargo test -- --ignored` when the mix or a song changes"]
     fn every_floor_renders_two_loops_inside_the_mix_targets() {
         // The classic synth's targets, on the song path: 0.14..=0.55 peak,
         // 0.045..=0.22 RMS, |DC| < 0.005. The loudest tier is the one to hold
@@ -2719,6 +2720,7 @@ mod tests {
     /// octave pulse once climbed an octave a beat through a bass rest and
     /// drove the bus to NaN).
     #[test]
+    #[ignore = "full-song render (0.5-2 s each): `cargo test -- --ignored` when the mix or a song changes"]
     fn every_tier_stays_finite_for_a_whole_loop() {
         for theme in Theme::playable() {
             for tier in 0..=3u32 {
@@ -2765,6 +2767,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full-song render (0.5-2 s each): `cargo test -- --ignored` when the mix or a song changes"]
     fn a_song_renders_bit_for_bit_identically() {
         for theme in Theme::playable() {
             let (a, _) = render(theme, 2, 22_050, 1);

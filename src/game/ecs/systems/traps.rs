@@ -3367,59 +3367,6 @@ mod tests {
 
     // ---- Determinism -----------------------------------------------------
 
-    /// Twin runs: same seed, same scripted input, identical trap state, load,
-    /// wear and positions.
-    #[test]
-    fn twin_runs_reproduce_the_same_trap_state() {
-        let run = |seed: u64| {
-            let mut w = World::new(Theme::Kitchen, seed);
-            for i in 0..900 {
-                let dir = match (i / 90) % 4 {
-                    0 => Vec2::new(1.0, 0.0),
-                    1 => Vec2::new(0.0, 1.0),
-                    2 => Vec2::new(-1.0, 0.0),
-                    _ => Vec2::new(0.0, -1.0),
-                };
-                w.update(DT, dir, false);
-            }
-            let sticky: Vec<(u8, f32, u8, u32, u8)> = w
-                .level
-                .objects
-                .sticky_traps
-                .iter()
-                .map(|v| (v.state as u8, v.worn, v.load, v.progress.to_bits(), v.tear_n))
-                .collect();
-            let mice: Vec<(u8, f32, bool)> = w
-                .level
-                .objects
-                .mousetraps
-                .iter()
-                .map(|v| (v.state as u8, v.progress, v.bait_taken))
-                .collect();
-            (
-                w.player.pos.x,
-                w.player.pos.y,
-                w.kills,
-                w.elapsed,
-                sticky,
-                mice,
-            )
-        };
-
-        let a = run(4242);
-        let b = run(4242);
-        assert_eq!(a.0.to_bits(), b.0.to_bits(), "player x differs");
-        assert_eq!(a.1.to_bits(), b.1.to_bits(), "player y differs");
-        assert_eq!(a.2, b.2, "kills differ");
-        assert_eq!(a.3.to_bits(), b.3.to_bits(), "elapsed differs");
-        assert_eq!(a.4, b.4, "sticky boards differ between twin runs");
-        assert_eq!(a.5, b.5, "mousetraps differ between twin runs");
-        assert!(
-            !a.4.is_empty() || !a.5.is_empty(),
-            "no traps on the map, test proves nothing"
-        );
-    }
-
     /// A bait is an ordinary floor find: the pickup pass books it for the HUD
     /// and the App's counters, once. (The trap used to book it as well, so one
     /// Heal on a plate was called out twice and counted as two.)
