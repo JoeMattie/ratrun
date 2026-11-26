@@ -22,7 +22,7 @@ def wilson(rate, n, z=1.959964):
     denom = 1 + z * z / n
     center = (rate + z * z / (2 * n)) / denom
     radius = z * np.sqrt(rate * (1 - rate) / n + z * z / (4 * n * n)) / denom
-    return center - radius, center + radius
+    return np.clip(center - radius, 0., rate), np.clip(center + radius, rate, 1.)
 
 
 def percent(value):
@@ -183,7 +183,8 @@ def confirmation(lines, cohort, actual, prediction):
     rows = []
     for skill in SKILLS:
         rate, n = actual[skill]["close_win"]
-        rows.append((skill, percent(prediction[skill]["close_win"]), f"{round(rate * n)}/{n} ({rate:.1%})",
+        observation = f"{round(rate * n)}/{n} ({rate:.1%})" if n else "— (0 wins)"
+        rows.append((skill, percent(prediction[skill]["close_win"]), observation,
                      "Within target" if n and rate >= .55 else "Outside target"))
     table(lines, ("Wins below 30% HP", "Predicted", "Measured", "Result"), rows)
 
@@ -273,6 +274,19 @@ def report(output):
              "Campaigns followed Sewer, Kitchen, Lab and Flatbed with a fresh Nest. "
              "Confirmation used exact seeds 5000–5299 for every skill.", ""]
     confirmation(lines, cohort, actual, result["candidate"])
+    augmented_path = output / "raw" / "augment" / "manifest.json"
+    if augmented_path.exists():
+        augmented = json.loads(augmented_path.read_bytes())
+        screening = json.loads((output / "solution-screen.json").read_bytes())
+        n = sum(job["runs"] for job in augmented["jobs"])
+        lines += ["", "## Boundary round", "",
+                  f"The initial optimum reached range edges for {', '.join(screening['edges'])}. "
+                  f"Modal ran {len(augmented['points'])} extra settings and {n} campaigns on the same common seeds. "
+                  "The round included the initial candidate, 16 Latin hypercube points over the expanded "
+                  "range and 16 in a neighborhood of the candidate. The original holdout stayed outside the refit.", "",
+                  f"Predicted weighted loss went from {screening['loss']:.2f} to {result['loss']:.2f}. "
+                  "Some final knobs remain near a sampled edge, where estimates depend more on the response model.",
+                  ""]
     design_and_fit(lines, result)
     seconds = pilot_seconds + confirm_seconds + result["screen_seconds"]
     lines += ["## Determinism and spend", "",
