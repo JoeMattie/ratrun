@@ -2398,6 +2398,7 @@ impl World {
                 let pen = pb.set_pen(0);
                 super::art_droppings::draw_dropping(pb, d, cam, self.elapsed);
                 pb.set_pen(pen);
+                super::art_droppings::mark_dropping_emissive(&mut self.light_map, pb, d, cam);
             }
         }
 
