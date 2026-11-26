@@ -695,8 +695,55 @@ fn draw_smear_arc(
 }
 
 // ============================================================================
-// Public Miniboss Body Entry Point
+// Public Miniboss Banner Style & Body Entry Point
 // ============================================================================
+
+/// Per-kind banner colour & badge styling for HUD nameplates and arrival plates.
+///
+/// The HUD/overlay layer (`render::overlay` / `render::hud`) can read this to
+/// tint Outfall miniboss nameplates without duplicating art palettes outside
+/// `art_miniboss`. Every `glyph` is from `STYLE.md`'s terminal-safe set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BannerStyle {
+    /// Primary nameplate accent colour.
+    pub accent: Rgb,
+    /// HP bar fill colour.
+    pub bar: Rgb,
+    /// Terminal-safe emblem glyph (`◆`, `▸`, `✦`).
+    pub glyph: char,
+}
+
+/// Banner styling for a named miniboss. Outfall appointments carry bespoke
+/// deep-sea accents; existing kinds return the standard warm-amber treatment.
+pub fn banner_style(kind: MinibossKind) -> BannerStyle {
+    match kind {
+        MinibossKind::Gasket => BannerStyle {
+            accent: (255, 198, 118),
+            bar: (238, 108, 72),
+            glyph: '◆',
+        },
+        MinibossKind::Swell => BannerStyle {
+            accent: (154, 242, 246),
+            bar: (82, 198, 214),
+            glyph: '▸',
+        },
+        MinibossKind::Shade => BannerStyle {
+            accent: (214, 232, 255),
+            bar: (158, 128, 232),
+            glyph: '◆',
+        },
+        MinibossKind::FalseBulb => BannerStyle {
+            accent: (132, 255, 248),
+            bar: (255, 124, 82),
+            glyph: '✦',
+        },
+        _ => BannerStyle {
+            accent: (242, 236, 224),
+            bar: (242, 184, 72),
+            glyph: '◆',
+        },
+    }
+}
 
 /// Draw one miniboss body at `e.pos` with full pose animation, entrance flourish,
 /// hurt reaction, death collapse, and outer radial HP ring.
@@ -724,11 +771,26 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
     // Exact Bell Diver chip direction comes straight from `mb.telegraph()`'s
     // `RingGap { gap_dir }` (falling back to `facing.rotate(RING_GAP_TURN)`), so
     // the missing-note gap in the ring always emanates right from the chipped rim.
-    let bell_gap_dir = match mb.telegraph() {
+    let tele = mb.telegraph();
+    let bell_gap_dir = match tele {
         Some(MinibossShape::RingGap { gap_dir, .. }) => {
             safe_dir(gap_dir, facing.rotate(RING_GAP_TURN))
         }
         _ => facing.rotate(RING_GAP_TURN),
+    };
+    // Exact Swell sliding notch tracks `Tide { gap, len }` during tells/strikes.
+    let swell_gap_frac = match tele {
+        Some(MinibossShape::Tide { len, gap, .. }) => {
+            let half = (len * 0.5).max(1.0);
+            (((gap.0 + gap.1) * 0.5) / (half * 0.5)).clamp(-1.0, 1.0)
+        }
+        _ => (anim * 1.6).sin() * 0.45,
+    };
+    // Exact False Bulb selection tracks `False { selected, .. }` so the body leans
+    // toward the live bulb and lets the telegraph draw the world-space stalk cleanly.
+    let (false_live_telegraph, false_selected) = match tele {
+        Some(MinibossShape::False { selected, .. }) => (true, selected),
+        _ => (false, None),
     };
 
     match mb.kind {
@@ -756,6 +818,19 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
         MinibossKind::AxleNut => draw_axle_nut(pb, p, facing, pose, anim, flash),
         MinibossKind::ChainDog => draw_chain_dog(pb, p, facing, pose, anim, flash),
         MinibossKind::RoadAtlas => draw_road_atlas(pb, p, facing, pose, anim, flash),
+        MinibossKind::Gasket => draw_gasket(pb, p, facing, pose, anim, flash),
+        MinibossKind::Swell => draw_swell(pb, p, facing, swell_gap_frac, pose, anim, flash),
+        MinibossKind::Shade => draw_shade(pb, p, facing, pose, anim, flash),
+        MinibossKind::FalseBulb => draw_false_bulb(
+            pb,
+            p,
+            facing,
+            false_live_telegraph,
+            false_selected,
+            pose,
+            anim,
+            flash,
+        ),
     }
 
     // Outer radial HP ring framed cleanly outside the ~32 px character silhouette
@@ -7142,6 +7217,1169 @@ fn draw_road_atlas(
 }
 
 // ============================================================================
+// Private helpers for The Outfall's four named appointments (25–28).
+// ============================================================================
+
+/// Curved quadratic-bezier illicium fishing stalk with dark ink backing.
+fn of_draw_bezier_stalk(
+    pb: &mut PixelBuffer,
+    p0: Vec2,
+    p1: Vec2,
+    p2: Vec2,
+    col: Rgb,
+    bright: Option<Rgb>,
+) {
+    let steps = 16;
+    let mut prev = p0;
+    for i in 1..=steps {
+        let u = i as f32 / steps as f32;
+        let inv = 1.0 - u;
+        let q = p0 * (inv * inv) + p1 * (2.0 * inv * u) + p2 * (u * u);
+        let x0 = prev.x.round() as i32;
+        let y0 = prev.y.round() as i32;
+        let x1 = q.x.round() as i32;
+        let y1 = q.y.round() as i32;
+        pb.line(x0, y0, x1, y1, INK);
+        pb.line(x0, y0 - 1, x1, y1 - 1, col);
+        if let Some(bcol) = bright {
+            if i % 3 == 0 {
+                plot_px(pb, x1, y1 - 1, bcol);
+            }
+        }
+        prev = q;
+    }
+}
+
+/// Self-lit bioluminescent cyan esca bulb with soft outer glow halo & white core.
+fn of_draw_bulb_orb(
+    pb: &mut PixelBuffer,
+    pos: Vec2,
+    core_r: f32,
+    halo_col: Rgb,
+    core_col: Rgb,
+    flash: f32,
+) {
+    let cx = pos.x.round() as i32;
+    let cy = pos.y.round() as i32;
+    let hr = (core_r + 2.2).ceil() as i32;
+    for dy in -hr..=hr {
+        for dx in -hr..=hr {
+            let d = (dx as f32).hypot(dy as f32);
+            if d <= core_r + 2.2 && d > core_r {
+                let a = (1.0 - (d - core_r) / 2.4).clamp(0.0, 1.0) * 0.55;
+                blend_px(pb, cx + dx, cy + dy, halo_col, a);
+            }
+        }
+    }
+    draw_shaded_disc(
+        pb,
+        pos.x,
+        pos.y,
+        core_r,
+        (255, 255, 255),
+        core_col,
+        halo_col,
+        flash,
+    );
+    plot_px(pb, cx, cy, (255, 255, 255));
+}
+
+// ============================================================================
+// 25. THE GASKET — "Mind the hole." (Outfall 3:00 · Annulus)
+//     31–36 px barnacle-crusted cast-bronze storm-drain flange & thick rubber
+//     O-ring gasket with 8 radial hex bolt lugs, hollow central bore, twin
+//     coral pressure-crab pincers & glowing amber eyes peering through the hole.
+// ============================================================================
+
+fn draw_gasket(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let bronze = pal((255, 232, 158), (212, 144, 62), (96, 56, 24));
+    let verdigris = pal((156, 248, 224), (82, 178, 158), (34, 84, 78));
+    let rubber = pal((122, 130, 148), (54, 60, 74), (20, 22, 32));
+    let coral = pal((255, 174, 136), (236, 82, 58), (118, 28, 28));
+    let steam_hi: Rgb = (224, 252, 255);
+    let steam_mid: Rgb = (118, 228, 236);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.8;
+        draw_shadow(pb, center.x + 1.5, center.y + 6.0, 16.0, 7.2, 0.52);
+        // Split storm-bronze flange halves flung apart!
+        let h1 = center - s * (4.5 + burst * 5.2) - Vec2::new(0.0, bounce * 0.8);
+        let h2 = center + s * (4.5 + burst * 5.2) + Vec2::new(0.0, 1.0 - bounce * 0.5);
+        draw_tapered_capsule(
+            pb,
+            h1 - f * 5.5,
+            h1 + f * 5.2,
+            2.6,
+            2.2,
+            bronze.hi,
+            bronze.mid,
+            bronze.lo,
+            flash,
+        );
+        draw_tapered_capsule(
+            pb,
+            h2 - f * 5.2,
+            h2 + f * 5.5,
+            2.5,
+            2.1,
+            bronze.mid,
+            bronze.lo,
+            INK,
+            flash,
+        );
+        // Torn rubber O-ring gasket slumped crooked beside the chest.
+        mb_a_ring(
+            pb,
+            center.x + f.x * (2.5 + burst * 3.0),
+            center.y + 2.0,
+            3.8,
+            5.8,
+            rubber,
+            flash,
+        );
+        // Scattered hex flange bolts.
+        for k in 0..3 {
+            let a = k as f32 * 2.1 + 0.4;
+            let bp = center + Vec2::from_angle(a) * (7.8 + burst * 4.5);
+            draw_shaded_disc(pb, bp.x, bp.y, 1.4, bronze.hi, bronze.mid, bronze.lo, flash);
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, steam_hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (recoil, lift, spin, swell, claw_open) = match pose {
+        Pose::Entrance(t) => (0.0, ent_y, t * 8.0, 0.0, 0.5),
+        Pose::Idle => (
+            0.0,
+            (anim * 2.8).sin() * 0.8,
+            (anim * 1.4).sin() * 0.18,
+            (anim * 2.8).sin() * 0.3,
+            0.25 + (anim * 2.6).sin().abs() * 0.18,
+        ),
+        Pose::Approach => (
+            (anim * 6.5).sin() * 1.2,
+            -(anim * 6.5).sin().abs() * 1.5,
+            anim * 2.6,
+            0.0,
+            0.35 + (anim * 6.5).sin().abs() * 0.22,
+        ),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (
+                -3.8 * c + q * 0.8,
+                -2.2 * c,
+                anim * 1.2 + c * 1.4 + q * 0.08,
+                c * 1.6,
+                0.35 + c * 0.65,
+            )
+        }
+        Pose::Strike(t) => {
+            let lunge = (t * PI).sin();
+            (
+                4.5 * lunge,
+                -0.8 + 1.4 * lunge,
+                anim * 1.2 + 1.4 + t * 5.5,
+                1.8 * lunge,
+                0.15,
+            )
+        }
+        Pose::Recover(t) => (-1.6, 1.6, (t * 9.0).sin() * 0.12, -0.8, 0.65),
+        Pose::Retreat(t) => (-2.4, -(t * 10.0).sin().abs() * 1.2, -t * 4.0, 0.0, 0.2),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.50, 1.15);
+    draw_shadow(
+        pb,
+        center.x + 1.5,
+        center.y + 8.5,
+        13.5 * sh_s + ent_sq * 2.0,
+        6.2 * sh_s,
+        0.54,
+    );
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), steam_mid);
+        }
+    }
+
+    // Strike annular pressure-burst shockwave ring smear!
+    if let Pose::Strike(t) = pose {
+        let r_s = 12.0 + t * 6.0;
+        draw_smear_arc(
+            pb,
+            base,
+            0.0,
+            TAU,
+            r_s - 2.2,
+            r_s + 1.2,
+            coral.hi,
+            (255, 248, 204),
+            0.72 * (1.0 - t * 0.35),
+        );
+    }
+
+    // 1. Four symmetrical articulated coral crab legs splayed left & right.
+    let stride_amp = if matches!(pose, Pose::Approach | Pose::Retreat(_)) {
+        2.6
+    } else {
+        0.4
+    };
+    for &i in &[-1.0_f32, 1.0] {
+        for &side in &[-1.0_f32, 1.0] {
+            let phase = anim * 7.2 + i * 1.7 + if side > 0.0 { PI } else { 0.0 };
+            let stride = phase.sin() * stride_amp;
+            let hip = base + f * (i * 3.8 - 1.2) + s * (side * 8.6);
+            let knee = base
+                + f * (i * 5.8 - 1.8 + stride * 0.5)
+                + s * (side * 12.2)
+                + Vec2::new(0.0, -1.0);
+            let foot = base
+                + f * (i * 7.2 - 2.2 + stride)
+                + s * (side * 13.8)
+                + Vec2::new(0.0, 1.8);
+            draw_tapered_capsule(pb, hip, knee, 1.35, 1.0, coral.hi, coral.mid, coral.lo, flash);
+            draw_tapered_capsule(pb, knee, foot, 1.0, 0.55, coral.mid, coral.lo, INK, flash);
+        }
+    }
+
+    // 2. Eight chunky radial bolt-flange lugs around the storm-drain ring!
+    let ring_c = base + Vec2::new(0.0, -0.6 + ent_sq * 0.9);
+    let r_out = 10.6 + swell * 0.6;
+    let r_in = 5.4 + swell * 0.45;
+    for k in 0..8 {
+        let a = spin + k as f32 * (TAU / 8.0);
+        let d = Vec2::from_angle(a);
+        let lug = ring_c + d * (r_out + 1.3);
+        draw_shaded_disc(pb, lug.x, lug.y, 1.85, bronze.hi, bronze.mid, bronze.lo, flash);
+        if let Pose::Tell(t) = pose {
+            if k % 2 == 0 {
+                let ph = (t * 4.5 + k as f32 * 0.25).fract();
+                let jp = lug + d * (1.5 + ph * 4.8);
+                blend_px(pb, jp.x.round() as i32, jp.y.round() as i32, steam_hi, (1.0 - ph) * 0.9);
+            }
+        }
+    }
+
+    // 3. Cast-bronze flange ring, oxidized verdigris crust & inner O-ring gasket!
+    mb_a_ring(pb, ring_c.x, ring_c.y, r_in + 1.4, r_out, bronze, flash);
+    for &a_off in &[0.5_f32, 1.4, 2.3] {
+        let vp = ring_c + Vec2::from_angle(a_off + spin * 0.3) * (r_out - 1.4);
+        let vx = vp.x.round() as i32;
+        let vy = vp.y.round() as i32;
+        plot_px(pb, vx, vy, apply_flash(verdigris.mid, flash));
+        plot_px(pb, vx + 1, vy, apply_flash(verdigris.hi, flash));
+    }
+    let gasket_off = if matches!(pose, Pose::Recover(_)) {
+        Vec2::new(2.2, -1.6)
+    } else {
+        Vec2::ZERO
+    };
+    let gasket_pal = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        pal((255, 224, 128), (242, 114, 68), (118, 36, 30))
+    } else {
+        rubber
+    };
+    mb_a_ring(
+        pb,
+        ring_c.x + gasket_off.x,
+        ring_c.y + gasket_off.y,
+        r_in,
+        r_in + 2.0,
+        gasket_pal,
+        flash,
+    );
+    // Hollow dark central bore ("Mind the hole.")
+    draw_shaded_disc(
+        pb,
+        ring_c.x,
+        ring_c.y,
+        (r_in - 0.6).max(2.8),
+        (34, 40, 52),
+        (18, 22, 32),
+        (10, 12, 18),
+        flash,
+    );
+    mb_a_glint(pb, ring_c + Vec2::new(-6.8, -6.2), bronze.hi);
+    mb_a_glint(pb, ring_c + Vec2::new(5.2, -6.8), verdigris.hi);
+
+    // 4. Twin coral-red pressure-crab pincers jutting forward from the flange!
+    for &side in &[-1.0_f32, 1.0] {
+        let sh = ring_c + f * 6.5 + s * (side * 6.2);
+        let elbow = sh
+            + f * (3.2 + claw_open * 1.4)
+            + s * (side * (3.4 + claw_open * 2.2));
+        let tip_out = elbow + f.rotate(side * (0.35 + claw_open * 0.35)) * 4.2;
+        let tip_in = elbow + f.rotate(-side * 0.25) * 3.4;
+        draw_tapered_capsule(pb, sh, elbow, 2.0, 1.7, coral.hi, coral.mid, coral.lo, flash);
+        draw_tapered_capsule(pb, elbow, tip_out, 1.5, 0.7, coral.hi, coral.mid, coral.lo, flash);
+        draw_tapered_capsule(pb, elbow, tip_in, 1.2, 0.6, coral.hi, coral.mid, coral.lo, flash);
+    }
+
+    // 5. Fierce amber-gold eyes peering right out of the central hollow bore!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 240, 118),
+        Pose::Recover(_) => (148, 255, 212),
+        _ => (255, 218, 96),
+    };
+    for &side in &[-1.0_f32, 1.0] {
+        draw_eye(
+            pb,
+            ring_c + f * 1.6 + s * (side * 2.2) + Vec2::new(0.0, -0.5),
+            1.55,
+            eye_col,
+            INK,
+            f,
+            expr,
+            flash,
+        );
+    }
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, ring_c + Vec2::new(0.0, -15.5), t);
+    }
+    if let Pose::Recover(t) = pose {
+        // Blown seal: pressurized sea-spray fountain shooting straight up!
+        for k in 0..5 {
+            let ph = (t * 4.5 + k as f32 * 0.2).fract();
+            let sp = ring_c
+                + Vec2::new(
+                    (k as f32 - 2.0) * (1.2 + ph * 2.6),
+                    -2.0 - ph * 11.0 + ph * ph * 4.0,
+                );
+            plot_px(
+                pb,
+                sp.x.round() as i32,
+                sp.y.round() as i32,
+                if k % 2 == 0 { steam_hi } else { steam_mid },
+            );
+        }
+        draw_dizzy_stars(pb, ring_c + Vec2::new(0.0, -12.5), 7.8, t);
+        draw_recover_beacon(pb, ring_c, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, bronze.hi);
+}
+
+// ============================================================================
+// 26. THE SWELL — "The gap drifts." (Outfall 6:00 · Tide)
+//     Broadside ~34 px riveted marine sluice-gate bulkhead backed by an
+//     armoured ballast-boiler hull, frothing white-cyan wave crests, twin
+//     brass chain-hoist winches, and a sliding notch synced to `Tide::gap`.
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn draw_swell(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    gap_frac: f32,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let hull = pal((156, 224, 232), (62, 134, 152), (24, 58, 76));
+    let iron = pal((192, 210, 228), (108, 126, 144), (44, 54, 68));
+    let foam = pal((255, 255, 255), (156, 246, 250), (62, 172, 192));
+    let brass = pal((255, 238, 136), (218, 160, 48), (108, 70, 20));
+    let kelp = pal((112, 196, 138), (48, 112, 78), (20, 52, 40));
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.6;
+        draw_shadow(pb, center.x + 1.5, center.y + 6.5, 17.5, 7.0, 0.50);
+        // Dark sea-water spill with delicate foam rim flecks.
+        draw_shaded_ellipse(
+            pb,
+            center.x,
+            center.y + 2.5,
+            9.0 + burst * 5.0,
+            4.2 + burst * 2.0,
+            (78, 164, 182),
+            (34, 88, 108),
+            (18, 42, 58),
+            flash,
+        );
+        for k in 0..6 {
+            let a = k as f32 * (TAU / 6.0) + 0.3;
+            let fp = center
+                + Vec2::new(
+                    a.cos() * (7.5 + burst * 4.5),
+                    2.5 + a.sin() * (3.5 + burst * 1.6),
+                );
+            plot_px(pb, fp.x.round() as i32, fp.y.round() as i32, foam.mid);
+        }
+        // Split bulkhead wings & loose brass winch drums.
+        for &side in &[-1.0_f32, 1.0] {
+            let wp = center
+                + s * (side * (6.2 + burst * 5.0))
+                - Vec2::new(0.0, bounce * if side < 0.0 { 0.9 } else { 0.5 });
+            draw_rotated_box(
+                pb,
+                wp,
+                s.rotate(side * 0.25),
+                6.2,
+                3.0,
+                hull.hi,
+                hull.mid,
+                hull.lo,
+                flash,
+            );
+            draw_shaded_disc(
+                pb,
+                wp.x + s.x * side * 4.2,
+                wp.y + s.y * side * 4.2,
+                2.3,
+                brass.hi,
+                brass.mid,
+                brass.lo,
+                flash,
+            );
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, foam.hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_y = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 20.0).0
+    } else {
+        0.0
+    };
+
+    let (surge, lift, crest, tilt) = match pose {
+        Pose::Entrance(t) => (-2.0 * (1.0 - t), ent_y, 1.0 + (1.0 - t) * 0.8, 0.0),
+        Pose::Idle => (
+            (anim * 2.4).sin() * 1.0,
+            (anim * 2.4 + 0.8).sin() * 1.1,
+            1.0 + (anim * 3.0).sin() * 0.2,
+            (anim * 1.6).sin() * 0.05,
+        ),
+        Pose::Approach => (
+            (anim * 5.8).sin() * 1.8,
+            -(anim * 5.8).sin().abs() * 1.4,
+            1.2 + (anim * 5.8).sin().abs() * 0.4,
+            (anim * 5.8).sin() * 0.08,
+        ),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-4.2 * c + q * 0.8, -2.4 * c, 1.2 + c * 1.5, q * 0.05)
+        }
+        Pose::Strike(t) => {
+            let lunge = (t * PI).sin();
+            (5.4 * lunge + 1.2, -0.6 + 1.0 * lunge, 2.4 - t * 0.8, 0.0)
+        }
+        Pose::Recover(t) => (-1.5, 1.8, 0.35, 0.22 + (t * 9.0).sin() * 0.06),
+        Pose::Retreat(t) => (-2.8, -(t * 9.0).sin().abs() * 1.0, 0.8, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * surge + jolt + Vec2::new(0.0, lift);
+    let bf = f.rotate(tilt);
+    let bs = bf.perp();
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.48, 1.15);
+    draw_shadow(pb, center.x + 1.5, center.y + 8.0, 16.5 * sh_s, 7.0 * sh_s, 0.52);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), foam.mid);
+        }
+    }
+
+    // 1. Trailing kelp streamers behind the armored ballast hull.
+    for &k in &[-2.0_f32, -1.0, 1.0, 2.0] {
+        let wob = (anim * 5.0 + k * 1.3).sin() * 1.8;
+        let k0 = base - bf * 6.5 + bs * (k * 4.2);
+        let k1 = k0 - bf * 6.0 + bs * wob;
+        draw_tapered_capsule(pb, k0, k1, 1.2, 0.45, kelp.hi, kelp.mid, kelp.lo, flash);
+    }
+
+    // 2. Chunky riveted marine ballast-boiler hull backing the sluice shield!
+    let hull_back = base - bf * 4.2;
+    draw_rotated_box(pb, hull_back, bs, 10.2, 4.4, hull.hi, hull.mid, hull.lo, flash);
+    for &side in &[-1.0_f32, 1.0] {
+        let tk = hull_back - bf * 1.6 + bs * (side * 6.8);
+        draw_shaded_disc(pb, tk.x, tk.y, 3.3, iron.hi, iron.mid, iron.lo, flash);
+        mb_a_glint(pb, tk + Vec2::new(-1.0, -1.2), iron.hi);
+    }
+
+    // 3. Strike foaming broadside surge smear wings!
+    if matches!(pose, Pose::Strike(_)) {
+        for &side in &[-1.0_f32, 1.0] {
+            draw_tapered_capsule(
+                pb,
+                base + bf * 3.8 + bs * (side * 5.5),
+                base + bf * 6.2 + bs * (side * 16.5),
+                2.2,
+                1.2,
+                foam.hi,
+                foam.mid,
+                foam.lo,
+                flash,
+            );
+        }
+    }
+
+    // 4. Broadside riveted iron sluice-gate bulkhead (~30 px wide) split by sliding notch!
+    let notch_off = gap_frac.clamp(-1.0, 1.0) * 6.2;
+    let half_span = 15.0_f32;
+    let notch_half = 3.2_f32;
+    let wings = [(-half_span, notch_off - notch_half), (notch_off + notch_half, half_span)];
+    for &(lo_s, hi_s) in &wings {
+        let w_half = (hi_s - lo_s) * 0.5;
+        if w_half > 1.2 {
+            let wc = base + bf * 1.2 + bs * ((lo_s + hi_s) * 0.5);
+            draw_rotated_box(pb, wc, bs, w_half, 3.8, hull.hi, hull.mid, hull.lo, flash);
+            draw_rotated_box(
+                pb,
+                wc - bf * 1.4,
+                bs,
+                (w_half - 0.8).max(1.0),
+                1.4,
+                iron.hi,
+                iron.mid,
+                iron.lo,
+                flash,
+            );
+        }
+    }
+
+    // 5. Gleaming brass sliding notch brackets framing the drifting gap!
+    for &side in &[-1.0_f32, 1.0] {
+        let brk = base + bf * 2.4 + bs * (notch_off + side * notch_half);
+        draw_rotated_box(pb, brk, bf, 3.2, 1.15, brass.hi, brass.mid, brass.lo, flash);
+        mb_a_glint(pb, brk + bf * 1.5, brass.hi);
+    }
+
+    // 6. Twin heavy brass chain-hoist winch drums capping both ends!
+    for &side in &[-1.0_f32, 1.0] {
+        let end_c = base + bf * 0.8 + bs * (side * (half_span + 1.0));
+        draw_shaded_disc(pb, end_c.x, end_c.y, 3.5, brass.hi, brass.mid, brass.lo, flash);
+        draw_shaded_disc(pb, end_c.x, end_c.y, 1.5, iron.hi, iron.mid, iron.lo, flash);
+        mb_a_glint(pb, end_c + Vec2::new(-1.2, -1.5), brass.hi);
+    }
+
+    // 7. Surging white-cyan foam wave crests rolling over the front prow!
+    let foam_wings = [
+        (-half_span + 1.0, notch_off - notch_half - 0.5),
+        (notch_off + notch_half + 0.5, half_span - 1.0),
+    ];
+    for &(lo_s, hi_s) in &foam_wings {
+        if hi_s <= lo_s {
+            continue;
+        }
+        let steps = (((hi_s - lo_s) / 2.8) as i32).max(2);
+        for i in 0..=steps {
+            let u = i as f32 / steps as f32;
+            let pos_s = lo_s + (hi_s - lo_s) * u;
+            let curl = (anim * 7.0 + pos_s * 0.5).sin() * 0.9;
+            let fp = base
+                + bf * (4.2 + crest * 1.2 + curl * 0.4)
+                + bs * pos_s
+                + Vec2::new(0.0, -crest * 0.8);
+            draw_shaded_disc(
+                pb,
+                fp.x,
+                fp.y,
+                1.65 + crest * 0.42,
+                foam.hi,
+                foam.mid,
+                foam.lo,
+                flash,
+            );
+        }
+    }
+
+    // 8. Armored sluice-turret cupola & glowing amber eyes!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 232, 92),
+        Pose::Recover(_) => (148, 255, 212),
+        _ => (255, 216, 118),
+    };
+    let head_c = base - bf * 1.8 + bs * (notch_off * 0.35) + Vec2::new(0.0, -1.6);
+    draw_shaded_disc(pb, head_c.x, head_c.y, 3.8, iron.hi, iron.mid, iron.lo, flash);
+    for &side in &[-1.0_f32, 1.0] {
+        draw_eye(
+            pb,
+            head_c + bf * 1.2 + bs * (side * 1.9) + Vec2::new(0.0, -0.4),
+            1.45,
+            eye_col,
+            INK,
+            bf,
+            expr,
+            flash,
+        );
+    }
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, head_c + Vec2::new(0.0, -12.0), t);
+    }
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, head_c + Vec2::new(0.0, -9.5), 8.2, t);
+        draw_recover_beacon(pb, base + bs * notch_off, t);
+    }
+    draw_hurt_burst(pb, base, bf, flash, foam.hi);
+}
+
+// ============================================================================
+// 27. THE SHADE — "Stand on the lit side." (Outfall 9:00 · Umbra)
+//     Abyssal hooded mantle-ray shade in void-indigo with curled cowl horns,
+//     a razor-sharp moonlight-silver self-lit rim, antique-brass storm-shutter
+//     crest catching the light on its back (`-f`), and burning amber eyes.
+// ============================================================================
+
+fn draw_shade(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let cloak = mb2_pal((132, 146, 204), (50, 56, 94), (18, 20, 38));
+    let deep = mb2_pal((84, 94, 142), (30, 34, 58), (12, 14, 26));
+    let brass = pal((255, 232, 138), (206, 142, 52), (92, 56, 22));
+    let rim_hi: Rgb = (238, 250, 255);
+    let rim_mid: Rgb = (138, 218, 255);
+    let warm_lit: Rgb = (255, 238, 156);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 16.5, 7.2, 0.55);
+        // Tattered cloak wing shreds splayed out beside the chest.
+        for &side in &[-1.0_f32, 1.0] {
+            let sh = center + s * (side * (5.5 + burst * 5.0));
+            let p_front = sh + f * 3.5;
+            let p_tip = sh + s * (side * 6.5) - f * 1.5;
+            mb2_draw_poly_tri(pb, sh - f * 3.5, p_front, p_tip, deep, flash);
+            pb.line(
+                p_front.x.round() as i32,
+                p_front.y.round() as i32,
+                p_tip.x.round() as i32,
+                p_tip.y.round() as i32,
+                rim_mid,
+            );
+        }
+        draw_shaded_ellipse(
+            pb,
+            center.x,
+            center.y + 2.0,
+            8.5,
+            4.5,
+            cloak.hi,
+            cloak.mid,
+            cloak.lo,
+            flash,
+        );
+        let vp = center + f * (5.0 + burst * 5.2) - Vec2::new(0.0, bounce);
+        draw_rotated_box(pb, vp, s.rotate(0.35), 4.8, 1.8, brass.hi, brass.mid, brass.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, rim_hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_y = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0).0
+    } else {
+        0.0
+    };
+
+    let (lunge, lift, spread, coil) = match pose {
+        Pose::Entrance(t) => (0.0, ent_y - 2.0, 1.0 + (1.0 - t) * 0.4, 0.0),
+        Pose::Idle => {
+            let b = (anim * 2.6).sin();
+            (b * 0.8, -2.0 + b * 1.3, 1.02 + b * 0.10, 0.0)
+        }
+        Pose::Approach => {
+            let b = (anim * 5.4).sin();
+            (b * 1.6, -2.6 + b * 1.5, 1.10 + b * 0.16, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.4 * c + q * 0.7, -3.4 * c, 1.08 + 0.46 * c, c)
+        }
+        Pose::Strike(t) => {
+            let slam = (t * PI).sin();
+            (4.2 * slam, -1.6 + 1.2 * slam, 1.48 - t * 0.18, 1.0)
+        }
+        Pose::Recover(_) => (-1.6, 1.6, 0.70, 0.0),
+        Pose::Retreat(_) => (-2.8, -2.0, 0.94, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.12);
+    draw_shadow(pb, center.x + 1.5, center.y + 8.5, 14.5 * sh_s, 6.4 * sh_s, 0.56);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.40 {
+            draw_entrance_ring(pb, center, ((t - 0.40) / 0.60).clamp(0.0, 1.0), rim_mid);
+        }
+    }
+
+    // 1. Drifting abyssal shadow tail-wisps behind `-f`.
+    for k in -1..=1 {
+        let kf = k as f32;
+        let wob = (anim * 6.0 + kf * 1.5).sin() * 1.8;
+        let t0 = body - f * 4.5 + s * (kf * 3.2);
+        let t1 = body
+            - f * (12.0 + (1.0 - kf.abs()) * 2.5)
+            + s * (kf * 4.5 + wob);
+        draw_tapered_capsule(
+            pb,
+            t0,
+            t1,
+            1.9 - kf.abs() * 0.3,
+            0.45,
+            deep.hi,
+            deep.mid,
+            deep.lo,
+            flash,
+        );
+    }
+
+    // 2. Wide hooded mantle-ray wings (~32–36 px span) with crisp moonlight-silver rim!
+    let wing_span = 14.2 * spread;
+    let locked_tell = matches!(pose, Pose::Tell(t) if t > 0.5);
+    let edge_col = apply_flash(if locked_tell { warm_lit } else { rim_hi }, flash);
+    let trail_col = apply_flash(rim_mid, flash);
+    for &side in &[-1.0_f32, 1.0] {
+        let root_f = body + f * 3.8 + s * (side * 2.2);
+        let root_b = body - f * 6.0 + s * (side * 2.4);
+        let wing_tip = body
+            + f * (1.5 - coil * 2.0)
+            + s * (side * wing_span)
+            + Vec2::new(0.0, (anim * 4.0 + side).sin() * 1.1);
+        let wing_trail = body - f * 8.4 + s * (side * (wing_span * 0.62));
+        mb2_draw_poly_tri(pb, root_f, root_b, wing_tip, cloak, flash);
+        mb2_draw_poly_tri(pb, root_b, wing_trail, wing_tip, deep, flash);
+        pb.line(
+            root_f.x.round() as i32,
+            root_f.y.round() as i32,
+            wing_tip.x.round() as i32,
+            wing_tip.y.round() as i32,
+            edge_col,
+        );
+        pb.line(
+            wing_tip.x.round() as i32,
+            wing_tip.y.round() as i32,
+            wing_trail.x.round() as i32,
+            wing_trail.y.round() as i32,
+            trail_col,
+        );
+    }
+
+    // 3. Strike forward umbra shadow-blade smear!
+    if let Pose::Strike(t) = pose {
+        let ang = f.angle();
+        draw_smear_arc(
+            pb,
+            body,
+            ang - 0.50,
+            ang + 0.50,
+            9.0,
+            17.5,
+            (148, 96, 232),
+            rim_hi,
+            0.78 * (1.0 - t * 0.3),
+        );
+    }
+
+    // 4. Hooded mantle torso, curled cowl horns & antique-brass storm-shutter crest!
+    draw_shaded_disc(pb, body.x, body.y, 6.8, cloak.hi, cloak.mid, cloak.lo, flash);
+    for &side in &[-1.0_f32, 1.0] {
+        let h0 = body + f * 2.2 + s * (side * 4.2) + Vec2::new(0.0, -1.8);
+        let h1 = body - f * 3.5 + s * (side * 6.8) + Vec2::new(0.0, -4.2);
+        draw_tapered_capsule(pb, h0, h1, 1.4, 0.55, cloak.hi, cloak.mid, cloak.lo, flash);
+        plot_px(pb, h1.x.round() as i32, h1.y.round() as i32, apply_flash(rim_hi, flash));
+    }
+    // Antique-brass lantern-shutter arc on the BACK (`-f`, the lit/safe side!).
+    let shutter_c = body - f * 4.0 + Vec2::new(0.0, -1.4);
+    draw_rotated_box(
+        pb,
+        shutter_c,
+        s,
+        5.6,
+        1.9,
+        brass.hi,
+        brass.mid,
+        brass.lo,
+        flash,
+    );
+    mb_a_glint(pb, shutter_c - f * 0.8, warm_lit);
+    if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        for k in -2..=2 {
+            let gp = shutter_c - f * 2.4 + s * (k as f32 * 2.0);
+            blend_px(pb, gp.x.round() as i32, gp.y.round() as i32, warm_lit, 0.88);
+        }
+    }
+
+    // 5. Deep shadowed cowl face with bright silver brow rim & molten-amber eyes!
+    let face = body + f * 3.8 + Vec2::new(0.0, -0.4);
+    draw_shaded_disc(pb, face.x, face.y, 4.4, deep.mid, deep.lo, INK, flash);
+    let brow_l = face + f * 1.4 - s * 4.2 + Vec2::new(0.0, -2.2);
+    let brow_m = face + f * 2.6 + Vec2::new(0.0, -2.8);
+    let brow_r = face + f * 1.4 + s * 4.2 + Vec2::new(0.0, -2.2);
+    let cowl_rim = apply_flash(rim_hi, flash);
+    pb.line(
+        brow_l.x.round() as i32,
+        brow_l.y.round() as i32,
+        brow_m.x.round() as i32,
+        brow_m.y.round() as i32,
+        cowl_rim,
+    );
+    pb.line(
+        brow_m.x.round() as i32,
+        brow_m.y.round() as i32,
+        brow_r.x.round() as i32,
+        brow_r.y.round() as i32,
+        cowl_rim,
+    );
+
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 228, 96),
+        Pose::Strike(_) => (255, 118, 72),
+        Pose::Recover(_) => (148, 255, 212),
+        _ => (255, 194, 72),
+    };
+    for &side in &[-1.0_f32, 1.0] {
+        draw_eye(
+            pb,
+            face + f * 1.0 + s * (side * 2.1) + Vec2::new(0.0, -0.1),
+            1.75,
+            eye_col,
+            INK,
+            f,
+            expr,
+            flash,
+        );
+    }
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, body + Vec2::new(0.0, -14.0), t);
+    }
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, body + Vec2::new(0.0, -11.5), 7.6, t);
+        draw_recover_beacon(pb, shutter_c, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, rim_hi);
+}
+
+// ============================================================================
+// 28. THE FALSE BULB — "One of them bites." (Outfall 12:00 · False)
+//     Compact deep-sea twin-stalked mimic-angler rehearsing The Lantern:
+//     warty abyssal slate-green hide, separated self-lit white-cyan curved
+//     needle-teeth, golden angler eyes, and twin flexible esca stalks.
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn draw_false_bulb(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    has_live_telegraph: bool,
+    selected: Option<usize>,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let hide = pal((126, 168, 182), (52, 78, 92), (18, 30, 40));
+    let belly = pal((162, 196, 202), (82, 114, 124), (36, 52, 62));
+    let fin = mb2_pal((102, 158, 168), (42, 72, 84), (16, 28, 38));
+    let teeth_hi: Rgb = (255, 255, 255);
+    let teeth_mid: Rgb = (196, 252, 248);
+    let cyan_mid: Rgb = (118, 252, 246);
+    let cyan_lo: Rgb = (34, 168, 192);
+    let amber_hi: Rgb = (255, 224, 96);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.6;
+        draw_shadow(pb, center.x + 1.5, center.y + 6.0, 15.0, 6.8, 0.52);
+        // Rolled-over angler carcass with slack jaw & pale belly up.
+        let body_c = center - Vec2::new(0.0, bounce * 0.7);
+        draw_shaded_ellipse(
+            pb,
+            body_c.x,
+            body_c.y + 1.5,
+            10.0,
+            6.2,
+            belly.hi,
+            belly.mid,
+            belly.lo,
+            flash,
+        );
+        for k in -2..=2 {
+            let tp = body_c + f * 5.4 + s * (k as f32 * 2.0);
+            plot_px(pb, tp.x.round() as i32, tp.y.round() as i32, teeth_mid);
+            plot_px(
+                pb,
+                (tp.x + f.x).round() as i32,
+                (tp.y + f.y).round() as i32,
+                teeth_hi,
+            );
+        }
+        // One snapped dark bulb, one lonely glowing cyan bulb beside the chest.
+        let b_dead = center + f * (5.2 + burst * 4.5) - s * 6.8;
+        let b_glow = center + f * (6.2 + burst * 5.0) + s * 6.2;
+        pb.line(
+            body_c.x.round() as i32,
+            body_c.y.round() as i32,
+            b_dead.x.round() as i32,
+            b_dead.y.round() as i32,
+            (42, 52, 62),
+        );
+        draw_shaded_disc(pb, b_dead.x, b_dead.y, 1.7, (72, 86, 98), (38, 46, 56), INK, 0.0);
+        of_draw_bulb_orb(pb, b_glow, 2.2, cyan_lo, cyan_mid, 0.0);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, cyan_mid);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_y = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 18.0).0
+    } else {
+        0.0
+    };
+
+    let (lunge, lift, jaw_open) = match pose {
+        Pose::Entrance(t) => (-2.0 * (1.0 - t), ent_y, 0.4 + t * 0.4),
+        Pose::Idle => (
+            (anim * 2.6).sin() * 0.8,
+            (anim * 2.6 + 0.6).sin() * 1.0,
+            0.25 + (anim * 2.0).sin().abs() * 0.2,
+        ),
+        Pose::Approach => (
+            (anim * 6.2).sin() * 1.4,
+            -(anim * 6.2).sin().abs() * 1.2,
+            0.35 + (anim * 6.2).sin().abs() * 0.25,
+        ),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.2 * c + q * 0.7, -1.6 * c, 0.45 + c * 0.65)
+        }
+        Pose::Strike(t) => {
+            let slam = (t * PI).sin();
+            (5.2 * slam, -0.5 + 1.0 * slam, 1.15 - t * 0.7)
+        }
+        Pose::Recover(_) => (-1.8, 1.6, 0.85),
+        Pose::Retreat(t) => (-2.6, -(t * 9.0).sin().abs() * 1.0, 0.2),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    // Lean subtly toward the selected biting bulb once locked!
+    let sel_bias = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        match selected {
+            Some(0) => -1.0_f32,
+            Some(_) => 1.0_f32,
+            None => 0.0_f32,
+        }
+    } else {
+        0.0
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + s * (sel_bias * 1.8) + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.50, 1.15);
+    draw_shadow(pb, center.x + 1.5, center.y + 8.0, 13.5 * sh_s, 6.5 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.40 {
+            draw_entrance_ring(pb, center, ((t - 0.40) / 0.60).clamp(0.0, 1.0), cyan_mid);
+        }
+    }
+
+    // 1. Wagging deep-sea tail fin & twin jagged pectoral fins.
+    let wag_freq = if matches!(pose, Pose::Approach) { 7.5 } else { 3.2 };
+    let wag = (anim * wag_freq).sin() * 2.6;
+    let tail_root = body - f * 6.8;
+    mb2_draw_poly_tri(
+        pb,
+        tail_root,
+        tail_root - f * 6.4 + s * (4.4 + wag),
+        tail_root - f * 6.4 + s * (-4.4 + wag),
+        fin,
+        flash,
+    );
+    for &side in &[-1.0_f32, 1.0] {
+        let pf0 = body - f * 1.0 + s * (side * 6.2);
+        let pf1 = body - f * 5.4 + s * (side * 11.2) + Vec2::new(0.0, (anim * 5.0 + side).sin());
+        let pf2 = body + f * 1.8 + s * (side * 10.2);
+        mb2_draw_poly_tri(pb, pf0, pf1, pf2, fin, flash);
+        pb.line(
+            pf0.x.round() as i32,
+            pf0.y.round() as i32,
+            pf2.x.round() as i32,
+            pf2.y.round() as i32,
+            apply_flash(hide.hi, flash),
+        );
+    }
+
+    // 2. Chunky warty deep-sea angler torso + glossy teal dorsal rim!
+    draw_shaded_disc(
+        pb,
+        body.x - f.x * 1.4,
+        body.y - f.y * 1.4,
+        7.8,
+        hide.hi,
+        hide.mid,
+        hide.lo,
+        flash,
+    );
+    draw_shaded_disc(
+        pb,
+        body.x + f.x * 2.4,
+        body.y + f.y * 2.4,
+        6.6,
+        hide.hi,
+        hide.mid,
+        hide.lo,
+        flash,
+    );
+    mb_a_glint(pb, body - f * 2.5 + Vec2::new(-2.2, -5.0), hide.hi);
+    for k in -1..=1 {
+        let sp = body - f * (1.2 + k as f32 * 2.8) + Vec2::new(0.0, -5.2);
+        plot_px(pb, sp.x.round() as i32, sp.y.round() as i32, apply_flash(cyan_mid, flash));
+    }
+
+    // 3. Gaping underbite angler jaw with crisp separated self-lit needle-teeth!
+    let mouth_c = body + f * (6.6 + jaw_open * 1.5) + Vec2::new(0.0, 0.8);
+    draw_rotated_box(
+        pb,
+        mouth_c,
+        s,
+        6.0,
+        2.0 + jaw_open * 1.2,
+        (24, 18, 30),
+        (12, 10, 18),
+        INK,
+        flash,
+    );
+    for k in -2..=2 {
+        let tb = mouth_c + s * (k as f32 * 2.5) + f * 0.4;
+        let t_len = 3.0 + if k.abs() <= 1 { 1.0 } else { 0.0 } + jaw_open * 0.9;
+        let tt = tb + f * t_len + Vec2::new(0.0, -0.8);
+        pb.line(
+            tb.x.round() as i32,
+            tb.y.round() as i32,
+            tt.x.round() as i32,
+            tt.y.round() as i32,
+            teeth_mid,
+        );
+        plot_px(pb, tt.x.round() as i32, tt.y.round() as i32, teeth_hi);
+    }
+
+    // 4. Golden-yellow angler eyes (echoing scene-g1/g2).
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = if matches!(pose, Pose::Recover(_)) {
+        (148, 255, 212)
+    } else {
+        amber_hi
+    };
+    for &side in &[-1.0_f32, 1.0] {
+        draw_eye(
+            pb,
+            body + f * 2.8 + s * (side * 4.0) + Vec2::new(0.0, -2.2),
+            1.75,
+            eye_col,
+            INK,
+            f,
+            expr,
+            flash,
+        );
+    }
+
+    // 5. Twin forehead illicium stalks & esca bulbs.
+    //    When a live `MinibossShape::False` telegraph is active, `draw_false_telegraph`
+    //    draws the exact world-space stalk(s) and bulbs on the hostile layer so there
+    //    is one clean continuous line; here we draw the forehead stalk socket and
+    //    (once locked) the limp retracted stub on the dropped decoy side.
+    let brow = body + f * 1.8 + Vec2::new(0.0, -4.6);
+    draw_shaded_disc(pb, brow.x, brow.y, 1.9, hide.hi, hide.mid, hide.lo, flash);
+    if has_live_telegraph && matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        if let Some(sel) = selected {
+            let decoy_side = if sel == 0 { 1.0_f32 } else { -1.0_f32 };
+            let limp_end = brow + f * 4.2 + s * (decoy_side * 5.8) + Vec2::new(0.0, 2.2);
+            let limp_ctrl = brow + f * 2.0 + s * (decoy_side * 4.0) + Vec2::new(0.0, -2.5);
+            of_draw_bezier_stalk(pb, brow, limp_ctrl, limp_end, (48, 66, 78), None);
+        }
+    } else {
+        for (idx, &side) in [-1.0_f32, 1.0].iter().enumerate() {
+            if matches!(pose, Pose::Recover(_)) {
+                let b_pos = body + f * 6.5 + s * (side * 3.5) + Vec2::new(0.0, 3.2);
+                let ctrl = brow + f * 4.5 + s * (-side * 4.0) + Vec2::new(0.0, -2.0);
+                of_draw_bezier_stalk(pb, brow, ctrl, b_pos, (64, 88, 98), None);
+                of_draw_bulb_orb(pb, b_pos, 1.8, (48, 122, 134), (108, 206, 212), flash);
+            } else {
+                let idx_f = idx as f32;
+                let bob_x = (anim * 4.2 + idx_f * 2.4).sin() * 1.6;
+                let bob_y = (anim * 3.6 + idx_f * 1.9).cos() * 1.4;
+                let b_pos = body
+                    + f * (11.8 + bob_x)
+                    + s * (side * 7.4)
+                    + Vec2::new(0.0, -3.5 + bob_y);
+                let ctrl = brow + f * 6.0 + s * (side * 6.5) + Vec2::new(0.0, -7.5);
+                of_draw_bezier_stalk(pb, brow, ctrl, b_pos, (72, 118, 132), Some(cyan_mid));
+                of_draw_bulb_orb(pb, b_pos, 2.2, cyan_lo, cyan_mid, flash);
+            }
+        }
+    }
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, body + Vec2::new(0.0, -14.8), t);
+    }
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, body + Vec2::new(0.0, -11.5), 7.6, t);
+        // Exposed pale cheek/flank (rehearsing The Lantern's flank punish).
+        draw_recover_beacon(pb, body - s * 4.8, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, cyan_mid);
+}
+
+// ============================================================================
 // Public Ground Telegraph Renderer (Driven Strictly by MinibossShape Data!)
 // ============================================================================
 
@@ -7298,6 +8536,67 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
                 cam,
                 is_active,
                 progress,
+            );
+        }
+        MinibossShape::Annulus {
+            origin,
+            inner,
+            outer,
+        } => {
+            draw_annulus_telegraph(pb, origin, inner, outer, cam, is_active, progress);
+        }
+        MinibossShape::Tide {
+            origin,
+            aim,
+            len,
+            from,
+            to,
+            gap,
+        } => {
+            let active_range = match active_shape {
+                Some(MinibossShape::Tide {
+                    from: a_from,
+                    to: a_to,
+                    ..
+                }) => Some((a_from, a_to)),
+                _ => None,
+            };
+            draw_tide_telegraph(
+                pb,
+                origin,
+                aim,
+                len,
+                from,
+                to,
+                gap,
+                active_range,
+                cam,
+                is_active,
+                progress,
+            );
+        }
+        MinibossShape::Umbra {
+            origin,
+            aim,
+            half_angle,
+            len,
+        } => {
+            draw_umbra_telegraph(pb, origin, aim, half_angle, len, cam, is_active, progress);
+        }
+        MinibossShape::False {
+            origin,
+            aim,
+            bulbs,
+            selected,
+            jaw_len,
+            jaw_half,
+        } => {
+            let sel = selected.or_else(|| match active_shape {
+                Some(MinibossShape::False { selected: s, .. }) => s,
+                _ => None,
+            });
+            draw_false_telegraph(
+                pb, origin, aim, bulbs, sel, jaw_len, jaw_half, cam, is_active, progress,
             );
         }
         shape => crate::game::ecs::systems::miniboss_shapes::draw_telegraph(
@@ -8215,6 +9514,498 @@ fn draw_spill_telegraph(
     }
 }
 
+/// The Gasket (and any `Annulus` signature): hard-edged inner and outer warning
+/// rims with radial pressure ticks, surging hot coral in Active while keeping
+/// the central safe hole (`d < inner`) 100% unobstructed.
+#[allow(clippy::too_many_arguments)]
+fn draw_annulus_telegraph(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    inner: f32,
+    outer: f32,
+    cam: Vec2,
+    is_active: bool,
+    progress: f32,
+) {
+    if pb.w == 0 || pb.h == 0 || outer <= inner {
+        return;
+    }
+    let o = origin - cam;
+    let pad = outer + 2.0;
+    let x0 = (o.x - pad).floor().max(0.0) as i32;
+    let x1 = (o.x + pad).ceil().min(((pb.w as i32) - 1) as f32) as i32;
+    let y0 = (o.y - pad).floor().max(0.0) as i32;
+    let y1 = (o.y + pad).ceil().min(((pb.h as i32) - 1) as f32) as i32;
+
+    let locked = is_active || progress >= 0.5;
+    let pulse = 0.78 + 0.22 * (progress * TAU * 3.5).sin();
+    let warn_fill: Rgb = (214, 128, 56);
+    let warn_edge: Rgb = if locked { (255, 236, 136) } else { (255, 198, 86) };
+    let inner_edge: Rgb = if locked { (255, 250, 198) } else { (255, 224, 118) };
+    let hot_fill: Rgb = (255, 108, 54);
+    let hot_core: Rgb = (255, 248, 202);
+    let inv_band = 1.0 / (outer - inner).max(1.0);
+
+    for y in y0..=y1 {
+        let dy = y as f32 + 0.5 - o.y;
+        let dy2 = dy * dy;
+        for x in x0..=x1 {
+            let dx = x as f32 + 0.5 - o.x;
+            let d = (dx * dx + dy2).sqrt();
+            // Keep the central safe hole strictly unpainted.
+            if d < inner || d > outer + 0.65 {
+                continue;
+            }
+            let on_inner = d <= inner + 1.10;
+            let on_outer = d >= outer - 1.05;
+            if is_active {
+                let band_u = ((d - inner) * inv_band).clamp(0.0, 1.0);
+                let wave = 0.5 + 0.5 * (band_u * 10.0 - progress * 18.0).sin();
+                if on_inner || on_outer {
+                    plot_px(pb, x, y, hot_core);
+                } else {
+                    blend_px(pb, x, y, mix(hot_fill, hot_core, wave * 0.45), 0.74);
+                }
+            } else if on_inner {
+                blend_px(pb, x, y, inner_edge, if locked { 0.96 } else { 0.88 * pulse });
+            } else if on_outer {
+                if locked || ((x + y) & 3) != 0 {
+                    blend_px(pb, x, y, warn_edge, if locked { 0.96 } else { 0.86 * pulse });
+                }
+            } else {
+                let ang = dy.atan2(dx);
+                let spoke = (ang * 4.0 + progress * 6.0).rem_euclid(1.0) < 0.16;
+                blend_px(
+                    pb,
+                    x,
+                    y,
+                    if spoke { warn_edge } else { warn_fill },
+                    if spoke { 0.34 } else { 0.18 + 0.14 * progress },
+                );
+            }
+        }
+    }
+}
+
+/// The Swell (and any `Tide` signature): outlines the full swept broadside area
+/// with a crystal-clear continuous safe lane (`gap.0..gap.1` strictly unpainted),
+/// then sweeps the white-capped hot coral crossbar across both wings in Active.
+#[allow(clippy::too_many_arguments)]
+fn draw_tide_telegraph(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    aim: Vec2,
+    len: f32,
+    from_a: f32,
+    to_a: f32,
+    gap: (f32, f32),
+    active_range: Option<(f32, f32)>,
+    cam: Vec2,
+    is_active: bool,
+    progress: f32,
+) {
+    if pb.w == 0 || pb.h == 0 || len <= 0.5 || to_a <= from_a {
+        return;
+    }
+    let o = origin - cam;
+    let dir = safe_dir(aim, Vec2::new(1.0, 0.0));
+    let perp = dir.perp();
+    let half_len = len * 0.5;
+    let (g0, g1) = gap;
+
+    let corners = [
+        o + dir * from_a - perp * half_len,
+        o + dir * from_a + perp * half_len,
+        o + dir * to_a - perp * half_len,
+        o + dir * to_a + perp * half_len,
+    ];
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for q in &corners {
+        min_x = min_x.min(q.x);
+        max_x = max_x.max(q.x);
+        min_y = min_y.min(q.y);
+        max_y = max_y.max(q.y);
+    }
+    let x0 = (min_x - 1.5).floor().max(0.0) as i32;
+    let x1 = (max_x + 1.5).ceil().min(((pb.w as i32) - 1) as f32) as i32;
+    let y0 = (min_y - 1.5).floor().max(0.0) as i32;
+    let y1 = (max_y + 1.5).ceil().min(((pb.h as i32) - 1) as f32) as i32;
+
+    let locked = is_active || progress >= 0.5;
+    let pulse = 0.76 + 0.24 * (progress * TAU * 3.5).sin();
+    let warn_fill: Rgb = (168, 118, 66);
+    let warn_edge: Rgb = if locked { (255, 234, 134) } else { (255, 198, 92) };
+    let gap_edge: Rgb = if locked { (255, 252, 206) } else { (255, 226, 122) };
+    let hot_fill: Rgb = (255, 106, 62);
+    let hot_foam: Rgb = (242, 255, 252);
+    let hot_lead: Rgb = (255, 252, 210);
+
+    for y in y0..=y1 {
+        let vy = y as f32 + 0.5 - o.y;
+        for x in x0..=x1 {
+            let vx = x as f32 + 0.5 - o.x;
+            let along = vx * dir.x + vy * dir.y;
+            if along < from_a - 0.6 || along > to_a + 0.6 {
+                continue;
+            }
+            let across = vx * perp.x + vy * perp.y;
+            if across.abs() > half_len + 0.6 {
+                continue;
+            }
+            // Keep the continuous safe gap lane strictly clear!
+            if across > g0 && across < g1 {
+                continue;
+            }
+
+            let on_gap_wall =
+                (across <= g0 && across >= g0 - 1.15) || (across >= g1 && across <= g1 + 1.15);
+            let on_side_wall = across.abs() >= half_len - 1.05;
+            let on_front_back = along <= from_a + 1.05 || along >= to_a - 1.05;
+
+            let mut in_live_bar = false;
+            if is_active {
+                if let Some((a_lo, a_hi)) = active_range {
+                    if along >= a_lo - 0.4 && along <= a_hi + 0.4 {
+                        in_live_bar = true;
+                        let lead = along >= a_hi - 1.5;
+                        if on_gap_wall || lead {
+                            plot_px(pb, x, y, if lead { hot_lead } else { hot_foam });
+                        } else {
+                            let churn = 0.5 + 0.5 * (across * 0.7 - progress * 22.0).sin();
+                            blend_px(pb, x, y, mix(hot_fill, hot_foam, churn * 0.35), 0.88);
+                        }
+                    }
+                }
+            }
+
+            if !in_live_bar {
+                if on_gap_wall {
+                    let a = if is_active {
+                        0.58
+                    } else if locked {
+                        0.96
+                    } else {
+                        0.88 * pulse
+                    };
+                    blend_px(pb, x, y, gap_edge, a);
+                } else if on_side_wall || on_front_back {
+                    if is_active {
+                        blend_px(pb, x, y, warn_edge, 0.34);
+                    } else if locked || (((along + across).floor() as i32) & 3) != 0 {
+                        blend_px(pb, x, y, warn_edge, if locked { 0.92 } else { 0.82 * pulse });
+                    }
+                } else if !is_active {
+                    let in_start_bar = along <= from_a + 6.0;
+                    let chev = (along - progress * 26.0).rem_euclid(10.0) < 1.6;
+                    if in_start_bar && locked {
+                        blend_px(pb, x, y, warn_edge, 0.38);
+                    } else {
+                        blend_px(
+                            pb,
+                            x,
+                            y,
+                            if chev { warn_edge } else { warn_fill },
+                            if chev { 0.34 * pulse } else { 0.16 + 0.12 * progress },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Shade (and any `Umbra` signature): darkened violet-hatched shadow wedge
+/// framed by a razor-bright hard perimeter that stays readable even with
+/// lighting and effects disabled, plus a subtle warm lit-side back glint.
+#[allow(clippy::too_many_arguments)]
+fn draw_umbra_telegraph(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    aim: Vec2,
+    half_angle: f32,
+    len: f32,
+    cam: Vec2,
+    is_active: bool,
+    progress: f32,
+) {
+    if pb.w == 0 || pb.h == 0 || len <= 1.0 {
+        return;
+    }
+    let o = origin - cam;
+    let dir = safe_dir(aim, Vec2::new(1.0, 0.0));
+    let ray_l = dir.rotate(-half_angle);
+    let ray_r = dir.rotate(half_angle);
+    let perp_l = ray_l.perp();
+    let perp_r = ray_r.perp();
+
+    let pad = len + 2.0;
+    let x0 = (o.x - pad).floor().max(0.0) as i32;
+    let x1 = (o.x + pad).ceil().min(((pb.w as i32) - 1) as f32) as i32;
+    let y0 = (o.y - pad).floor().max(0.0) as i32;
+    let y1 = (o.y + pad).ceil().min(((pb.h as i32) - 1) as f32) as i32;
+
+    let locked = is_active || progress >= 0.5;
+    let pulse = 0.78 + 0.22 * (progress * TAU * 3.5).sin();
+    let cos_outer = (half_angle + 0.03).min(FRAC_PI_2 - 0.01).cos();
+    let cos_outer2 = cos_outer * cos_outer;
+    let r_max2 = (len + 0.8) * (len + 0.8);
+    let r_arc2 = (len - 1.15).max(0.0) * (len - 1.15).max(0.0);
+
+    let shadow_tint: Rgb = (22, 16, 46);
+    let warn_edge: Rgb = if locked { (255, 232, 134) } else { (255, 188, 92) };
+    let rib_col: Rgb = (176, 132, 238);
+    let hot_fill: Rgb = (218, 66, 114);
+    let hot_core: Rgb = (255, 246, 198);
+
+    for y in y0..=y1 {
+        let vy = y as f32 + 0.5 - o.y;
+        let vy2 = vy * vy;
+        for x in x0..=x1 {
+            let vx = x as f32 + 0.5 - o.x;
+            let along = vx * dir.x + vy * dir.y;
+            if along <= 0.0 {
+                continue;
+            }
+            let d2 = vx * vx + vy2;
+            if d2 < 9.0 || d2 > r_max2 {
+                continue;
+            }
+            if along * along < d2 * cos_outer2 {
+                continue;
+            }
+            let arc_edge = d2 >= r_arc2;
+            let side_edge = (vx * perp_l.x + vy * perp_l.y).abs() <= 1.15
+                || (vx * perp_r.x + vy * perp_r.y).abs() <= 1.15;
+            if is_active {
+                if side_edge || arc_edge {
+                    plot_px(pb, x, y, hot_core);
+                } else {
+                    let d = d2.sqrt();
+                    let wave = 0.5 + 0.5 * (d * 0.65 - progress * 24.0).sin();
+                    blend_px(pb, x, y, mix(hot_fill, hot_core, wave * 0.38), 0.72);
+                }
+            } else if side_edge {
+                blend_px(pb, x, y, warn_edge, if locked { 0.98 } else { 0.88 * pulse });
+            } else if arc_edge {
+                if locked || ((x + y) & 3) != 0 {
+                    blend_px(pb, x, y, warn_edge, if locked { 0.96 } else { 0.86 * pulse });
+                }
+            } else {
+                darken_px(pb, x, y, 0.52);
+                let hatch = ((x - y) & 7) == 0;
+                blend_px(
+                    pb,
+                    x,
+                    y,
+                    if hatch { rib_col } else { shadow_tint },
+                    if hatch { 0.36 } else { 0.35 + 0.12 * progress },
+                );
+            }
+        }
+    }
+
+    // Small warm lit-side back crescent behind `-dir` ("Stand on the lit side.").
+    if !is_active {
+        let back_ang = (-dir).angle();
+        for k in -3..=3 {
+            let a = back_ang + k as f32 * 0.20;
+            let q = o + Vec2::from_angle(a) * 10.5;
+            blend_px(
+                pb,
+                q.x.round() as i32,
+                q.y.round() as i32,
+                (255, 236, 152),
+                0.75 * pulse,
+            );
+        }
+    }
+}
+
+/// Oriented `jaw_len × (2 * jaw_half)` biting jaw footprint for `MinibossShape::False`.
+#[allow(clippy::too_many_arguments)]
+fn draw_false_jaw_box(
+    pb: &mut PixelBuffer,
+    bulb_s: Vec2,
+    dir: Vec2,
+    jaw_len: f32,
+    jaw_half: f32,
+    is_active: bool,
+    is_tentative: bool,
+    progress: f32,
+) {
+    if pb.w == 0 || pb.h == 0 || jaw_len <= 0.5 || jaw_half <= 0.25 {
+        return;
+    }
+    let perp = dir.perp();
+    let corners = [
+        bulb_s - perp * jaw_half,
+        bulb_s + perp * jaw_half,
+        bulb_s + dir * jaw_len - perp * jaw_half,
+        bulb_s + dir * jaw_len + perp * jaw_half,
+    ];
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for q in &corners {
+        min_x = min_x.min(q.x);
+        max_x = max_x.max(q.x);
+        min_y = min_y.min(q.y);
+        max_y = max_y.max(q.y);
+    }
+    let x0 = (min_x - 1.5).floor().max(0.0) as i32;
+    let x1 = (max_x + 1.5).ceil().min(((pb.w as i32) - 1) as f32) as i32;
+    let y0 = (min_y - 1.5).floor().max(0.0) as i32;
+    let y1 = (max_y + 1.5).ceil().min(((pb.h as i32) - 1) as f32) as i32;
+
+    let pulse = 0.78 + 0.22 * (progress * TAU * 4.0).sin();
+    for y in y0..=y1 {
+        let vy = y as f32 + 0.5 - bulb_s.y;
+        for x in x0..=x1 {
+            let vx = x as f32 + 0.5 - bulb_s.x;
+            let along = vx * dir.x + vy * dir.y;
+            if along < -0.5 || along > jaw_len + 0.5 {
+                continue;
+            }
+            let across = (vx * perp.x + vy * perp.y).abs();
+            if across > jaw_half + 0.5 {
+                continue;
+            }
+            let on_long = across >= jaw_half - 0.95;
+            let on_end = along <= 0.85 || along >= jaw_len - 0.85;
+            if is_active {
+                if on_long || on_end {
+                    plot_px(pb, x, y, (255, 252, 208));
+                } else {
+                    let tooth = (((along * 0.75).floor() as i32) & 1) == 0 && across > 0.7;
+                    let col: Rgb = if tooth { (255, 255, 250) } else { (255, 88, 62) };
+                    blend_px(pb, x, y, col, if tooth { 0.92 } else { 0.84 });
+                }
+            } else if is_tentative {
+                if on_long || on_end {
+                    let step = (along.floor() as i32 + across.floor() as i32).rem_euclid(4);
+                    if step < 2 {
+                        blend_px(pb, x, y, (214, 242, 246), 0.78 * pulse);
+                    }
+                } else {
+                    blend_px(pb, x, y, (98, 178, 194), 0.14);
+                }
+            } else if on_long || on_end {
+                plot_px(pb, x, y, (255, 236, 132));
+            } else {
+                // Alternating inward needle-teeth on the committed jaw so teeth
+                // distinguish the real biting bulb even without colour/FX.
+                let tooth = (along.floor() as i32).rem_euclid(4) == 1 && across >= jaw_half - 1.95;
+                if tooth {
+                    plot_px(pb, x, y, (255, 255, 244));
+                } else {
+                    blend_px(pb, x, y, (238, 108, 66), 0.28 + 0.18 * progress);
+                }
+            }
+        }
+    }
+}
+
+/// The False Bulb (`MinibossShape::False`):
+/// - Tracking (`selected == None`): both bulbs with arched stalks & tentative dashed jaws.
+/// - Locked (`selected == Some(i)`): only `bulbs[i]` keeps its stalk and grows the hard-edged
+///   toothed `18×6` jaw; the far bulb dims with no line or jaw outline.
+/// - Active (`selected == Some(i)`): the locked jaw fills solid hot coral + white teeth,
+///   while the far bulb gives one clearly harmless expanding cyan bubble pop.
+#[allow(clippy::too_many_arguments)]
+fn draw_false_telegraph(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    aim: Vec2,
+    bulbs: [Vec2; 2],
+    selected: Option<usize>,
+    jaw_len: f32,
+    jaw_half: f32,
+    cam: Vec2,
+    is_active: bool,
+    progress: f32,
+) {
+    if pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let o = origin - cam;
+    let dir = safe_dir(aim, Vec2::new(1.0, 0.0));
+    let perp = dir.perp();
+    let brow = o + dir * 1.8 + Vec2::new(0.0, -4.4);
+    let b_s = [bulbs[0] - cam, bulbs[1] - cam];
+    let cyan_hi: Rgb = (255, 255, 255);
+    let cyan_mid: Rgb = (118, 252, 248);
+    let cyan_lo: Rgb = (34, 172, 198);
+    let amber_hot: Rgb = (255, 214, 92);
+
+    match selected {
+        None => {
+            for (idx, &bs) in b_s.iter().enumerate() {
+                let side = if idx == 0 { -1.0_f32 } else { 1.0_f32 };
+                let ctrl = (brow + bs) * 0.5 + Vec2::new(0.0, -5.5) + perp * (side * 2.5);
+                of_draw_bezier_stalk(pb, brow, ctrl, bs, (64, 152, 172), Some(cyan_mid));
+                draw_false_jaw_box(pb, bs, dir, jaw_len, jaw_half, false, true, progress);
+                of_draw_bulb_orb(pb, bs, 2.6, cyan_lo, cyan_mid, 0.0);
+            }
+        }
+        Some(raw_idx) => {
+            let idx = raw_idx.min(1);
+            let other = 1 - idx;
+            let live_b = b_s[idx];
+            let decoy_b = b_s[other];
+
+            // 1. Harmless far bulb: no stalk line, no jaw outline.
+            if is_active {
+                let pop_r = 2.8 + progress * 7.5;
+                let fade = (1.0 - progress).clamp(0.0, 1.0);
+                for k in 0..20 {
+                    let a = k as f32 * (TAU / 20.0);
+                    let q = decoy_b + Vec2::from_angle(a) * pop_r;
+                    blend_px(
+                        pb,
+                        q.x.round() as i32,
+                        q.y.round() as i32,
+                        if k % 2 == 0 { cyan_mid } else { cyan_hi },
+                        fade * 0.85,
+                    );
+                }
+                for k in 0..4 {
+                    let a = k as f32 * FRAC_PI_2 + 0.5;
+                    let q = decoy_b + Vec2::from_angle(a) * (pop_r * 0.6);
+                    blend_px(pb, q.x.round() as i32, q.y.round() as i32, cyan_hi, fade * 0.75);
+                }
+            } else {
+                let cx = decoy_b.x.round() as i32;
+                let cy = decoy_b.y.round() as i32;
+                blend_px(pb, cx, cy, (148, 212, 224), 0.75);
+                for &(dx, dy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    blend_px(pb, cx + dx, cy + dy, (62, 128, 148), 0.52);
+                }
+            }
+
+            // 2. Locked biting bulb: keeps its taut arched stalk + hard-edged toothed jaw!
+            let side = if idx == 0 { -1.0_f32 } else { 1.0_f32 };
+            let ctrl = (brow + live_b) * 0.5 + Vec2::new(0.0, -5.0) + perp * (side * 2.0);
+            let stalk_col: Rgb = if is_active { (255, 118, 72) } else { amber_hot };
+            of_draw_bezier_stalk(pb, brow, ctrl, live_b, stalk_col, Some((255, 250, 200)));
+            draw_false_jaw_box(pb, live_b, dir, jaw_len, jaw_half, is_active, false, progress);
+            let flick = ((progress * 6.0).floor() as i32) % 2 == 0;
+            let halo = if is_active {
+                (255, 108, 68)
+            } else if flick {
+                amber_hot
+            } else {
+                cyan_lo
+            };
+            let core = if is_active || flick { (255, 248, 198) } else { cyan_mid };
+            of_draw_bulb_orb(pb, live_b, 2.8, halo, core, 0.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9056,5 +10847,248 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn all_four_outfall_minibosses_render_with_contrast_bounds_and_animations() {
+        use rand::SeedableRng;
+        let bg = (16, 18, 22);
+        let mut pb = PixelBuffer::new(96, 96);
+        let mut pb_a = PixelBuffer::new(96, 96);
+        let mut pb_b = PixelBuffer::new(96, 96);
+        let cam = Vec2::new(100.0, 100.0);
+        let origin = Vec2::new(148.0, 148.0);
+        let aim = Vec2::new(-1.0, 0.0);
+        let outfall = [
+            MinibossKind::Gasket,
+            MinibossKind::Swell,
+            MinibossKind::Shade,
+            MinibossKind::FalseBulb,
+        ];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(47);
+        for kind in outfall {
+            let style = banner_style(kind);
+            assert!(
+                matches!(style.glyph, '◆' | '▸' | '✦'),
+                "{kind:?}: banner glyph must be terminal-safe"
+            );
+            for state in [
+                MinibossState::Approach,
+                MinibossState::Tell,
+                MinibossState::Active,
+                MinibossState::Recover,
+                MinibossState::Cooldown,
+            ] {
+                pb.clear(bg);
+                let mut e =
+                    Enemy::spawn(crate::game::enemy::EnemyKind::Brute, origin, 1.0, &mut rng);
+                e.hp = 160.0;
+                e.max_hp = 160.0;
+                e.radius = kind.body_radius();
+                e.facing = aim;
+                e.vel = if state == MinibossState::Approach {
+                    aim * 30.0
+                } else {
+                    Vec2::ZERO
+                };
+                e.anim = 1.4;
+                let mut mb = Miniboss::new(kind, 0);
+                mb.origin = origin;
+                mb.aim = aim;
+                mb.state = state;
+                mb.timer = if state == MinibossState::Active {
+                    kind.active_duration() * 0.5
+                } else {
+                    0.6
+                };
+                draw(&mut pb, &e, &mb, cam, (90, 220, 200));
+
+                let mut count = 0usize;
+                let mut max_lum = 0u32;
+                let (mut x0, mut x1, mut y0, mut y1) = (96usize, 0usize, 96usize, 0usize);
+                for y in 0..96usize {
+                    for x in 0..96usize {
+                        let c = pb.pixel_at(x, y);
+                        if c != bg {
+                            count += 1;
+                            let l = c.0 as u32 + c.1 as u32 + c.2 as u32;
+                            if l > max_lum {
+                                max_lum = l;
+                            }
+                            x0 = x0.min(x);
+                            x1 = x1.max(x);
+                            y0 = y0.min(y);
+                            y1 = y1.max(y);
+                        }
+                    }
+                }
+                assert!(count >= 40, "{kind:?}/{state:?}: too few pixels ({count})");
+                assert!(
+                    max_lum >= 540,
+                    "{kind:?}/{state:?}: needs bright rim/highlight (max_lum {max_lum})"
+                );
+                if state == MinibossState::Approach {
+                    let w = x1 - x0 + 1;
+                    let h = y1 - y0 + 1;
+                    assert!(
+                        w <= 44 && h <= 44,
+                        "{kind:?} Approach body sprawls to {w}x{h} (limit 44x44)"
+                    );
+                }
+            }
+
+            // Entrance and Death must both animate distinctly across their timelines.
+            let mut e = Enemy::spawn(crate::game::enemy::EnemyKind::Brute, origin, 1.0, &mut rng);
+            e.hp = 160.0;
+            e.max_hp = 160.0;
+            e.radius = kind.body_radius();
+            e.facing = aim;
+            e.vel = aim * 36.0;
+            let mut mb = Miniboss::new(kind, 0);
+            mb.timer = 0.15;
+            pb_a.clear(bg);
+            draw(&mut pb_a, &e, &mb, cam, (90, 220, 200));
+            mb.timer = 0.95;
+            pb_b.clear(bg);
+            draw(&mut pb_b, &e, &mb, cam, (90, 220, 200));
+            assert_ne!(pb_a.pixels(), pb_b.pixels(), "{kind:?}: entrance should animate");
+
+            e.hp = 0.0;
+            mb.state = MinibossState::Recover;
+            mb.timer = 0.05;
+            pb_a.clear(bg);
+            draw(&mut pb_a, &e, &mb, cam, (90, 220, 200));
+            mb.timer = 0.85;
+            pb_b.clear(bg);
+            draw(&mut pb_b, &e, &mb, cam, (90, 220, 200));
+            assert_ne!(pb_a.pixels(), pb_b.pixels(), "{kind:?}: death should animate");
+        }
+    }
+
+    #[test]
+    fn outfall_telegraphs_keep_safe_holes_and_gaps_clear_and_distinguish_false_bulbs() {
+        let bg = (16, 18, 22);
+        let cam = Vec2::ZERO;
+
+        // 1. Gasket Annulus: inner safe hole stays 100% clear in Tell & Active.
+        for (is_active, prog) in [(false, 0.75_f32), (true, 0.45)] {
+            let mut pb = PixelBuffer::new(120, 100);
+            pb.clear(bg);
+            let o = Vec2::new(60.0, 50.0);
+            draw_annulus_telegraph(&mut pb, o, 8.0, 18.0, cam, is_active, prog);
+            let mut ring_px = 0usize;
+            let mut max_lum = 0u32;
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    let c = pb.pixel_at(x, y);
+                    let d = (x as f32 + 0.5 - o.x).hypot(y as f32 + 0.5 - o.y);
+                    if d < 7.0 {
+                        assert_eq!(c, bg, "Annulus hole must stay clear (active={is_active})");
+                    } else if c != bg {
+                        ring_px += 1;
+                        max_lum = max_lum.max(c.0 as u32 + c.1 as u32 + c.2 as u32);
+                    }
+                }
+            }
+            assert!(ring_px >= 40 && max_lum >= 540, "Annulus rim too faint");
+        }
+
+        // 2. Swell Tide: continuous safe gap stays 100% clear in Tell & Active.
+        for (is_active, prog, act_r) in [
+            (false, 0.75_f32, None),
+            (true, 0.45, Some((18.6_f32, 24.6_f32))),
+        ] {
+            let mut pb = PixelBuffer::new(120, 100);
+            pb.clear(bg);
+            let o = Vec2::new(72.0, 48.0);
+            let aim = Vec2::new(-1.0, 0.0);
+            let gap = (-4.0_f32, 12.0_f32);
+            draw_tide_telegraph(&mut pb, o, aim, 64.0, -3.0, 51.0, gap, act_r, cam, is_active, prog);
+            let mut wing_lo = 0usize;
+            let mut wing_hi = 0usize;
+            for y in 0..pb.h {
+                let across = -(y as f32 + 0.5 - o.y); // perp of (-1, 0) is (0, -1)
+                for x in 0..pb.w {
+                    let c = pb.pixel_at(x, y);
+                    if across > gap.0 + 0.8 && across < gap.1 - 0.8 {
+                        assert_eq!(c, bg, "Tide gap must stay clear (active={is_active})");
+                    } else if c != bg {
+                        if across < gap.0 {
+                            wing_lo += 1;
+                        } else {
+                            wing_hi += 1;
+                        }
+                    }
+                }
+            }
+            assert!(wing_lo >= 20 && wing_hi >= 20, "Tide must outline both wings");
+        }
+
+        // 3. Shade Umbra: hard bright wedge edges survive pitch-black (Lighting Off).
+        for (is_active, prog) in [(false, 0.75_f32), (true, 0.45)] {
+            let mut pb = PixelBuffer::new(120, 100);
+            pb.clear((0, 0, 0));
+            draw_umbra_telegraph(
+                &mut pb,
+                Vec2::new(72.0, 48.0),
+                Vec2::new(-1.0, 0.0),
+                25.0_f32.to_radians(),
+                46.0,
+                cam,
+                is_active,
+                prog,
+            );
+            let mut lit_px = 0usize;
+            let mut max_lum = 0u32;
+            for &c in pb.pixels() {
+                if c != (0, 0, 0) {
+                    lit_px += 1;
+                    max_lum = max_lum.max(c.0 as u32 + c.1 as u32 + c.2 as u32);
+                }
+            }
+            assert!(lit_px >= 40 && max_lum >= 540, "Umbra must stay visible with lights off");
+        }
+
+        // 4. FalseBulb: tracking shows both proposals; lock shows jaw on selected bulb only;
+        //    active fills selected jaw and pops the far bulb harmlessly.
+        let o = Vec2::new(76.0, 48.0);
+        let aim = Vec2::new(-1.0, 0.0);
+        let bulbs = [Vec2::new(54.0, 62.0), Vec2::new(54.0, 34.0)];
+        let count_rect = |pb: &PixelBuffer, x0: usize, x1: usize, y0: usize, y1: usize| {
+            let mut n = 0usize;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if pb.pixel_at(x, y) != bg {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        let mut pb_track = PixelBuffer::new(120, 100);
+        pb_track.clear(bg);
+        draw_false_telegraph(&mut pb_track, o, aim, bulbs, None, 18.0, 3.0, cam, false, 0.25);
+        assert!(count_rect(&pb_track, 36, 54, 59, 65) >= 12);
+        assert!(count_rect(&pb_track, 36, 54, 31, 37) >= 12);
+
+        let mut pb_lock = PixelBuffer::new(120, 100);
+        pb_lock.clear(bg);
+        draw_false_telegraph(&mut pb_lock, o, aim, bulbs, Some(0), 18.0, 3.0, cam, false, 0.75);
+        assert!(count_rect(&pb_lock, 36, 54, 59, 65) >= 40, "locked bulb must draw 18x6 jaw");
+        assert_eq!(
+            count_rect(&pb_lock, 36, 50, 31, 37),
+            0,
+            "unselected far bulb must not draw a jaw outline"
+        );
+
+        let mut pb_act = PixelBuffer::new(120, 100);
+        pb_act.clear(bg);
+        draw_false_telegraph(&mut pb_act, o, aim, bulbs, Some(0), 18.0, 3.0, cam, true, 0.45);
+        assert!(count_rect(&pb_act, 36, 54, 59, 65) >= 60, "active jaw must fill");
+        assert!(
+            count_rect(&pb_act, 44, 64, 24, 44) >= 8,
+            "far bulb must show harmless pop ring in Active"
+        );
     }
 }
