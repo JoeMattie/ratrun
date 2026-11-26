@@ -49,7 +49,7 @@
 use super::fx::{self, Canvas, FxFrame, FxLight, LightInfo, LightTag, Normal, SampleHit, ShadowQuery};
 use super::shadow::{Body, Geometry, HardShadows, ShadowProfile, Surface};
 use super::softshadow::SoftProfile;
-use super::{air, motes, overhead, softshadow, specular, surface, upsample, water};
+use super::{air, motes, overhead, softshadow, specular, surface, underwater, upsample, water};
 use super::{fixtures, LightScene, ThemeAmbient};
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -825,6 +825,9 @@ impl LightMap {
     pub fn apply_scene(&mut self, pb: &mut PixelBuffer, scene: &LightScene<'_>) {
         #[cfg(test)]
         if scene.mode == LightingMode::Off {
+            if scene.level.theme == Theme::Outfall {
+                underwater::apply_flat_grade(pb);
+            }
             return;
         }
         if pb.w == 0 || pb.h == 0 {
@@ -1164,14 +1167,29 @@ impl LightMap {
                     let n = water::gather_ripples(scene.ecs, frame.cam, &mut ripples);
                     water::apply(&self.grid, &mut canvas, &frame, &ripples[..n], &laser_segments);
                 }
+                if theme == Theme::Outfall {
+                    underwater::grade_grid(&self.grid, &mut canvas);
+                }
                 if !fx::skip("air") {
                     air::composite(&self.grid, &mut canvas, &frame);
                 }
                 if !fx::skip("motes") {
                     motes::draw(&self.grid, &mut canvas, &frame, scene.elapsed);
+                    if theme == Theme::Outfall
+                        && !matches!(scene.mode, LightingMode::Full | LightingMode::Hard)
+                    {
+                        underwater::apply_cheap_caustics(&self.grid, &mut canvas, &frame, scene.elapsed);
+                    }
                 }
             } else {
                 self.grid.composite(pb, scene.depth);
+                if theme == Theme::Outfall {
+                    let (w, h) = (pb.w, pb.h);
+                    let (px, mat) = pb.split_mat();
+                    let mut canvas = Canvas { w, h, px, mat };
+                    underwater::grade_grid(&self.grid, &mut canvas);
+                    underwater::apply_cheap_caustics(&self.grid, &mut canvas, &frame, scene.elapsed);
+                }
             }
         }
         let _pm = crate::prof::scope(crate::prof::Stage::LMarks);

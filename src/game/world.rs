@@ -3598,6 +3598,7 @@ impl World {
     ) {
         #[cfg(test)]
         if self.lighting == LightingMode::Off {
+            crate::render::lighting::apply_off_grade(pb, self.level.theme);
             return;
         }
         if self.flat_lit || crate::prof::lighting_skipped() {

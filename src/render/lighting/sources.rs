@@ -242,25 +242,36 @@ impl LightMap {
             elapsed
         };
         let rat_flicker = 1.0 + 0.03 * (breath_t * 4.3).sin();
-        self.lights.push(PointLight {
-            x: px,
-            y: py,
-            radius: rat_radius,
-            color: theme_prof.rat_tint,
-            intensity: ((match scene.level.theme {
-                Theme::Trailer => 62.0,
-                Theme::Outfall => 184.0,
-                _ => 196.0,
-            }) * rat_flicker) as u16,
-            scatter: match scene.level.theme {
-                Theme::Trailer => 7,
-                Theme::Outfall => 20,
-                _ => 22,
-            },
-            priority: 3,
-            occlude: true,
-            hard: false,
-        });
+        if scene.level.theme == Theme::Outfall {
+            let energy = (184.0 * rat_flicker) as u16 as f32 / 256.0;
+            let mut light =
+                Light::radial(scene.player.pos, rat_radius, theme_prof.rat_tint, energy);
+            light.scatter = 20.0 / 256.0;
+            light.casts_shadow = true;
+            light.falloff = Falloff::Smooth;
+            // Restrained steady underwater beam scatter around the rat's
+            // diving headlamp so drifting marine snow reads even in open halls
+            // far from sconces, without breathing with the 4 Hz aura step.
+            self.push_lantern_lure(light, (184.0 + 20.0) / 256.0, 0.28);
+        } else {
+            self.lights.push(PointLight {
+                x: px,
+                y: py,
+                radius: rat_radius,
+                color: theme_prof.rat_tint,
+                intensity: ((match scene.level.theme {
+                    Theme::Trailer => 62.0,
+                    _ => 196.0,
+                }) * rat_flicker) as u16,
+                scatter: match scene.level.theme {
+                    Theme::Trailer => 7,
+                    _ => 22,
+                },
+                priority: 3,
+                occlude: true,
+                hard: false,
+            });
+        }
 
         // Dash cyan-white burst light.
         if scene.player.dash_active > 0.0 {
