@@ -2746,6 +2746,7 @@ impl World {
                         | PickupKind::ShrinkDraught
                         | PickupKind::WhiteCoat
                         | PickupKind::TheCollar
+                        | PickupKind::Headlamp
                 );
                 let gr = (if is_pocket { 6.0 } else { 7.0 } + pulse * 3.5) as i32;
                 let grf = gr as f32;
@@ -3853,6 +3854,18 @@ impl World {
                 PickupKind::TheCollar.color()
             };
             pb.plot(x, y, glint);
+        }
+        if self.player.buffs.headlamp > 0.0 {
+            let head = if self.player.buffs.is_giant() || self.player.buffs.tiny > 0.0 {
+                art_rat_giant::headlamp_mount(&self.player, self.elapsed, scale, outfit)
+            } else {
+                art_rat::headlamp_mount(&self.player, self.elapsed, outfit)
+            } + bob_lean;
+            super::art_headlamp::draw_rat_headlamp(
+                pb, head, self.player.face, scale, cam, self.elapsed,
+                self.player.buffs.headlamp <= super::ecs::systems::powerups::HEADLAMP_FADE_SECS,
+            );
+            self.light_map.mark_emissive_highlights(pb, self.w2s(head, cam), (3.0 * scale).ceil() as i32);
         }
         pb.set_pen(pen);
         if self.whip_chain.is_active() {

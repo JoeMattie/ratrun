@@ -598,7 +598,7 @@ impl CommandSpec {
 }
 
 const ON_OFF: &[&str] = &["on", "off"];
-const GIVE_KINDS: &[&str] = &["weapon", "passive", "all", "lava"];
+const GIVE_KINDS: &[&str] = &["weapon", "passive", "all", "lava", "pickup"];
 const REMOVE_KINDS: &[&str] = &["weapon", "passive"];
 const TP_KINDS: &[&str] = &["arena", "shop", "chest", "maze"];
 const LIGHTS_KINDS: &[&str] = &["full", "hard", "coarse", "compact"];
@@ -699,8 +699,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "give",
         aliases: &[],
-        usage: "give weapon|passive <name> [n] | give all | give lava [level]",
-        summary: "Grant a weapon, passive, or everything.",
+        usage: "give weapon|passive|pickup <name> [n] | give all | give lava [level]",
+        summary: "Grant a weapon, passive, or pickup.",
         args: &[ArgKind::Words(GIVE_KINDS), ArgKind::Text, ArgKind::Text],
         read_only: false,
         handler: cmd_give,
@@ -816,8 +816,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "spawn",
         aliases: &[],
-        usage: "spawn <enemy|miniboss> [count] [elite]",
-        summary: "Spawn enemies (or a named miniboss) around the rat.",
+        usage: "spawn <enemy|miniboss> [count] [elite] | spawn pickup <name> [count]",
+        summary: "Spawn enemies or pickups around the rat.",
         args: &[ArgKind::Enemy, ArgKind::Text, ArgKind::Text],
         read_only: false,
         handler: cmd_spawn,
@@ -1296,7 +1296,12 @@ pub fn candidates(kind: ArgKind) -> Vec<String> {
             .collect(),
         ArgKind::Pickup => PickupKind::all()
             .iter()
-            .flat_map(|p| [slug(p.name()), slug(p.label())])
+            .flat_map(|p| {
+                let name = slug(p.name());
+                let label = slug(p.label());
+                let alternate = (label != name).then_some(label);
+                std::iter::once(name).chain(alternate)
+            })
             .collect(),
         ArgKind::Floor => Theme::playable().iter().map(|t| slug(t.name())).collect(),
         ArgKind::Splice => SpliceKind::all().iter().map(|s| slug(s.name())).collect(),
@@ -1352,12 +1357,22 @@ pub fn complete(console: &Console) -> Vec<String> {
         out.push("all".to_string());
         return out.into_iter().filter(|c| c.starts_with(&word)).collect();
     }
+    if cmd.name == "spawn" && arg_index == 0 {
+        let mut out = candidates(ArgKind::Enemy);
+        out.push("pickup".to_string());
+        return out.into_iter().filter(|c| c.starts_with(&word)).collect();
+    }
     let kind = if cmd.name == "give" && arg_index == 1 {
         match words.get(1).map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("weapon") => ArgKind::Weapon,
             Some("passive") => ArgKind::Passive,
+            Some("pickup") => ArgKind::Pickup,
             _ => ArgKind::Text,
         }
+    } else if cmd.name == "spawn" && arg_index == 1
+        && words.get(1).is_some_and(|word| word.eq_ignore_ascii_case("pickup"))
+    {
+        ArgKind::Pickup
     } else {
         cmd.args.get(arg_index).copied().unwrap_or(ArgKind::Text)
     };
@@ -1754,7 +1769,8 @@ fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
             world.give_passive(p, stacks);
             app.console_line(format!("gave {} ×{}", p.name(), stacks), LineKind::Success);
         }
-        _ => return Err("usage: give weapon|passive <name> [n] | give all | give lava [level]".into()),
+        Some("pickup") => return cmd_pickup(app, &args[1..]),
+        _ => return Err("usage: give weapon|passive|pickup <name> [n] | give all | give lava [level]".into()),
     }
     Ok(())
 }
@@ -1931,6 +1947,9 @@ fn cmd_spawn(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or("usage: spawn <enemy|miniboss> [count] [elite]")?
         .to_string();
+    if name.eq_ignore_ascii_case("pickup") {
+        return cmd_pickup(app, &args[1..]);
+    }
     // A named miniboss is spawnable here too: the body it spawns is an ordinary
     // `Enemy` with a `Miniboss` component on it.
     let enemy = find_enemy(&name);
@@ -2867,6 +2886,24 @@ mod tests {
         c.cursor = c.input.len();
         let list = complete(&c);
         assert!(list.iter().any(|s| s == "fatreserves"), "got {list:?}");
+    }
+
+    #[test]
+    fn headlamp_can_be_completed_and_spawned_through_each_pickup_command() {
+        let mut c = Console::new();
+        c.open_panel();
+        let mut app = fresh_app();
+        for command in ["pickup", "give pickup", "spawn pickup"] {
+            c.input = format!("{command} hea");
+            c.cursor = c.input.len();
+            let names = complete(&c);
+            assert_eq!(names.iter().filter(|s| s.as_str() == "headlamp").count(), 1);
+            run_command(&mut app, &format!("{command} headlamp")).unwrap();
+        }
+        let count = app.world_ref().unwrap().pickups().iter()
+            .filter(|p| p.kind == PickupKind::Headlamp)
+            .count();
+        assert_eq!(count, 3);
     }
 
     #[test]

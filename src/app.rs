@@ -369,6 +369,8 @@ struct PictureKey {
     shake: u32,
     /// Scheduled fixture attenuation, in bits, derived from the floor clock.
     blackout: u32,
+    /// Timer and facing changes can be staged directly in a frozen picture.
+    headlamp: Option<(u32, u32, u32)>,
 }
 
 impl PictureKey {
@@ -386,6 +388,9 @@ impl PictureKey {
             fx: w.lighting_fx,
             shake: w.shake_scale.to_bits(),
             blackout: w.blackout().to_bits(),
+            headlamp: (w.player.buffs.headlamp > 0.0).then(|| (
+                w.player.buffs.headlamp.to_bits(), w.player.face.x.to_bits(), w.player.face.y.to_bits(),
+            )),
         }
     }
 }
@@ -6321,7 +6326,7 @@ mod tests {
         let arrays = [KeyCode::Char('4'), KeyCode::Char('7'), KeyCode::F(1), KeyCode::F(5)];
         h.frame(&arrays);
         let picks = h.app.testbed.unwrap();
-        assert_eq!(picks.pickup, *PickupKind::all().last().unwrap());
+        assert_eq!(picks.pickup, PickupKind::Headlamp);
         assert_eq!(picks.enemy, EnemyKind::ShoreCrab);
         assert_eq!(picks.boss, *BossKind::all().last().unwrap());
         assert_eq!(picks.miniboss, *MinibossKind::all().last().unwrap());
@@ -10526,7 +10531,8 @@ mod tests {
             // lighting effects. `sconce`: the rat in front of the nearest wall
             // lamp with bodies between lamp and camera; `pendant`: bodies in a
             // ring under the nearest hanging lamp; `wet`: the same lamp with no
-            // bodies (floor reflections); `corner`: the rat in the room farthest
+            // bodies (floor reflections); `headlamp`: the rat lights a hall ahead;
+            // `corner`: the rat in the room farthest
             // from the map centre with bodies round it (the overhead offset).
             // `RATRUN_DUMP_N=n` takes the n-th nearest lamp and
             // `RATRUN_DUMP_AT=seconds` sets the frozen scene clock.
@@ -10543,6 +10549,16 @@ mod tests {
                 } else {
                     hh.app.start_practice(theme);
                     hh.frame(&[KeyCode::Enter]);
+                }
+                if scene == "headlamp" {
+                    use crate::render::lighting::LightingMode;
+                    let mode = match std::env::var("RATRUN_DUMP_LIGHTS").as_deref() {
+                        Ok("hard") => LightingMode::Hard,
+                        Ok("coarse") => LightingMode::Coarse,
+                        Ok("compact") => LightingMode::Compact,
+                        _ => LightingMode::Full,
+                    };
+                    hh.app.set_lighting(mode);
                 }
                 let nth = std::env::var("RATRUN_DUMP_N")
                     .ok()
@@ -10612,7 +10628,16 @@ mod tests {
                 lamps.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
                 let mut spots: Vec<Vec2> = Vec::new();
                 let rat_at;
-                if scene == "corner" {
+                if scene == "headlamp" {
+                    let hall = w.level.largest_hall().expect("a hall for the Headlamp capture");
+                    rat_at = hall.center() - Vec2::new(36.0, 0.0);
+                    w.player.face = Vec2::new(1.0, 0.0);
+                    w.player.buffs.headlamp = crate::game::ecs::systems::powerups::HEADLAMP_SECS;
+                    w.cam_focus = Some(rat_at + Vec2::new(30.0, 0.0));
+                    for offset in [Vec2::new(47.0, -12.0), Vec2::new(64.0, 14.0)] {
+                        spots.push(rat_at + offset);
+                    }
+                } else if scene == "corner" {
                     let centre = Vec2::new(
                         w.level.tiles.cols() as f32 * 8.0,
                         w.level.tiles.rows() as f32 * 8.0,
@@ -11832,6 +11857,17 @@ mod tests {
         assert_eq!(h.app.world_draws, drawn + 1, "the fixture power must redraw");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "the blackout stays frozen");
+
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.app.world.as_mut().unwrap().player.buffs.headlamp = 18.0;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a staged Headlamp must redraw");
+        h.app.world.as_mut().unwrap().player.face = Vec2::new(1.0, 0.0);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 2, "a turn of the beam must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 2, "the beam stays frozen");
 
         // The zoom: every frame of the ease is a new picture, then it stops.
         let mut h = paused_harness();

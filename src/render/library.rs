@@ -659,6 +659,9 @@ fn draw_art(art: &mut PixelBuffer, scenes: &mut Scenes, key: Key, accent: Rgb, t
         }
         Key::Passive(kind) => draw_icon(art, art_icons::passive(kind), false, t),
         Key::Splice(kind) => draw_icon(art, art_icons::splice(kind), false, t),
+        Key::Pickup(PickupKind::Headlamp) => {
+            crate::game::art_headlamp::draw_headlamp_icon(art, centre.x as i32 - 4, centre.y as i32 - 4);
+        }
         Key::Pickup(kind) => {
             let s = (centre.x as i32, (centre.y + (t * 2.0).sin() * 2.0) as i32);
             art_floor::draw_pickup(art, kind, s, t);

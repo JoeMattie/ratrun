@@ -616,6 +616,11 @@ pub fn draw_giant_rat_with_outfit(
     }
 }
 
+pub(crate) fn headlamp_mount(player: &Player, elapsed: f32, scale: f32, outfit: RatOutfit) -> Vec2 {
+    let pose = GiantPose::from_player_with_outfit(player, elapsed, Vec2::ZERO, scale, outfit);
+    pose.place(if pose.diver { HELMET_U } else { 3.2 }, 0.0)
+}
+
 /// Speed lines peeling off the giant's haunches during a dash.
 fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &GiantPose) {
     let streaks = (7.0 * pose.scale).ceil() as i32;

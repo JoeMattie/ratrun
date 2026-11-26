@@ -132,6 +132,8 @@ pub enum PickupKind {
     WhiteCoat,
     /// The Collar: double gem XP and faster heavy pursuers (16 s).
     TheCollar,
+    /// Headlamp: lights the way and makes the horde shy away (18 s).
+    Headlamp,
 }
 
 impl PickupKind {
@@ -153,6 +155,7 @@ impl PickupKind {
             PickupKind::ShrinkDraught => (192, 235, 255),
             PickupKind::WhiteCoat => (255, 255, 248),
             PickupKind::TheCollar => (255, 201, 100),
+            PickupKind::Headlamp => super::art_headlamp::HEADLAMP_LENS_COLOR,
         }
     }
     pub fn glyph(self) -> &'static str {
@@ -168,6 +171,7 @@ impl PickupKind {
             PickupKind::ShrinkDraught => "T",
             PickupKind::WhiteCoat => "W",
             PickupKind::TheCollar => "K",
+            PickupKind::Headlamp => "H",
         }
     }
 
@@ -183,6 +187,7 @@ impl PickupKind {
             PickupKind::ShrinkDraught => "T",
             PickupKind::WhiteCoat => "W",
             PickupKind::TheCollar => "K",
+            PickupKind::Headlamp => "H",
             // The three legacy pickups are instant and have no timer.
             PickupKind::Heal | PickupKind::Magnet | PickupKind::Nuke => "",
         }
@@ -202,12 +207,13 @@ impl PickupKind {
             PickupKind::ShrinkDraught => "SHRINK DRAUGHT",
             PickupKind::WhiteCoat => "WHITE COAT",
             PickupKind::TheCollar => "THE COLLAR",
+            PickupKind::Headlamp => "HEADLAMP",
         }
     }
 
     /// Every pickup kind, in enum order. The console's `pickup` command and
     /// its Tab completion read this table rather than a retyped list.
-    pub const fn all() -> [PickupKind; 11] {
+    pub const fn all() -> [PickupKind; 12] {
         [
             PickupKind::Heal,
             PickupKind::Magnet,
@@ -220,6 +226,7 @@ impl PickupKind {
             PickupKind::ShrinkDraught,
             PickupKind::WhiteCoat,
             PickupKind::TheCollar,
+            PickupKind::Headlamp,
         ]
     }
 
@@ -238,6 +245,7 @@ impl PickupKind {
             PickupKind::ShrinkDraught => "shrinkdraught",
             PickupKind::WhiteCoat => "whitecoat",
             PickupKind::TheCollar => "thecollar",
+            PickupKind::Headlamp => "headlamp",
         }
     }
 }
@@ -289,7 +297,7 @@ mod tests {
     #[test]
     fn the_pickup_table_lists_every_kind_once_in_discriminant_order() {
         let all = PickupKind::all();
-        assert_eq!(all.len(), 11, "one row per find");
+        assert_eq!(all.len(), 12, "one row per find");
         for (i, kind) in all.iter().enumerate() {
             assert_eq!(*kind as usize, i, "{kind:?} is out of order");
             if !kind.buff_tag().is_empty() {

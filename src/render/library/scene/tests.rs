@@ -890,6 +890,7 @@ fn the_pocket_finds_are_collected() {
         PickupKind::ShrinkDraught,
         PickupKind::WhiteCoat,
         PickupKind::TheCollar,
+        PickupKind::Headlamp,
     ] {
         let key = Key::Pickup(kind);
         let mut scene = LibraryScene::build(key).expect("a pickup scene");

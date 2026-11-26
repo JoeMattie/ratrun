@@ -2525,6 +2525,7 @@ pub fn emit_pickup_ambient(
             PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => {
                 Ramp::Custom(kind.color(), (72, 76, 84))
             }
+            PickupKind::Headlamp => Ramp::Custom(kind.color(), (120, 99, 62)),
         };
         let a = rng.random_range(0.0..std::f32::consts::TAU);
         let d = rng.random_range(2.5..5.5);
@@ -5061,6 +5062,8 @@ pub fn emit_pickup_find(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, kind:
             10,
             60.0,
         ),
+        // The beam itself is the pickup cue, with a warm ring and no RNG sparks.
+        PickupKind::Headlamp => (kind.color(), (255, 255, 248), Ramp::Gold, 0, 0.0),
         // Not a pocket find: fall back to the heal burst's gentle read.
         _ => (
             (126, 224, 152),
@@ -5207,6 +5210,7 @@ pub fn emit_buff_expire(ps: &mut Particles, pos: Vec2, kind: PickupKind) {
         PickupKind::CleanSocks => ((240, 240, 232), 5),
         PickupKind::GrowthSerum => ((255, 88, 196), 6),
         PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => (kind.color(), 5),
+        PickupKind::Headlamp => (kind.color(), 5),
         _ => ((190, 190, 190), 4),
     };
     let n = ps.budget_count(count, false);

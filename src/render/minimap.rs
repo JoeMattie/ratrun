@@ -459,12 +459,13 @@ pub enum PickupTag {
     ShrinkDraught,
     WhiteCoat,
     Collar,
+    Headlamp,
 }
 
 impl PickupTag {
     /// Every icon this tag can draw, in legend order (chest first: it is the
     /// landmark the player walks back for).
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Chest,
         Self::Heal,
         Self::Magnet,
@@ -477,6 +478,7 @@ impl PickupTag {
         Self::ShrinkDraught,
         Self::WhiteCoat,
         Self::Collar,
+        Self::Headlamp,
     ];
 
     /// The single glyph that stands for this find on the expanded map and in
@@ -496,6 +498,7 @@ impl PickupTag {
             Self::ShrinkDraught => 'T',
             Self::WhiteCoat => 'W',
             Self::Collar => 'K',
+            Self::Headlamp => 'H',
         }
     }
 
@@ -515,6 +518,7 @@ impl PickupTag {
             Self::ShrinkDraught => (192, 235, 255),
             Self::WhiteCoat => (255, 255, 248),
             Self::Collar => (255, 201, 100),
+            Self::Headlamp => crate::game::art_headlamp::HEADLAMP_LENS_COLOR,
         }
     }
 
@@ -533,6 +537,7 @@ impl PickupTag {
             Self::ShrinkDraught => "Shrink Draught",
             Self::WhiteCoat => "White Coat",
             Self::Collar => "The Collar",
+            Self::Headlamp => "Headlamp",
         }
     }
 }

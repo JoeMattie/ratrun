@@ -266,6 +266,7 @@ fn pickup_tag(kind: PickupKind) -> PickupTag {
         PickupKind::ShrinkDraught => PickupTag::ShrinkDraught,
         PickupKind::WhiteCoat => PickupTag::WhiteCoat,
         PickupKind::TheCollar => PickupTag::Collar,
+        PickupKind::Headlamp => PickupTag::Headlamp,
     }
 }
 

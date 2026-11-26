@@ -14,7 +14,7 @@ use crate::game::ecs::components::{
 use crate::game::ecs::resources::{ActiveFx, DashTrack, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossKind, MinibossState};
-use crate::game::ecs::systems::powerups::Decoy;
+use crate::game::ecs::systems::powerups::{Decoy, HeadlampBeam, HEADLAMP_HALF_ANGLE, HEADLAMP_RANGE};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Chest, Gem, Gold, Pickup};
 use crate::game::level::PropKind;
@@ -204,6 +204,8 @@ fn laser_art_and_lights_use_the_moved_hit_segments() {
 
 const MAX_LAVA_LIGHTS: usize = 24;
 
+pub(super) const HEADLAMP_LIGHT_PRIORITY: u8 = 4;
+
 impl LightMap {
     /// Gather all lights from world state; returns the active boss phase if any.
     pub(super) fn gather_lights(
@@ -271,6 +273,25 @@ impl LightMap {
                 occlude: true,
                 hard: false,
             });
+        }
+
+        if let Some(beam) = HeadlampBeam::from_player(scene.level, scene.player, scene.player.face) {
+            let mut light = Light::radial(
+                beam.origin,
+                HEADLAMP_RANGE,
+                crate::game::art_headlamp::HEADLAMP_LENS_COLOR,
+                2.45,
+            );
+            light.shape = LightShape::Cone {
+                radius: HEADLAMP_RANGE,
+                dir: beam.dir,
+                half_angle: HEADLAMP_HALF_ANGLE,
+            };
+            light.falloff = Falloff::Linear;
+            light.scatter = 0.0;
+            // The grid clips this light with the same tile rays as the fog.
+            light.casts_shadow = false;
+            self.push_shaped(light, HEADLAMP_LIGHT_PRIORITY);
         }
 
         let dash_scale = scene.player.buffs.draw_scale();

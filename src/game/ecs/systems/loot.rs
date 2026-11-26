@@ -33,6 +33,10 @@
 //! in `SpawnId` order instead of the legacy `Vec`/`swap_remove` order (the
 //! port's one sanctioned difference; see `CLAUDE.md`, "Determinism rules").
 //!
+//! The Headlamp replaces the last default Medkit bucket and one Medkit bait
+//! outcome. Seeded traces can change when those finds affect play. The drop
+//! sampler still consumes one word and bait still uses its existing hash.
+//!
 //! ## No per-tick allocation
 //!
 //! Every order-sensitive walk sorts its entity list **once per system per
@@ -94,12 +98,12 @@ use crate::math::Vec2;
 /// appointment — and the rat still has to finish the body.
 pub const NUKE_NAMED_CHUNK: f32 = 0.35;
 
-/// Weights out of 100: Heal 30, Magnet 18, Nuke 3, Growth Serum 4,
+/// Weights out of 100: Heal 29, Magnet 18, Nuke 3, Growth Serum 4,
 /// Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9, Clean Socks 9,
-/// and 1 each for Shrink Draught, White Coat and The Collar.
+/// and 1 each for Shrink Draught, White Coat, The Collar and Headlamp.
 ///
-/// The three new outcomes deliberately change seeded traces when they replace
-/// Heal or Nuke. Drop chance and the single word spent choosing a find stay
+/// Headlamp takes the last Medkit bucket and can change seeded traces that
+/// hit it. Drop chance and the single word spent choosing a find stay
 /// the same.
 pub const PICKUP_WEIGHT_TOTAL: u32 = 100;
 
@@ -135,6 +139,10 @@ fn pickup_from_word(word: u32, weights: &[u32; 11]) -> PickupKind {
     for (kind, &weight) in KINDS.into_iter().zip(weights) {
         let weight = u64::from(weight);
         if bucket < weight {
+            // Keep existing tuning arrays and all later bucket boundaries.
+            if kind == PickupKind::Heal && weight > 1 && bucket + 1 == weight {
+                return PickupKind::Headlamp;
+            }
             return kind;
         }
         bucket -= weight;
@@ -988,6 +996,11 @@ pub fn pickups_system(
             }
             PickupKind::TheCollar => {
                 player.buffs.collar = powerups::COLLAR_SECS;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::Headlamp => {
+                player.buffs.headlamp = powerups::HEADLAMP_SECS;
                 vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
                 sfx.0.push(Sfx::PocketFind);
             }
