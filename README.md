@@ -366,7 +366,7 @@ Custom bindings take priority. With default bindings, `P` pauses and
 | `RATRUN_CONSOLE` | `RATRUN_CONSOLE=0` disables the admin console in a build that has it. |
 | `RATRUN_CURSOR` | force the cheese cursor on/off for the session. |
 | `RATRUN_MUSIC` | `chip` plays the floor songs on the old chip oscillators, `classic` the original chiptune; the default is the 16-bit palette. |
-| `RATRUN_SMOOTH` | Edge treatment at 1× zoom: `0` (default) plain half blocks, `1` corner smoothing, `2` antialiasing, `3` xBR, `4` antialiasing with wedge glyphs, `5` xBR in exact colours. |
+| `RATRUN_SMOOTH` | Edge treatment at 1× zoom: `off` (default) plain half blocks, `xbr` (`smooth`) blended xBR, `crisp` xBR in exact colours. |
 | `RATRUN_FOREGROUND` | `1` draws the overhead parallax layer (pipes, lines, hanging things). Defaults to Off. |
 | `RATRUN_MUSIC_VOLUME`, `RATRUN_SFX_VOLUME` | pin a volume (0–100, `%` optional) for the session without writing it to your preferences. |
 

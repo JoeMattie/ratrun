@@ -2311,41 +2311,21 @@ impl World {
             self.zoom_scale = Vec2::new(ww as f32 / sw as f32, wh as f32 / sh as f32);
             self.world_buf = Some(buf);
         }
-        // At 1x (and zoomed in, where a cell covers less than two world pixels)
-        // `pb` *is* the screen picture, so the sub-cell frame is an EPX upscale
-        // of it rather than a second resample: the Scale2x corner rule rounds
-        // staircases and curves without inventing a colour, and its guards (see
-        // `subcell::smooth_into`) leave a flat floor, a thin feature, an ink
-        // mark and a lit gradient alone. With `smooth` off there is no detail
-        // frame at these zooms at all, so the frame is the half-block blit every
-        // earlier build drew, byte for byte.
+        // At 1x (and zoomed in, where a cell covers at most two world pixels)
+        // `pb` *is* the screen picture, so `Smooth::Xbr` and `Smooth::XbrCrisp`
+        // build the sub-cell frame from `pb` (`DetailFrame::xbr_from`), fitted
+        // to `grid`. With `smooth` off there is no detail frame at these zooms
+        // at all, so the frame is the half-block blit every earlier build drew,
+        // byte for byte.
         if !self.detail_live && sw > 0 && sh.is_multiple_of(2) {
             if let Some(grid) =
                 crate::render::subcell::grid_for_frame(self.subcell, z, self.smooth)
             {
                 use crate::render::subcell::Smooth;
                 let filled = match self.smooth {
-                    Smooth::Strong | Smooth::Wedge => {
-                        // Antialiasing reads the picture at world resolution:
-                        // `pb` itself when unzoomed, else the world buffer this
-                        // draw just resampled it from (zoomed in, an edge then
-                        // sits at its true place inside a cell). `Wedge` adds
-                        // the wedge glyphs and the diagonal-stroke rule.
-                        let src = match self.world_buf.as_ref() {
-                            Some(buf) if (z - 1.0).abs() >= 0.002 => buf,
-                            _ => &*pb,
-                        };
-                        let wedges = self.smooth == Smooth::Wedge;
-                        self.detail.antialias_with(self.subcell, wedges, sw, sh / 2, src, pb)
-                    }
-                    // The blended and crisp xBR fits read
-                    // the screen picture itself at every zoom; `grid` is the
-                    // grid it fits to.
-                    Smooth::Xbr | Smooth::XbrCrisp => {
-                        let crisp = self.smooth == Smooth::XbrCrisp;
-                        self.detail.xbr_from(grid, crisp, sw, sh / 2, pb)
-                    }
-                    Smooth::Epx | Smooth::Off => self.detail.smooth_from(grid, sw, sh / 2, pb),
+                    Smooth::Off => false,
+                    Smooth::Xbr => self.detail.xbr_from(grid, false, sw, sh / 2, pb),
+                    Smooth::XbrCrisp => self.detail.xbr_from(grid, true, sw, sh / 2, pb),
                 };
                 if filled {
                     self.detail_base.copy_from(pb);

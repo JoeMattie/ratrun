@@ -38,13 +38,12 @@
 //!
 //! # `XbrCrisp`: two exact colours (`cell_crisp`)
 //!
-//! The same filter read conservatively, kept for A/B. The shares are never
+//! The same filter read conservatively (`CRISP`). The shares are never
 //! turned into colours: the cell's glyph is the pattern nearest the *coverage*
 //! of its second colour, and its two colours are exact source colours.
 //!
-//! * **Contrast.** The reference's (in)equality tests are the `EDGE` test the
-//!   other 1× passes use (`differs`), so a light gradient or texture grain is
-//!   never an edge.
+//! * **Contrast.** The reference's (in)equality tests are the `EDGE` contrast
+//!   test (`differs`), so a light gradient or texture grain is never an edge.
 //! * **Stairs only.** A corner leans only where the pixel's colour carries on
 //!   along the diagonal on at least one side (the reference's `eq(PE, PG) ||
 //!   eq(PE, PC)` made a requirement), so a rectangle keeps its corners and an
@@ -76,9 +75,40 @@
 //! `xbr_sim.py` beside this file is the same pass in Python (`--crisp` for the
 //! second mode), for looking at a rule change on a captured frame.
 
-use super::{differs, dist, edge_flags, luma, Encoded, Grid, Pair, E_D, E_R};
+use super::{differs, dist, luma, Encoded, Grid};
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::Rgb;
+
+/// Per-pixel step flags: the pixel differs (by `EDGE` or `GATE`) from its right
+/// neighbour or from the one below.
+const E_R: u8 = 1;
+const E_D: u8 = 2;
+
+/// The two colours of a cell in [`cell_crisp`]. The first is the cell's top
+/// pixel; the second is the first colour met that differs from it by `EDGE`.
+struct Pair {
+    x: Rgb,
+    y: Option<Rgb>,
+}
+
+impl Pair {
+    /// Which of the two `c` is (`true` = the second), or `None` when it is a
+    /// third colour: a cell is two colours or it is left alone.
+    fn class(&mut self, c: Rgb) -> Option<bool> {
+        if c == self.x {
+            return Some(false);
+        }
+        match self.y {
+            Some(y) if c == y => Some(true),
+            _ if !differs(c, self.x) => Some(false),
+            Some(y) => (!differs(c, y)).then_some(true),
+            None => {
+                self.y = Some(c);
+                Some(true)
+            }
+        }
+    }
+}
 
 /// The reference's `eq`: two pixels are alike under this summed YUV distance.
 const EQ: u32 = 155;
@@ -165,7 +195,7 @@ fn rot(k: usize, dx: isize, dy: isize) -> (isize, isize) {
 }
 
 /// The picture with what the pass precomputes a pixel.
-pub(super) struct View<'a> {
+struct View<'a> {
     s: &'a [Rgb],
     yuv: &'a [Rgb],
     flags: &'a [u8],
@@ -176,12 +206,6 @@ pub(super) struct View<'a> {
 }
 
 impl<'a> View<'a> {
-    /// A view for the mark tests alone ([`View::bright_isolated`]): no YUV, no
-    /// edge flags.
-    pub(super) fn marks(src: &'a PixelBuffer) -> Self {
-        View { s: src.pixels(), yuv: &[], flags: &[], w: src.w, h: src.h, crisp: true }
-    }
-
     /// The pixel index at `(x + dx, y + dy)`, clamped to the picture.
     #[inline]
     fn at(&self, x: usize, y: usize, dx: isize, dy: isize) -> usize {
@@ -212,7 +236,7 @@ impl<'a> View<'a> {
 
     /// A bright or saturated sample that stands alone: a pellet, a spark, a
     /// telegraph dot.
-    pub(super) fn bright_isolated(&self, x: usize, y: usize) -> bool {
+    fn bright_isolated(&self, x: usize, y: usize) -> bool {
         let c = self.s[y * self.w + x];
         let hi = i32::from(c.0.max(c.1).max(c.2));
         let lo = i32::from(c.0.min(c.1).min(c.2));
@@ -228,7 +252,7 @@ impl<'a> View<'a> {
 
     /// A gameplay mark by the picture's own evidence: [`View::bright_isolated`],
     /// or a pixel of a one-pixel line along an axis or a 45° diagonal.
-    pub(super) fn feature(&self, x: usize, y: usize) -> bool {
+    fn feature(&self, x: usize, y: usize) -> bool {
         if self.bright_isolated(x, y) {
             return true;
         }
@@ -639,6 +663,28 @@ fn emit(pattern: u8, original: u8, grid: Grid, x: Rgb, y: Rgb) -> Option<Encoded
     } else {
         Encoded { glyph: grid.glyph(!pattern & full), fg: x, bg: y }
     })
+}
+
+/// The step flags of the crisp fit: `E_R` / `E_D` where a pixel differs from
+/// the one to its right / below by `EDGE` (`differs`).
+fn edge_flags(src: &PixelBuffer, flags: &mut Vec<u8>) {
+    let (w, h) = (src.w, src.h);
+    let s = src.pixels();
+    flags.clear();
+    flags.resize(w * h, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let mut f = 0u8;
+            if x + 1 < w && differs(s[i], s[i + 1]) {
+                f |= E_R;
+            }
+            if y + 1 < h && differs(s[i], s[i + w]) {
+                f |= E_D;
+            }
+            flags[i] = f;
+        }
+    }
 }
 
 /// The step flags of the blended fit: `E_R` / `E_D` where a pixel differs from

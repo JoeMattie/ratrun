@@ -24,38 +24,16 @@
 //! sextant numbering skips the two patterns that are `▌` and `▐`, and the
 //! octant block is not in bit order at all.
 //!
-//! At 1× (and zoomed in, where a cell covers less than two world pixels) the
-//! half-block picture is already the whole picture, so there is nothing to
-//! resample: the sub-pixels come from an **EPX / Scale2x** upscale of it
-//! instead (`smooth_into`). A corner takes the neighbour's colour only when
-//! the two adjacent neighbours agree and the opposite ones differ, so a
-//! staircase diagonal or a curve rounds off — and because the rule only ever
-//! copies an existing colour, no new colour appears. The guards (contrast
-//! threshold `EDGE`, the 1-px **thin** rule, and the identical-pair cell
-//! rule) are what keep it from touching a pellet, a whisker or a soft
-//! gradient; see `smooth_into`.
-//!
-//! That EPX pass is [`Smooth::Epx`]. Smoothing defaults to [`Smooth::Off`].
-//! [`Smooth::Xbr`]
-//! (`subcell/xbr.rs`): an xBR 2× upscale of the same picture, whose edge
-//! detection reads a radius-two neighbourhood, fitted in two colours (which
-//! may be blends) to the quadrant, sextant or octant pattern nearest it.
-//! [`Smooth::XbrCrisp`] is the same filter kept to the picture's own two
-//! colours and to stairs only, for comparison.
-//! [`Smooth::Strong`] is coverage **antialiasing** (`antialias`): a staircase
-//! between two regions is read as
-//! the straight slanted edge it stands for, each cell it crosses gets an 8 × 8
-//! coverage mask, and the cell is drawn with the block glyph nearest that mask
-//! — the **eighth blocks** (`▏▎▍▌▋▊▉`, `▁▂▃▄▅▆▇`, and their complements by
-//! swapping the two colours), the quadrants, and sextants/octants where the
-//! terminal has them. Zoomed in, the same masks are sampled from the world
-//! buffer, so an edge sits where it really is inside a cell. [`Smooth::Wedge`]
-//! (built, off by default) is the same pass with the wedge and triangle glyphs
-//! (`U+1FB3C..=U+1FB6F`, `U+25E2..=U+25E5`) as further candidates, and with
-//! one-pixel diagonal strokes drawn as a band instead of left alone.
+//! At 1× (and zoomed in, where a cell covers at most two world pixels)
+//! smoothing defaults to [`Smooth::Off`]. [`Smooth::Xbr`] (`SMOOTH`,
+//! `subcell/xbr.rs`) runs an xBR 2× upscale of the half-block picture over a
+//! radius-two neighbourhood and fits each cell's 2 × 4 block in two colours
+//! (which may be blends) to the finest quadrant, sextant or octant pattern the
+//! terminal supports. [`Smooth::XbrCrisp`] (`CRISP`) reads the same filter
+//! conservatively, on stairs only and in the picture's own two colours.
 //!
 //! **Render-only.** Nothing here reads or writes simulation state. With
-//! smoothing off (`RATRUN_SMOOTH=0`, console `smooth off`) a 1× frame is
+//! smoothing off (`RATRUN_SMOOTH=off`, console `smooth off`) a 1× frame is
 //! byte-identical to the half-block blit every earlier build drew.
 
 use ratatui::buffer::Buffer;
@@ -71,11 +49,12 @@ mod tables;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub fn canvas_masks() -> impl Iterator<Item = (char, u64)> {
     use tables::*;
-    QUADRANTS.into_iter().zip(QUAD_MASKS)
+    QUADRANTS
+        .into_iter()
+        .zip(QUAD_MASKS)
         .chain(SEXTANTS.into_iter().zip(SEXTANT_MASKS))
         .chain(OCTANTS.into_iter().zip(OCTANT_MASKS))
         .chain(EIGHTHS)
-        .chain(WEDGES)
         .filter(|&(glyph, _)| glyph != ' ')
 }
 mod xbr;
@@ -138,86 +117,63 @@ pub enum Smooth {
     /// Plain half blocks.
     #[default]
     Off,
-    /// The EPX / Scale2x corner rounding (`smooth_into`).
-    Epx,
-    /// Antialiasing with part-cell glyphs (`antialias`).
-    Strong,
     /// An xBR 2× upscale fitted to quadrants, sextants or octants in two
     /// colours that may be blends (`subcell/xbr.rs`).
     Xbr,
-    /// [`Smooth::Strong`] plus the wedge and triangle glyphs, and diagonal
-    /// one-pixel strokes drawn as a band. Needs sextants or better; on a
-    /// lesser terminal it is `Strong`.
-    Wedge,
     /// [`Smooth::Xbr`]'s filter read conservatively: stairs only, and a cell's
-    /// two colours are exact source colours. Kept for A/B.
+    /// two colours are exact source colours.
     XbrCrisp,
 }
 
 impl Smooth {
-    /// Every level, in the order the Graphics page cycles them. **One list**:
-    /// a new variant is added here (and to [`Smooth::label`]) and nowhere
-    /// else — the options page walks this slice, so it can never fall behind
-    /// the enum.
-    pub const ALL: &'static [Smooth] = &[
-        Smooth::Off,
-        Smooth::Epx,
-        Smooth::Strong,
-        Smooth::XbrCrisp,
-        Smooth::Xbr,
-        Smooth::Wedge,
-    ];
+    /// Every level, in the order the Graphics page and `S` cycle them:
+    /// `OFF` -> `SMOOTH` -> `CRISP`. **One list**: a new variant is added here
+    /// (and to [`Smooth::label`]) and nowhere else — the options page walks
+    /// this slice, so it can never fall behind the enum.
+    pub const ALL: &'static [Smooth] = &[Smooth::Off, Smooth::Xbr, Smooth::XbrCrisp];
 
     /// The word the Graphics page prints for this level. Player-facing, so it
-    /// names what the player sees (`STYLE.md`: no internal jargon — `EPX` is an
-    /// algorithm's name, not a description of the picture).
+    /// names what the player sees (`STYLE.md`: no internal jargon).
     pub fn label(self) -> &'static str {
         match self {
             Smooth::Off => "OFF",
-            Smooth::Epx => "SOFT",
-            Smooth::Strong => "SHARP",
-            Smooth::XbrCrisp => "CRISP",
             Smooth::Xbr => "SMOOTH",
-            Smooth::Wedge => "WEDGE",
+            Smooth::XbrCrisp => "CRISP",
         }
     }
 
-    /// `0`/`off`, `1`/`on`/`epx`, `2`/`strong`, `3`/`xbr`, `4`/`wedge`,
-    /// `5`/`crisp`.
+    /// `0`/`off`, `3`/`xbr`/`smooth`, `5`/`crisp`.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "0" | "off" | "false" | "no" => Smooth::Off,
-            "1" | "on" | "epx" => Smooth::Epx,
-            "2" | "strong" | "aa" => Smooth::Strong,
-            "3" | "xbr" => Smooth::Xbr,
-            "4" | "wedge" | "wedges" => Smooth::Wedge,
+            "3" | "xbr" | "smooth" => Smooth::Xbr,
             "5" | "crisp" | "xbrcrisp" | "xbr-crisp" => Smooth::XbrCrisp,
             _ => return None,
         })
     }
 
-    /// The word the console prints and accepts.
+    /// The word the console and save file print and accept.
     pub fn as_str(self) -> &'static str {
         match self {
             Smooth::Off => "off",
-            Smooth::Epx => "on",
-            Smooth::Strong => "strong",
             Smooth::Xbr => "xbr",
-            Smooth::Wedge => "wedge",
             Smooth::XbrCrisp => "crisp",
         }
     }
 }
 
-/// The 1× edge treatment for the session: `RATRUN_SMOOTH=0` pins plain half
-/// blocks, `1` the EPX rounding, `2` the antialiasing, `3` the xBR fit, `4` the
-/// antialiasing with wedges, `5` the crisp xBR fit; unset or unreadable
-/// leaves the default ([`Smooth::Off`]). The console `smooth` command and the
-/// Graphics page are the live setting; this is the session pin, and it is
-/// reported as an `Option` so the app can tell a pin from a saved preference
-/// (a pinned session is never written back over the save).
+/// The 1× edge treatment for the session: `RATRUN_SMOOTH=off` (or `0`) pins
+/// plain half blocks, `xbr` (or `smooth`, `3`) the blended xBR fit, `crisp`
+/// (or `5`) the exact-colour xBR fit; any unknown or removed mode maps to
+/// [`Smooth::Off`], while unset or empty returns `None` so the app can tell a
+/// session pin from a saved preference (a pinned session is never written back
+/// over the save).
 pub fn smooth_env() -> Option<Smooth> {
-    std::env::var("RATRUN_SMOOTH").ok().and_then(|v| Smooth::parse(&v))
+    let raw = std::env::var("RATRUN_SMOOTH").ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(Smooth::parse(&raw).unwrap_or(Smooth::Off))
 }
 
 /// [`smooth_env`], falling back to [`Smooth::Off`] when unpinned.
@@ -315,44 +271,25 @@ pub fn grid_for(set: SubcellSet, zoom: f32) -> Option<Grid> {
 }
 
 /// The grid for a whole frame: zoomed out, [`grid_for`]'s answer (the finest
-/// set the zoom can fill); at 1× and zoomed in, the grid the **smoothing**
-/// upscale (`smooth_into`) feeds — two sub-pixels across per world pixel
-/// either way, and one sub-row per world pixel at the quad grid (the vertical
-/// resolution the half-block blit already had) or two at the octant grid (the
-/// full 2 × 2 of the rule). `None` when the set is `Off` or smoothing is off.
-/// The antialiasing ([`Smooth::Strong`], [`Smooth::Wedge`]) keeps its own
-/// 8 × 8 masks, so its frame is the plain picture on the quad grid whatever the
-/// set. For [`Smooth::Xbr`] and [`Smooth::XbrCrisp`] the answer is the finest grid the 2 × 4 xBR block
-/// of a cell may be **fitted** to — the set's own, sextants included (the
-/// block's rows are weighed onto the three sextant rows); the frame that
-/// carries the ink marks under it is still the quad one
-/// ([`DetailFrame::xbr_from`]).
+/// set the zoom can fill); at 1× and zoomed in, the finest grid the 2 × 4 xBR
+/// block of a cell may be **fitted** to ([`Smooth::Xbr`] and
+/// [`Smooth::XbrCrisp`]) — the set's own, sextants included (the block's rows
+/// are weighed onto the three sextant rows), while the frame that carries the
+/// ink marks under it stays on the quad grid ([`DetailFrame::xbr_from`]).
+/// `None` when the set is `Off` or smoothing is off.
 pub fn grid_for_frame(set: SubcellSet, zoom: f32, smooth: Smooth) -> Option<Grid> {
     if let Some(g) = grid_for(set, zoom) {
         return Some(g);
     }
-    if smooth == Smooth::Off || set == SubcellSet::Off {
+    if smooth == Smooth::Off {
         return None;
     }
-    if matches!(smooth, Smooth::Strong | Smooth::Wedge) {
-        return Some(Grid::Quad);
+    match set {
+        SubcellSet::Off => None,
+        SubcellSet::Quad => Some(Grid::Quad),
+        SubcellSet::Sextant => Some(Grid::Sextant),
+        SubcellSet::Octant => Some(Grid::Octant),
     }
-    if matches!(smooth, Smooth::Xbr | Smooth::XbrCrisp) {
-        return Some(match set {
-            SubcellSet::Off => return None,
-            SubcellSet::Quad => Grid::Quad,
-            SubcellSet::Sextant => Grid::Sextant,
-            SubcellSet::Octant => Grid::Octant,
-        });
-    }
-    // A sextant grid has one and a half sub-rows per world pixel, which the
-    // 2 × 2 rule cannot fill exactly; the quad grid is the honest answer (and
-    // what the zoom ladder already picks for a sextant terminal at 1.25×).
-    Some(match set {
-        SubcellSet::Octant => Grid::Octant,
-        SubcellSet::Off => return None,
-        SubcellSet::Quad | SubcellSet::Sextant => Grid::Quad,
-    })
 }
 
 /// One encoded cell.
@@ -372,14 +309,12 @@ const FLAT_SPREAD: i32 = 28;
 /// (the same line `PixelBuffer::resample_to` draws).
 const SALIENT: u32 = 3 * 28 * 28;
 
-/// The contrast (summed over the three channels) an edge must exceed before
-/// the smoothing rule may round it. Below this the two pixels are a lit
-/// gradient or texture grain: rounding across it would band a light falloff
-/// or shimmer frame to frame, so the picture is left alone. Above it they are
-/// two regions, and the corner between them is a stair-step worth rounding.
+/// The contrast (summed over the three channels) an edge must exceed in
+/// [`Smooth::XbrCrisp`]. Below this the two pixels are a lit gradient or
+/// texture grain.
 const EDGE: i32 = 48;
 
-/// Do two pixels differ by more than `EDGE` (summed channel distance)?
+/// Do two pixels differ by at least `EDGE` (summed channel distance)?
 #[inline]
 fn differs(a: Rgb, b: Rgb) -> bool {
     (i32::from(a.0) - i32::from(b.0)).abs()
@@ -518,752 +453,9 @@ pub fn encode(px: &[Rgb], ink: u8, grid: Grid) -> Encoded {
     }
 }
 
-/// The key each encoded cell's neighbourhood falls back on when it cannot be
-/// split: a flat cell is the plain half block the old blit wrote.
-///
-/// # Smoothing (the 1× and zoomed-in picture)
-///
-/// Zoomed out, [`DetailFrame`] is fed by `PixelBuffer::resample_to`; at 1× and
-/// zoomed in the picture holds no world pixels the half-block blit does not
-/// already show, so the sub-pixels are made by an **EPX / Scale2x** upscale of
-/// it: every world pixel becomes `2 × grid.rows()/2` sub-pixels. The corner
-/// rule is EPX's: a corner takes its adjacent neighbour's colour only when
-/// those two neighbours agree and the two opposite ones differ, so a staircase
-/// diagonal or a curve rounds off — and only ever copies an *existing* colour,
-/// so no new colour appears and a cell still holds at most three.
-///
-/// Four guards keep the exactness the playfield needs. Each is a pure function
-/// of the current picture (no temporal state), so a frame cannot shimmer
-/// because the last one differed:
-///
-/// 1. **Contrast.** The rule only runs across edges that differ by at least
-///    `EDGE` summed over the channels. Two pixels either side of a lit
-///    gradient are inside that; rounding across one would band the falloff.
-/// 2. **Thin.** A pixel whose colour run is one pixel wide in either axis
-///    (both horizontal neighbours differ, or both vertical ones do, by
-///    `EDGE`) is a line — a whisker, a tail tip, a telegraph, a pellet's rim
-///    — or a lone speck. It is never modified and never copied outward as a
-///    corner colour, so a one-pixel feature cannot be thinned, thickened or
-///    erased. A *corner* of a body with like-coloured neighbours on two
-///    adjacent sides is not thin, so silhouettes still round.
-/// 3. **Identical pair.** A cell whose two world pixels are the same colour is
-///    written flat: the smoothing has nothing to round there, so flat floor
-///    costs exactly what it did before.
-/// 4. **Ink.** Ink and salience are not in this picture at all: the ink pass
-///    and the damage digits stamp the half-block buffer *after* this, and
-///    [`DetailFrame::overlay`] carries what they changed onto the sub-pixels it
-///    covers, exact colours, so a mark can never be smoothed away.
-///
-/// Returns whether it filled `dst` (the sizes must be the smoothing grid's).
-fn smooth_into(src: &PixelBuffer, dst: &mut PixelBuffer, grid: Grid, thin: &mut Vec<bool>) -> bool {
-    let rp = (grid.rows() / 2).max(1);
-    let (w, h) = (src.w, src.h);
-    if w == 0 || h == 0 || !h.is_multiple_of(2) || dst.w != w * 2 || dst.h != h * rp {
-        return false;
-    }
-    let s = src.pixels();
-    let at = |x: usize, y: usize| s[y * w + x];
-    thin.clear();
-    thin.resize(w * h, false);
-    for y in 0..h {
-        for x in 0..w {
-            let p = at(x, y);
-            let dl = x == 0 || differs(at(x - 1, y), p);
-            let dr = x + 1 == w || differs(at(x + 1, y), p);
-            let du = y == 0 || differs(at(x, y - 1), p);
-            let dd = y + 1 == h || differs(at(x, y + 1), p);
-            thin[y * w + x] = (dl && dr) || (du && dd);
-        }
-    }
-    let dw = dst.w;
-    let out = dst.pixels_mut();
-    for y in 0..h {
-        let yu = y.saturating_sub(1);
-        let yd = (y + 1).min(h - 1);
-        let row = y * rp * dw;
-        for x in 0..w {
-            let xl = x.saturating_sub(1);
-            let xr = (x + 1).min(w - 1);
-            let p = at(x, y);
-            // The cell's partner row (the other half of the same terminal
-            // cell). Identical pair, or a thin pixel: write it flat.
-            let partner = if y % 2 == 0 { (y + 1).min(h - 1) } else { y - 1 };
-            if at(x, partner) == p || thin[y * w + x] {
-                for r in 0..rp {
-                    out[row + r * dw + x * 2] = p;
-                    out[row + r * dw + x * 2 + 1] = p;
-                }
-                continue;
-            }
-            let (b, g) = (at(x, yu), at(x, yd));
-            let (d, e) = (at(xl, y), at(xr, y));
-            let f = at(xl, yd);
-            let hh = at(xr, yd);
-            let (mut c0, mut c1) = (p, p);
-            let (mut c2, mut c3) = (p, p);
-            // Upper-left: left and up agree, and each differs from the corner
-            // opposite it. `c0` is the neighbour's own colour, never a blend.
-            if !differs(d, b)
-                && differs(d, hh)
-                && differs(b, f)
-                && !thin[yu * w + xl]
-                && !thin[y * w + xl]
-            {
-                c0 = d;
-            }
-            if !differs(b, e)
-                && differs(b, f)
-                && differs(e, hh)
-                && !thin[yu * w + xr]
-                && !thin[y * w + xr]
-            {
-                c1 = e;
-            }
-            if !differs(d, g)
-                && differs(d, hh)
-                && differs(g, f)
-                && !thin[yd * w + xl]
-                && !thin[y * w + xl]
-            {
-                c2 = d;
-            }
-            if !differs(e, g)
-                && differs(e, f)
-                && differs(g, hh)
-                && !thin[yd * w + xr]
-                && !thin[y * w + xr]
-            {
-                c3 = e;
-            }
-            if rp == 1 {
-                // One sub-row a world pixel (the quad grid): the rule has no
-                // second row to land in, so the rounded half is written — the
-                // upper one where it rounded, else the lower, so a staircase
-                // rounds whichever way it steps.
-                out[row + x * 2] = if c0 != p { c0 } else { c2 };
-                out[row + x * 2 + 1] = if c1 != p { c1 } else { c3 };
-            } else {
-                for (r, (a, c)) in [(c0, c1), (c2, c3)].into_iter().enumerate() {
-                    out[row + r * dw + x * 2] = a;
-                    out[row + r * dw + x * 2 + 1] = c;
-                }
-            }
-        }
-    }
-    true
-}
-
-// ---------------------------------------------------------------------------
-// Antialiasing (`Smooth::Strong`)
-// ---------------------------------------------------------------------------
-
-/// Per-pixel flags of the antialiasing pass: the pixel differs (by `EDGE`)
-/// from its right neighbour, from the one below, and it is **thin** (the same
-/// one-pixel-wide rule as `smooth_into`'s).
-const E_R: u8 = 1;
-const E_D: u8 = 2;
-const THIN: u8 = 4;
-/// [`cut_diagonal`]'s mark: a thin pixel that is part of a diagonal stroke.
-const STROKE: u8 = 8;
-
-/// A pixel's four cut masks, by the neighbour whose colour moves in.
-const FROM_UP: usize = 0;
-const FROM_DOWN: usize = 1;
-const FROM_LEFT: usize = 2;
-const FROM_RIGHT: usize = 3;
-
-/// The longest tread a slope is read from. A longer run is a straight edge
-/// with a step at its end, and only its last few pixels lean into the step.
-const RUN_CAP: usize = 8;
-
-/// The upper half of a cell as a coverage mask (`▀`).
-const UPPER: u64 = 0x0000_0000_FFFF_FFFF;
-
-/// "Not antialiased": the cell is encoded from its pixels as before.
-const NO_CELL: Encoded = Encoded { glyph: '\0', fg: (0, 0, 0), bg: (0, 0, 0) };
-
-/// Eighth blocks in the order they are tried, by index into either half of
-/// `tables::EIGHTHS`: 4/8 first, then outward. An exact tie between two
-/// widths therefore goes to the one nearer the half block.
-const EIGHTH_ORDER: [usize; 7] = [3, 2, 4, 1, 5, 0, 6];
-
-/// How a run of edge ends. `Plain`: it stops, turns a real corner, or meets a
-/// third colour — no evidence of a slope. `First` / `Second`: it steps by
-/// exactly one pixel toward the first side (up, or left) or the second (down,
-/// or right) and carries on, which is a stair.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum End {
-    Plain,
-    First,
-    Second,
-}
-
-fn edge_flags(src: &PixelBuffer, flags: &mut Vec<u8>) {
-    let (w, h) = (src.w, src.h);
-    let s = src.pixels();
-    flags.clear();
-    flags.resize(w * h, 0);
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let p = s[i];
-            let mut f = 0u8;
-            if x + 1 < w && differs(p, s[i + 1]) {
-                f |= E_R;
-            }
-            if y + 1 < h && differs(p, s[i + w]) {
-                f |= E_D;
-            }
-            let dl = x == 0 || flags[i - 1] & E_R != 0;
-            let dr = x + 1 == w || f & E_R != 0;
-            let du = y == 0 || flags[i - w] & E_D != 0;
-            let dd = y + 1 == h || f & E_D != 0;
-            if (dl && dr) || (du && dd) {
-                f |= THIN;
-            }
-            flags[i] = f;
-        }
-    }
-}
-
-/// Cuts along horizontal edges (shallow stairs). The edge between rows `y - 1`
-/// and `y` is followed while both rows keep their colour; an end that steps one
-/// pixel up or down makes the edge a slanted line from half a pixel off at that
-/// end to level at the middle of the run (so a tread with a step at both ends,
-/// in opposite directions, is one straight line through its midpoint). A pixel
-/// is 8 × 4 samples: with `lc` the run length, the sample row next to the edge
-/// is cut for `3·lc` samples from the stepped end and the next one for `lc`.
-fn cut_horizontal(w: usize, h: usize, flags: &[u8], cuts: &mut [[u32; 4]]) {
-    let f = |x: usize, y: usize| flags[y * w + x];
-    for y in 1..h {
-        let mut x = 0;
-        while x < w {
-            if f(x, y - 1) & E_D == 0 {
-                x += 1;
-                continue;
-            }
-            let a = x;
-            let mut b = x;
-            while b + 1 < w
-                && f(b + 1, y - 1) & E_D != 0
-                && f(b, y - 1) & E_R == 0
-                && f(b, y) & E_R == 0
-            {
-                b += 1;
-            }
-            x = b + 1;
-            // `out` is the column past the end, `j` the column whose right
-            // edge is the junction between the run and it.
-            let end = |out: usize, j: usize| -> End {
-                if f(out, y - 1) & E_D != 0 {
-                    return End::Plain;
-                }
-                let (up, low) = (f(j, y - 1) & E_R != 0, f(j, y) & E_R != 0);
-                if up && !low && y >= 2 && f(j, y - 2) & E_R == 0 {
-                    End::First
-                } else if low && !up && y + 1 < h && f(j, y + 1) & E_R == 0 {
-                    End::Second
-                } else {
-                    End::Plain
-                }
-            };
-            let left = if a == 0 { End::Plain } else { end(a - 1, a - 1) };
-            let right = if b + 1 == w { End::Plain } else { end(b + 1, b) };
-            if left == right {
-                // No step at all, or a cap (both ends step the same way): the
-                // top of a curve is level, and a pellet keeps its flat sides.
-                continue;
-            }
-            let lc = (b - a + 1).min(RUN_CAP);
-            for (end, from_left) in [(left, true), (right, false)] {
-                // `First`: the lower colour rises into row `y - 1` (its bottom
-                // sample rows). `Second`: the upper one drops into row `y`.
-                let (row, other, dir, near, next) = match end {
-                    End::Plain => continue,
-                    End::First => (y - 1, y, FROM_DOWN, 3, 2),
-                    End::Second => (y, y - 1, FROM_UP, 0, 1),
-                };
-                let bits = |n: usize| -> u32 {
-                    if from_left {
-                        (1u32 << n) - 1
-                    } else {
-                        (0xFFu32 << (8 - n)) & 0xFF
-                    }
-                };
-                for i in 0..=(b - a) {
-                    let n0 = (3 * lc).saturating_sub(8 * i).min(8);
-                    if n0 == 0 {
-                        break;
-                    }
-                    let n1 = lc.saturating_sub(8 * i).min(8);
-                    let px = if from_left { a + i } else { b - i };
-                    if (f(px, row) | f(px, other)) & THIN != 0 {
-                        continue;
-                    }
-                    cuts[row * w + px][dir] |= (bits(n0) << (8 * near)) | (bits(n1) << (8 * next));
-                }
-            }
-        }
-    }
-}
-
-/// Cuts along vertical edges (steep stairs): [`cut_horizontal`] turned a
-/// quarter. The edge between columns `x - 1` and `x` leans up to four samples
-/// (half a pixel) into the left or the right pixel at a stepped end.
-fn cut_vertical(w: usize, h: usize, flags: &[u8], cuts: &mut [[u32; 4]]) {
-    let f = |x: usize, y: usize| flags[y * w + x];
-    for x in 1..w {
-        let mut y = 0;
-        while y < h {
-            if f(x - 1, y) & E_R == 0 {
-                y += 1;
-                continue;
-            }
-            let a = y;
-            let mut b = y;
-            while b + 1 < h
-                && f(x - 1, b + 1) & E_R != 0
-                && f(x - 1, b) & E_D == 0
-                && f(x, b) & E_D == 0
-            {
-                b += 1;
-            }
-            y = b + 1;
-            // `out` is the row past the end, `j` the row whose bottom edge is
-            // the junction between the run and it.
-            let end = |out: usize, j: usize| -> End {
-                if f(x - 1, out) & E_R != 0 {
-                    return End::Plain;
-                }
-                let (lf, rt) = (f(x - 1, j) & E_D != 0, f(x, j) & E_D != 0);
-                if lf && !rt && x >= 2 && f(x - 2, j) & E_D == 0 {
-                    End::First
-                } else if rt && !lf && x + 1 < w && f(x + 1, j) & E_D == 0 {
-                    End::Second
-                } else {
-                    End::Plain
-                }
-            };
-            let top = if a == 0 { End::Plain } else { end(a - 1, a - 1) };
-            let bottom = if b + 1 == h { End::Plain } else { end(b + 1, b) };
-            if top == bottom {
-                continue;
-            }
-            let lc = (b - a + 1).min(RUN_CAP);
-            for (end, from_top) in [(top, true), (bottom, false)] {
-                // `First`: the right colour leans into column `x - 1` (its
-                // rightmost samples). `Second`: the left one into column `x`.
-                let (col, other, dir) = match end {
-                    End::Plain => continue,
-                    End::First => (x - 1, x, FROM_RIGHT),
-                    End::Second => (x, x - 1, FROM_LEFT),
-                };
-                for i in 0..=(b - a) {
-                    if 16 * i + 2 >= 7 * lc {
-                        break;
-                    }
-                    let py = if from_top { a + i } else { b - i };
-                    if (f(col, py) | f(other, py)) & THIN != 0 {
-                        continue;
-                    }
-                    let mut m = 0u32;
-                    for s in 0..4usize {
-                        // Samples taken on this sample row, counted from the
-                        // edge: the line is `4·(1 - t / (lc/2))` samples in at
-                        // `t` pixels from the stepped end.
-                        let n = (0..4usize).filter(|&j| 16 * i + 4 * s + 2 < lc * (7 - 2 * j)).count();
-                        let row = if end == End::First {
-                            (0xFFu32 << (8 - n)) & 0xFF
-                        } else {
-                            (1u32 << n) - 1
-                        };
-                        let sy = if from_top { s } else { 3 - s };
-                        m |= row << (8 * sy);
-                    }
-                    cuts[py * w + col][dir] |= m;
-                }
-            }
-        }
-    }
-}
-
-/// The two colours of a cell being antialiased. The first is the cell's first
-/// pixel; the second is the first colour met that differs from it by `EDGE`.
-struct Pair {
-    x: Rgb,
-    y: Option<Rgb>,
-}
-
-impl Pair {
-    /// Which of the two `c` is (`true` = the second), or `None` when it is a
-    /// third colour: a cell is two colours or it is left alone.
-    fn class(&mut self, c: Rgb) -> Option<bool> {
-        if c == self.x {
-            return Some(false);
-        }
-        match self.y {
-            Some(y) if c == y => Some(true),
-            _ if !differs(c, self.x) => Some(false),
-            Some(y) => (!differs(c, y)).then_some(true),
-            None => {
-                self.y = Some(c);
-                Some(true)
-            }
-        }
-    }
-}
-
-/// One source pixel as 8 × 4 samples (bit `row * 8 + col`), set where the
-/// sample shows the pair's second colour: the pixel's own class, with each cut
-/// handed to the neighbour it came from.
-fn px_mask(s: &[Rgb], w: usize, cuts: &[[u32; 4]], i: usize, pair: &mut Pair) -> Option<u32> {
-    let mut m = if pair.class(s[i])? { !0u32 } else { 0 };
-    let c = cuts[i];
-    // A cut is only ever written toward a neighbour that exists, so an index
-    // that would wrap belongs to a zero cut and is never read.
-    let from = [i.wrapping_sub(w), i + w, i.wrapping_sub(1), i + 1];
-    for dir in [FROM_UP, FROM_DOWN, FROM_LEFT, FROM_RIGHT] {
-        if c[dir] != 0 {
-            if pair.class(s[from[dir]])? {
-                m |= c[dir];
-            } else {
-                m &= !c[dir];
-            }
-        }
-    }
-    Some(m)
-}
-
-/// The glyph for a cell whose samples are `m` (bit set = colour `y`, clear =
-/// colour `x`): the one whose coverage mask differs from `m` in the fewest
-/// samples. `None` when nothing beats what the cell is drawn as already — flat
-/// or the half block — so a tie keeps today's cell. The eighth blocks are tried
-/// both ways round (the glyph is the left / lower part, so the right / upper
-/// part is the same glyph with the colours swapped); a finer grid's glyph is
-/// taken only where it is strictly closer still.
-///
-/// With `wedges` set (and a terminal that has them, `has_wedges`) the wedges
-/// and triangles of `tables::WEDGES` are further candidates: each competes by
-/// the same distance, both ways round, and like every other family must be
-/// strictly closer than what the cell already has.
-fn choose_from(m: u64, x: Rgb, y: Rgb, set: SubcellSet, wedges: bool) -> Option<Encoded> {
-    let ones = m.count_ones();
-    let half = (m ^ UPPER).count_ones();
-    let mut best = ones.min(64 - ones).min(half).min(64 - half);
-    if best == 0 {
-        return None;
-    }
-    let mut out = None;
-    for k in EIGHTH_ORDER {
-        for base in [0, 7] {
-            let (glyph, gm) = tables::EIGHTHS[base + k];
-            let d = (m ^ gm).count_ones();
-            if d < best {
-                best = d;
-                out = Some(Encoded { glyph, fg: y, bg: x });
-            }
-            if 64 - d < best {
-                best = 64 - d;
-                out = Some(Encoded { glyph, fg: x, bg: y });
-            }
-        }
-    }
-    let grids: &[Grid] = match set {
-        SubcellSet::Off => &[],
-        SubcellSet::Quad => &[Grid::Quad],
-        SubcellSet::Sextant => &[Grid::Quad, Grid::Sextant],
-        SubcellSet::Octant => &[Grid::Quad, Grid::Sextant, Grid::Octant],
-    };
-    for &grid in grids {
-        // The nearest pattern of a grid is a majority vote in each sub-pixel.
-        let mut p = 0u8;
-        for b in 0..grid.subpixels() {
-            let block = grid.mask(1u8 << b);
-            if (m & block).count_ones() * 2 > block.count_ones() {
-                p |= 1u8 << b;
-            }
-        }
-        let d = (m ^ grid.mask(p)).count_ones();
-        if d < best {
-            best = d;
-            let full = ((1u16 << grid.subpixels()) - 1) as u8;
-            // The brighter colour is the foreground, as in `encode`.
-            out = Some(if luma(y) >= luma(x) {
-                Encoded { glyph: grid.glyph(p), fg: y, bg: x }
-            } else {
-                Encoded { glyph: grid.glyph(!p & full), fg: x, bg: y }
-            });
-        }
-    }
-    if wedges && has_wedges(set) {
-        for &(glyph, gm) in tables::WEDGES.iter() {
-            let d = (m ^ gm).count_ones();
-            if d < best {
-                best = d;
-                out = Some(Encoded { glyph, fg: y, bg: x });
-            }
-            if 64 - d < best {
-                best = 64 - d;
-                out = Some(Encoded { glyph, fg: x, bg: y });
-            }
-        }
-    }
-    out
-}
-
-/// A pixel's four corners as 8 × 4 sample masks: the triangle whose legs are
-/// half the pixel's sides (three samples on the row at the corner, one on the
-/// next).
-const CORNER_TL: u32 = 0x0000_0107;
-const CORNER_TR: u32 = 0x0000_80E0;
-const CORNER_BL: u32 = 0x0701_0000;
-const CORNER_BR: u32 = 0xE080_0000;
-
-/// [`Smooth::Wedge`] only: draw one-pixel **diagonal strokes** as a band.
-///
-/// A pixel is on such a stroke when all four axial neighbours differ from it
-/// (by `EDGE`) and both diagonal neighbours on one diagonal match it: a tail,
-/// a whisker, a limb drawn one pixel wide. The thin rule would leave it a row
-/// of squares touching at their corners. Here the pixel gives up its two
-/// corners off the stroke, and the two background pixels beside each joint
-/// take the corner that touches it, so consecutive squares become one band of
-/// even width with straight sides (the cut every wedge glyph is shaped for).
-///
-/// A bright or saturated isolated sample (`xbr::View::bright_isolated`: a
-/// pellet, a telegraph dot, a spark) is never such a pixel, so hostile marks
-/// stay exact; and a background pixel that is itself thin takes nothing. The
-/// stroke pixel's `THIN` flag is cleared, so the stair cuts may read it too.
-fn cut_diagonal(src: &PixelBuffer, flags: &mut [u8], cuts: &mut [[u32; 4]]) {
-    let (w, h) = (src.w, src.h);
-    if w < 3 || h < 3 {
-        return;
-    }
-    let s = src.pixels();
-    let marks = xbr::View::marks(src);
-    for y in 1..h - 1 {
-        for x in 1..w - 1 {
-            let i = y * w + x;
-            if flags[i] & THIN == 0
-                || flags[i] & (E_R | E_D) != (E_R | E_D)
-                || flags[i - 1] & E_R == 0
-                || flags[i - w] & E_D == 0
-            {
-                continue;
-            }
-            let p = s[i];
-            let down_right = !differs(p, s[i - w - 1]) && !differs(p, s[i + w + 1]);
-            let down_left = !differs(p, s[i - w + 1]) && !differs(p, s[i + w - 1]);
-            if !(down_right || down_left) || marks.bright_isolated(x, y) {
-                continue;
-            }
-            flags[i] |= STROKE;
-            // (the stroke pixel's lost corners; then, for the joint above and
-            // the joint below, the background pixel and the corner it gains.)
-            let (up_corner, down_corner, joints) = if down_right {
-                (
-                    CORNER_TR,
-                    CORNER_BL,
-                    [
-                        (i - w, FROM_DOWN, CORNER_BL),
-                        (i - 1, FROM_RIGHT, CORNER_TR),
-                        (i + 1, FROM_LEFT, CORNER_BL),
-                        (i + w, FROM_UP, CORNER_TR),
-                    ],
-                )
-            } else {
-                (
-                    CORNER_TL,
-                    CORNER_BR,
-                    [
-                        (i - w, FROM_DOWN, CORNER_BR),
-                        (i + 1, FROM_LEFT, CORNER_TL),
-                        (i - 1, FROM_RIGHT, CORNER_BR),
-                        (i + w, FROM_UP, CORNER_TL),
-                    ],
-                )
-            };
-            cuts[i][FROM_UP] |= up_corner;
-            cuts[i][FROM_DOWN] |= down_corner;
-            for (j, dir, corner) in joints {
-                // A neighbour that is thin itself (a mark, another stroke) is
-                // left whole. `THIN` is only cleared below, so the answer does
-                // not depend on the order the pixels are visited in.
-                if flags[j] & THIN == 0 {
-                    cuts[j][dir] |= corner;
-                }
-            }
-        }
-    }
-    for f in flags.iter_mut() {
-        if *f & STROKE != 0 {
-            *f &= !THIN;
-        }
-    }
-}
-
-/// `choose_from` without the wedges: the [`Smooth::Strong`] vocabulary.
-#[cfg(test)]
-fn choose(m: u64, x: Rgb, y: Rgb, set: SubcellSet) -> Option<Encoded> {
-    choose_from(m, x, y, set, false)
-}
-
-/// Can `set`'s terminal draw the wedge and triangle glyphs? The wedges sit in
-/// the sextants' Unicode block (Symbols for Legacy Computing), so a terminal
-/// known to draw sextants as geometry is taken to draw them too.
-fn has_wedges(set: SubcellSet) -> bool {
-    matches!(set, SubcellSet::Sextant | SubcellSet::Octant)
-}
-
-/// # Antialiasing (the 1× and zoomed-in picture at [`Smooth::Strong`])
-///
-/// `src` is the picture at **world** resolution: the half-block buffer itself
-/// at 1×, the larger-pixelled world buffer when zoomed in. `out` gets one entry
-/// a cell (`cols × rows`): the antialiased cell, or `NO_CELL` where the cell is
-/// to be drawn exactly as before.
-///
-/// 1. **Edges.** Two neighbouring pixels are an edge when they differ by
-///    `EDGE`, the same line the EPX pass draws, so a lit gradient or texture
-///    grain is never one.
-/// 2. **Evidence.** A straight run of edge says nothing about where the true
-///    edge lies inside a pixel, so it is left on the pixel boundary: a wall
-///    stays a clean cell boundary and a rectangle keeps its corners. Only a
-///    run that ends in a **one-pixel step** is read as a slope — the stair of
-///    run length `n` is the line of slope `1/n` through the middle of each
-///    tread — and the cut is at most half a pixel deep (`cut_horizontal`,
-///    `cut_vertical`).
-/// 3. **Thin.** A one-pixel-wide pixel is never cut and never the colour cut
-///    into a neighbour, so a whisker, a telegraph or a pellet rim is untouched.
-/// 4. **Two colours.** A cell whose samples hold a third colour is left alone.
-/// 5. **Glyph.** `choose`: least `popcount(mask ^ glyph)`, ties to today's.
-///
-/// With `wedges` ([`Smooth::Wedge`], on a terminal with sextants or better)
-/// two things are added: `cut_diagonal` runs first, so a one-pixel diagonal
-/// stroke that is not a bright mark is drawn as a band, and `choose_from` also
-/// tries the wedge and triangle glyphs.
-///
-/// Zoomed in, a cell covers part of a pixel or straddles a pixel boundary, and
-/// its 64 samples are read from the (cut) pixels under them, so a boundary that
-/// falls inside a cell is drawn where it is.
-///
-/// Every step is a function of `src` alone: no state survives a frame, so a
-/// still picture cannot flicker. Ink and damage digits are not in `src`; the
-/// cells they stamp are flagged by [`DetailFrame::overlay`] and encoded exact.
-#[allow(clippy::too_many_arguments)]
-fn antialias(
-    src: &PixelBuffer,
-    cols: usize,
-    rows: usize,
-    set: SubcellSet,
-    wedges: bool,
-    flags: &mut Vec<u8>,
-    cuts: &mut Vec<[u32; 4]>,
-    out: &mut Vec<Encoded>,
-) {
-    // Wedges need the sextants' block; without it the pass is `Strong`.
-    let wedges = wedges && has_wedges(set);
-    out.clear();
-    out.resize(cols * rows, NO_CELL);
-    let (w, h) = (src.w, src.h);
-    if w == 0 || h == 0 || cols == 0 || rows == 0 {
-        return;
-    }
-    edge_flags(src, flags);
-    cuts.clear();
-    cuts.resize(w * h, [0; 4]);
-    if wedges {
-        cut_diagonal(src, flags, cuts);
-    }
-    cut_horizontal(w, h, flags, cuts);
-    cut_vertical(w, h, flags, cuts);
-    let s = src.pixels();
-
-    if w == cols && h == rows * 2 {
-        // 1×: a cell is exactly two pixels, and only a cut can change it.
-        for cy in 0..rows {
-            for cx in 0..cols {
-                let t = cy * 2 * w + cx;
-                let b = t + w;
-                if cuts[t] == [0; 4] && cuts[b] == [0; 4] {
-                    continue;
-                }
-                let mut pair = Pair { x: s[t], y: None };
-                let Some(mt) = px_mask(s, w, cuts, t, &mut pair) else { continue };
-                let Some(mb) = px_mask(s, w, cuts, b, &mut pair) else { continue };
-                let Some(y) = pair.y else { continue };
-                let m = u64::from(mt) | (u64::from(mb) << 32);
-                if let Some(e) = choose_from(m, pair.x, y, set, wedges) {
-                    out[cy * cols + cx] = e;
-                }
-            }
-        }
-        return;
-    }
-
-    // Zoomed in: sample `(i, j)` of cell `(cx, cy)` sits at its centre,
-    // `(16·cx + 2·i + 1) / (16·cols)` of the way across `src`.
-    let (xden, yden) = (cols * 16, rows * 16);
-    for cy in 0..rows {
-        // The source row, and the sample row inside it, under each of the
-        // cell's eight sample rows.
-        let mut ys = [(0usize, 0usize); 8];
-        for (j, e) in ys.iter_mut().enumerate() {
-            let pos = (16 * cy + 2 * j + 1) * h;
-            *e = (pos / yden, pos % yden * 4 / yden);
-        }
-        let (y0, y1) = (ys[0].0, ys[7].0);
-        for cx in 0..cols {
-            let x0 = (16 * cx + 1) * w / xden;
-            let x1 = (16 * cx + 15) * w / xden;
-            if x1 - x0 > 1 || y1 - y0 > 2 {
-                continue;
-            }
-            // Flat unless a covered pixel is cut or two of them meet at an edge.
-            let mut busy = false;
-            for py in y0..=y1 {
-                for px in x0..=x1 {
-                    let i = py * w + px;
-                    busy |= cuts[i] != [0; 4]
-                        || (px < x1 && flags[i] & E_R != 0)
-                        || (py < y1 && flags[i] & E_D != 0);
-                }
-            }
-            if !busy {
-                continue;
-            }
-            let mut pair = Pair { x: s[y0 * w + x0], y: None };
-            let mut masks = [0u32; 6];
-            let mut two = true;
-            for py in y0..=y1 {
-                for px in x0..=x1 {
-                    match px_mask(s, w, cuts, py * w + px, &mut pair) {
-                        Some(m) => masks[(py - y0) * 2 + (px - x0)] = m,
-                        None => two = false,
-                    }
-                }
-            }
-            let (true, Some(y)) = (two, pair.y) else { continue };
-            let mut xs = [(0usize, 0usize); 8];
-            for (i, e) in xs.iter_mut().enumerate() {
-                let pos = (16 * cx + 2 * i + 1) * w;
-                *e = (pos / xden, pos % xden * 8 / xden);
-            }
-            let mut m = 0u64;
-            for (j, &(py, v)) in ys.iter().enumerate() {
-                for (i, &(px, u)) in xs.iter().enumerate() {
-                    if (masks[(py - y0) * 2 + (px - x0)] >> (v * 8 + u)) & 1 != 0 {
-                        m |= 1u64 << (j * 8 + i);
-                    }
-                }
-            }
-            if let Some(e) = choose_from(m, pair.x, y, set, wedges) {
-                out[cy * cols + cx] = e;
-            }
-        }
-    }
-}
-
-/// The zoomed-out picture at sub-cell resolution: `2·cols × grid.rows()·rows`
-/// pixels, plus one bit a sub-pixel for what the screen-space passes stamped.
+/// The zoomed-out or xBR-smoothed picture at sub-cell resolution:
+/// `2·cols × grid.rows()·rows` pixels, plus one bit a sub-pixel for what the
+/// screen-space passes stamped.
 pub struct DetailFrame {
     grid: Grid,
     cols: usize,
@@ -1271,16 +463,11 @@ pub struct DetailFrame {
     px: PixelBuffer,
     /// Per cell: bit `row * 2 + col` set = that sub-pixel is ink.
     ink: Vec<u8>,
-    /// The smoothing pass's per-pixel "this is a one-pixel-wide feature" flags,
-    /// held here so a smoothing frame allocates nothing.
-    thin: Vec<bool>,
-    /// The antialiasing pass's answer a cell (`NO_CELL` = encode the pixels),
-    /// empty on every other kind of frame; and its two scratch buffers (edge
-    /// flags and cut masks a source pixel), held so a frame allocates nothing.
+    /// The xBR pass's answer a cell (empty on a zoomed-out resampled frame),
+    /// and its scratch buffers (step flags and YUV triples a source pixel),
+    /// held here so a steady-state frame allocates nothing.
     aa: Vec<Encoded>,
     flags: Vec<u8>,
-    cuts: Vec<[u32; 4]>,
-    /// The xBR pass's scratch (one YUV triple a source pixel), held likewise.
     yuv: Vec<Rgb>,
 }
 
@@ -1298,10 +485,8 @@ impl DetailFrame {
             rows: 0,
             px: PixelBuffer::new(0, 0),
             ink: Vec::new(),
-            thin: Vec::new(),
             aa: Vec::new(),
             flags: Vec::new(),
-            cuts: Vec::new(),
             yuv: Vec::new(),
         }
     }
@@ -1334,49 +519,6 @@ impl DetailFrame {
         &mut self.px
     }
 
-    /// Start an antialiased frame ([`Smooth::Strong`]) of `cols × rows` cells:
-    /// the frame is `half` (the half-block picture, `cols × 2·rows`) on the
-    /// quad grid, unchanged, plus one antialiased cell wherever `antialias`
-    /// finds a slanted or sub-cell edge in `src` — the picture at world
-    /// resolution, which is `half` itself at 1× and the world buffer when
-    /// zoomed in. `set` is the finest glyph family the terminal draws. Returns
-    /// whether it filled the frame; the scratch lives here, so a steady-state
-    /// frame allocates nothing.
-    pub fn antialias_from(
-        &mut self,
-        set: SubcellSet,
-        cols: usize,
-        rows: usize,
-        src: &PixelBuffer,
-        half: &PixelBuffer,
-    ) -> bool {
-        self.antialias_with(set, false, cols, rows, src, half)
-    }
-
-    /// [`DetailFrame::antialias_from`], with the wedge glyphs and the diagonal
-    /// stroke rule when `wedges` is set ([`Smooth::Wedge`]). Where the terminal
-    /// has no sextants the two are the same frame.
-    pub fn antialias_with(
-        &mut self,
-        set: SubcellSet,
-        wedges: bool,
-        cols: usize,
-        rows: usize,
-        src: &PixelBuffer,
-        half: &PixelBuffer,
-    ) -> bool {
-        if cols == 0 || rows == 0 || half.w != cols || half.h != rows * 2 {
-            return false;
-        }
-        let px = self.begin(Grid::Quad, cols, rows);
-        for (dst, &c) in px.pixels_mut().as_chunks_mut::<2>().0.iter_mut().zip(half.pixels()) {
-            dst[0] = c;
-            dst[1] = c;
-        }
-        antialias(src, cols, rows, set, wedges, &mut self.flags, &mut self.cuts, &mut self.aa);
-        true
-    }
-
     /// Start an xBR frame ([`Smooth::Xbr`], or [`Smooth::XbrCrisp`] with
     /// `crisp`) of `cols × rows` cells from `half`, the half-block picture
     /// (`cols × 2·rows`). `fit` is the finest grid a cell may be fitted to
@@ -1384,11 +526,11 @@ impl DetailFrame {
     /// `xbr::xbr` — the plain `▀` with its own two colours wherever nothing
     /// leaned, so an untouched cell is what [`Smooth::Off`] draws,
     /// byte for byte. Underneath, the frame is the plain picture on the
-    /// **quad** grid (as for the antialiasing), which is what
-    /// [`DetailFrame::overlay`] stamps and what a stamped cell is encoded
-    /// from: a mark covers exactly the half cell it always did, whatever grid
-    /// the smoothing used. Returns whether it filled the frame; the scratch
-    /// lives here, so a steady-state frame allocates nothing.
+    /// **quad** grid, which is what [`DetailFrame::overlay`] stamps and what a
+    /// stamped cell is encoded from: a mark covers exactly the half cell it
+    /// always did, whatever grid the smoothing used. Returns whether it filled
+    /// the frame; the scratch lives here, so a steady-state frame allocates
+    /// nothing.
     pub fn xbr_from(
         &mut self,
         fit: Grid,
@@ -1406,16 +548,6 @@ impl DetailFrame {
             dst[1] = c;
         }
         xbr::xbr(half, fit, crisp, &mut self.yuv, &mut self.flags, &mut self.aa)
-    }
-
-    /// Start a smoothing frame of `cols × rows` cells on `grid` and fill it
-    /// from `src` (the half-block picture at 1x or zoomed in) with the EPX
-    /// upscale of `smooth_into`. Returns whether it filled the frame; the
-    /// scratch the rule needs lives in this frame, so a steady-state frame
-    /// allocates nothing.
-    pub fn smooth_from(&mut self, grid: Grid, cols: usize, rows: usize, src: &PixelBuffer) -> bool {
-        self.begin(grid, cols, rows);
-        smooth_into(src, &mut self.px, grid, &mut self.thin)
     }
 
     /// Carry the screen-space passes over: every half-block pixel that differs
@@ -1474,7 +606,7 @@ impl DetailFrame {
 
     /// Encode the cell at `(cx, cy)`.
     pub fn cell(&self, cx: usize, cy: usize) -> Encoded {
-        // An antialiased cell, unless a screen-space pass stamped it: ink and
+        // An xBR-fitted cell, unless a screen-space pass stamped it: ink and
         // digits are exact, so a stamped cell is encoded from its pixels.
         let at = cy * self.cols + cx;
         if self.ink[at] == 0 {
@@ -1542,11 +674,6 @@ pub fn glyph_card() -> String {
 
     row(&mut out, "half", &mut "▀▄".chars().cycle());
     row(&mut out, "quadrant", &mut (1..15u8).map(|p| Grid::Quad.glyph(p)).cycle());
-    // The 1x antialiasing's part-cell blocks: left 1/8 ..= 7/8, lower 1/8 ..= 7/8.
-    row(&mut out, "eighths", &mut tables::EIGHTHS.iter().map(|&(g, _)| g).cycle());
-    // The `smooth wedge` vocabulary: wedges and triangles. They should meet
-    // the cell's edges with no seam, like the sextants below.
-    row(&mut out, "wedges", &mut tables::WEDGES.iter().map(|&(g, _)| g).cycle());
     let _ = writeln!(out);
     row(&mut out, "sextant", &mut (1..63u8).map(|p| Grid::Sextant.glyph(p)));
     // Checkers and stripes: the patterns where a font's gaps show first.
@@ -1743,11 +870,29 @@ mod tests {
         // were stamped, whatever else is in the cell.
         let border = (14, 10, 18);
         let core = (255, 230, 200);
-        let px = [border, border, core, core, (200, 40, 40), (40, 200, 40), (90, 90, 200), (120, 120, 120)];
+        let px = [
+            border,
+            border,
+            core,
+            core,
+            (200, 40, 40),
+            (40, 200, 40),
+            (90, 90, 200),
+            (120, 120, 120),
+        ];
         let e = encode(&px, 0b0000_1111, Grid::Octant);
         assert_eq!((e.fg, e.bg), (core, border));
         // One ink colour: it is one of the two, exactly.
-        let px = [(60, 60, 60), (70, 66, 60), core, core, (64, 60, 58), (60, 60, 60), (70, 66, 60), (66, 62, 60)];
+        let px = [
+            (60, 60, 60),
+            (70, 66, 60),
+            core,
+            core,
+            (64, 60, 58),
+            (60, 60, 60),
+            (70, 66, 60),
+            (66, 62, 60),
+        ];
         let e = encode(&px, 0b0000_1100, Grid::Octant);
         assert_eq!(e.fg, core);
         assert_eq!(e.glyph, Grid::Octant.glyph(0b0000_1100));
@@ -1791,47 +936,34 @@ mod tests {
     }
 
     /// The frame grid: zoomed out it is [`grid_for`]'s answer; at 1x and zoomed
-    /// in it is the smoothing grid — the full 2x2 only where the glyph set has
-    /// two sub-rows a world pixel (octants), the 2-wide one else — and nothing
-    /// at all with smoothing off or the half-block set.
+    /// in it is the terminal's own finest grid for `Smooth::Xbr` and
+    /// `Smooth::XbrCrisp`, and `None` with smoothing off or the half-block set.
     #[test]
     fn the_frame_grid_covers_the_smoothing_zooms() {
         use SubcellSet::*;
-        let (off, epx, strong) = (Smooth::Off, Smooth::Epx, Smooth::Strong);
-        assert_eq!(grid_for_frame(Octant, 2.0, epx), Some(Grid::Octant));
-        assert_eq!(grid_for_frame(Octant, 2.0, off), Some(Grid::Octant), "zoomed out is not smoothing");
-        assert_eq!(grid_for_frame(Octant, 2.0, strong), Some(Grid::Octant));
-        assert_eq!(grid_for_frame(Sextant, 1.25, epx), Some(Grid::Quad));
+        assert_eq!(
+            grid_for_frame(Octant, 2.0, Smooth::Off),
+            Some(Grid::Octant),
+            "zoomed out is not smoothing"
+        );
         // Zoomed out the resample path is untouched by the 1x level.
-        for level in [Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp] {
+        for level in [Smooth::Off, Smooth::Xbr, Smooth::XbrCrisp] {
             assert_eq!(grid_for_frame(Octant, 2.0, level), Some(Grid::Octant));
             assert_eq!(grid_for_frame(Sextant, 1.25, level), Some(Grid::Quad));
         }
         for z in [0.5, 0.75, 1.0] {
-            assert_eq!(grid_for_frame(Octant, z, epx), Some(Grid::Octant));
-            assert_eq!(grid_for_frame(Quad, z, epx), Some(Grid::Quad));
-            assert_eq!(grid_for_frame(Sextant, z, epx), Some(Grid::Quad));
             for set in [Off, Quad, Sextant, Octant] {
-                assert_eq!(grid_for_frame(set, z, off), None, "{set:?} at {z} with smoothing off");
+                assert_eq!(
+                    grid_for_frame(set, z, Smooth::Off),
+                    None,
+                    "{set:?} at {z} with smoothing off"
+                );
             }
-            for level in [epx, strong] {
-                assert_eq!(grid_for_frame(Off, z, level), None, "half blocks: nothing to encode");
-            }
-            // The antialiasing keeps its own masks: its frame is the plain
-            // picture on the quad grid on every terminal that has one.
-            for set in [Quad, Sextant, Octant] {
-                assert_eq!(grid_for_frame(set, z, strong), Some(Grid::Quad), "{set:?} at {z}");
-                assert_eq!(grid_for_frame(set, z, Smooth::Wedge), Some(Grid::Quad), "{set:?} at {z}");
-            }
-            // The xBR block is fitted to the terminal's own finest grid,
-            // sextants included.
             for level in [Smooth::Xbr, Smooth::XbrCrisp] {
+                assert_eq!(grid_for_frame(Off, z, level), None, "half blocks: nothing to encode");
                 assert_eq!(grid_for_frame(Quad, z, level), Some(Grid::Quad));
                 assert_eq!(grid_for_frame(Sextant, z, level), Some(Grid::Sextant));
                 assert_eq!(grid_for_frame(Octant, z, level), Some(Grid::Octant));
-            }
-            for level in [Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp] {
-                assert_eq!(grid_for_frame(Off, z, level), None, "half blocks: nothing to encode");
             }
         }
     }
@@ -1839,208 +971,32 @@ mod tests {
     #[test]
     fn the_smoothing_level_reads_as_a_number_or_a_word_and_defaults_to_off() {
         assert_eq!(Smooth::default(), Smooth::Off);
+        assert_eq!(Smooth::ALL, &[Smooth::Off, Smooth::Xbr, Smooth::XbrCrisp]);
+        assert_eq!(
+            Smooth::ALL.iter().map(|s| s.label()).collect::<Vec<_>>(),
+            vec!["OFF", "SMOOTH", "CRISP"]
+        );
         for (text, want) in [
             ("0", Smooth::Off),
             ("off", Smooth::Off),
-            ("1", Smooth::Epx),
-            ("on", Smooth::Epx),
-            ("2", Smooth::Strong),
-            (" Strong ", Smooth::Strong),
+            ("false", Smooth::Off),
+            ("no", Smooth::Off),
             ("3", Smooth::Xbr),
             ("XBR", Smooth::Xbr),
-            ("4", Smooth::Wedge),
-            ("wedge", Smooth::Wedge),
+            (" smooth ", Smooth::Xbr),
             ("5", Smooth::XbrCrisp),
             ("crisp", Smooth::XbrCrisp),
+            ("xbrcrisp", Smooth::XbrCrisp),
+            ("xbr-crisp", Smooth::XbrCrisp),
         ] {
             assert_eq!(Smooth::parse(text), Some(want), "{text:?}");
         }
-        assert_eq!(Smooth::parse("lots"), None);
-        for level in
-            [Smooth::Off, Smooth::Epx, Smooth::Strong, Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp]
-        {
+        for removed in ["1", "2", "4", "on", "epx", "strong", "aa", "wedge", "wedges", "lots"] {
+            assert_eq!(Smooth::parse(removed), None, "{removed:?} must not parse");
+        }
+        for &level in Smooth::ALL {
             assert_eq!(Smooth::parse(level.as_str()), Some(level));
         }
-    }
-
-    /// A 45° stair-step between two regions, both at least two pixels thick,
-    /// rounds exactly as the EPX rule says: only the one cell the step cuts
-    /// through changes, and its corner becomes the other region's own colour.
-    #[test]
-    fn a_stair_step_rounds_into_the_expected_sub_pixels() {
-        // A above, B below, stepping down to the right.
-        let (a, b) = (A, B);
-        let mut src = PixelBuffer::new(4, 4);
-        for y in 0..4 {
-            for x in 0..4 {
-                src.plot(x, y, if x >= 3 - y { a } else { b });
-            }
-        }
-        // Octants: two sub-rows a world pixel, the full 2x2 of the rule.
-        let mut frame = DetailFrame::new();
-        assert!(frame.smooth_from(Grid::Octant, 4, 2, &src));
-        // The cell holding the step (x = 2; world rows 0 and 1): its upper
-        // sub-row is the dark region, its lower one rounds its upper-left
-        // corner to the dark region's colour.
-        let e = frame.cell(2, 0);
-        assert_eq!(
-            e,
-            Encoded { glyph: Grid::Octant.glyph(0b1110_0000), fg: a, bg: b },
-            "the step's corner should take the dark region's own colour"
-        );
-        // Every other cell is flat or exactly the half block it was.
-        assert_eq!(frame.cell(0, 0), Encoded { glyph: '▀', fg: b, bg: b });
-        assert_eq!(frame.cell(1, 0), Encoded { glyph: '▀', fg: b, bg: b });
-        assert_eq!(frame.cell(3, 0), Encoded { glyph: '▀', fg: a, bg: a });
-        assert_eq!(frame.cell(2, 1), Encoded { glyph: '▀', fg: a, bg: a });
-
-        // Quadrants: two sub-pixels across, one down — the horizontal half of
-        // the rule, which rounds the same corner in its own resolution.
-        let mut frame = DetailFrame::new();
-        assert!(frame.smooth_from(Grid::Quad, 4, 2, &src));
-        assert_eq!(
-            frame.cell(2, 0),
-            Encoded { glyph: Grid::Quad.glyph(0b1000), fg: a, bg: b }
-        );
-        assert_eq!(frame.cell(3, 0), Encoded { glyph: '▀', fg: a, bg: a });
-    }
-
-    /// A flat picture is the half-block blit: every sub-pixel is its world
-    /// pixel, every cell the plain `▀`, so flat floor costs exactly what it did.
-    #[test]
-    fn a_flat_picture_is_the_half_block_blit() {
-        let floor = (52, 48, 44);
-        let mut src = PixelBuffer::new(8, 6);
-        src.clear(floor);
-        for grid in [Grid::Quad, Grid::Octant] {
-            let mut frame = DetailFrame::new();
-            assert!(frame.smooth_from(grid, 8, 3, &src));
-            for cy in 0..3 {
-                for cx in 0..8 {
-                    assert_eq!(
-                        frame.cell(cx, cy),
-                        Encoded { glyph: '▀', fg: floor, bg: floor },
-                        "{grid:?} ({cx}, {cy})"
-                    );
-                }
-            }
-        }
-    }
-
-    /// A soft lit gradient is not an edge: nothing is rounded and no cell
-    /// needs a sub-cell glyph, so a lamp's falloff cannot band or shimmer.
-    #[test]
-    fn a_smooth_lit_gradient_emits_no_sub_cell_glyphs() {
-        let mut src = PixelBuffer::new(24, 16);
-        for y in 0..16 {
-            for x in 0..24 {
-                let v = 30 + (x * 5 + y * 3) as u8; // steps of 3-8 a pixel
-                src.plot(x, y, (v, v, v));
-            }
-        }
-        let mut frame = DetailFrame::new();
-        assert!(frame.smooth_from(Grid::Octant, 24, 8, &src));
-        for cy in 0..8 {
-            for cx in 0..24 {
-                let e = frame.cell(cx, cy);
-                assert_eq!(e.glyph, '▀', "({cx}, {cy}) took a sub-cell glyph: {e:?}");
-                assert_eq!(e.fg, src.pixel_at(cx, cy * 2));
-                assert_eq!(e.bg, src.pixel_at(cx, cy * 2 + 1));
-            }
-        }
-        // A hard *straight* edge through the same picture is not a stair-step
-        // either, and must not turn into glyphs: the rule rounds corners, not
-        // edges, so a wall or a platform keeps its exact silhouette.
-        let mut step = PixelBuffer::new(24, 16);
-        step.clear(B);
-        for y in 0..16 {
-            step.line(0, y, 11, y, A);
-        }
-        let mut frame = DetailFrame::new();
-        assert!(frame.smooth_from(Grid::Octant, 24, 8, &step));
-        for cy in 0..8 {
-            for cx in 0..24 {
-                let e = frame.cell(cx, cy);
-                assert_eq!(e.glyph, '▀', "({cx}, {cy}) took a sub-cell glyph: {e:?}");
-            }
-        }
-    }
-
-    /// A one-pixel line — a whisker, a telegraph, a bullet's rim — is never
-    /// modified and never copied outward: every line pixel keeps all its
-    /// sub-pixels, and no sub-pixel outside the line takes its colour.
-    #[test]
-    fn a_one_pixel_line_survives_the_smoothing_unchanged() {
-        let floor = (40, 44, 52);
-        let line = (255, 236, 120);
-        let (w, h) = (24usize, 16usize);
-        let mut src = PixelBuffer::new(w, h);
-        src.clear(floor);
-        // A shallow diagonal, a vertical, a horizontal and a lone speck.
-        for i in 0..12 {
-            src.plot(2 + i, 2 + i / 2, line);
-        }
-        src.line(18, 1, 18, 14, line);
-        src.line(3, 12, 14, 12, line);
-        src.plot(21, 14, line);
-        let mut is_line = vec![false; w * h];
-        for (i, &c) in src.pixels().iter().enumerate() {
-            is_line[i] = c == line;
-        }
-        for grid in [Grid::Quad, Grid::Octant] {
-            let rp = (grid.rows() / 2).max(1);
-            let mut frame = DetailFrame::new();
-            assert!(frame.smooth_from(grid, w, h / 2, &src));
-            let px = frame.pixels();
-            for y in 0..h {
-                for x in 0..w {
-                    let want = is_line[y * w + x];
-                    for r in 0..rp {
-                        for c in 0..2 {
-                            let got = px.pixel_at(x * 2 + c, y * rp + r) == line;
-                            assert_eq!(
-                                got, want,
-                                "{grid:?}: ({x}, {y}) sub-pixel ({c}, {r}) is_line={want}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// A two-by-two pellet (the smallest a body's bright core gets) is not a
-    /// stair-step: all four of its pixels keep every sub-pixel, and no floor
-    /// cell takes its colour.
-    #[test]
-    fn a_two_pixel_pellet_is_not_thinned() {
-        let floor = (44, 40, 48);
-        let pellet = (255, 120, 160);
-        let mut src = PixelBuffer::new(10, 8);
-        src.clear(floor);
-        for y in 3..5 {
-            for x in 4..6 {
-                src.plot(x, y, pellet);
-            }
-        }
-        let mut frame = DetailFrame::new();
-        assert!(frame.smooth_from(Grid::Octant, 10, 4, &src));
-        let px = frame.pixels();
-        for y in 0..8 {
-            for x in 0..10 {
-                let want = (4usize..6).contains(&x) && (3usize..5).contains(&y);
-                for r in 0..2 {
-                    for c in 0..2 {
-                        assert_eq!(
-                            px.pixel_at(x * 2 + c, y * 2 + r) == pellet,
-                            want,
-                            "({x}, {y}) sub-pixel ({c}, {r})"
-                        );
-                    }
-                }
-            }
-        }
-        assert_eq!(frame.cell(0, 0), Encoded { glyph: '▀', fg: floor, bg: floor });
     }
 
     /// At 1x the smoothed frame is still one cell wide a column and carries the
@@ -2060,16 +1016,12 @@ mod tests {
         const BORDER: Rgb = (14, 10, 18);
         const WHITE: Rgb = (255, 255, 255);
         for (set, level) in [
-            (SubcellSet::Quad, Smooth::Epx),
-            (SubcellSet::Octant, Smooth::Epx),
-            (SubcellSet::Quad, Smooth::Strong),
-            (SubcellSet::Sextant, Smooth::Strong),
-            (SubcellSet::Octant, Smooth::Strong),
             (SubcellSet::Quad, Smooth::Xbr),
             (SubcellSet::Sextant, Smooth::Xbr),
             (SubcellSet::Octant, Smooth::Xbr),
+            (SubcellSet::Quad, Smooth::XbrCrisp),
             (SubcellSet::Sextant, Smooth::XbrCrisp),
-            (SubcellSet::Sextant, Smooth::Wedge),
+            (SubcellSet::Octant, Smooth::XbrCrisp),
         ] {
             let mut w = World::new(Theme::Sewer, 7);
             let p = w.player.pos;
@@ -2092,13 +1044,9 @@ mod tests {
             w.draw(&mut pb);
             let frame = w.detail().expect("1x with smoothing: a detail frame");
             assert_eq!(frame.cells(), (120, 40));
-            // (The xBR frame carries its marks on the quad grid whatever grid
-            // the cells were fitted to.)
-            let carried = match level {
-                Smooth::Xbr | Smooth::XbrCrisp => Grid::Quad,
-                _ => grid_for_frame(set, 1.0, level).unwrap(),
-            };
-            assert_eq!(frame.grid(), carried);
+            // The xBR frame carries its marks on the quad grid whatever grid
+            // the cells were fitted to.
+            assert_eq!(frame.grid(), Grid::Quad);
 
             let mut seen = [0usize; 4];
             for y in 0..pb.h {
@@ -2286,16 +1234,16 @@ mod tests {
             // Zoomed out the loot marks are one size down (`ink::LOOT_SMALL_FROM`):
             // the coin is a solid 2x2 square and the gem one bright pixel.
             assert!(seen[0] >= 4, "{set:?}: the coin square: {seen:?}");
-            // (No pellet border here: the ink pass re-stamps hostile marks only
-            // when zoomed out, so at 1x there is none to keep.)
-            // (The small gem mark is the tier colour, not white.)
 
             // Without a set, or at 1x with the smoothing off, there is no
             // detail frame.
             w.set_zoom_instant(1.0);
             w.smooth = Smooth::Off;
             w.draw(&mut pb);
-            assert!(w.detail().is_none(), "{set:?}: 1x with smoothing off is the half-block picture");
+            assert!(
+                w.detail().is_none(),
+                "{set:?}: 1x with smoothing off is the half-block picture"
+            );
             w.set_zoom_instant(2.0);
             w.subcell = SubcellSet::Off;
             w.draw(&mut pb);
@@ -2303,47 +1251,11 @@ mod tests {
         }
     }
 
-    // ---- antialiasing (`Smooth::Strong`) ----
-
-    /// The coverage mask of any glyph the playfield can emit.
-    fn mask_of(glyph: char) -> u64 {
-        if let Some(&(_, m)) = tables::EIGHTHS.iter().find(|&&(g, _)| g == glyph) {
-            return m;
-        }
-        for grid in [Grid::Octant, Grid::Sextant] {
-            for p in 0..1u16 << grid.subpixels() {
-                if grid.glyph(p as u8) == glyph {
-                    return grid.mask(p as u8);
-                }
-            }
-        }
-        if let Some(&(_, m)) = tables::WEDGES.iter().find(|&&(g, _)| g == glyph) {
-            return m;
-        }
-        panic!("U+{:X} is not a playfield glyph", glyph as u32);
-    }
-
-    /// How many of a cell's 64 samples show `c`.
-    fn coverage(e: Encoded, c: Rgb) -> u32 {
-        let ones = mask_of(e.glyph).count_ones();
-        (if e.fg == c { ones } else { 0 }) + (if e.bg == c { 64 - ones } else { 0 })
-    }
-
-    /// An antialiased 1x frame of `src` (`cols x rows` cells).
-    fn strong(src: &PixelBuffer, set: SubcellSet) -> DetailFrame {
-        let mut frame = DetailFrame::new();
-        assert!(frame.antialias_from(set, src.w, src.h / 2, src, src));
-        frame
-    }
-
-    fn is_eighth(glyph: char) -> bool {
-        glyph != '▌' && glyph != '▄' && tables::EIGHTHS.iter().any(|&(g, _)| g == glyph)
-    }
-
     #[test]
     fn the_coverage_masks_match_the_unicode_shapes() {
-        // Eighth blocks: fourteen of them, one cell wide, `n` columns from the
-        // left or `n` rows from the bottom.
+        // Eighth blocks (kept for the web canvas rasterizer's HUD bars):
+        // fourteen of them, one cell wide, `n` columns from the left or `n`
+        // rows from the bottom.
         assert_eq!(tables::EIGHTHS.len(), 14);
         for (i, &(g, m)) in tables::EIGHTHS.iter().enumerate() {
             let mut utf8 = [0u8; 4];
@@ -2353,7 +1265,12 @@ mod tests {
             for row in 0..8u32 {
                 for col in 0..8u32 {
                     let want = if i < 7 { col < n } else { row >= 8 - n };
-                    assert_eq!(m >> (row * 8 + col) & 1 == 1, want, "U+{:X} ({col}, {row})", g as u32);
+                    assert_eq!(
+                        m >> (row * 8 + col) & 1 == 1,
+                        want,
+                        "U+{:X} ({col}, {row})",
+                        g as u32
+                    );
                 }
             }
         }
@@ -2367,12 +1284,7 @@ mod tests {
         // eight rows; the patterns the tables share have one mask.
         assert_eq!(Grid::Quad.mask(0b0001), 0x0000_0000_0F0F_0F0F, "upper left quadrant");
         assert_eq!(Grid::Quad.mask(0b1000), 0xF0F0_F0F0_0000_0000, "lower right quadrant");
-        assert_eq!(Grid::Quad.mask(0b0011), UPPER);
-        assert_eq!(mask_of('▀'), UPPER);
-        assert_eq!(mask_of('▄'), !UPPER);
-        assert_eq!(mask_of('▌'), Grid::Quad.mask(0b0101));
-        assert_eq!(mask_of('▂'), Grid::Octant.mask(0b1100_0000));
-        assert_eq!(mask_of('▆'), Grid::Octant.mask(0b1111_1100));
+        assert_eq!(Grid::Quad.mask(0b0011), 0x0000_0000_FFFF_FFFF);
         assert_eq!(Grid::Octant.mask(0b0000_0001), 0x0000_0000_0000_0F0F);
         assert_eq!(Grid::Sextant.mask(0b000001), 0x0000_0000_000F_0F0F, "three rows");
         assert_eq!(Grid::Sextant.mask(0b000100), 0x0000_000F_0F00_0000, "two rows");
@@ -2394,422 +1306,7 @@ mod tests {
         }
     }
 
-    /// The glyph chooser on masks with a known best answer.
-    #[test]
-    fn the_nearest_glyph_is_chosen_and_a_tie_keeps_the_cell() {
-        let set = SubcellSet::Quad;
-        // Exactly flat, exactly the half block: nothing to do.
-        assert_eq!(choose(0, A, B, set), None);
-        assert_eq!(choose(!0, A, B, set), None);
-        assert_eq!(choose(UPPER, A, B, set), None);
-        assert_eq!(choose(!UPPER, A, B, set), None);
-        // The left five eighths in the second colour: `▋` with it in front.
-        let left5 = tables::EIGHTHS[4].1;
-        assert_eq!(choose(left5, A, B, set), Some(Encoded { glyph: '▋', fg: B, bg: A }));
-        // The right three eighths: the same glyph, colours swapped.
-        assert_eq!(choose(!left5, A, B, set), Some(Encoded { glyph: '▋', fg: A, bg: B }));
-        // The bottom quarter, and everything but it.
-        let low2 = tables::EIGHTHS[8].1;
-        assert_eq!(choose(low2, A, B, set), Some(Encoded { glyph: '▂', fg: B, bg: A }));
-        assert_eq!(choose(!low2, A, B, set), Some(Encoded { glyph: '▂', fg: A, bg: B }));
-        // Half of the bottom row: as near flat as the one-eighth block, so the
-        // cell stays what it was.
-        assert_eq!(choose(0x0F00_0000_0000_0000, A, B, set), None);
-        // A quadrant shape picks the quadrant, brighter colour in front.
-        let ll = Grid::Quad.mask(0b0100);
-        assert_eq!(choose(ll, B, A, set), Some(Encoded { glyph: '▖', fg: A, bg: B }));
-        assert_eq!(choose(ll, A, B, set), Some(Encoded { glyph: '▜', fg: A, bg: B }));
-        // An octant shape is only reachable where the terminal has octants.
-        let o = Grid::Octant.mask(0b0100_0001);
-        let e = choose(o, B, A, SubcellSet::Octant).expect("an octant");
-        assert_eq!(e, Encoded { glyph: Grid::Octant.glyph(0b0100_0001), fg: A, bg: B });
-        assert_ne!(choose(o, B, A, SubcellSet::Quad), Some(e));
-    }
-
-    /// A long shallow stair between two flat colours becomes a straight slanted
-    /// edge: along every tread the lower colour's share of the column falls
-    /// steadily, in steps smaller than the half cell the stair jumped by, and
-    /// the cells that carry it are eighth blocks.
-    #[test]
-    fn a_shallow_stair_becomes_a_straight_slanted_edge() {
-        for run in [4usize, 8] {
-            let (w, h) = (run * 8, 24usize);
-            let mut src = PixelBuffer::new(w, h);
-            for y in 0..h {
-                for x in 0..w {
-                    src.plot(x as i32, y as i32, if y >= 6 + x / run { B } else { A });
-                }
-            }
-            for set in [SubcellSet::Quad, SubcellSet::Sextant, SubcellSet::Octant] {
-                let frame = strong(&src, set);
-                let column = |x: usize| -> u32 {
-                    (0..h / 2).map(|cy| coverage(frame.cell(x, cy), B)).sum()
-                };
-                let mut eighths = 0;
-                let mut distinct = std::collections::BTreeSet::new();
-                for x in 0..w {
-                    let (here, plain) = (column(x), ((h - 6 - x / run) * 32) as u32);
-                    assert!(
-                        here.abs_diff(plain) <= 16,
-                        "run {run} {set:?}: column {x} moved more than half a pixel: {here} vs {plain}"
-                    );
-                    distinct.insert(here);
-                    if x + 1 < w {
-                        let next = column(x + 1);
-                        assert!(next <= here, "run {run} {set:?}: not monotonic at {x}: {here} -> {next}");
-                        assert!(here - next < 32, "run {run} {set:?}: a whole step survives at {x}");
-                    }
-                    for cy in 0..h / 2 {
-                        let e = frame.cell(x, cy);
-                        eighths += usize::from(is_eighth(e.glyph));
-                        let mut utf8 = [0u8; 4];
-                        assert_eq!(e.glyph.encode_utf8(&mut utf8).cell_width(), 1);
-                    }
-                }
-                assert!(eighths >= 12, "run {run} {set:?}: only {eighths} eighth-block cells");
-                assert!(distinct.len() > 8 + 4, "run {run} {set:?}: {} levels for 8 treads", distinct.len());
-            }
-        }
-    }
-
-    /// The same stair turned a quarter: a steep edge leans with left blocks.
-    #[test]
-    fn a_steep_stair_leans_with_left_blocks() {
-        let (w, h) = (24usize, 32usize);
-        let mut src = PixelBuffer::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                src.plot(x as i32, y as i32, if x >= 6 + y / 4 { B } else { A });
-            }
-        }
-        let frame = strong(&src, SubcellSet::Quad);
-        let row = |cy: usize| -> u32 { (0..w).map(|x| coverage(frame.cell(x, cy), B)).sum() };
-        let mut left = 0;
-        for cy in 0..h / 2 {
-            if cy + 1 < h / 2 {
-                assert!(row(cy + 1) <= row(cy), "not monotonic at row {cy}");
-                assert!(row(cy) - row(cy + 1) < 64, "a whole step survives at row {cy}");
-            }
-            for x in 0..w {
-                let g = frame.cell(x, cy).glyph;
-                left += usize::from(tables::EIGHTHS[..7].iter().any(|&(e, _)| e == g) && g != '▌');
-            }
-        }
-        assert!(left >= 8, "only {left} left-block cells");
-    }
-
-    /// Zoomed in, a world pixel is wider than a cell and its boundary can fall
-    /// inside one: two world pixels across three cells put it in the middle of
-    /// the second, which is the 4/8 block; with eight cells to three pixels it
-    /// falls a third of the way into a cell, which is the 3/8 block.
-    #[test]
-    fn a_boundary_inside_a_cell_picks_the_block_at_its_position() {
-        let mut src = PixelBuffer::new(2, 4);
-        for y in 0..4 {
-            src.plot(0, y, A);
-            src.plot(1, y, B);
-        }
-        let mut half = PixelBuffer::new(3, 6);
-        src.resample_to(&mut half);
-        let mut frame = DetailFrame::new();
-        assert!(frame.antialias_from(SubcellSet::Quad, 3, 3, &src, &half));
-        for cy in 0..3 {
-            assert_eq!(frame.cell(0, cy), Encoded { glyph: '▀', fg: A, bg: A });
-            assert_eq!(frame.cell(1, cy), Encoded { glyph: '▌', fg: A, bg: B }, "row {cy}");
-            assert_eq!(frame.cell(2, cy), Encoded { glyph: '▀', fg: B, bg: B });
-        }
-
-        // Three world pixels (A A B) across eight cells: the boundary is at
-        // 16/3 cells, a third of the way into cell 5.
-        let mut src = PixelBuffer::new(3, 6);
-        for y in 0..6 {
-            src.plot(0, y, A);
-            src.plot(1, y, A);
-            src.plot(2, y, B);
-        }
-        let mut half = PixelBuffer::new(8, 16);
-        src.resample_to(&mut half);
-        let mut frame = DetailFrame::new();
-        assert!(frame.antialias_from(SubcellSet::Quad, 8, 8, &src, &half));
-        for cy in 0..8 {
-            let e = frame.cell(5, cy);
-            assert_eq!(e, Encoded { glyph: '▍', fg: A, bg: B }, "row {cy}");
-            assert_eq!(frame.cell(4, cy).glyph, '▀');
-            assert_eq!(frame.cell(6, cy).glyph, '▀');
-        }
-    }
-
-    /// Flat floor, a lit gradient, a straight wall edge on or off a cell
-    /// boundary and a rectangle's corners carry no evidence of a slope: no cell
-    /// is antialiased, so the frame is the cells it always was.
-    #[test]
-    fn flat_gradient_and_straight_edges_emit_no_part_cell_glyphs() {
-        let mut flat = PixelBuffer::new(24, 16);
-        flat.clear((52, 48, 44));
-        let mut gradient = PixelBuffer::new(24, 16);
-        for y in 0..16 {
-            for x in 0..24 {
-                let v = 30 + (x * 5 + y * 3) as u8;
-                gradient.plot(x, y, (v, v, v));
-            }
-        }
-        let mut wall = PixelBuffer::new(24, 16);
-        wall.clear(B);
-        wall.rect_fill(0, 0, 11, 16, A); // a vertical edge
-        wall.rect_fill(0, 0, 24, 5, A); // a horizontal one, mid-cell, and their corner
-        let mut boxes = PixelBuffer::new(24, 16);
-        boxes.clear(B);
-        boxes.rect_fill(3, 3, 6, 6, A);
-        boxes.rect_fill(13, 6, 7, 5, A);
-        for (name, src) in [("flat", &flat), ("gradient", &gradient), ("wall", &wall), ("boxes", &boxes)] {
-            for set in [SubcellSet::Quad, SubcellSet::Octant] {
-                let frame = strong(src, set);
-                assert!(
-                    frame.aa.iter().all(|e| e.glyph == '\0'),
-                    "{name} {set:?}: a cell was antialiased"
-                );
-                for cy in 0..8 {
-                    for cx in 0..24 {
-                        let e = frame.cell(cx, cy);
-                        assert!(e.glyph == '▀' || e.glyph == '▄', "{name} ({cx}, {cy}): {e:?}");
-                        assert_eq!(coverage(e, src.pixel_at(cx, cy * 2)), if e.fg == e.bg { 64 } else { 32 });
-                    }
-                }
-            }
-        }
-        // The flat and gradient frames are the half-block blit, cell for cell.
-        for src in [&flat, &gradient] {
-            let frame = strong(src, SubcellSet::Octant);
-            for cy in 0..8 {
-                for cx in 0..24 {
-                    let want = Encoded { glyph: '▀', fg: src.pixel_at(cx, cy * 2), bg: src.pixel_at(cx, cy * 2 + 1) };
-                    assert_eq!(frame.cell(cx, cy), want);
-                }
-            }
-        }
-    }
-
-    /// One-pixel lines, a lone speck and a two-by-two pellet are never cut and
-    /// never cut into the floor beside them.
-    #[test]
-    fn thin_features_and_a_pellet_are_not_antialiased() {
-        let floor = (40, 44, 52);
-        let line = (255, 236, 120);
-        let mut src = PixelBuffer::new(24, 16);
-        src.clear(floor);
-        for i in 0..12 {
-            src.plot(2 + i, 2 + i / 2, line);
-        }
-        src.line(18, 1, 18, 14, line);
-        src.line(3, 12, 14, 12, line);
-        src.plot(21, 14, line);
-        let mut pellet = PixelBuffer::new(24, 16);
-        pellet.clear(floor);
-        pellet.rect_fill(4, 3, 2, 2, (255, 120, 160));
-        pellet.rect_fill(11, 6, 2, 2, (255, 120, 160));
-        for (name, src) in [("lines", &src), ("pellet", &pellet)] {
-            let frame = strong(src, SubcellSet::Octant);
-            assert!(frame.aa.iter().all(|e| e.glyph == '\0'), "{name}: a cell was antialiased");
-            // So every pixel is still shown, whole, in its own colour.
-            for y in 0..16 {
-                for x in 0..24 {
-                    let (e, c) = (frame.cell(x, y / 2), src.pixel_at(x, y));
-                    let shown = if mask_of(e.glyph) >> (y % 2 * 32) & 1 == 1 { e.fg } else { e.bg };
-                    assert_eq!(shown, c, "{name} ({x}, {y})");
-                }
-            }
-        }
-    }
-
-    /// A stamped mark wins its cell even where the antialiasing had cut it: the
-    /// overlay's cells are encoded from their pixels, exact.
-    #[test]
-    fn a_stamped_mark_overrides_an_antialiased_cell() {
-        let mut src = PixelBuffer::new(32, 16);
-        for y in 0..16 {
-            for x in 0..32 {
-                src.plot(x, y, if y >= 5 + x / 4 { B } else { A });
-            }
-        }
-        let mut frame = strong(&src, SubcellSet::Quad);
-        let cut: Vec<usize> = (0..frame.aa.len()).filter(|&i| frame.aa[i].glyph != '\0').collect();
-        assert!(!cut.is_empty());
-        let mark = (255, 255, 255);
-        let mut after = PixelBuffer::new(32, 16);
-        after.copy_from(&src);
-        for &i in &cut {
-            after.plot((i % 32) as i32, (i / 32 * 2) as i32, mark);
-        }
-        frame.overlay(&src, &after);
-        for &i in &cut {
-            let e = frame.cell(i % 32, i / 32);
-            assert!(e.fg == mark || e.bg == mark, "cell {i}: the mark became {e:?}");
-            assert!(e.glyph == '▀' || e.glyph == '▄', "cell {i}: {e:?}");
-        }
-    }
-
-    /// No temporal state: a picture's glyphs do not depend on what the frame
-    /// held before it.
-    #[test]
-    fn the_same_picture_always_yields_the_same_glyphs() {
-        let stair = |run: usize| {
-            let mut src = PixelBuffer::new(32, 16);
-            for y in 0..16 {
-                for x in 0..32 {
-                    src.plot(x as i32, y as i32, if y >= 4 + x / run { B } else { A });
-                }
-            }
-            src
-        };
-        let (one, two) = (stair(4), stair(2));
-        let fresh = strong(&one, SubcellSet::Octant).aa.clone();
-        assert!(fresh.iter().any(|e| e.glyph != '\0'));
-        let mut frame = DetailFrame::new();
-        for src in [&one, &two, &one, &one] {
-            assert!(frame.antialias_from(SubcellSet::Octant, 32, 8, src, src));
-        }
-        assert!(frame.aa == fresh, "the frame remembered an earlier picture");
-        // And a zoomed-out or EPX frame afterwards holds no stale answer.
-        assert!(frame.smooth_from(Grid::Quad, 32, 8, &one));
-        assert!(frame.aa.is_empty());
-    }
-
-    /// The antialiased frame goes to the terminal as ordinary one-cell glyphs.
-    #[test]
-    fn an_antialiased_frame_renders_one_glyph_a_cell() {
-        let mut src = PixelBuffer::new(32, 16);
-        for y in 0..16 {
-            for x in 0..32 {
-                src.plot(x, y, if y >= 4 + x / 8 { B } else { A });
-            }
-        }
-        let frame = strong(&src, SubcellSet::Sextant);
-        let area = Rect::new(0, 0, 32, 8);
-        let mut buf = Buffer::empty(area);
-        frame.render_to(area, &mut buf);
-        let mut part = 0;
-        for cy in 0..8u16 {
-            for cx in 0..32u16 {
-                let cell = &buf[(cx, cy)];
-                assert_eq!(cell.symbol().cell_width(), 1);
-                assert_eq!(cell.symbol().chars().count(), 1);
-                part += usize::from(is_eighth(cell.symbol().chars().next().unwrap()));
-            }
-        }
-        assert!(part >= 4, "{part} eighth-block cells reached the buffer");
-    }
-
-    // ---- wedges (`Smooth::Wedge`) ----
-
-    fn is_wedge(glyph: char) -> bool {
-        tables::WEDGES.iter().any(|&(g, _)| g == glyph)
-    }
-
-    /// An antialiased 1x frame of `src` with the wedge rules asked for.
-    fn wedged(src: &PixelBuffer, set: SubcellSet) -> DetailFrame {
-        let mut frame = DetailFrame::new();
-        assert!(frame.antialias_with(set, true, src.w, src.h / 2, src, src));
-        frame
-    }
-
-    #[test]
-    fn the_wedge_table_is_one_polarity_of_twenty_eight_shapes() {
-        assert_eq!(tables::WEDGES.len(), 28);
-        let mut seen: Vec<u64> = Vec::new();
-        for &(g, m) in tables::WEDGES.iter() {
-            assert_eq!(g.to_string().as_str().cell_width(), 1, "U+{:X}", g as u32);
-            let cp = g as u32;
-            assert!(
-                (0x1FB3C..=0x1FB6F).contains(&cp) || (0x25E2..=0x25E5).contains(&cp),
-                "U+{cp:X} is not a wedge or a triangle"
-            );
-            assert!(m != 0 && m != !0, "U+{cp:X} is flat");
-            assert!(!seen.contains(&m) && !seen.contains(&!m), "U+{cp:X} repeats a shape");
-            seen.push(m);
-            // No wedge is a shape the block families already draw.
-            assert!(tables::EIGHTHS.iter().all(|&(_, e)| e != m && e != !m));
-            assert!((0..64u8).all(|p| Grid::Sextant.mask(p) != m));
-        }
-        // Known points: the lower-left wedge to the lower centre covers the
-        // bottom-left corner and nothing of the top row; `◢` is the half of the
-        // cell below the rising diagonal.
-        let small = tables::WEDGES.iter().find(|&&(g, _)| g == '\u{1FB3C}').unwrap().1;
-        assert!(small >> 56 & 1 == 1 && small & 0xFF == 0 && small.count_ones() < 8);
-        let tri = tables::WEDGES.iter().find(|&&(g, _)| g == '\u{25E2}').unwrap().1;
-        assert!(tri >> 63 & 1 == 1 && tri & 1 == 0 && (28..=36).contains(&tri.count_ones()));
-    }
-
-    #[test]
-    fn a_wedge_competes_by_distance_and_must_be_strictly_closer() {
-        let set = SubcellSet::Sextant;
-        for &(g, m) in tables::WEDGES.iter() {
-            // Its own shape picks it, either way round.
-            assert_eq!(choose_from(m, A, B, set, true), Some(Encoded { glyph: g, fg: B, bg: A }));
-            assert_eq!(choose_from(!m, A, B, set, true), Some(Encoded { glyph: g, fg: A, bg: B }));
-            // Not asked for, or no sextants: never a wedge.
-            for (set, wedges) in [(set, false), (SubcellSet::Quad, true)] {
-                let e = choose_from(m, A, B, set, wedges);
-                assert!(e.is_none_or(|e| !is_wedge(e.glyph)), "U+{:X}: {e:?}", g as u32);
-            }
-        }
-        // A shape a block already draws exactly stays that block.
-        let left5 = tables::EIGHTHS[4].1;
-        assert_eq!(choose_from(left5, A, B, set, true), choose(left5, A, B, set));
-        assert_eq!(choose_from(UPPER, A, B, set, true), None);
-    }
-
-    /// A clean 45° edge between two regions is drawn with wedges where the
-    /// terminal has them, and is exactly the `Strong` frame where it does not.
-    #[test]
-    fn a_clean_diagonal_edge_picks_wedges_and_falls_back_without_sextants() {
-        let mut src = PixelBuffer::new(32, 24);
-        for y in 0..24 {
-            for x in 0..32 {
-                src.plot(x, y, if y >= 4 + x { B } else { A });
-            }
-        }
-        for set in [SubcellSet::Sextant, SubcellSet::Octant] {
-            let frame = wedged(&src, set);
-            let wedges = frame.aa.iter().filter(|e| is_wedge(e.glyph)).count();
-            assert!(wedges >= 8, "{set:?}: {wedges} wedge cells along the diagonal");
-            for e in frame.aa.iter().filter(|e| e.glyph != '\0') {
-                assert!((e.fg == A && e.bg == B) || (e.fg == B && e.bg == A), "{e:?}");
-            }
-            // And the plain antialiasing never uses one.
-            assert!(strong(&src, set).aa.iter().all(|e| !is_wedge(e.glyph)));
-        }
-        let (with, without) = (wedged(&src, SubcellSet::Quad), strong(&src, SubcellSet::Quad));
-        assert!(with.aa == without.aa, "without sextants `wedge` must be `strong`");
-    }
-
-    /// A dull one-pixel diagonal stroke becomes a band of wedges; a bright one
-    /// (a telegraph, a pellet trail) and the axis-aligned lines stay exact.
-    #[test]
-    fn a_dull_diagonal_stroke_is_drawn_as_a_band_and_a_bright_one_is_not() {
-        let floor = (40, 44, 52);
-        let line = |c: Rgb| {
-            let mut src = PixelBuffer::new(24, 24);
-            src.clear(floor);
-            for i in 2..20 {
-                src.plot(i, i, c);
-            }
-            src.line(22, 2, 22, 20, c);
-            src
-        };
-        let dull = wedged(&line((120, 90, 70)), SubcellSet::Sextant);
-        let wedges = dull.aa.iter().filter(|e| is_wedge(e.glyph)).count();
-        assert!(wedges >= 16, "{wedges} wedge cells along the stroke");
-        // The upright line beside it is still thin: column 22 is untouched.
-        for cy in 0..12 {
-            assert_eq!(dull.aa[cy * 24 + 22].glyph, '\0', "row {cy}");
-        }
-        let bright = wedged(&line((255, 236, 120)), SubcellSet::Sextant);
-        assert!(bright.aa.iter().all(|e| e.glyph == '\0'), "a bright stroke was redrawn");
-        // `Strong` leaves both alone.
-        assert!(strong(&line((120, 90, 70)), SubcellSet::Sextant).aa.iter().all(|e| e.glyph == '\0'));
-    }
-
-    // ---- xBR (`Smooth::Xbr`): the frame around `xbr.rs`'s own tests ----
+    // ---- xBR (`Smooth::Xbr` and `Smooth::XbrCrisp`) ----
 
     fn xbr_frame(src: &PixelBuffer, fit: Grid, crisp: bool) -> DetailFrame {
         let mut frame = DetailFrame::new();
@@ -2832,7 +1329,11 @@ mod tests {
         bands.clear(A);
         bands.rect_fill(0, 5, 32, 9, B);
         bands.rect_fill(0, 19, 32, 2, (200, 60, 60));
-        for (name, src, crisp) in [("rects", &rects, true), ("bands", &bands, true), ("bands", &bands, false)] {
+        for (name, src, crisp) in [
+            ("rects", &rects, true),
+            ("bands", &bands, true),
+            ("bands", &bands, false),
+        ] {
             for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
                 let frame = xbr_frame(src, fit, crisp);
                 assert_eq!(frame.grid(), Grid::Quad);
@@ -2910,9 +1411,10 @@ mod tests {
     #[test]
     fn the_glyph_card_names_every_set() {
         let card = glyph_card();
-        for label in ["half", "quadrant", "wedges", "sextant", "octant", "RATRUN_SUBCELL", "always on"] {
+        for label in ["half", "quadrant", "sextant", "octant", "RATRUN_SUBCELL", "always on"] {
             assert!(card.contains(label), "{label}");
         }
+        assert!(!card.contains("wedges") && !card.contains("eighths"));
         assert!(card.contains('\u{1FB00}') && card.contains('\u{1CD00}') && card.contains('▚'));
     }
 }

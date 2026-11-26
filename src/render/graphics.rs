@@ -405,7 +405,7 @@ mod tests {
         GraphicsView {
             lighting: LightingMode::Full,
             fx: true,
-            smooth: Smooth::Strong,
+            smooth: Smooth::Xbr,
             foreground: true,
             glyphfx: true,
             shake_scale: crate::game::world::SHAKE_SCALE,
@@ -475,7 +475,7 @@ mod tests {
         let v = view(LIGHTING_ROW);
         assert_eq!(value_text(&v, Row::Lighting), "FULL");
         assert_eq!(value_text(&v, Row::Fx), "ON");
-        assert_eq!(value_text(&v, Row::Smooth), "SHARP");
+        assert_eq!(value_text(&v, Row::Smooth), "SMOOTH");
         assert_eq!(value_text(&v, Row::Foreground), "ON");
         assert_eq!(value_text(&v, Row::GlyphFx), "ON");
         assert_eq!(value_text(&v, Row::Shake), "65%");
@@ -507,10 +507,13 @@ mod tests {
     fn the_smoothing_row_does_not_print_an_algorithm_name() {
         for level in Smooth::ALL {
             let label = level.label();
-            assert!(!label.contains("EPX"), "{label}");
+            assert!(!label.contains("XBR"), "{label}");
             assert!(label.chars().all(|c| c.is_ascii_uppercase() || c == ' '));
         }
-        assert_eq!(Smooth::label(Smooth::Off), "OFF");
+        assert_eq!(
+            Smooth::ALL.iter().map(|s| s.label()).collect::<Vec<_>>(),
+            vec!["OFF", "SMOOTH", "CRISP"]
+        );
     }
 
     /// Left and right both reach every value and come back: the row can never
@@ -555,7 +558,7 @@ mod tests {
     }
 
     /// The selected row's note explains the setting, and the note changes with
-    /// the selection, so a player who does not know what "SOFT" means can find
+    /// the selection, so a player who does not know what "CRISP" means can find
     /// out without leaving the page.
     #[test]
     fn the_note_follows_the_selected_row() {
