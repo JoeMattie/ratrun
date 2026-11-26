@@ -147,6 +147,7 @@ def main(manifest: str, output: str = str(OUTPUT)):
             }
             atomic_write(directory / f"{key}.receipt", json.dumps(receipt).encode())
             del remaining[key]
-        pending = list(remaining.values())
+        pending = [job for job in remaining.values()
+                   if not (directory / f"{job['id']}.receipt").exists()]
     if pending:
         raise RuntimeError(f"{len(pending)} incomplete shards in {directory}")
