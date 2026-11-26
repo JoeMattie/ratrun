@@ -3260,6 +3260,75 @@ mod tests {
         assert_eq!(burst, 1, "exactly one release burst");
     }
 
+    /// Everything a held body spawns is on the body: the glue board's two vfx
+    /// edges (the grab and the tear-free) take world positions from the sim,
+    /// so a held body may only ever leave finite particles, shockwaves and
+    /// stains within a few pixels of itself. (A body pinned on the pad has a
+    /// zero velocity for the whole hold, so anything aimed along its velocity
+    /// would degenerate here.)
+    ///
+    /// The drawing half of the same complaint — a strand anchored on a screen
+    /// fixed point instead of on the body — is covered by
+    /// `art_traps::tests::a_stuck_board_draws_its_strands_on_the_board_at_any_camera`.
+    #[test]
+    fn a_held_body_only_ever_spawns_particles_on_itself() {
+        let mut w = open_arena(211);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        // Far enough away that the rat never shares the pad.
+        w.player.pos = c + Vec2::new(300.0, 0.0);
+        let body = add_enemy(&mut w, EnemyKind::Skitterer, c, 400.0);
+
+        // A small body's hold is 2.5 s: 200 ticks carry the catch, the whole
+        // hold and the tear-free, so both vfx edges fire inside this loop.
+        let mut edges = 0usize;
+        for tick in 0..200 {
+            w.sfx.clear();
+            traps_tick(&mut w, Vec2::ZERO, false);
+            edges += sfx_count(&w, Sfx::TrapGlueGrab) + sfx_count(&w, Sfx::TrapGlueRelease);
+            let at = enemy_of(&mut w, body).pos;
+            for p in w.particles.items.iter() {
+                assert!(
+                    p.pos.x.is_finite() && p.pos.y.is_finite(),
+                    "tick {tick}: a particle spawned with a non-finite position {:?}",
+                    p.pos,
+                );
+                assert!(
+                    p.pos.dist(at) <= 32.0,
+                    "tick {tick}: a particle spawned {} px from the held body",
+                    p.pos.dist(at),
+                );
+            }
+            for sw in w.particles.shockwaves.iter() {
+                assert!(
+                    sw.pos.x.is_finite() && sw.pos.y.is_finite(),
+                    "tick {tick}: a shockwave spawned with a non-finite position",
+                );
+                assert!(
+                    sw.pos.dist(at) <= 32.0,
+                    "tick {tick}: a shockwave spawned {} px from the held body",
+                    sw.pos.dist(at),
+                );
+            }
+            for st in w.particles.stains.iter() {
+                assert!(
+                    st.pos.x.is_finite() && st.pos.y.is_finite(),
+                    "tick {tick}: a stain spawned with a non-finite position",
+                );
+                assert!(
+                    st.pos.dist(at) <= 32.0,
+                    "tick {tick}: a stain spawned {} px from the held body",
+                    st.pos.dist(at),
+                );
+            }
+            if board_state(&w, 0) == StickyTrapState::Idle && tick > 10 {
+                break;
+            }
+        }
+        assert!(!w.particles.is_empty(), "the trap burst nothing at all");
+        assert_eq!(edges, 2, "one grab and one tear-free, got {edges}");
+    }
+
     /// A dash tears the glue with the release edge (not with a grab).
     #[test]
     fn a_dash_break_plays_the_tear_free_release() {
