@@ -1094,10 +1094,10 @@ pub static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "smooth",
-        aliases: &["epx"],
-        usage: "smooth [off|on|strong|xbr|wedge|crisp]",
-        summary: "Set the 1x edge smoothing: off, on (rounding), strong (antialiasing), xbr, wedge or crisp.",
-        args: &[ArgKind::Words(&["off", "on", "strong", "xbr", "wedge", "crisp"])],
+        aliases: &[],
+        usage: "smooth [off|xbr|crisp]",
+        summary: "Set the 1x edge smoothing: off, xbr (smooth) or crisp.",
+        args: &[ArgKind::Words(&["off", "xbr", "crisp"])],
         read_only: true,
         handler: cmd_smooth,
     },
@@ -2339,9 +2339,7 @@ fn cmd_smooth(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
         None if app.smooth_enabled() => Smooth::Off,
         None => Smooth::Xbr,
         Some(word) => Smooth::parse(word)
-            .ok_or_else(|| {
-                format!("expected off, on, strong, xbr, wedge or crisp, got `{word}`")
-            })?,
+            .ok_or_else(|| format!("expected off, xbr or crisp, got `{word}`"))?,
     };
     app.set_smooth_level(level);
     app.console_line(format!("smooth {}", level.as_str()), LineKind::Success);
@@ -2954,37 +2952,33 @@ mod tests {
     /// usable mid-run without branding the run CONSOLE USED.
     #[test]
     fn the_smooth_command_a_bs_the_picture_without_flagging() {
+        use crate::render::subcell::Smooth;
         let mut app = fresh_app();
         assert!(!app.smooth_enabled(), "off by default");
         run_command(&mut app, "smooth off").expect("smooth off");
         assert!(!app.smooth_enabled());
         assert!(!app.console_cheat, "a render-only toggle must not flag the run");
-        run_command(&mut app, "smooth on").expect("smooth on");
-        assert!(app.smooth_enabled());
+        run_command(&mut app, "smooth").expect("smooth steps");
+        assert_eq!(app.smooth_level(), Smooth::Xbr, "the toggle enables the xBR fit");
         run_command(&mut app, "smooth").expect("smooth steps");
         assert!(!app.smooth_enabled(), "no argument flips it");
         assert!(scrollback(&app).contains("smooth off"));
-        // The levels: off, on (the EPX rounding), strong (antialiasing), xbr
-        // (what a bare `smooth` turns back on), wedge and
-        // crisp.
-        use crate::render::subcell::Smooth;
-        run_command(&mut app, "smooth on").expect("smooth on");
-        assert_eq!(app.smooth_level(), Smooth::Epx);
-        run_command(&mut app, "smooth strong").expect("smooth strong");
-        assert_eq!(app.smooth_level(), Smooth::Strong);
-        assert!(scrollback(&app).contains("smooth strong"));
-        run_command(&mut app, "smooth wedge").expect("smooth wedge");
-        assert_eq!(app.smooth_level(), Smooth::Wedge);
-        assert!(scrollback(&app).contains("smooth wedge"));
+
         run_command(&mut app, "smooth crisp").expect("smooth crisp");
         assert_eq!(app.smooth_level(), Smooth::XbrCrisp);
         assert!(scrollback(&app).contains("smooth crisp"));
         run_command(&mut app, "smooth xbr").expect("smooth xbr");
         assert_eq!(app.smooth_level(), Smooth::Xbr);
         run_command(&mut app, "smooth 0").expect("smooth 0");
-        run_command(&mut app, "smooth").expect("smooth flips back on");
-        assert_eq!(app.smooth_level(), Smooth::Xbr, "the toggle enables the xBR fit");
-        assert!(run_command(&mut app, "smooth lots").is_err());
+        assert_eq!(app.smooth_level(), Smooth::Off);
+        run_command(&mut app, "smooth smooth").expect("smooth smooth");
+        assert_eq!(app.smooth_level(), Smooth::Xbr);
+
+        // Removed modes and unknown words are rejected with a message.
+        for removed in ["on", "epx", "strong", "wedge", "1", "2", "4", "lots"] {
+            assert!(run_command(&mut app, &format!("smooth {removed}")).is_err(), "{removed}");
+        }
+        assert!(run_command(&mut app, "epx").is_err(), "retired alias");
         assert!(!app.console_cheat, "no level flags the run");
     }
 

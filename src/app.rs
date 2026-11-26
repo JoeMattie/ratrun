@@ -4578,9 +4578,9 @@ impl App {
     }
 
     /// Pick the 1x edge treatment (the console `smooth` command and the
-    /// Graphics page's SMOOTHING row): off, the EPX rounding, or the
-    /// antialiasing. Render-only, and persisted — a choice made here is the
-    /// player's, so it also drops the `RATRUN_SMOOTH` session pin.
+    /// Graphics page's SMOOTHING row): off, smooth (xBR), or crisp.
+    /// Render-only, and persisted — a choice made here is the player's, so it
+    /// also drops the `RATRUN_SMOOTH` session pin.
     pub(crate) fn set_smooth_level(&mut self, level: crate::render::subcell::Smooth) {
         self.smooth_env = None;
         if self.smooth != level {
@@ -15708,7 +15708,7 @@ mod tests {
     }
 
     /// The wedge is stamped in screen space after the playfield blit, so the
-    /// sub-cell encoder (quadrant, sextant and octant) and the 1x EPX smoothing
+    /// sub-cell encoder (quadrant, sextant and octant) and the 1x xBR smoothing
     /// cannot eat it: at every zoom the pointer cell is the wedge's tip and the
     /// cell beside it is cheese.
     #[test]
@@ -16316,15 +16316,23 @@ mod tests {
         h.frame(&[KeyCode::Left]);
         assert!(h.app.fx_enabled());
 
-        // SMOOTHING: the `smooth` levels, left and right.
-        assert_eq!(h.app.smooth_level(), Smooth::default());
+        // SMOOTHING: `Off -> SMOOTH -> CRISP`, left and right.
+        assert_eq!(h.app.smooth_level(), Smooth::Off);
         h.app.graphics_row = graphics::SMOOTH_ROW;
         h.frame(&[KeyCode::Right]);
-        assert_eq!(h.app.smooth_level(), Smooth::Epx, "right walks down the list");
-        assert_eq!(h.app.world.as_ref().unwrap().smooth, Smooth::Epx);
-        assert_eq!(h.app.scores.graphics.smooth(), Smooth::Epx);
+        assert_eq!(h.app.smooth_level(), Smooth::Xbr, "right steps Off -> SMOOTH");
+        assert_eq!(h.app.world.as_ref().unwrap().smooth, Smooth::Xbr);
+        assert_eq!(h.app.scores.graphics.smooth(), Smooth::Xbr);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.smooth_level(), Smooth::XbrCrisp, "right steps SMOOTH -> CRISP");
+        assert_eq!(h.app.world.as_ref().unwrap().smooth, Smooth::XbrCrisp);
+        assert_eq!(h.app.scores.graphics.smooth(), Smooth::XbrCrisp);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.smooth_level(), Smooth::Off, "right wraps CRISP -> Off");
         h.frame(&[KeyCode::Left]);
-        assert_eq!(h.app.smooth_level(), Smooth::default());
+        assert_eq!(h.app.smooth_level(), Smooth::XbrCrisp, "left wraps Off -> CRISP");
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.smooth_level(), Smooth::Off);
 
         // FOREGROUND: the parallax layer.
         assert!(h.app.foreground_enabled());
@@ -16525,6 +16533,30 @@ mod tests {
         match saved {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
+        }
+
+        // A `RATRUN_SMOOTH` pin naming a retired mode resolves to Off for the
+        // session without overwriting a saved SMOOTH preference.
+        let smooth_saved = std::env::var("RATRUN_SMOOTH").ok();
+        for retired in ["on", "strong", "wedge", "1", "2", "4"] {
+            std::env::set_var("RATRUN_SMOOTH", retired);
+            let mut table = ScoreTable::default();
+            table.graphics.set_smooth(crate::render::subcell::Smooth::Xbr);
+            let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+            assert_eq!(
+                app.smooth_level(),
+                crate::render::subcell::Smooth::Off,
+                "RATRUN_SMOOTH={retired} should become Off"
+            );
+            assert_eq!(
+                app.scores.graphics.smooth(),
+                crate::render::subcell::Smooth::Xbr,
+                "the saved preference stays untouched while pinned"
+            );
+        }
+        match smooth_saved {
+            Some(value) => std::env::set_var("RATRUN_SMOOTH", value),
+            None => std::env::remove_var("RATRUN_SMOOTH"),
         }
     }
 

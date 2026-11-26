@@ -279,7 +279,7 @@ pub struct GraphicsFile {
     /// `lights` command sets. Absent means "whatever this terminal's colour
     /// depth defaults to" (the only correct answer before the player picks).
     pub lighting: Option<String>,
-    /// `off` | `on` | `strong` | `xbr` | `wedge` | `crisp`.
+    /// `off` | `xbr` | `crisp`.
     pub smooth: String,
     /// The parallax overhead layer (`render::foreground`).
     pub foreground: bool,
@@ -994,11 +994,20 @@ mod tests {
     fn version_two_graphics_saves_enable_foreground_and_keep_smoothing() {
         use crate::render::subcell::Smooth;
         let table = ScoreTable::parse(
-            r#"{"graphics":{"graphics_version":2,"smooth":"wedge","foreground":false}}"#,
+            r#"{"graphics":{"graphics_version":2,"smooth":"crisp","foreground":false}}"#,
         );
         assert_eq!(table.graphics.graphics_version, 3);
-        assert_eq!(table.graphics.smooth(), Smooth::Wedge);
+        assert_eq!(table.graphics.smooth(), Smooth::XbrCrisp);
         assert!(table.graphics.foreground);
+
+        // Saves naming a retired smoothing mode normalize to Off.
+        for retired in ["on", "epx", "strong", "wedge"] {
+            let table = ScoreTable::parse(&format!(
+                r#"{{"graphics":{{"graphics_version":3,"smooth":"{retired}"}}}}"#
+            ));
+            assert_eq!(table.graphics.smooth(), Smooth::Off, "{retired}");
+            assert_eq!(table.graphics.smooth, "off", "{retired}");
+        }
     }
 
     #[test]
