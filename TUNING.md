@@ -110,6 +110,9 @@ starts neutral on each floor and holds its last buildup value during boss
 cleanup. The director raises the ratio to `power_hp_exponent` and clamps it
 between `power_hp_floor` and `power_hp_ceiling`.
 
+With `[campaign] carry = false`, sectors two through four use the nominal
+fresh horde curve and `power_fresh_reference_hp` for their DPS reference.
+
 ## Boss hazards
 
 Every boss kind accepts `attack_damage_mult` for timed hazard damage and `tell_time_mult` for the warning portion of a queued hazard. The Jungle Cat, Horseshoe Crab, Broom, MegaRat, Mower, Cobra, Magpie and Hawk ship with about ×1.18 hazard damage and ×1.33 warning time. Other bosses default to ×1.0 on both. Body contact has its own `contact_damage_mult`. A hazard keeps its footprint and the length of its active window.

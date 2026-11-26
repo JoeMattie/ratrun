@@ -282,21 +282,29 @@ pub(crate) struct HordePower {
 }
 
 impl HordePower {
-    pub(crate) fn tick(&mut self, tuning: &crate::tuning::Director, level: usize, elapsed: f32, dt: f32, total_damage: f32) {
+    pub(crate) fn tick(&mut self, tuning: &crate::tuning::Tuning, level: usize, elapsed: f32, dt: f32, total_damage: f32) {
         if dt <= 0.0 {
             return;
         }
         // Use the nominal horde's rate and HP curves. The current power boost,
         // surges, and balance overlays never raise the reference behind the rat.
-        let expected = (tuning.power_reference_hp[level_slot(level)]
-            * spawn_rate_for(level, elapsed) * horde_hp_mult_for(level, elapsed)).max(f32::MIN_POSITIVE);
+        let knobs = &tuning.director;
+        let (reference_hp, nominal_horde_hp) = if let Some(fresh) = tuning.fresh_sector_slot(level) {
+            let curve = curve_clock(level, elapsed);
+            let ramp = ((curve - LEVEL_HP_EXTRA_AFTER) / (BOSS_TIME - LEVEL_HP_EXTRA_AFTER)).clamp(0.0, 1.0);
+            (knobs.power_fresh_reference_hp[fresh], hp_mult_at(curve) * FRESH_BUILD_HP_LEVEL[fresh]
+                * (1.0 + (FRESH_LEVEL_HP_EXTRA[fresh] - 1.0) * ramp))
+        } else {
+            (knobs.power_reference_hp[level_slot(level)], horde_hp_mult_for(level, elapsed))
+        };
+        let expected = (reference_hp * spawn_rate_for(level, elapsed) * nominal_horde_hp).max(f32::MIN_POSITIVE);
         if self.expected_dps == 0.0 {
             self.expected_dps = expected;
             self.actual_dps = expected;
         }
         let damage = (total_damage - self.previous_damage).max(0.0);
         self.previous_damage = total_damage;
-        let window = tuning.power_memory_secs + dt;
+        let window = knobs.power_memory_secs + dt;
         self.actual_dps += (damage - self.actual_dps * dt) / window;
         self.expected_dps += (expected - self.expected_dps) * (dt / window);
     }
@@ -560,6 +568,9 @@ pub(crate) const BUILD_HP: [(f32, f32); 7] = [
 /// practice run plays level one's row (`DifficultyLevel`). Rising, so the
 /// Flatbed finale is the hardest level.
 pub const BUILD_HP_LEVEL: [f32; 4] = [0.8, 2.2, 2.4, 2.6];
+
+pub(crate) const FRESH_BUILD_HP_LEVEL: [f32; 3] = [0.64, 0.66, 0.68];
+pub(crate) const FRESH_LEVEL_HP_EXTRA: [f32; 3] = [1.23, 1.26, 1.29];
 
 /// The boss pool's own correction per campaign level, on top of
 /// [`BUILD_HP_LEVEL`]: measured median fights 66 / 78 / 72 / 66 s against the

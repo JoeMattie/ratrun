@@ -80,8 +80,8 @@ section!(Director {
     build_hp: [(f32, f32); 7] = d::BUILD_HP; "Build HP correction knots [curve seconds, multiplier]",
     build_hp_level: [f32; 4] = [0.6262416, 2.6255746, 3.595_260_1, 2.2739563]; "Build HP correction multipliers by campaign sector",
     level_hp_extra: [f32; 4] = d::LEVEL_HP_EXTRA; "Horde-only HP multipliers reached at the boss by sector",
-    fresh_build_hp_level: [f32; 3] = [0.64, 0.66, 0.68]; "Build HP correction by sector with campaign carry disabled",
-    fresh_level_hp_extra: [f32; 3] = [1.23, 1.26, 1.29]; "Horde-only HP at the boss by sector with campaign carry disabled",
+    fresh_build_hp_level: [f32; 3] = d::FRESH_BUILD_HP_LEVEL; "Build HP correction by sector with campaign carry disabled",
+    fresh_level_hp_extra: [f32; 3] = d::FRESH_LEVEL_HP_EXTRA; "Horde-only HP at the boss by sector with campaign carry disabled",
     level_hp_extra_after: f32 = d::LEVEL_HP_EXTRA_AFTER; "Horde-only HP ramp grace period (s)",
     level_damage_top: [f32; 4] = [0.61121884, 1.0319662, 1.2344486, 2.0158477]; "Horde contact damage multipliers reached at the boss by sector",
     level_speed_top: [f32; 4] = d::LEVEL_SPEED_TOP; "Horde speed multipliers reached at the boss by sector",
@@ -114,6 +114,7 @@ section!(Director {
     power_hp_ceiling: f32 = 1.4; "Maximum power-based HP multiplier",
     power_memory_secs: f32 = 18.0; "Damage averaging time constant in simulation seconds",
     power_reference_hp: [f32; 4] = [13.0, 16.0, 25.0, 15.0]; "Expected damage per scheduled body at unit horde HP, by sector",
+    power_fresh_reference_hp: [f32; 3] = [17.0, 21.0, 21.0]; "Power reference HP for fresh builds in sectors two to four",
 });
 
 pub(crate) const SECTOR_KEYS: [&str; 4] = ["1", "2", "3", "4"];
@@ -500,8 +501,10 @@ impl Tuning {
         {
             bail!("director power HP bounds must satisfy 0 < floor <= 1 <= ceiling");
         }
-        if director.power_memory_secs <= 0.0 || director.power_reference_hp.contains(&0.0) {
-            bail!("director power_memory_secs and power_reference_hp must be positive");
+        if director.power_memory_secs <= 0.0 || director.power_reference_hp.contains(&0.0)
+            || director.power_fresh_reference_hp.contains(&0.0)
+        {
+            bail!("director power memory and reference HP must be positive");
         }
         if director.pressure_recovery_budget_cut > 1.0
             || director.pressure_recovery_heal > 1.0
