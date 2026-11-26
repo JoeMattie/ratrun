@@ -122,8 +122,9 @@ pub(super) fn resolve(b: u8, theme: Theme, wall: bool) -> MaterialKind {
         (Theme::Printworks, _) => MaterialKind::Stone,
         (Theme::Trailer, false) => MaterialKind::Wood,
         (Theme::Trailer, true) => MaterialKind::Metal,
-        // Wet seabed sand catches the sewer streak; pier pilings are weathered timber.
-        (Theme::Outfall, false) => MaterialKind::WetBrick,
+        // Dry seabed sand is matte (wet puddles stamp `MaterialKind::Water`);
+        // pier pilings are weathered timber.
+        (Theme::Outfall, false) => MaterialKind::Stone,
         (Theme::Outfall, true) => MaterialKind::Wood,
     }
 }
@@ -216,8 +217,8 @@ mod tests {
     }
 
     #[test]
-    fn outfall_resolves_wet_sand_floor_and_timber_piling_walls() {
-        assert_eq!(resolve(0, Theme::Outfall, false), MaterialKind::WetBrick);
+    fn outfall_resolves_matte_sand_floor_and_timber_piling_walls() {
+        assert_eq!(resolve(0, Theme::Outfall, false), MaterialKind::Stone);
         assert_eq!(resolve(0, Theme::Outfall, true), MaterialKind::Wood);
     }
 }

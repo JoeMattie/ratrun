@@ -74,6 +74,8 @@ pub mod metrics;
 pub mod placement;
 /// Standing water (the wet floors' puddles); its own salted rng, run last.
 pub mod puddles;
+/// Decorative aquatic plants on the Outfall seabed; own salted rng, run after puddles.
+pub mod seabed;
 pub mod validate;
 
 use crate::math::Vec2;
@@ -130,6 +132,7 @@ fn repair_outfall_lures(level: &mut Level, attempt: u32) -> bool {
         return false;
     }
     puddles::place(level, attempt);
+    seabed::place(level, attempt);
     true
 }
 
@@ -158,8 +161,10 @@ pub struct StageTimings {
     pub nav: u64,
     /// Render-only fixtures and ambient emitter placement.
     pub lights: u64,
-    /// Standing water (`puddles::place`): the last stage of all.
+    /// Standing water (`puddles::place`).
     pub puddles: u64,
+    /// Outfall seabed plants (`seabed::place`): the last stage of all.
+    pub seabed: u64,
 }
 
 impl StageTimings {
@@ -179,6 +184,7 @@ impl StageTimings {
             nav: self.nav.min(other.nav),
             lights: self.lights.min(other.lights),
             puddles: self.puddles.min(other.puddles),
+            seabed: self.seabed.min(other.seabed),
         }
     }
 
@@ -195,6 +201,7 @@ impl StageTimings {
             + self.nav
             + self.lights
             + self.puddles
+            + self.seabed
     }
 }
 
@@ -303,6 +310,7 @@ fn generate_stages(
         boss: crate::game::level::BossArena::default(),
         trailer: crate::game::level::TrailerDeck::default(),
         puddles: Vec::new(),
+        plants: Vec::new(),
     };
     if theme == Theme::Outfall {
         stage!(hazards, {
@@ -313,11 +321,15 @@ fn generate_stages(
     }
     stage!(lights, lights::place(&mut level, attempt));
     let mut level = strip_boss_arena(level);
-    // Standing water: the last stage of all, on its own salted rng over the
-    // finished grid (`puddles`'s module docs). It writes only
-    // `Level::puddles`, which the map pin does not fold, and it draws nothing
-    // another stage reads, so no earlier stage can move.
+    // Standing water: on its own salted rng over the finished grid
+    // (`puddles`'s module docs). It writes only `Level::puddles`, which the map
+    // pin does not fold, and it draws nothing another stage reads, so no
+    // earlier stage can move.
     stage!(puddles, puddles::place(&mut level, attempt));
+    // Seabed plants (Outfall only): the last stage of all, on its own salted
+    // rng over the finished grid (`seabed`'s module docs). Writes only
+    // `Level::plants` and is a no-op on every other theme.
+    stage!(seabed, seabed::place(&mut level, attempt));
     level
 }
 

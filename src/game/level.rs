@@ -300,8 +300,8 @@ impl Palette {
                 blood: (150, 66, 48),
             },
             Theme::Outfall => Palette {
-                bg: (42, 43, 37),
-                bg_alt: (49, 49, 42),
+                bg: (84, 77, 60),
+                bg_alt: (96, 88, 69),
                 wall: (34, 58, 63),
                 wall_edge: (138, 170, 173),
                 accent: (105, 230, 223),
@@ -1194,6 +1194,36 @@ impl Puddle {
     }
 }
 
+/// Kind of decorative aquatic plant rooted on the Outfall seabed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlantKind {
+    /// Tall olive/brown kelp frond clustered along walls and room edges.
+    Kelp,
+    /// Short green seagrass tuft in patches on open sand.
+    Seagrass,
+    /// Compact coral-pink / sea-orange anemone or sea fan in corners.
+    Anemone,
+}
+
+/// One decorative aquatic plant on the Outfall seabed, in world pixels.
+///
+/// Purely decorative: never a tile, never blocking, invisible to gameplay,
+/// the bot, fog and the minimap. Placed last by [`super::levelgen::seabed`]
+/// on its own salted rng so no earlier stage or other theme can move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeabedPlant {
+    /// Root anchor on the seabed, world px.
+    pub pos: Vec2,
+    /// Species (kelp frond, seagrass tuft, or corner anemone/sea fan).
+    pub kind: PlantKind,
+    /// Continuous sway phase offset in radians (`0..TAU`).
+    pub phase: f32,
+    /// Size variant (`0..=2`: small, medium, tall).
+    pub size: u8,
+    /// Deterministic visual variation seed (tone, lean, blade layout).
+    pub seed: u32,
+}
+
 // ---- The level -------------------------------------------------------------
 
 #[derive(bevy_ecs::resource::Resource)]
@@ -1241,6 +1271,11 @@ pub struct Level {
     /// stage, so it cannot move the map pin. Empty on the Lab, the Printworks
     /// and the Flatbed.
     pub puddles: Vec<Puddle>,
+    /// Decorative aquatic plants on the Outfall seabed. Render-only; placed
+    /// last by [`super::levelgen::seabed`] on its own salted rng so no earlier
+    /// stage or other theme can move. Empty on every theme except
+    /// [`Theme::Outfall`].
+    pub plants: Vec<SeabedPlant>,
 }
 
 /// The fight furniture a boss arena used to carry (`DESIGN_REVIEW.md` §5).
@@ -1319,6 +1354,7 @@ impl Level {
             boss: BossArena::default(),
             trailer: TrailerDeck::default(),
             puddles: Vec::new(),
+            plants: Vec::new(),
         }
     }
 

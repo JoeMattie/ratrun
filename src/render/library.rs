@@ -1257,6 +1257,7 @@ fn build_scene(theme: Theme) -> Level {
         boss: crate::game::level::BossArena::default(),
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
+        plants: Vec::new(),
     };
     // A few props on the floor, cycling the theme's own furniture.
     let kinds = theme_props(theme);

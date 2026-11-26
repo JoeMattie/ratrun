@@ -1354,6 +1354,7 @@ fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
         boss: BossArena::default(),
         trailer: TrailerDeck::default(),
         puddles: Vec::new(),
+        plants: Vec::new(),
     }
 }
 
@@ -1409,6 +1410,7 @@ fn deck_patch() -> Level {
             slides: Vec::new(),
         },
         puddles: Vec::new(),
+        plants: Vec::new(),
     }
 }
 
@@ -2681,6 +2683,37 @@ pub(super) fn outfall_floor_patch() -> Level {
         bulb,
         vec![bulb + Vec2::new(0.0, 24.0)],
     ));
+    let wall_y = (cy - 1) as f32 * crate::game::collision::TILE_F + 5.5;
+    level.plants.extend([
+        crate::game::level::SeabedPlant {
+            pos: Vec2::new(aim.x - 36.0, wall_y),
+            kind: crate::game::level::PlantKind::Kelp,
+            phase: 0.4,
+            size: 2,
+            seed: 10,
+        },
+        crate::game::level::SeabedPlant {
+            pos: Vec2::new(aim.x - 31.0, wall_y + 1.0),
+            kind: crate::game::level::PlantKind::Kelp,
+            phase: 1.5,
+            size: 1,
+            seed: 11,
+        },
+        crate::game::level::SeabedPlant {
+            pos: aim + Vec2::new(8.0, 14.0),
+            kind: crate::game::level::PlantKind::Seagrass,
+            phase: 0.9,
+            size: 1,
+            seed: 21,
+        },
+        crate::game::level::SeabedPlant {
+            pos: Vec2::new(aim.x + 12.0, wall_y),
+            kind: crate::game::level::PlantKind::Anemone,
+            phase: 2.1,
+            size: 1,
+            seed: 30,
+        },
+    ]);
     level
 }
 
