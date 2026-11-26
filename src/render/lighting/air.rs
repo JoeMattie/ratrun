@@ -369,23 +369,34 @@ fn bloom(grid: &mut Grid, frame: &FxFrame<'_>) {
     }
 }
 
+/// Underwater depth-haze parameters for The Outfall: closer onset, deeper
+/// marine blue-cyan colour and slightly denser distance fade than dry floors.
+const FOG_NEAR_OUTFALL: f32 = 30.0;
+const FOG_MAX_OUTFALL: f32 = 0.84;
+const FOG_COLOR_OUTFALL: Rgb = (6, 36, 62);
+
 fn fog(grid: &mut Grid, frame: &FxFrame<'_>) {
     let stride = grid.stride.max(1) as f32;
     let start = grid.start;
     let reach = ((grid.w.max(grid.h)) as f32 * stride * FOG_REACH_SHARE).max(1.0);
     let rat = frame.rat;
+    let (fog_near, fog_max) = if frame.theme == Theme::Outfall {
+        (FOG_NEAR_OUTFALL, FOG_MAX_OUTFALL)
+    } else {
+        (FOG_NEAR, FOG_MAX)
+    };
     for sy in 0..grid.h {
         for sx in 0..grid.w {
             let p = start + Vec2::new(sx as f32 * stride, sy as f32 * stride);
             let d = (p - rat).len();
-            let ramp = ((d - FOG_NEAR) / reach).clamp(0.0, 1.0);
+            let ramp = ((d - fog_near) / reach).clamp(0.0, 1.0);
             if ramp <= 0.0 {
                 continue;
             }
             let mul = grid.samples[sy * grid.w + sx].mul;
             let peak = f32::from(mul[0].max(mul[1]).max(mul[2]));
             let bias = 1.0 - FOG_SUPPRESS * (peak / FOG_BIAS_PEAK).min(1.0);
-            let amount = ramp * bias * FOG_MAX * strength::FOG;
+            let amount = ramp * bias * fog_max * strength::FOG;
             if amount <= 0.0 {
                 continue;
             }
@@ -396,8 +407,12 @@ fn fog(grid: &mut Grid, frame: &FxFrame<'_>) {
 }
 
 /// The fog colour: the theme's own tint at [`FOG_TINT`], so the distance fades
-/// into the room's colour rather than a generic grey.
+/// into the room's colour rather than a generic grey (deep ocean blue-cyan on
+/// The Outfall).
 fn fog_color(frame: &FxFrame<'_>) -> Rgb {
+    if frame.theme == Theme::Outfall {
+        return FOG_COLOR_OUTFALL;
+    }
     let channel = |v: u16| (f32::from(v) * FOG_TINT) as u8;
     (
         channel(frame.ambient[0]),

@@ -34,6 +34,7 @@ mod sources;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod specular;
 mod surface;
+mod underwater;
 mod upsample;
 mod water;
 pub(crate) mod blackout;
@@ -44,6 +45,8 @@ pub(crate) use fixtures::draw_fixtures;
 pub(crate) use fx::enabled_from_env as fx_enabled_from_env;
 pub(crate) use overhead::{draw_deferred as draw_overhead_shadows, OverheadScene};
 pub(crate) use specular::{boss_pen, enemy_pen, giant_rat_pen, pool_pen, prop_pen, rat_pen};
+#[cfg(test)]
+pub(crate) use underwater::apply_off_grade;
 pub(crate) use water::gloss_enabled as water_gloss_enabled;
 #[cfg(test)]
 mod gallery;
@@ -141,12 +144,12 @@ pub fn theme_ambient(theme: Theme) -> ThemeAmbient {
             hard_pools: true,
             rat_tint: (220, 246, 248),
         },
-        // Deep abyssal seabed: blue-black cold ambient with soft pools and a
-        // warm amber rat aura contrasting against the cyan lures.
+        // Deep submerged seabed: cool marine blue-cyan ambient with soft pools
+        // and a warm diving-lamp rat aura contrasting against the water.
         Theme::Outfall => ThemeAmbient {
-            mul: [84, 108, 132],
+            mul: [60, 148, 210],
             hard_pools: false,
-            rat_tint: (255, 218, 152),
+            rat_tint: (255, 224, 168),
         },
     }
 }

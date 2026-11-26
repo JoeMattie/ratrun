@@ -72,10 +72,6 @@ const CAUSTIC_BY: i32 = 14;
 /// Phase advance per 8 Hz step, in 256ths of a cycle (≈ 0.63 cycles a second),
 /// kept for the legacy stepped test override.
 const CAUSTIC_PHASE_STEP: u32 = 20;
-/// Continuous Outfall caustic drift speed, in 256ths of a cycle per second
-/// (~3.5–4.2 world px/s across the two fronts) so water light glides smoothly
-/// without held-step judder.
-const CAUSTIC_DRIFT_PER_SEC: f32 = 56.0;
 /// Mean downward drift speed of Outfall marine snow, in world pixels per second
 /// (individual flakes stagger from 5.0..=7.0 px/s with sub-pixel start phases
 /// so only a few flakes step 1 px on any 60 Hz frame).
@@ -219,7 +215,7 @@ fn particulate(
     let count = mote_count(canvas.w, canvas.h, frame.mode, flavour);
     let seed = (frame.level.seed as u32) ^ (frame.level.seed >> 32) as u32;
     let field = (canvas.w * canvas.h) as u32;
-    let cold = matches!(flavour, Flavour::Cold | Flavour::MarineSnow);
+    let cold = flavour == Flavour::Cold;
     let cam = (frame.cam.x as i64, frame.cam.y as i64);
     let t = elapsed.max(0.0);
     for i in 0..count {
@@ -393,7 +389,7 @@ fn channel(amount: i32, tint: u8) -> u8 {
 
 /// [`SIN_QUARTER`] looked up over the full turn, Q8.8 (`-256..=256`).
 #[inline]
-fn sin_q8(index: u8) -> i32 {
+pub(super) fn sin_q8(index: u8) -> i32 {
     let i = usize::from(index);
     let (i, sign) = if i < 128 { (i, 1) } else { (i - 128, -1) };
     let v = if i <= 64 {
@@ -428,6 +424,10 @@ fn caustics(
     if gains.caustics <= 0 {
         return;
     }
+    if frame.theme == Theme::Outfall {
+        super::underwater::apply_fx_caustics(grid, canvas, frame, elapsed, gains.caustics);
+        return;
+    }
     // A view-wide flag (or any flagged zone in this level) gates the pass; the
     // per-sample `Surface::zone` then decides pixel by pixel.
     let whole_view = caustics_here(frame.theme, None);
@@ -441,11 +441,7 @@ fn caustics(
     {
         return;
     }
-    let phase = if frame.theme == Theme::Outfall {
-        ((elapsed.max(0.0) * CAUSTIC_DRIFT_PER_SEC).floor() as i64).rem_euclid(256) as i32
-    } else {
-        ((u64::from(clock) * u64::from(CAUSTIC_PHASE_STEP)) & 255) as i32
-    };
+    let phase = ((u64::from(clock) * u64::from(CAUSTIC_PHASE_STEP)) & 255) as i32;
     let cam = (frame.cam.x.round() as i32, frame.cam.y.round() as i32);
     let (w, h) = (canvas.w, canvas.h);
     for py in 0..h {
@@ -693,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn outfall_caustics_skip_blackout_creatures_and_emissives() {
+    fn outfall_caustics_skip_blackout_and_emissives_and_are_fainter_on_creatures() {
         let lvl = level(Theme::Outfall);
         let (w, h) = (64, 32);
         let mut grid = caustic_grid(w, h);
@@ -707,33 +703,44 @@ mod tests {
         pb.set_materials(true);
         pb.set_pen(0);
         pb.clear((85, 71, 78));
-        // Stamp a creature pixel and an emissive pixel in the lit left half.
+        // Stamp a creature patch and an emissive pixel in the lit left half.
         let creature_pen = super::material::pen(super::material::MaterialKind::Slime, true, 3);
         let emissive_pen = super::material::pen(super::material::MaterialKind::Emissive, false, 0);
         pb.set_pen(creature_pen);
-        pb.plot(10, 10, (85, 71, 78));
+        for y in 4..28i32 {
+            for x in 2..16i32 {
+                pb.plot(x, y, (85, 71, 78));
+            }
+        }
         pb.set_pen(emissive_pen);
-        pb.plot(12, 10, (85, 71, 78));
+        pb.plot(18, 10, (85, 71, 78));
         pb.set_pen(0);
 
         let f = frame(&lvl, LightingMode::Full, 3.0);
         let mut canvas = testkit::canvas(&mut pb);
         draw_with(&grid, &mut canvas, &f, f.elapsed, Gains::live());
 
-        assert_eq!(pb.pixel_at(10, 10), (85, 71, 78), "creature excluded");
-        assert_eq!(pb.pixel_at(12, 10), (85, 71, 78), "emissive excluded");
-        let mut lit_left = 0usize;
+        assert_eq!(pb.pixel_at(18, 10), (85, 71, 78), "emissive excluded");
+        let mut max_creature_lift = 0u8;
+        let mut max_floor_lift = 0u8;
         for y in 0..h {
             for x in 0..w {
-                let changed = pb.pixel_at(x, y) != (85, 71, 78);
+                let c = pb.pixel_at(x, y);
+                let changed = c != (85, 71, 78);
                 if x >= w / 2 {
                     assert!(!changed, "blackout zone must stay dry at ({x}, {y})");
-                } else if changed {
-                    lit_left += 1;
+                } else if (4..28).contains(&y) && (2..16).contains(&x) {
+                    max_creature_lift = max_creature_lift.max(c.2.saturating_sub(78));
+                } else if !(x == 18 && y == 10) {
+                    max_floor_lift = max_floor_lift.max(c.2.saturating_sub(78));
                 }
             }
         }
-        assert!(lit_left > 0, "lit non-blackout Outfall floor gets caustics");
+        assert!(max_floor_lift >= 25, "lit non-blackout Outfall floor gets bright caustics ({max_floor_lift})");
+        assert!(
+            max_creature_lift > 0 && max_creature_lift < max_floor_lift,
+            "creatures take fainter caustics than floor: creature={max_creature_lift} floor={max_floor_lift}"
+        );
     }
 
     #[test]

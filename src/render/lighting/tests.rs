@@ -1156,3 +1156,224 @@ fn outfall_lantern_real_lure_has_steady_air_and_decoy_stays_cheap() {
     assert!(lum(&decoy_pb, 64, 48) > 20, "decoy still visibly glows");
     drop((dim_map, bright_map));
 }
+
+#[test]
+fn outfall_lit_floor_is_bluer_than_sewer_across_all_tiers_and_depths() {
+    let albedo: Rgb = (85, 78, 72);
+    let light = Light::radial(Vec2::new(64.0, 48.0), 80.0, (240, 232, 220), 1.1);
+    let render = |theme: Theme, mode: LightingMode, depth: ColorDepth, fx: bool| {
+        let w = test_world(theme);
+        let mut pb = PixelBuffer::new(128, 96);
+        pb.set_materials(fx && matches!(mode, LightingMode::Full | LightingMode::Hard));
+        pb.set_pen(0);
+        pb.clear(albedo);
+        let mut map = LightMap::new();
+        map.push_shaped(light, 3);
+        let mut scene = test_scene(&w, mode, depth, Vec2::ZERO);
+        scene.fx = fx;
+        map.apply_scene(&mut pb, &scene);
+        pb
+    };
+    let blue_bias = |pb: &PixelBuffer, depth: ColorDepth| -> i64 {
+        let mut sum = 0i64;
+        for y in 24..72 {
+            for x in 32..96 {
+                let c = super::gallery::terminal_rgb(pb.pixel_at(x, y), depth);
+                sum += i64::from(c.2) - i64::from(c.0);
+            }
+        }
+        sum
+    };
+
+    for fx in [true, false] {
+        for mode in LightingMode::LIVE {
+            let sewer = render(Theme::Sewer, mode, ColorDepth::Truecolor, fx);
+            let outfall = render(Theme::Outfall, mode, ColorDepth::Truecolor, fx);
+            let s_bias = blue_bias(&sewer, ColorDepth::Truecolor);
+            let o_bias = blue_bias(&outfall, ColorDepth::Truecolor);
+            assert!(
+                o_bias > s_bias + 40_000,
+                "Outfall ({o_bias}) must be much bluer than Sewer ({s_bias}) at {mode:?} fx={fx}"
+            );
+        }
+        // Survives 256-colour folding: Outfall stays visibly blue-shifted after palette mapping.
+        let sewer_256 = render(Theme::Sewer, LightingMode::Hard, ColorDepth::Ansi256, fx);
+        let outfall_256 = render(Theme::Outfall, LightingMode::Hard, ColorDepth::Ansi256, fx);
+        let s256 = blue_bias(&sewer_256, ColorDepth::Ansi256);
+        let o256 = blue_bias(&outfall_256, ColorDepth::Ansi256);
+        assert!(
+            o256 > s256 + 20_000,
+            "Outfall must survive 256-colour folding bluer than Sewer: {o256} vs {s256} (fx={fx})"
+        );
+    }
+
+    // Lighting OFF applies the cheap flat underwater grade on Outfall and leaves Sewer untouched.
+    let sewer_off = render(Theme::Sewer, LightingMode::Off, ColorDepth::Truecolor, false);
+    let outfall_off = render(Theme::Outfall, LightingMode::Off, ColorDepth::Truecolor, false);
+    assert_eq!(sewer_off.pixel_at(64, 48), albedo);
+    let o_px = outfall_off.pixel_at(64, 48);
+    assert!(
+        o_px.2 > o_px.0 + 40,
+        "Outfall lighting-OFF flat grade must shift blue: {o_px:?}"
+    );
+}
+
+#[test]
+fn outfall_caustics_vary_over_space_and_time_and_are_absent_on_other_floors() {
+    let light = Light::radial(Vec2::new(64.0, 48.0), 84.0, (180, 230, 240), 1.15);
+    let render = |theme: Theme, elapsed: f32, fx: bool| {
+        let mut w = test_world(theme);
+        w.elapsed = elapsed;
+        w.level.objects.light_zones.push(LightZone {
+            rect: TileRect::new(0, 0, 8, 6),
+            kind: LightZoneKind::Room,
+        });
+        let mut pb = PixelBuffer::new(128, 96);
+        pb.set_materials(fx);
+        pb.set_pen(0);
+        pb.clear((64, 72, 74));
+        let mut map = LightMap::new();
+        map.push_shaped(light, 3);
+        let mut scene = test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        scene.fx = fx;
+        map.apply_scene(&mut pb, &scene);
+        pb
+    };
+
+    for fx in [true, false] {
+        // 2.000 s and 2.040 s are inside the same 8 Hz bucket: continuous
+        // Outfall caustics must still advance smoothly without stepping.
+        let a = render(Theme::Outfall, 2.000, fx);
+        let b = render(Theme::Outfall, 2.040, fx);
+        assert_ne!(
+            a.pixels(),
+            b.pixels(),
+            "Outfall caustics must animate continuously over elapsed (fx={fx})"
+        );
+        // Spatial variation across the lit floor (bright net vs troughs).
+        let unique: std::collections::HashSet<Rgb> = (32..96)
+            .flat_map(|x| (24..72).map(move |y| a.pixel_at(x, y)))
+            .collect();
+        assert!(
+            unique.len() >= 4,
+            "Outfall caustics must vary spatially across lit floor (fx={fx}): {}",
+            unique.len()
+        );
+    }
+
+    // Every non-Outfall floor has no caustics (no continuous drift inside an 8 Hz step).
+    for theme in Theme::playable() {
+        if theme == Theme::Outfall {
+            continue;
+        }
+        for fx in [true, false] {
+            let a = render(theme, 2.000, fx);
+            let b = render(theme, 2.040, fx);
+            assert_eq!(
+                a.pixels(),
+                b.pixels(),
+                "{theme:?} must stay free of Outfall caustics (fx={fx})"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_outfall_themes_keep_batch12_fx_off_and_off_mode_identity() {
+    for theme in Theme::playable() {
+        if theme == Theme::Outfall {
+            continue;
+        }
+        let w = test_world(theme);
+        let albedo: Rgb = (85, 71, 78);
+        // LightingMode::Off must leave every non-Outfall pixel untouched.
+        let mut off_pb = PixelBuffer::new(64, 48);
+        off_pb.clear(albedo);
+        let mut off_map = LightMap::new();
+        off_map.apply_scene(
+            &mut off_pb,
+            &test_scene(&w, LightingMode::Off, ColorDepth::Truecolor, Vec2::ZERO),
+        );
+        assert!(
+            off_pb.pixels().iter().all(|&p| p == albedo),
+            "{theme:?} LightingMode::Off must remain byte-identical"
+        );
+
+        // With fx = false and no lights, every floor pixel matches the batch-12
+        // ambient multiplier exactly (no Outfall grade or caustic shift).
+        let mut pb = PixelBuffer::new(64, 48);
+        pb.clear(albedo);
+        let mut map = LightMap::new();
+        map.apply_scene(
+            &mut pb,
+            &test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO),
+        );
+        let profile = theme_ambient(theme);
+        let gain = zone_gain(None);
+        let expected_mul = profile.mul.map(|c| ambient_level(c, gain));
+        let expected = (
+            ((i32::from(albedo.0) * i32::from(expected_mul[0])) >> 8) as u8,
+            ((i32::from(albedo.1) * i32::from(expected_mul[1])) >> 8) as u8,
+            ((i32::from(albedo.2) * i32::from(expected_mul[2])) >> 8) as u8,
+        );
+        assert_eq!(
+            pb.pixel_at(32, 24),
+            expected,
+            "{theme:?} fx=false must match batch-12 composite exactly"
+        );
+    }
+}
+
+#[test]
+fn outfall_frozen_frames_are_bit_identical_and_hostile_layer_stays_untinted() {
+    for fx in [true, false] {
+        let mut w = World::new(Theme::Outfall, 77);
+        w.elapsed = 12.345;
+        w.lighting = LightingMode::Full;
+        w.lighting_fx = fx;
+        w.smoke_enabled = false;
+        let mut first = PixelBuffer::new(120, 80);
+        let mut second = PixelBuffer::new(120, 80);
+        // Prime any first-frame eased cap, then verify frozen frames match bit-for-bit.
+        w.draw(&mut first);
+        w.draw(&mut first);
+        w.draw(&mut second);
+        assert_eq!(
+            first.pixels(),
+            second.pixels(),
+            "frozen Outfall frame must be bit-identical (fx={fx})"
+        );
+    }
+
+    // Hostile layer (enemy pellet) is drawn after lighting and must stay untinted.
+    let mut w = World::new(Theme::Outfall, 77);
+    w.elapsed = 4.0;
+    w.lighting = LightingMode::Full;
+    w.lighting_fx = true;
+    w.smoke_enabled = false;
+    let pellet_pos = w.player.pos + Vec2::new(24.0, 0.0);
+    w.spawn_bullet(Bullet::new(
+        pellet_pos,
+        Vec2::ZERO,
+        4.0,
+        Faction::Enemy,
+        (255, 60, 40),
+    ));
+    let mut pb = PixelBuffer::new(120, 80);
+    w.draw(&mut pb);
+    let sx = (pellet_pos.x - w.cam.x).round() as usize;
+    let sy = (pellet_pos.y - w.cam.y).round() as usize;
+    let mut max_red = 0u8;
+    for dy in sy.saturating_sub(2)..=(sy + 2).min(pb.h - 1) {
+        for dx in sx.saturating_sub(2)..=(sx + 2).min(pb.w - 1) {
+            let c = pb.pixel_at(dx, dy);
+            if c.0 > c.2.saturating_add(40) {
+                max_red = max_red.max(c.0);
+            }
+        }
+    }
+    assert!(
+        max_red >= 240,
+        "hostile pellet on Outfall must remain bright untinted red (got max_red={max_red})"
+    );
+}
