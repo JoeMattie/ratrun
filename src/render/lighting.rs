@@ -23,6 +23,8 @@ mod engine;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod fixtures;
 mod fx;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+mod gi;
 mod material;
 mod motes;
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
@@ -43,6 +45,7 @@ pub(crate) use ambience::draw_ambience;
 pub(crate) use fixtures::draw_fixtures;
 // Batch-13 effects (`.review/handoff/lighting/CONTRACT.md`).
 pub(crate) use fx::enabled_from_env as fx_enabled_from_env;
+pub use gi::{env_pin as gi_env_pin, from_env as gi_from_env, GlobalLight};
 pub(crate) use overhead::{draw_deferred as draw_overhead_shadows, OverheadScene};
 pub(crate) use specular::{
     boss_pen, cloth_pen, dropping_pen, enemy_pen, giant_rat_pen, pool_pen, prop_pen, rat_helmet_pen,
@@ -90,6 +93,8 @@ pub struct LightScene<'a> {
     /// The batch-13 lighting effects (`fx.rs`): off, the pass is the
     /// batch-12 one byte for byte.
     pub fx: bool,
+    /// Optional ambient occlusion + one-bounce global illumination (`gi.rs`).
+    pub gi: GlobalLight,
 }
 
 /// Per-theme lighting character.

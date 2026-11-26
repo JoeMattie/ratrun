@@ -290,13 +290,16 @@ pub struct GraphicsFile {
     /// The camera's share of the simulation's shake (`World::shake_scale`),
     /// one of [`crate::render::graphics::SHAKE_STEPS`].
     pub shake_scale: f32,
+    /// `off` | `ao` | `gi` — ambient occlusion and one-bounce global
+    /// illumination (`render::lighting::GlobalLight`). Defaults to `off`.
+    pub global_light: String,
 }
 
 const GRAPHICS_VERSION: u32 = 3;
 
 impl Default for GraphicsFile {
-    /// The terminal's own lighting tier, smoothing off, foreground, light
-    /// effects and glyph particles on, and 65 % shake.
+    /// The terminal's own lighting tier, smoothing and global light off,
+    /// foreground, light effects and glyph particles on, and 65 % shake.
     fn default() -> Self {
         GraphicsFile {
             graphics_version: GRAPHICS_VERSION,
@@ -306,6 +309,7 @@ impl Default for GraphicsFile {
             fx: true,
             glyphfx: true,
             shake_scale: crate::game::world::SHAKE_SCALE,
+            global_light: crate::render::lighting::GlobalLight::default().as_str().to_string(),
         }
     }
 }
@@ -337,6 +341,15 @@ impl GraphicsFile {
 
     pub fn set_smooth(&mut self, level: crate::render::subcell::Smooth) {
         self.smooth = level.as_str().to_string();
+    }
+
+    /// The saved global-light mode; an unreadable word loads `Off`.
+    pub fn global_light(&self) -> crate::render::lighting::GlobalLight {
+        crate::render::lighting::GlobalLight::parse(&self.global_light).unwrap_or_default()
+    }
+
+    pub fn set_global_light(&mut self, mode: crate::render::lighting::GlobalLight) {
+        self.global_light = mode.as_str().to_string();
     }
 
     /// The saved shake share, clamped into `0.0..=1.0` (a hand-edited file, or
@@ -374,6 +387,7 @@ impl GraphicsFile {
             self.graphics_version = GRAPHICS_VERSION;
         }
         self.set_smooth(smooth);
+        self.set_global_light(self.global_light());
         self.set_shake(self.shake());
     }
 }

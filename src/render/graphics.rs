@@ -21,6 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::Frame;
 
+use crate::render::lighting::GlobalLight;
 use crate::render::menu::{heavy, ink, panel, HitMap, Target};
 use crate::render::palette::{COAT, MUTED, PLATE, TRACK};
 use crate::render::subcell::Smooth;
@@ -28,17 +29,18 @@ use crate::render::subcell::Smooth;
 /// Row indices in screen order.
 pub const LIGHTING_ROW: usize = 0;
 pub const FX_ROW: usize = 1;
-pub const SMOOTH_ROW: usize = 2;
-pub const FOREGROUND_ROW: usize = 3;
-pub const GLYPHFX_ROW: usize = 4;
-pub const SHAKE_ROW: usize = 5;
-pub const BACK_ROW: usize = 6;
+pub const GLOBAL_LIGHT_ROW: usize = 2;
+pub const SMOOTH_ROW: usize = 3;
+pub const FOREGROUND_ROW: usize = 4;
+pub const GLYPHFX_ROW: usize = 5;
+pub const SHAKE_ROW: usize = 6;
+pub const BACK_ROW: usize = 7;
 /// How many rows the page has.
-pub const ROW_COUNT: usize = 7;
+pub const ROW_COUNT: usize = 8;
 
 /// Preferred panel size; clamped to the terminal.
 pub const PANEL_W: u16 = 58;
-pub const PANEL_H: u16 = 14;
+pub const PANEL_H: u16 = 15;
 /// The label column, two cells wider than the longest label (`GLYPH PARTICLES`,
 /// fifteen) so a value strip never butts against its label.
 const LABEL_W: u16 = 17;
@@ -55,6 +57,8 @@ pub enum Row {
     Lighting,
     /// The lighting effects layer (`render::lighting::fx`, console `fx`).
     Fx,
+    /// Optional ambient occlusion + global illumination (`render::lighting::gi`, console `gi`).
+    GlobalLight,
     /// The 1× edge treatment (`render::subcell::Smooth`, console `smooth`).
     Smooth,
     /// The parallax overhead layer (console `foreground`).
@@ -70,6 +74,7 @@ pub enum Row {
 pub const ROWS: [Row; ROW_COUNT] = [
     Row::Lighting,
     Row::Fx,
+    Row::GlobalLight,
     Row::Smooth,
     Row::Foreground,
     Row::GlyphFx,
@@ -84,6 +89,7 @@ impl Row {
         match self {
             Row::Lighting => "LIGHTING",
             Row::Fx => "LIGHT EFFECTS",
+            Row::GlobalLight => "GLOBAL LIGHT",
             Row::Smooth => "SMOOTHING",
             Row::Foreground => "FOREGROUND",
             Row::GlyphFx => "GLYPH PARTICLES",
@@ -98,6 +104,7 @@ impl Row {
         match self {
             Row::Lighting => " lamp quality; a slow terminal wants coarse",
             Row::Fx => " material shine and overhead shadows",
+            Row::GlobalLight => " corner shadows and colour bounce",
             Row::Smooth => " edge treatment at 1x",
             Row::Foreground => " overhead pipes, lines and proofs",
             Row::GlyphFx => " motes, sparks and rising bubbles",
@@ -112,6 +119,7 @@ impl Row {
 pub struct GraphicsView<'a> {
     pub lighting: crate::render::lighting::LightingMode,
     pub fx: bool,
+    pub global_light: GlobalLight,
     pub smooth: Smooth,
     pub foreground: bool,
     pub glyphfx: bool,
@@ -191,6 +199,13 @@ pub fn step_lighting(
     live[step_index(i, live.len(), dir)]
 }
 
+/// Step the global light mode through [`GlobalLight::ALL`].
+pub fn step_global_light(cur: GlobalLight, dir: isize) -> GlobalLight {
+    let all = GlobalLight::ALL;
+    let i = all.iter().position(|g| *g == cur).unwrap_or(0);
+    all[step_index(i, all.len(), dir)]
+}
+
 /// Step the 1× edge treatment through [`Smooth::ALL`], the one list a new level
 /// has to be added to.
 pub fn step_smooth(cur: Smooth, dir: isize) -> Smooth {
@@ -241,6 +256,7 @@ pub fn value_text(view: &GraphicsView<'_>, row: Row) -> String {
     match row {
         Row::Lighting => lighting_label(view.lighting).to_string(),
         Row::Fx => on_off(view.fx),
+        Row::GlobalLight => view.global_light.label().to_string(),
         Row::Smooth => view.smooth.label().to_string(),
         Row::Foreground => on_off(view.foreground),
         Row::GlyphFx => on_off(view.glyphfx),
@@ -405,6 +421,7 @@ mod tests {
         GraphicsView {
             lighting: LightingMode::Full,
             fx: true,
+            global_light: GlobalLight::Off,
             smooth: Smooth::Xbr,
             foreground: true,
             glyphfx: true,
@@ -475,6 +492,7 @@ mod tests {
         let v = view(LIGHTING_ROW);
         assert_eq!(value_text(&v, Row::Lighting), "FULL");
         assert_eq!(value_text(&v, Row::Fx), "ON");
+        assert_eq!(value_text(&v, Row::GlobalLight), "OFF");
         assert_eq!(value_text(&v, Row::Smooth), "SMOOTH");
         assert_eq!(value_text(&v, Row::Foreground), "ON");
         assert_eq!(value_text(&v, Row::GlyphFx), "ON");
@@ -484,6 +502,7 @@ mod tests {
         let off = GraphicsView {
             lighting: LightingMode::Compact,
             fx: false,
+            global_light: GlobalLight::AoGi,
             smooth: Smooth::Off,
             foreground: false,
             glyphfx: false,
@@ -495,6 +514,7 @@ mod tests {
         };
         assert_eq!(value_text(&off, Row::Lighting), "COMPACT");
         assert_eq!(value_text(&off, Row::Fx), "OFF");
+        assert_eq!(value_text(&off, Row::GlobalLight), "AO + GI");
         assert_eq!(value_text(&off, Row::Smooth), "OFF");
         assert_eq!(value_text(&off, Row::Foreground), "OFF");
         assert_eq!(value_text(&off, Row::GlyphFx), "OFF");
@@ -534,6 +554,17 @@ mod tests {
             LightingMode::LIVE[LightingMode::LIVE.len() - 1],
             "left wraps the other way"
         );
+
+        // Global light: Off -> AO Only -> AO + GI -> Off.
+        let mut gl = GlobalLight::ALL[0];
+        let mut seen = Vec::new();
+        for _ in 0..GlobalLight::ALL.len() {
+            seen.push(gl);
+            gl = step_global_light(gl, 1);
+        }
+        assert_eq!(seen, GlobalLight::ALL);
+        assert_eq!(gl, GlobalLight::Off);
+        assert_eq!(step_global_light(GlobalLight::Off, -1), GlobalLight::AoGi);
 
         // Smoothing: everything in `Smooth::ALL`.
         let mut level = Smooth::ALL[0];

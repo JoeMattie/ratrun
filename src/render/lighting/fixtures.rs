@@ -584,6 +584,7 @@ mod tests {
             mode: LightingMode::Full,
             depth: ColorDepth::Truecolor,
             fx: false,
+            gi: crate::render::lighting::GlobalLight::Off,
         }
     }
 

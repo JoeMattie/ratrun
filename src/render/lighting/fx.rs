@@ -356,6 +356,7 @@ pub(super) mod testkit {
             mode,
             depth,
             fx: true,
+            gi: super::super::GlobalLight::Off,
         }
     }
 

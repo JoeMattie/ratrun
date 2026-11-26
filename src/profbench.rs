@@ -51,9 +51,45 @@ static STILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 static BUFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// `--horde N`: keep at least N live enemies around the rat while measuring.
 static HORDE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// `--drops`: stage an 8-dropping Hantavirus scene around the rat.
+static DROPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn stage_droppings(w: &mut crate::game::world::World) {
+    use crate::game::collision::SizeClass;
+    use crate::game::ecs::{components::Dropping, resources::spawn_with_id};
+    for seed in 0..8 {
+        let angle = (seed as f32 + 0.25) * std::f32::consts::TAU / 8.0;
+        let pos = w.testbed_spawn_point(Vec2::from_angle(angle), 22.0, 1.0, SizeClass::Small);
+        spawn_with_id(
+            &mut w.ecs,
+            Dropping {
+                pos,
+                age: 0.5,
+                damage: 1.0,
+                jumps: 1,
+                reach: 14.0,
+                radius: 7.0,
+                seed,
+                level: 5,
+            },
+        );
+    }
+}
 
 /// One measured simulation step: the bot's, or a standing rat's.
 fn step(run: &mut AutoRun, frame: usize) {
+    if DROPS.load(std::sync::atomic::Ordering::Relaxed) {
+        let still = STILL.load(std::sync::atomic::Ordering::Relaxed);
+        let dir = if still {
+            Vec2::ZERO
+        } else {
+            Vec2::from_angle(frame as f32 * 0.085)
+        };
+        let w = run.world_mut();
+        w.update(DT, dir, false);
+        w.sfx.clear();
+        return;
+    }
     let horde = HORDE.load(std::sync::atomic::Ordering::Relaxed);
     if horde > 0 && frame.is_multiple_of(8) {
         let w = run.world_mut();
@@ -241,6 +277,10 @@ pub fn run(args: &[String]) {
     let god = arg(args, "--god").is_none_or(|g| g != "0");
     let sample = arg(args, "--sample").map(str::to_string);
     STILL.store(args.iter().any(|a| a == "--still"), std::sync::atomic::Ordering::Relaxed);
+    DROPS.store(
+        args.iter().any(|a| a == "--drops") || std::env::var_os("RATRUN_PROF_DROPS").is_some(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     HORDE.store(
         arg(args, "--horde").and_then(|s| s.parse().ok()).unwrap_or(0),
         std::sync::atomic::Ordering::Relaxed,
@@ -317,6 +357,25 @@ pub fn run(args: &[String]) {
     );
 
     for (i, cfg) in cfgs.iter().enumerate() {
+        if DROPS.load(std::sync::atomic::Ordering::Relaxed) {
+            use crate::game::loadout::Upgrade;
+            use crate::game::weapon::WeaponKind;
+            let w = run.world_mut();
+            let mut q = w.ecs.query::<bevy_ecs::entity::Entity>();
+            let drop_ents: Vec<_> = q
+                .iter(&w.ecs)
+                .filter(|&e| w.ecs.get::<crate::game::ecs::components::Dropping>(e).is_some())
+                .collect();
+            for e in drop_ents {
+                w.ecs.despawn(e);
+            }
+            w.configure_testbed();
+            w.player.loadout.weapons.clear();
+            w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::Hantavirus));
+            w.player.loadout.weapons[0].level = 5;
+            w.player.loadout.weapons[0].timer = 60.0;
+            stage_droppings(w);
+        }
         let last = i + 1 == cfgs.len();
         let sample = if last { sample.as_deref() } else { None };
         match mode.as_str() {
@@ -340,6 +399,8 @@ fn configure(run: &mut AutoRun, cfg: &Cfg) -> Rect {
         crate::term::block_set(),
     );
     w.smooth = crate::render::subcell::smooth_from_env();
+    w.lighting_fx = crate::render::lighting::fx_enabled_from_env();
+    w.global_light = crate::render::lighting::gi_from_env();
     g
 }
 
