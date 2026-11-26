@@ -7162,7 +7162,9 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
     // A swinging cord's tell shape is the wedge it sweeps (a `Cone`), but it is
     // drawn as a cord: the stitched arc of the row's own sweep, both edges of
     // the sector, and the cord itself waiting on the edge the swing starts from.
-    if let SignatureShape::Cord { len, half, sweep } = mb.kind.signature().shape {
+    if let (MinibossShape::Cone { .. }, SignatureShape::Cord { len, half, sweep }) =
+        (full_shape, mb.kind.signature().shape)
+    {
         let aim = safe_dir(mb.aim, Vec2::new(1.0, 0.0));
         draw_cord_telegraph(
             pb,
@@ -7298,6 +7300,9 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
                 progress,
             );
         }
+        shape => crate::game::ecs::systems::miniboss_shapes::draw_telegraph(
+            pb, mb, &shape, cam, Vec2::splat(1.0),
+        ),
     }
 }
 

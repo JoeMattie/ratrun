@@ -95,7 +95,7 @@ Nothing is copied out per tick: entity components live in the ECS world for the 
 ONE `Schedule`, one thread, `multi_threaded` off. `chain()` inserts `ApplyDeferred` after any system that took `Commands`, so an entity spawned by one system exists for the next. The real order (the module doc carries the full table):
 
 ```text
-powerups → traps → hazards → floor_sewer_slow → player → puddles → fog::reveal
+powerups → traps → hazards → floor_sewer_slow → player → record_rat_track → puddles → fog::reveal
   → [gates: passage, cache, door, shop::threshold]
   → flow_refresh → director → miniboss → boss_spawn → boss::megarat::boss_summon
   → enemy_steering → enemy_fire → grid_build → separation → wall_resolve
@@ -115,6 +115,7 @@ powerups → traps → hazards → floor_sewer_slow → player → puddles → f
 Load-bearing adjacencies (each is commented in the file):
 
 - `traps`/`hazards` run **before** `player` so a glue/ink slow folds into this tick's `TickInput` throttle, and their damage lands before the reap (a trap kill takes the normal loot path).
+- `record_rat_track` runs immediately after `player` and samples its post-move position into `RatTrack`, a permanent two-second ring buffer at 30 Hz. Wake freezes a recent path at the tell lock. Drip takes three positions across the tracking half. The recorder draws no rng.
 - `gates`/`shop::threshold` sit after the fog reveal and before the flow refresh, so all three see the rat's post-move cell.
 - Boss spawns are before `grid_build`; `megarat::boss_summon` exists because a boss controller cannot take `Commands` and may only add `Enemy`s in that slot.
 - Every weapon/melee/area damage pass sits between `grid_build` and `reap_enemies`, so a kill this tick is reaped this tick (and loots this tick).

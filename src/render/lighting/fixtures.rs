@@ -166,7 +166,7 @@ fn housing(theme: Theme) -> Housing {
 /// The light and the drawn lens read this same rule (and [`sconce_sputter`]),
 /// so a dead lamp never shows a lit pixel over a black pool.
 pub(super) fn sconce_spent(seed: u32) -> bool {
-    seed.is_multiple_of(8)
+    LightFixture::sconce_spent(seed)
 }
 
 /// Whether a spent wall lamp's dying lens is lit at `elapsed`. The rate is the

@@ -35,6 +35,82 @@ use crate::math::Vec2;
 use super::components::SpawnId;
 use super::systems::boss::BossKind;
 
+// A two-second history at 30 Hz, including both endpoints.
+pub const RAT_TRACK_CAPACITY: usize = 61;
+const RAT_TRACK_STEP: f64 = 1.0 / 30.0;
+
+/// Post-move rat positions. Only the recorder writes this permanent scratch.
+#[derive(Resource)]
+pub struct RatTrack {
+    samples: [(f64, Vec2); RAT_TRACK_CAPACITY],
+    next: usize,
+    count: usize,
+    next_sample: f64,
+    now: f64,
+    pos: Vec2,
+}
+
+impl Default for RatTrack {
+    fn default() -> Self {
+        Self {
+            samples: [(0.0, Vec2::ZERO); RAT_TRACK_CAPACITY],
+            next: 0,
+            count: 0,
+            next_sample: 0.0,
+            now: 0.0,
+            pos: Vec2::ZERO,
+        }
+    }
+}
+
+impl RatTrack {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn record(&mut self, dt: f32, pos: Vec2) {
+        let end = self.now + f64::from(dt.max(0.0));
+        if self.count == 0 {
+            self.pos = pos;
+        }
+        while self.next_sample <= end {
+            let p = if end > self.now {
+                let t = ((self.next_sample - self.now) / (end - self.now)) as f32;
+                self.pos + (pos - self.pos) * t
+            } else {
+                pos
+            };
+            self.samples[self.next] = (self.next_sample, p);
+            self.next = (self.next + 1) % RAT_TRACK_CAPACITY;
+            self.count = (self.count + 1).min(RAT_TRACK_CAPACITY);
+            self.next_sample += RAT_TRACK_STEP;
+        }
+        self.now = end;
+        self.pos = pos;
+    }
+
+    /// Samples in reverse chronological order, measured in seconds ago.
+    pub fn samples(&self) -> impl Iterator<Item = (f64, Vec2)> + '_ {
+        (0..self.count).map(|i| {
+            let index = (self.next + RAT_TRACK_CAPACITY - 1 - i) % RAT_TRACK_CAPACITY;
+            let (time, pos) = self.samples[index];
+            (self.now - time, pos)
+        })
+    }
+
+    pub fn at_age(&self, age: f64) -> Vec2 {
+        let (mut newer_age, mut newer) = (0.0, self.pos);
+        for (older_age, older) in self.samples() {
+            if age <= older_age && older_age > newer_age {
+                let t = ((age - newer_age) / (older_age - newer_age)).clamp(0.0, 1.0) as f32;
+                return newer + (older - newer) * t;
+            }
+            (newer_age, newer) = (older_age, older);
+        }
+        newer
+    }
+}
+
 // ---- Per-tick input ------------------------------------------------------
 
 /// The three arguments of the legacy `World::update(dt, move_dir, dash)`.

@@ -19,8 +19,9 @@
 //! where the rat is heading; from the lock on the aim is frozen and the body
 //! is planted until its exposed second is over ([`Miniboss::holds`]). The
 //! whole footprint is outlined for the full second (a swinging cord tells
-//! as the whole sector it sweeps), and one strike bites the rat once
-//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 4500 / 10700 / 14400 /
+//! as the whole sector it sweeps). A strike normally bites the rat once
+//! (`hit_this_strike`). Return and Drip latch each pass or drop separately.
+//! Slot HP is [`appointment_hp`]: 4500 / 10700 / 14400 /
 //! 18100.
 //! A signature whose shape leaves no walkable escape is re-aimed (up to 8
 //! tries) and skipped if still trapped.
@@ -76,8 +77,9 @@ use crate::game::collision::SizeClass;
 use crate::game::ecs::components::SpawnId;
 use crate::game::director::MINIBOSS_TIMES;
 use crate::game::ecs::resources::{
-    NextEnemyId, NextSpawnId, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
+    NextEnemyId, NextSpawnId, RatTrack, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
 };
+use super::miniboss_shapes::{self as shapes, SignatureTrack, WakeTrail};
 use crate::game::ecs::systems::spawn::{spawn_point_reachable, SpawnScratch};
 use crate::game::director::BOSS_TIME;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -339,6 +341,12 @@ impl MinibossKind {
                 StampLayout::Along { spacing } => spacing * 3.0 + half,
                 StampLayout::AroundRat { .. } | StampLayout::V { .. } => return ENGAGE_RANGE,
             },
+            S::Annulus { .. } | S::Overlap { .. } | S::Comb { .. } | S::Wake { .. } | S::Drip { .. } => {
+                return ENGAGE_RANGE;
+            }
+            S::Tide { travel, half, .. } => travel + half,
+            S::Return { len, half, .. } => len + half,
+            S::Shear { len, .. } | S::Umbra { len, .. } => len,
         };
         (reach * ENGAGE_REACH_FRACTION).clamp(self.body_radius() + 10.0, ENGAGE_RANGE)
     }
@@ -686,6 +694,7 @@ impl MinibossKind {
                 bar_len: len,
                 covered: len,
             },
+            shape => shapes::resolve(shape, mb, None),
         }
     }
 
@@ -783,6 +792,8 @@ impl MinibossKind {
                 // leading edge travels the lane plus the bar's own length.
                 covered: (len + bar_len) * p,
             },
+            SignatureShape::Wake { delay, .. } if TELL_TIME - TELL_LOCK + t < delay => return None,
+            shape => shapes::resolve(shape, mb, Some((p, t))),
         })
     }
 }
@@ -834,6 +845,15 @@ pub enum SignatureShape {
         half: f32,
         bar_len: f32,
     },
+    Annulus { inner: f32, outer: f32 },
+    Tide { len: f32, half: f32, gap: f32, travel: f32 },
+    Return { len: f32, half: f32, sweep: f32 },
+    Overlap { radius: f32, sep: f32 },
+    Comb { len: f32, half: f32, tooth_gap: f32, wide_gap: f32 },
+    Shear { len: f32, half: f32, channel: f32 },
+    Wake { delay: f32, window: f32, half: f32 },
+    Drip { radius: f32 },
+    Umbra { half_angle: f32, len: f32 },
 }
 
 /// Where a row's three stamps sit, relative to what the tell locked.
@@ -861,6 +881,8 @@ pub struct Signature {
 pub const STAMP_STEP: f32 = 0.3;
 
 /// A distinct signature footprint. All units are world pixels.
+/// Wake keeps its fixed history inline so resolving a footprint never allocates.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MinibossShape {
     /// A straight trench from `a` to `b` with half-width `half`.
@@ -917,6 +939,19 @@ pub enum MinibossShape {
         bar_len: f32,
         covered: f32,
     },
+    Annulus { origin: Vec2, inner: f32, outer: f32 },
+    /// The warned travel, or just the live crossbar, split by a fixed gap.
+    Tide { origin: Vec2, aim: Vec2, len: f32, from: f32, to: f32, gap: (f32, f32) },
+    /// A swept or instantaneous cord with an uncovered hub.
+    Return { origin: Vec2, aim: Vec2, len: f32, half: f32, sweep: f32 },
+    Overlap { centers: [Vec2; 2], radius: f32 },
+    Comb { origin: Vec2, aim: Vec2, len: f32, half: f32, gaps: [(f32, f32); 3] },
+    /// `blade` is the lateral offset of either live blade. `None` warns the lane.
+    Shear { origin: Vec2, aim: Vec2, len: f32, half: f32, channel: f32, blade: Option<f32> },
+    Wake { trail: WakeTrail, half: f32 },
+    /// All three circles when warning, a single circle when striking.
+    Drip { centers: [Vec2; 3], radius: f32, mask: u8 },
+    Umbra { origin: Vec2, aim: Vec2, half_angle: f32, len: f32 },
 }
 
 impl MinibossShape {
@@ -940,6 +975,7 @@ impl MinibossShape {
                 bar_len,
                 ..
             } => origin + aim.normalized() * ((covered - bar_len * 0.5).max(0.0)),
+            shape => shape.signature_bounds().map_or(Vec2::ZERO, |(lo, hi)| (lo + hi) * 0.5),
         }
     }
 
@@ -1056,6 +1092,7 @@ impl MinibossShape {
                     && across + radius >= seam_half
                     && across <= seam_half + half * 2.0 + radius
             }
+            _ => shapes::contains(self, p, radius),
         }
     }
 }
@@ -1097,6 +1134,11 @@ pub struct Miniboss {
     pub target: Vec2,
     /// The three stamp centres, locked at tell start, in landing order.
     pub stamp_centers: [Vec2; 3],
+    pub(super) signature_track: SignatureTrack,
+    /// Successful hits in the separately damaging passes or circles.
+    multi_hit_mask: u8,
+    /// Remaining i-frames granted by this strike's most recent hit.
+    multi_hit_iframes: f32,
     /// One-shot arrival cue.
     pub announced: bool,
     /// One-shot tell cue for this signature.
@@ -1126,6 +1168,9 @@ impl Miniboss {
             aim: Vec2::new(1.0, 0.0),
             target: Vec2::ZERO,
             stamp_centers: [Vec2::ZERO; 3],
+            signature_track: SignatureTrack::default(),
+            multi_hit_mask: 0,
+            multi_hit_iframes: 0.0,
             announced: false,
             tell_cued: false,
             active_cued: false,
@@ -1175,6 +1220,9 @@ impl Miniboss {
 
     /// The active hit shape, if the signature is live.
     pub fn active_shape(&self) -> Option<MinibossShape> {
+        if self.state == MinibossState::Tell {
+            return shapes::locked_tell_hit(self.kind.signature().shape, self);
+        }
         if self.state != MinibossState::Active {
             return None;
         }
@@ -1344,7 +1392,7 @@ fn spawn_miniboss(
 /// tick's steering, and so a spawn lands before the grid build.
 pub fn miniboss_system(
     mut commands: Commands,
-    input: Res<TickInput>,
+    (input, rat_track): (Res<TickInput>, Res<RatTrack>),
     counters: ResMut<RunCounters>,
     mut schedule: ResMut<MinibossSchedule>,
     level: Res<Level>,
@@ -1394,6 +1442,7 @@ pub fn miniboss_system(
             );
         }
         mb.timer += dt;
+        mb.multi_hit_iframes = (mb.multi_hit_iframes - dt).max(0.0);
         match mb.state {
             MinibossState::Approach => {
                 // Let the ordinary steering walk it in; just watch the range.
@@ -1409,6 +1458,7 @@ pub fn miniboss_system(
                         &mut sfx,
                         &mut particles,
                         &mut rng.0,
+                        &rat_track,
                     );
                 }
             }
@@ -1417,6 +1467,9 @@ pub fn miniboss_system(
                 // not by a stun: a miniboss is an elite-grade body and takes
                 // **slows**, so a Sonic Squeak ring must slow it exactly like
                 // it slows an elite instead of being cancelled here.
+                let signature = mb.kind.signature();
+                let timer = mb.timer;
+                mb.signature_track.update(signature.shape, timer, &rat_track);
                 if mb.timer < TELL_LOCK {
                     // Still tracking: the body walks on (`holds` is false) and
                     // the outline follows it. A re-aim that would leave the
@@ -1424,12 +1477,12 @@ pub fn miniboss_system(
                     let _ = aim_signature(&mut mb, e.pos, ppos, pvel, &level);
                 } else {
                     e.vel = Vec2::ZERO;
+                    strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
                 }
                 if mb.timer >= TELL_TIME {
                     mb.state = MinibossState::Active;
                     mb.timer = 0.0;
                     mb.active_cued = false;
-                    mb.hit_this_strike = false;
                 }
             }
             MinibossState::Active => {
@@ -1438,30 +1491,7 @@ pub fn miniboss_system(
                     mb.active_cued = true;
                     sfx.0.push(Sfx::MinibossTell);
                 }
-                if let Some(shape) = mb.active_shape() {
-                    // One hit per strike (`hit_this_strike`): a shape that
-                    // lingers over the rat for most of its window — a closing
-                    // ring, a claw sweeping back through the same ground —
-                    // bites once, not once a tick. The rat's i-frames would
-                    // hide a repeat inside half a second anyway; the latch is
-                    // what makes the rule independent of the i-frame length.
-                    // It is set only by a bite that *lands*: one blocked by a
-                    // dash or by i-frames from an unrelated hurt leaves the
-                    // strike live, so a dodge has to carry the rat clear of
-                    // the shape, not merely through its first tick.
-                    if !mb.hit_this_strike
-                        && shape.contains(ppos, crate::game::ecs::constants::PLAYER_RADIUS)
-                        && player.take_damage(mb.signature_damage)
-                    {
-                        mb.hit_this_strike = true;
-                        sfx.0.push(Sfx::Hurt);
-                        crate::game::particle::vfx::emit_player_hurt(
-                            &mut particles,
-                            &mut rng.0,
-                            ppos,
-                        );
-                    }
-                }
+                strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
                 if mb.timer >= mb.kind.active_duration() {
                     mb.state = MinibossState::Recover;
                     mb.timer = 0.0;
@@ -1530,6 +1560,63 @@ pub fn miniboss_system(
     }
 }
 
+fn strike_rat(
+    mb: &mut Miniboss,
+    player: &mut Player,
+    sfx: &mut SfxQueue,
+    particles: &mut Particles,
+    rng: &mut StdRng,
+) {
+    let Some(shape) = mb.active_shape() else {
+        return;
+    };
+    let bit = multi_hit_bit(mb.kind.signature(), mb.timer);
+    if apply_strike(mb, player, &shape, bit) {
+        sfx.0.push(Sfx::Hurt);
+        crate::game::particle::vfx::emit_player_hurt(particles, rng, player.pos);
+    }
+}
+
+pub(super) fn apply_strike(
+    mb: &mut Miniboss,
+    player: &mut Player,
+    shape: &MinibossShape,
+    bit: Option<u8>,
+) -> bool {
+    let already_hit = if let Some(bit) = bit {
+        mb.multi_hit_mask & bit != 0
+    } else {
+        mb.hit_this_strike
+    };
+    if already_hit || !shape.contains(player.pos, crate::game::ecs::constants::PLAYER_RADIUS) {
+        return false;
+    }
+    // Consecutive passes and drops are separate hits. Ignore only the
+    // immunity granted by this same strike, and honor an active dash.
+    let immunity = player.iframes;
+    if bit.is_some() && immunity == mb.multi_hit_iframes && player.dash_active <= 0.0 {
+        player.iframes = 0.0;
+    }
+    if !player.take_damage(mb.signature_damage) {
+        player.iframes = immunity;
+        return false;
+    }
+    if let Some(bit) = bit {
+        mb.multi_hit_mask |= bit;
+        mb.multi_hit_iframes = player.iframes;
+    }
+    mb.hit_this_strike = true;
+    true
+}
+
+pub(super) fn multi_hit_bit(signature: Signature, timer: f32) -> Option<u8> {
+    match signature.shape {
+        SignatureShape::Return { .. } => Some(1 << u8::from(timer > signature.active * 0.5)),
+        SignatureShape::Drip { .. } => Some(1 << shapes::drip_index(timer)),
+        _ => None,
+    }
+}
+
 /// Aim the signature from a body at `body` at a rat at `ppos` moving at
 /// `pvel`: the origin, the aim, the rat lock and the stamp centres.
 ///
@@ -1557,13 +1644,15 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
     // straight at the rat, that seam is where the rat already stands and the
     // strike never has to be answered; turn the lane just far enough that the
     // rat is under one bar's centre line and has to step to the seam.
-    let aim = match mb.kind.signature().shape {
+    let shape = mb.kind.signature().shape;
+    let aim = match shape {
         SignatureShape::Lane {
             seam_half, half, ..
         } => {
             let d = at.dist(body).max(1.0);
             aim.rotate(((seam_half + half) / d).clamp(0.0, 0.7).dasin())
         }
+        SignatureShape::Umbra { .. } => shapes::umbra_aim(level, body, aim),
         _ => aim,
     };
     let before = (mb.origin, mb.aim, mb.target, mb.stamp_centers);
@@ -1573,17 +1662,16 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
     lock_stamps(mb);
     // Reposition when the signature leaves no walkable escape: try rotating
     // the aim until a sample direction is clear.
-    let mut tries = 0;
-    while tries < 8 && !escape_exists(mb, ppos, level) {
+    let attempts = if matches!(shape, SignatureShape::Umbra { .. }) { 1 } else { 8 };
+    for _ in 0..attempts {
+        if escape_exists(mb, ppos, level) {
+            return true;
+        }
         mb.aim = mb.aim.rotate(std::f32::consts::FRAC_PI_4);
         lock_stamps(mb);
-        tries += 1;
     }
-    if tries >= 8 {
-        (mb.origin, mb.aim, mb.target, mb.stamp_centers) = before;
-        return false;
-    }
-    true
+    (mb.origin, mb.aim, mb.target, mb.stamp_centers) = before;
+    false
 }
 
 /// Enter the tell: aim the signature and cue it. The aim keeps tracking until
@@ -1597,7 +1685,13 @@ fn begin_tell(
     sfx: &mut SfxQueue,
     particles: &mut Particles,
     rng: &mut StdRng,
+    rat_track: &RatTrack,
 ) {
+    mb.timer = 0.0;
+    let shape = mb.kind.signature().shape;
+    if matches!(shape, SignatureShape::Wake { .. } | SignatureShape::Drip { .. }) {
+        mb.signature_track = SignatureTrack::start(shape, ppos, rat_track);
+    }
     if !aim_signature(mb, e.pos, ppos, pvel, level) {
         // Still trapped: skip this signature and go straight to cooldown.
         mb.state = MinibossState::Cooldown;
@@ -1605,7 +1699,9 @@ fn begin_tell(
         return;
     }
     mb.state = MinibossState::Tell;
-    mb.timer = 0.0;
+    mb.hit_this_strike = false;
+    mb.multi_hit_mask = 0;
+    mb.multi_hit_iframes = 0.0;
     // `tell_cued` stays set from the first tell on: the art reads it to know
     // the arrival pose is over.
     mb.tell_cued = true;
@@ -1653,6 +1749,11 @@ fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
             }
             d += 6.0;
         }
+        return true;
+    }
+    if shape.signature_bounds().is_some()
+        && !shape.contains(ppos, crate::game::ecs::constants::PLAYER_RADIUS)
+    {
         return true;
     }
     for i in 0..8 {

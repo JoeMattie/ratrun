@@ -489,6 +489,7 @@ impl World {
         ecs.insert_resource(BossOverride::default());
         // Named miniboss appointments + spawn grace (wave 3).
         ecs.insert_resource(super::ecs::systems::miniboss::MinibossSchedule::default());
+        ecs.insert_resource(super::ecs::resources::RatTrack::default());
         // Floor-trap side table (glue victims + mousetrap hit bookkeeping);
         // `traps::TrapRuntime::sync` sizes it from `level.objects`.
         ecs.insert_resource(super::ecs::systems::traps::TrapRuntime::default());
@@ -3593,7 +3594,9 @@ impl World {
             if !e.alive() {
                 continue;
             }
-            if !on_screen(self.w2s(e.pos, cam), 90.0, self.render_viewport) {
+            if !on_screen(self.w2s(e.pos, cam), 90.0, self.render_viewport)
+                && !mb.telegraph().is_some_and(|shape| shape.signature_bounds().is_some())
+            {
                 continue;
             }
             art_miniboss::draw_telegraph(pb, mb, cam, accent);

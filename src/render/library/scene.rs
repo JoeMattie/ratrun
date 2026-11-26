@@ -3228,6 +3228,7 @@ fn shape_bounds(shape: MinibossShape) -> (Vec2, Vec2) {
                 }
             }
         }
+        shape => return shape.signature_bounds().expect("new signature bounds"),
     }
     (lo, hi)
 }
