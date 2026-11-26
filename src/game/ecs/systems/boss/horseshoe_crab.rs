@@ -165,6 +165,9 @@ const S_WALLED: usize = 1;
 const S_LANE_LEN: usize = 2;
 /// The blood-pool fan's cursor (a deterministic walk, not a random draw).
 const S_POOLS: usize = 3;
+/// The committed burrow's own travel time (s), fixed at the tell's lock so the
+/// published hazard and the visible mound arrive together.
+const S_DIVE: usize = 4;
 
 // ---- flags layout ---------------------------------------------------------
 
@@ -398,13 +401,28 @@ fn tick_burrow_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
         if boss.progress() >= art::BURROW_LOCK_PROGRESS {
             boss.flags |= F_LOCK;
             let remaining = (boss.duration * (1.0 - art::BURROW_LOCK_PROGRESS)).max(0.05);
-            let dive = art::BURROW_SINK + art::BURROW_TRAVEL;
+            // The mark is the exit *and* the place the mound travels to, so it
+            // has to hold the whole shell. A stale mark (a forced state, or a
+            // mark left on floor the rat stands on with no room) is moved to the
+            // nearest point on the way back that does, before it is published.
+            if !ctx.footprint_fits(boss.target, art::BODY_RADIUS) {
+                boss.target = burrow_landing(ctx, boss.target, boss.pos, art::BODY_RADIUS);
+            }
+            // The visible dive's own clock: the sink plus the ground it has to
+            // cover at the crab's top speed, never a teleport.
+            let dive = burrow_dive_time(boss, ctx);
+            boss.scratch[S_DIVE] = dive;
+            // `push_hazard` scales the warn by the tell multiplier below, so
+            // divide the dive half out here: the eruption then lands exactly
+            // when the mound does (never before it), whatever the multiplier.
+            let delay = remaining
+                + dive / boss.attack_tuning.tell_time_mult.max(0.01);
             let burst = BossHazard::new(
                 HazardShape::Circle {
                     center: boss.target,
                     radius: art::BURROW_RADIUS,
                 },
-                remaining + dive,
+                delay,
                 0.18,
                 art::EMERGE_DAMAGE,
             )
@@ -416,35 +434,59 @@ fn tick_burrow_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     }
     if boss.progress() >= 1.0 {
         boss.pounce_origin = boss.pos;
-        // The dive and the run under the floor are one state: it is out of
-        // sight for the whole of both.
-        let travel = (art::BURROW_SINK + art::BURROW_TRAVEL) * boss.attack_tuning.tell_time_mult;
-        enter(boss, CrabState::Burrow, travel);
+        enter(boss, CrabState::Burrow, boss.scratch[S_DIVE]);
     }
 }
 
+/// How long the visible dive takes (s): the sink, then the distance from where
+/// the shell goes down to the marked exit at [`art::BURROW_TRAVEL_SPEED`] (the
+/// crab's own top speed).
+fn burrow_dive_time(boss: &Boss, ctx: &BossContext<'_>) -> f32 {
+    let slot = phase_slot(boss);
+    let ground = boss.pos.dist(boss.target) / art::BURROW_TRAVEL_SPEED[slot].max(1.0);
+    (art::BURROW_SINK * boss.attack_tuning.tell_time_mult + ground).max(0.05)
+}
+
 fn tick_burrow(ctx: &BossContext<'_>, boss: &mut Boss) {
-    // Under the floor: no wall rule, no contact, nothing to hit. It arrives at
-    // the mark as the dive ends.
-    if boss.progress() >= 1.0 {
-        // Live tells require full clearance. Keep a recovery path for forced
-        // states or a landing whose geometry was edited during the dive.
-        boss.pos = surface_spot(ctx, boss);
+    // Under the floor, but never out of sight: the mound is drawn at `boss.pos`
+    // and travels the whole way to the mark at the crab's own top speed. No wall
+    // rule (it is under the floor) and no contact (nothing is above the swell),
+    // but the shell's hit box is right under the mound, so it stays hittable.
+    let radius = boss.kind.body_radius();
+    // A stale mark (a forced state, or geometry edited since the lock) is
+    // re-aimed once, at the *near* end of the dive: the mound then walks to a
+    // spot the shell actually fits in. Nothing is ever placed at the far end.
+    if !ctx.footprint_fits(boss.target, radius) {
+        let landing = burrow_landing(ctx, boss.target, boss.pounce_origin, radius);
+        if landing.dist(boss.target) > 0.5 {
+            boss.target = landing;
+            let travel = burrow_dive_time(boss, ctx);
+            boss.scratch[S_DIVE] = travel;
+            boss.duration = boss.elapsed + travel;
+        }
+    }
+    let slot = phase_slot(boss);
+    let to = boss.target - boss.pos;
+    let gap = to.len();
+    let step = art::BURROW_TRAVEL_SPEED[slot] * ctx.dt;
+    if gap > 1e-3 {
+        boss.pos += to * (step.min(gap) / gap);
+    }
+    if boss.progress() >= 1.0 || boss.pos.dist(boss.target) <= 1.0 {
+        boss.pos = boss.target;
         enter(boss, CrabState::Emerge, art::EMERGE);
     }
 }
 
-/// Where the burrowing crab comes up: its mark when the whole body fits there,
-/// otherwise the first fitting point on the way back toward where it dived
-/// (floor it was standing on a moment ago), otherwise the nearest open cell.
-/// A dive that cannot hold the mark returns to its origin.
-fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
-    let radius = boss.kind.body_radius();
-    let mark = boss.target;
+/// Where the burrowing crab comes up, given the mark and the spot it went
+/// down: the mark when the whole body fits there, otherwise the first fitting
+/// point on the way back toward the dive, otherwise the nearest open cell. A
+/// dive that cannot hold the mark returns to its origin.
+fn burrow_landing(ctx: &BossContext<'_>, mark: Vec2, from: Vec2, radius: f32) -> Vec2 {
     if ctx.footprint_fits(mark, radius) {
         return mark;
     }
-    let back = boss.pounce_origin - mark;
+    let back = from - mark;
     let len = back.len();
     if len > 1e-3 {
         let dir = back * (1.0 / len);
@@ -461,7 +503,11 @@ fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
     if ctx.footprint_fits(open, radius) {
         return open;
     }
-    boss.pounce_origin
+    from
+}
+
+fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
+    burrow_landing(ctx, boss.target, boss.pounce_origin, boss.kind.body_radius())
 }
 
 fn tick_emerge(boss: &mut Boss) {
@@ -1405,17 +1451,21 @@ mod tests {
         let mark = boss_of(&mut w).unwrap().target;
         assert!(mark.dist(w.player.pos) < 26.0, "the mark must be under the rat");
         let mut underground = false;
+        let mut dive_steps = Vec::new();
         let mut hits = 0.0;
         let mut last = w.player.hp;
         let mut t = 0.0;
-        while t < 8.0 && state_of(&mut w) != CrabState::Recover {
+        while t < 12.0 && state_of(&mut w) != CrabState::Recover {
             tick(&mut w);
             w.sfx = Vec::new();
             if state_of(&mut w) == CrabState::Burrow {
                 underground = true;
                 let boss = boss_of(&mut w).unwrap();
-                assert!(!art::hit_shapes(&crab_view_of(&boss))[0].grounded);
+                // The mound is drawn, so the shell under it is hittable: the
+                // dive is no longer a free, invisible escape.
+                assert!(art::hit_shapes(&crab_view_of(&boss))[0].grounded);
                 assert_eq!(boss.contact_damage, 0.0);
+                dive_steps.push(boss.pos);
             }
             if w.player.hp < last {
                 hits += last - w.player.hp;
@@ -1425,6 +1475,13 @@ mod tests {
         }
         assert_eq!(state_of(&mut w), CrabState::Recover, "the eruption dazes it");
         assert!(underground, "the crab never went under");
+        // The dive covered real ground, tick by tick, never faster than the
+        // crab's own top speed: a visible mound, not a teleport.
+        assert!(dive_steps.len() > 2, "the dive was not a travel");
+        let cap = art::BURROW_TRAVEL_SPEED[1] * DT + 0.01;
+        for pair in dive_steps.windows(2) {
+            assert!(pair[0].dist(pair[1]) <= cap, "the mound jumped its dive");
+        }
         assert!(
             (hits - art::EMERGE_DAMAGE).abs() < 0.01,
             "the eruption is a single {} hit, took {hits}",
@@ -1520,8 +1577,15 @@ mod tests {
         place(&mut w, c, c + Vec2::new(40.0, 0.0));
         set_state(&mut w, CrabState::Burrow, 0.05);
         with_boss(&mut w, |b| b.target = mark);
-        let next = drive_until_change(&mut w, 1.0);
+        let before = boss_of(&mut w).unwrap().pos;
+        let next = drive_until_change(&mut w, 6.0);
         assert_eq!(next, CrabState::Emerge);
+        let out = boss_of(&mut w).unwrap().pos;
+        assert!(
+            before.dist(out) <= art::BURROW_TRAVEL_SPEED[1] * 6.0 + 1.0,
+            "the mound covered {:.1} px at its own speed",
+            before.dist(out)
+        );
         let boss = boss_of(&mut w).unwrap();
         assert!(
             fits(&w, boss.pos, boss.kind.body_radius()),

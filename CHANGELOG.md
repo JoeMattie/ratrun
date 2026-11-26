@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Bosses never vanish.** The Bell Diver and the other burrowing
+  minibosses no longer disappear and come up somewhere else: the dive is a
+  mound that travels from where they went down to the warned spot at no
+  more than their own sprint, and the body stays on screen and hittable
+  the whole way.
+- **The Horseshoe.** Its burrow is a moving mound of spoil you can follow
+  and hit, not a body that goes under and reappears under your feet. The
+  marked eruption still lands where it was drawn, and the shell arrives
+  with it.
+- **Lost bosses walk back.** A boss that has been stranded off the fight
+  for five seconds is called back: it sprints and leaps home over the
+  floor instead of being placed beside you. There is no pop-in and no
+  arrival flash anywhere.
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP

@@ -1055,6 +1055,15 @@ impl Miniboss {
         self.signature().active
     }
 
+    /// Is this body mid-dive (travelling under the floor)?
+    ///
+    /// The art draws such a body as a moving mound at its true position: it is
+    /// never hidden, and its hit shapes (the body itself) travel with it.
+    #[inline]
+    pub fn diving(&self) -> bool {
+        matches!(self.manoeuvre.motion, Motion::Dive { .. })
+    }
+
     pub(super) fn select_signature(&mut self, hp: f32, max_hp: f32) {
         if !self.second_unlocked && hp < max_hp * self.kind.temperament().second_from_hp {
             self.second_unlocked = true;
@@ -2469,8 +2478,9 @@ mod tests {
         w.director.spawn_timer = 1.0e6;
         w.director.elite_timer = 1.0e6;
         let p = w.player.pos;
-        // Use a surface body to exercise the normal Nuke path. Burrow's
-        // independent immunity would absorb the Nuke on this tick.
+        // Use a surface body to exercise the normal Nuke path (a burrower is
+        // drawn and hittable through its dive as well, but this test wants the
+        // plain case).
         let e = w.spawn_miniboss(K::Corkscrew, 1, p + Vec2::new(60.0, 0.0));
         let hp0 = w.ecs.get::<Enemy>(e).unwrap().hp;
         let max = w.ecs.get::<Enemy>(e).unwrap().max_hp;

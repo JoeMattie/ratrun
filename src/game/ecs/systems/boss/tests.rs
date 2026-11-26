@@ -580,14 +580,14 @@ fn boss_never_ends_a_tick_inside_a_wall() {
 // large body can enter (a maze's one-way door, the Sewer's escape rat-hole, a
 // 1-cell squeeze). The verifier's soft-lock (seed 17986931858700579504: Expert,
 // boss alive 1244 s, `Cat(Stalk)` at full HP while the rejoin kept putting it
-// 130 px away behind the same wall) is that shape. These two tests pin the
-// framework's answer: the rejoin never teleports the boss somewhere it cannot
-// walk to the rat, and a walled-off boss tears a body-sized hole and keeps
-// coming.
+// 130 px away behind the same wall) is that shape. These three tests pin the
+// framework's answer: a lost boss is *called back* by waking its own pursuit
+// sprint (never by moving it), and a walled-off boss tears a body-sized hole and
+// keeps coming.
 
 /// A rat parked in a 2 x 2-cell pocket with a solid wall ring around it, on an
-/// otherwise empty map. No spot on any [`REJOIN_RADII`] ring is both standable
-/// and walkable to the rat, which is the situation the siege exists for.
+/// otherwise empty map: the rat is somewhere no large body can walk to, which
+/// is the situation the siege exists for.
 fn walled_pocket_world() -> World {
     let mut w = World::new(Theme::Sewer, 11);
     open_arena(&mut w);
@@ -619,31 +619,45 @@ fn walled_pocket_world() -> World {
     w
 }
 
+/// The call is travel, not placement: a lost boss never moves further in one
+/// tick than its own sprint (the leap is the fastest thing it has), and it still
+/// has all the ground to cover when the call fires.
 #[test]
-fn a_rejoin_never_teleports_the_boss_into_a_wall() {
-    let w = walled_pocket_world();
-    let radius = BossKind::Cat.body_radius();
-    if let Some(spot) = rejoin_spot(&w.level, w.player.pos, radius) {
-        assert!(
-            w.level.tiles.circle_clear(spot, radius, SizeClass::Large),
-            "a rejoin spot must be body-clear ({spot:?})"
-        );
-        // ...and it is only accepted as a *walkable* ring spot when it is one:
-        // the fallback (a rat no large body can reach) is handled by the siege,
-        // whose own test follows.
-        assert!(
-            walkable_line(&w.level, spot, w.player.pos, radius, SizeClass::Large)
-                || spot.dist(w.player.pos) < 220.0,
-            "a far rejoin spot must be walkable to the rat ({spot:?})"
-        );
+fn a_lost_boss_is_called_back_by_walking_not_by_teleporting() {
+    let mut w = World::new(Theme::Sewer, 41);
+    open_arena(&mut w);
+    let far = w.player.pos + Vec2::new(600.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, far, 5000.0);
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        let mut boss = query.iter_mut(&mut w.ecs).next().expect("boss alive");
+        boss.set_state(BossState::Cat(BossCatState::Stalk), 5.0);
+        boss.lost = RELOCATE_AFTER_SECS;
     }
+    let before = boss_of(&mut w).expect("boss alive").pos;
+    update_boss(&mut w, DT);
+    let boss = boss_of(&mut w).expect("boss alive");
+    assert!(boss.recall > 0.0, "the call did not fire");
+    // The leap (300 px/s) is the fastest the framework ever moves a boss, and
+    // the controller's own neutral walk rides on top of it; a teleport across
+    // the 600 px gap would be two orders of magnitude larger.
+    assert!(
+        before.dist(boss.pos) <= LEAP_SPEED * DT * 2.0,
+        "the call moved the boss {} px in one tick",
+        before.dist(boss.pos)
+    );
+    assert!(
+        boss.pos.dist(w.player.pos) > REJOIN_DIST,
+        "the boss was placed beside the rat instead of walking there ({:?})",
+        boss.pos
+    );
 }
 
-/// The rejoin waits for the neutral beat: a boss that is owed a relocation but
-/// is in the middle of a set piece stays where its attack is, and is walked
-/// back on the first neutral tick.
+/// The call waits for the neutral beat: a boss in the middle of a set piece
+/// keeps the position its attack was drawn at, and starts walking home on the
+/// first neutral tick.
 #[test]
-fn a_rejoin_waits_for_the_neutral_beat() {
+fn a_recall_waits_for_the_neutral_beat() {
     let mut w = World::new(Theme::Sewer, 41);
     open_arena(&mut w);
     let far = w.player.pos + Vec2::new(600.0, 0.0);
@@ -657,10 +671,11 @@ fn a_rejoin_waits_for_the_neutral_beat() {
     update_boss(&mut w, DT);
     let boss = boss_of(&mut w).expect("boss alive");
     assert!(
-        boss.pos.dist(w.player.pos) > REJOIN_DIST,
-        "a roaring cat was relocated mid-roar to {:?}",
+        boss.pos.dist(far) < 2.0,
+        "a roaring cat was moved mid-roar (to {:?})",
         boss.pos
     );
+    assert_eq!(boss.recall, 0.0, "the call must wait for the neutral beat");
     assert!(boss.lost >= RELOCATE_AFTER_SECS, "the timer keeps running");
     {
         let mut query = w.ecs.query::<&mut Boss>();
@@ -669,9 +684,15 @@ fn a_rejoin_waits_for_the_neutral_beat() {
     }
     update_boss(&mut w, DT);
     let boss = boss_of(&mut w).expect("boss alive");
+    assert!(boss.recall > 0.0, "the neutral cat was not called back");
     assert!(
-        boss.pos.dist(w.player.pos) <= REJOIN_DIST,
-        "the neutral cat was not walked back ({:?})",
+        far.dist(boss.pos) <= LEAP_SPEED * DT * 2.0,
+        "the neutral cat moved {} px in one tick",
+        far.dist(boss.pos)
+    );
+    assert!(
+        boss.pos.dist(w.player.pos) > REJOIN_DIST,
+        "the cat was placed rather than walked ({:?})",
         boss.pos
     );
 }

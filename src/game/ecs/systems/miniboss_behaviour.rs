@@ -240,8 +240,13 @@ pub(crate) enum Motion {
     ChargeTell { from: Vec2, end: Vec2, left: f32 },
     Lunge { from: Vec2, end: Vec2, left: f32 },
     Charged,
-    Sunk { left: f32 },
-    Crack { at: Vec2, left: f32 },
+    /// The burrower's reposition: a **visible** dive. The body stays drawn the
+    /// whole way (a low mound at its true position, see `art_miniboss`), so it
+    /// can never leave one spot and reappear at another. `left` counts down
+    /// from `total`, and `total` is never shorter than the ground the dive has
+    /// to cover at the kind's sprint — so the strike that follows can be late
+    /// but never early.
+    Dive { from: Vec2, to: Vec2, left: f32, total: f32 },
     Surfaced,
 }
 
@@ -359,7 +364,7 @@ impl Manoeuvre {
     pub fn locks_position(self) -> bool {
         self.anchored || matches!(self.motion,
             Motion::ChargeTell { .. } | Motion::Lunge { .. } | Motion::Charged
-                | Motion::Sunk { .. } | Motion::Crack { .. } | Motion::Surfaced)
+                | Motion::Dive { .. } | Motion::Surfaced)
     }
 }
 
@@ -521,32 +526,30 @@ impl MovementParams<'_, '_> {
             MoveStyle::Burrow => {
                 let m = &mut mb.manoeuvre.motion;
                 match *m {
-                    Motion::Sunk { left } => {
-                        if left > dt {
-                            *m = Motion::Sunk { left: left - dt };
+                    Motion::Dive { from, to, left, total } => {
+                        // Underground travel is drawn, not implied: the body
+                        // (as a mound at this exact position) crosses the floor
+                        // every tick between `from` and the warn's landing spot.
+                        let left = (left - dt).max(0.0);
+                        let progress = if total > 1e-6 {
+                            (1.0 - left / total).clamp(0.0, 1.0)
                         } else {
-                            let seen = reachable(&level.tiles, cell_of(rat), SizeClass::Small);
-                            let turn = unit(phase(id, mb.strikes)) * std::f32::consts::TAU;
-                            if let Some(at) = [SURFACE_RANGE, 32.0, 48.0].into_iter()
-                                .find_map(|r| landing(level, &seen, rat, body.radius, LARGE, turn, r))
-                            {
-                                crack(particles, at, id);
-                                *m = Motion::Crack { at, left: CRACK_TIME };
-                            } else {
-                                body.buried = false;
-                                *m = Motion::Surfaced;
-                            }
+                            1.0
+                        };
+                        body.pos = from + (to - from) * progress;
+                        let travel = to - from;
+                        body.vel = if total > 1e-6 { travel * total.recip() } else { Vec2::ZERO };
+                        if travel.len_sq() > 1e-6 {
+                            body.facing = travel.normalized();
                         }
-                    }
-                    Motion::Crack { at, left } => {
-                        if left > dt {
-                            *m = Motion::Crack { at, left: left - dt };
-                        } else {
-                            if clear(level, at, body.radius, LARGE) {
-                                body.pos = at;
-                            }
-                            body.buried = false;
+                        body.anim += dt * (4.0 + t.speed * 0.5);
+                        if left <= 0.0 {
+                            body.pos = to;
+                            body.vel = Vec2::ZERO;
+                            crack(particles, to, id);
                             *m = Motion::Surfaced;
+                        } else {
+                            *m = Motion::Dive { from, to, left, total };
                         }
                     }
                     Motion::Surfaced => {
@@ -559,10 +562,27 @@ impl MovementParams<'_, '_> {
                         if distance <= STANDOFF && until_ready <= SINK_TIME + CRACK_TIME
                             && body.slow_t <= 0.0 && self.glue.get(entity).is_err()
                         {
-                            stand(body);
-                            body.buried = true;
-                            dust_mound(particles, body.pos);
-                            *m = Motion::Sunk { left: SINK_TIME };
+                            // The landing spot is picked here, exactly as the
+                            // old sink's expiry picked it (same fixed integer
+                            // mix, same radii, no rng), so the warned spot is
+                            // unchanged; only the way the body gets there is.
+                            let seen = reachable(&level.tiles, cell_of(rat), SizeClass::Small);
+                            let turn = unit(phase(id, mb.strikes)) * std::f32::consts::TAU;
+                            let at = [SURFACE_RANGE, 32.0, 48.0].into_iter()
+                                .find_map(|r| landing(level, &seen, rat, body.radius, LARGE, turn, r));
+                            if let Some(to) = at.filter(|at| clear(level, *at, body.radius, LARGE)) {
+                                stand(body);
+                                dust_mound(particles, body.pos);
+                                let from = body.pos;
+                                // The old sink + crack budget, and never faster
+                                // than the kind's own sprint (the charge lunge's
+                                // rate) over the ground it covers.
+                                let total = (SINK_TIME + CRACK_TIME)
+                                    .max(from.dist(to) / (t.speed * 3.0));
+                                *m = Motion::Dive { from, to, left: total, total };
+                            } else {
+                                steer(body, toward);
+                            }
                         } else {
                             steer(body, toward);
                         }
@@ -789,40 +809,62 @@ mod tests {
         }
     }
 
+    /// The burrowers never leave the floor: a dive is a visible mound travelling
+    /// from where the body went down to the warned spot, and the body stays
+    /// targetable the whole way (it is drawn the whole way). One case per kind
+    /// that uses the burrow temperament. (The Outfall's Shade shares the same
+    /// `MoveStyle::Burrow` arm; its theme only changes which floor counts as
+    /// clear, and an empty Outfall level has no sand to land on.)
     #[test]
-    fn burrow_is_immune_until_the_reachable_crack_resolves() {
-        let (mut w, entity) = setup(Theme::Sewer, MinibossKind::BellDiver, 48.0);
-        let mut crack_ticks = 0;
-        let mut sunk_ticks = 0;
-        let mut landing_at = None;
-        for _ in 0..100 {
-            tick(&mut w);
-            match motion(&w, entity) {
-                Motion::Sunk { .. } => sunk_ticks += 1,
-                Motion::Crack { at, .. } => {
-                    crack_ticks += 1;
-                    landing_at = Some(at);
+    fn burrow_travel_is_visible_and_never_teleports() {
+        for (theme, kind) in [
+            (Theme::Sewer, MinibossKind::BellDiver),
+            (Theme::Lab, MinibossKind::PetriMother),
+            (Theme::Laundry, MinibossKind::SudsBailiff),
+            (Theme::Flatbed, MinibossKind::TarpaulinPup),
+        ] {
+            let (mut w, entity) = setup(theme, kind, 48.0);
+            let speed_cap = kind.temperament().speed * 3.0;
+            let mut dive_ticks = 0;
+            let mut previous = w.ecs.get::<Enemy>(entity).unwrap().pos;
+            let mut landing_at = None;
+            for _ in 0..140 {
+                tick(&mut w);
+                match motion(&w, entity) {
+                    Motion::Dive { to, .. } => {
+                        dive_ticks += 1;
+                        landing_at = Some(to);
+                    }
+                    Motion::Surfaced => break,
+                    other => panic!("{kind:?}: expected a visible dive, got {other:?}"),
                 }
-                Motion::Surfaced => break,
-                other => panic!("expected to be underground, got {other:?}"),
+                let body = w.ecs.get::<Enemy>(entity).unwrap();
+                let step = body.pos.dist(previous);
+                assert!(
+                    step <= speed_cap * DT + 0.01,
+                    "{kind:?}: the dive jumped {step} px in one tick (cap {} px)",
+                    speed_cap * DT,
+                );
+                assert!(body.targetable(), "{kind:?}: a visible mound must stay hittable");
+                previous = body.pos;
             }
-            let mut body = w.ecs.get_mut::<Enemy>(entity).unwrap();
-            let hp = body.hp;
-            assert!(!body.targetable());
-            body.hurt(hp * 2.0);
-            assert_eq!(body.hurt_from(hp, Vec2::ZERO), 0.0);
-            assert_eq!(body.hp, hp);
+            assert!(
+                (dive_ticks as f32 * DT - (SINK_TIME + CRACK_TIME)).abs() <= DT * 1.01,
+                "{kind:?}: the dive keeps the old sink + crack budget",
+            );
+            let body = w.ecs.get::<Enemy>(entity).unwrap();
+            assert!(body.targetable(), "{kind:?}");
+            assert_eq!(Some(body.pos), landing_at, "{kind:?}: it arrives where the dive aimed");
+            assert!((body.pos.dist(w.player.pos) - SURFACE_RANGE).abs() < 0.01, "{kind:?}");
+            let seen = reachable(&w.level.tiles, cell_of(w.player.pos), SizeClass::Small);
+            assert!(is_reached(&seen, &w.level.tiles, cell_of(body.pos)), "{kind:?}");
+            tick(&mut w);
+            assert_eq!(
+                w.ecs.get::<Miniboss>(entity).unwrap().state,
+                MinibossState::Tell,
+                "{kind:?}",
+            );
         }
-        assert!((sunk_ticks as f32 * DT - SINK_TIME).abs() <= DT * 1.01);
-        assert!((crack_ticks as f32 * DT - CRACK_TIME).abs() <= DT * 1.01);
-        let body = w.ecs.get::<Enemy>(entity).unwrap();
-        assert!(body.targetable());
-        assert_eq!(Some(body.pos), landing_at);
-        assert!((body.pos.dist(w.player.pos) - SURFACE_RANGE).abs() < 0.01);
-        let seen = reachable(&w.level.tiles, cell_of(w.player.pos), SizeClass::Small);
-        assert!(is_reached(&seen, &w.level.tiles, cell_of(body.pos)));
-        tick(&mut w);
-        assert_eq!(w.ecs.get::<Miniboss>(entity).unwrap().state, MinibossState::Tell);
     }
 
     fn summon_wave(w: &mut World, owner: Entity) {

@@ -250,6 +250,33 @@ fn draw_shadow_body(pb: &mut PixelBuffer, cx: f32, cy: f32, rx: f32, ry: f32, st
     }
 }
 
+/// A burrower's dive, drawn: the spoil mound the body is digging through sits at
+/// the body's **true** position on every tick of the travel, so the rat can
+/// follow it across the floor and it can never disappear at A and reappear at
+/// B. The body itself is still drawn underneath, so the state reads as "under
+/// the floor" rather than "gone", and its hit shapes are the body's own.
+fn draw_dive_mound(pb: &mut PixelBuffer, at: Vec2, facing: Vec2, anim: f32) {
+    let f = safe_dir(facing, Vec2::new(1.0, 0.0));
+    let perp = f.perp();
+    let (hi, mid, lo) = ((152, 122, 84), (110, 86, 58), (66, 50, 34));
+    // A short ridge of spoil along the travel bearing: the hump is the body.
+    for (off, r) in [(-3.2, 6.2), (2.0, 7.0), (6.4, 4.6)] {
+        let sway = (anim * 9.0 + off).sin() * 0.8;
+        let c = at + f * off + perp * sway;
+        draw_shaded_disc(pb, c.x, c.y, r, hi, mid, lo, 0.0);
+    }
+    // The wet rim of the cut it is making, and the grit thrown out behind it.
+    for i in 0..8 {
+        let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let a = anim * 6.0 + i as f32 * 0.8;
+        let q = at - f * (7.0 + 2.0 * (a.sin() * 0.5 + 0.5))
+            + perp * (side * (5.0 + (a * 1.3).sin() * 1.4));
+        let (qx, qy) = (q.x.round() as i32, q.y.round() as i32);
+        blend_px(pb, qx, qy, (44, 32, 22), 0.55);
+        blend_px(pb, qx, qy - 1, (176, 150, 104), 0.35);
+    }
+}
+
 /// Draw a shaded disc with crisp dark outline & top-left directional highlight.
 #[allow(clippy::too_many_arguments)]
 fn draw_shaded_disc(
@@ -867,6 +894,12 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
             anim,
             flash,
         ),
+    }
+
+    // A burrower mid-dive keeps its body on screen: the mound is drawn at the
+    // body's exact position, so the travel is visible for its whole length.
+    if mb.diving() {
+        draw_dive_mound(pb, p, facing, anim);
     }
 
     // Outer radial HP ring framed cleanly outside the ~32 px character silhouette
