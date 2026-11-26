@@ -614,6 +614,7 @@ pub struct LevelIntroView<'a> {
     /// Upgrades carried in from the previous level (0..=5: three by default,
     /// two more from the nest's carry track).
     pub carried: &'a [UpgradeEntry<'a>],
+    pub fresh_start: bool,
     /// Cumulative campaign score entering this level.
     pub score_so_far: u32,
     pub gold: u32,
@@ -2722,10 +2723,10 @@ pub fn draw_level_intro_with(
             '─',
             ink(TRACK).bg(PLATE),
         );
-        let lbl = " CARRIED IN ";
+        let lbl = if view.fresh_start { " STARTING KIT " } else { " CARRIED IN " };
         let lx = inner.x + 4;
         if inner.width >= 24 {
-            put_str(buf, lx, inner.y + y, lbl, 12, heavy(accent).bg(PLATE));
+            put_str(buf, lx, inner.y + y, lbl, lbl.len() as u16, heavy(accent).bg(PLATE));
         }
         if inner.width >= 28 {
             let mut sb = StackBuf::<40>::new();
@@ -2750,7 +2751,11 @@ pub fn draw_level_intro_with(
                 buf,
                 inner,
                 y,
-                "Nothing carried — claws and nerve only.",
+                if view.fresh_start {
+                    "Gnaw Lv1"
+                } else {
+                    "Nothing carried — claws and nerve only."
+                },
                 ink(MUTED).bg(PLATE),
             );
         } else if spacious && carried_n <= 3 && y + 3 <= btn_row {
@@ -3314,6 +3319,74 @@ fn slot_unlock_hint(slot: &LevelSlotView) -> &'static str {
 /// Adapts to the grid's card height: a two-row card carries the name and a
 /// combined `BEST <score> · <time>` line, a taller one splits the best across
 /// two rows, and a tall card also shows the floor's emblem and boss codename.
+/// The cleared-sector report and route selection for a fresh start.
+pub fn draw_sector_transfer(
+    f: &mut Frame,
+    area: Rect,
+    summary: &LevelCompleteView<'_>,
+    next: CampaignLevel,
+    routes: &[Option<RouteChip<'_>>; MAX_ROUTE_CHIPS],
+    hovered: Option<KeepThreeAction>,
+    keys: &PlateKeys<'_>,
+) -> HitList<KeepThreeAction, 32> {
+    let mut hits = HitList::new();
+    if area.width < 22 || area.height < 12 {
+        return hits;
+    }
+    let card = centered_rect(area.width.min(62), 14.min(area.height), area);
+    let buf = f.buffer_mut();
+    let mut caption = StackBuf::<48>::new();
+    let _ = write!(caption, " SECTOR CLEARED / {} ", summary.level.name());
+    let inner = panel(buf, card, caption.as_str(), None, VICTORY_MINT);
+    let mut stats = StackBuf::<64>::new();
+    let time = fmt_time(summary.time_secs);
+    let _ = write!(stats, "{}  ·  {} KILLS", time.as_str(), summary.kills);
+    put_centered(buf, inner, 1, stats.as_str(), heavy(COAT).bg(PLATE));
+    let mut score = StackBuf::<64>::new();
+    let _ = write!(score, "{} SCORE  ·  {}¢ IN PURSE", summary.level_score, summary.gold);
+    put_centered(buf, inner, 2, score.as_str(), ink(TRAIL_GOLD).bg(PLATE));
+
+    let route_count = routes.iter().flatten().count() as u16;
+    let has_choice = route_count > 0;
+    let mut access = StackBuf::<48>::new();
+    if has_choice {
+        let _ = write!(access, "SELECT ACCESS ROUTE");
+    } else {
+        let _ = write!(access, "NEXT / {}", next.name());
+    }
+    let route_at = inner.height.saturating_sub(6);
+    put_centered(buf, inner, route_at, access.as_str(), heavy(next.accent()).bg(PLATE));
+    for (index, chip) in routes.iter().enumerate() {
+        let Some(chip) = chip else { continue };
+        let column = inner.width / route_count;
+        let area = Rect::new(inner.x + index as u16 * column, inner.y, column, inner.height);
+        let action = KeepThreeAction::Route(index as u8);
+        let style = if chip.chosen {
+            heavy(PLATE).bg(HEAL_MINT)
+        } else if hovered == Some(action) {
+            heavy(COAT).bg(PLATE_HILITE)
+        } else {
+            ink(COAT).bg(PLATE_SUB)
+        };
+        let mut label = StackBuf::<24>::new();
+        let _ = write!(label, " {} ", chip.name);
+        let rect = put_centered(buf, area, route_at + 1, label.as_str(), style);
+        hits.push(rect, action);
+    }
+    if has_choice {
+        let mut hint = StackBuf::<40>::new();
+        let _ = write!(hint, "←→ / {} route", keys.route);
+        put_centered(buf, inner, route_at + 2, hint.as_str(), ink(MUTED).bg(PLATE));
+    }
+    let action = KeepThreeAction::Confirm;
+    let bg = if hovered == Some(action) { TAIL } else { next.accent() };
+    let mut confirm = StackBuf::<48>::new();
+    let _ = write!(confirm, " PROCEED · {} ", keys.confirm);
+    let rect = put_centered(buf, inner, inner.height - 2, confirm.as_str(), heavy(PLATE).bg(bg));
+    hits.push(rect, action);
+    hits
+}
+
 /// `rect.height < 3` falls back to a single list row (no box to draw).
 fn draw_level_slot(
     buf: &mut Buffer,
@@ -4188,6 +4261,7 @@ mod tests {
             level: CampaignLevel::Laundry,
             flavor: None,
             carried: &[],
+            fresh_start: false,
             score_so_far: 0,
             gold: 0,
             hovered: None,
@@ -4469,6 +4543,7 @@ mod tests {
                 level: lvl,
                 flavor: None,
                 carried: &carried,
+                fresh_start: false,
                 score_so_far: 6420,
                 gold: 24,
                 hovered: None,
@@ -4511,6 +4586,7 @@ mod tests {
             level: CampaignLevel::Printworks,
             flavor: None,
             carried: &carried,
+            fresh_start: false,
             score_so_far: 6420,
             gold: 24,
             hovered: None,
@@ -4552,6 +4628,7 @@ mod tests {
                 level: lvl,
                 flavor: None,
                 carried: &[],
+                fresh_start: false,
                 score_so_far: 0,
                 gold: 0,
                 hovered: None,
@@ -5018,6 +5095,7 @@ mod tests {
                 level: lvl,
                 flavor: None,
                 carried: &[],
+                fresh_start: false,
                 score_so_far: 0,
                 gold: 0,
                 hovered: None,
@@ -5194,6 +5272,7 @@ mod tests {
                     level: lvl,
                     flavor: None,
                     carried: &carried,
+                    fresh_start: false,
                     score_so_far: 6420,
                     gold: 24,
                     hovered: None,

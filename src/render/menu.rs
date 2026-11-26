@@ -2459,7 +2459,7 @@ pub fn draw_pause_with_run(
     // The nest: the permanent bonuses this run is playing with, kept apart from
     // the in-run passives the tray above shows (`the nest bought this` vs `this
     // floor gave me that`). A fresh profile prints nothing at all.
-    let nest_line = world.player.loadout.meta.summary();
+    let nest_line = world.player.loadout.meta.summary(world.tuning().campaign.carry);
     if !nest_line.is_empty() {
         let y = inner.y + body_row + 6;
         if y < body_bottom {

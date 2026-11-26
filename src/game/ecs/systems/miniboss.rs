@@ -1197,21 +1197,21 @@ fn spawn_miniboss(
     next_id: &mut NextSpawnId,
     next_enemy_id: &mut NextEnemyId,
     rng: &mut StdRng,
-    tuning: &crate::tuning::Minibosses,
+    tuning: &crate::tuning::Tuning,
 ) {
     // A Brute body carries the miniboss so every existing weapon, trap and
     // bullet path already targets it. The stats are overwritten below.
     let mut e = Enemy::spawn(EnemyKind::Brute, pos, 1.0, rng);
-    e.hp = tuning.hp[level.min(3)][appointment.min(3)];
+    e.hp = tuning.miniboss_hp(level, appointment);
     e.max_hp = e.hp;
     e.radius = kind.body_radius();
-    e.damage = tuning.contact_damage;
+    e.damage = tuning.minibosses.contact_damage;
     // Faster than an ordinary brute so the approach reads as a named arrival.
     e.speed_scale = kind.speed_scale();
     e.elite = false;
     e.named = true;
     e.id = next_enemy_id.take();
-    commands.spawn((e, Miniboss::with_tuning(kind, appointment, tuning), next_id.take()));
+    commands.spawn((e, Miniboss::with_tuning(kind, appointment, &tuning.minibosses), next_id.take()));
 }
 
 /// The ordinary spawn ring needs only 4 px of clearance. Fit the larger
@@ -1457,7 +1457,7 @@ pub fn miniboss_system(
                     &mut movement.next_id,
                     &mut movement.next_enemy_id,
                     &mut rng.0,
-                    &tuning.minibosses,
+                    &tuning,
                 );
                 schedule.grace_half_until = elapsed + SPAWN_GRACE_HALF;
             }

@@ -148,7 +148,7 @@ pub fn outfall_motion_system(
                     lure_landing_clear(&level, trap.pos, at)
                         && at.dist_sq(player.pos) > clear_rat * clear_rat
                 }) {
-                    let hp = tuning.director.horde_hp_mult_for(difficulty.0, elapsed);
+                    let hp = tuning.horde_hp_mult_for(difficulty.0, elapsed);
                     let mods = tuning.director.enemy_mods_for(difficulty.0, elapsed);
                     let mut enemy = Enemy::spawn_with_phases(kind, at, hp, 1.5, 0.0, 0.0);
                     enemy.damage = kind.damage() * mods.damage;

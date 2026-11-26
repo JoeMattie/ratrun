@@ -85,7 +85,7 @@ use crate::game::loadout::{SlotCaps, Stats, MIN_SLOTS};
 /// How many upgrade tracks the nest has.
 pub const TRACK_COUNT: usize = 15;
 
-/// The most extra keep slots the carry-over track can buy (its level cap).
+/// The rank cap for Head Start / Deep Pockets.
 pub const MAX_CARRY_BONUS: u8 = 2;
 
 // ============================================================================
@@ -205,7 +205,7 @@ impl Track {
             Track::XpGain => "SECOND SCENT",
             Track::GoldGain => "HOARD GLAND",
             Track::Luck => "FOUR-LEAF LUCK",
-            Track::CarryOver => "DEEP POCKETS",
+            Track::CarryOver => "HEAD START",
             Track::Revive => "NINTH LIFE",
         }
     }
@@ -226,7 +226,7 @@ impl Track {
             Track::XpGain => "+4% gem XP per level.",
             Track::GoldGain => "+5% gold from every coin per level.",
             Track::Luck => "+15% rare-pickup chance per level.",
-            Track::CarryOver => "Keep one more powerup between floors.",
+            Track::CarryOver => "Draft one extra card at each sector opening per rank.",
             Track::Revive => "One revive a run: get up at half health.",
         }
     }
@@ -247,7 +247,7 @@ impl Track {
             Track::XpGain => "You know where the crumbs fall.",
             Track::GoldGain => "A pocket inside a pocket.",
             Track::Luck => "Clover tastes like nothing. Keep it.",
-            Track::CarryOver => "A nest with more than one mouth to it.",
+            Track::CarryOver => "Issued before exposure.",
             Track::Revive => "Not today, cat. Not this one.",
         }
     }
@@ -317,11 +317,23 @@ impl Track {
         self.prices().iter().sum()
     }
 
+    pub fn display_name(self, carry: bool) -> &'static str {
+        if carry && self == Track::CarryOver { "DEEP POCKETS" } else { self.name() }
+    }
+
+    pub fn display_flavor(self, carry: bool) -> &'static str {
+        if carry && self == Track::CarryOver {
+            "A nest with more than one mouth to it."
+        } else {
+            self.flavor()
+        }
+    }
+
     /// What `level` levels of this track gives, as the screen prints it.
     ///
     /// A `String` because these are display lines on a menu (never the
     /// simulation), exactly like the level-up card text.
-    pub fn value_text(self, level: u8) -> String {
+    pub fn value_text(self, level: u8, carry: bool) -> String {
         let level = level.min(self.max_level());
         match self {
             Track::WeaponSlots => format!("{} weapon slots", MIN_SLOTS + level as usize),
@@ -339,7 +351,8 @@ impl Track {
             Track::XpGain => format!("+{}% XP", u32::from(level) * 4),
             Track::GoldGain => format!("+{}% gold", u32::from(level) * 5),
             Track::Luck => format!("+{}% rare finds", u32::from(level) * 15),
-            Track::CarryOver => format!("keep {} between floors", KEEP_COUNT + level as usize),
+            Track::CarryOver if carry => format!("keep {} between floors", KEEP_COUNT + level as usize),
+            Track::CarryOver => format!("{level} opening {}", if level == 1 { "card" } else { "cards" }),
             Track::Revive => {
                 if level == 0 {
                     "no revive".to_string()
@@ -622,16 +635,16 @@ impl RunModifiers {
     /// One-line summary for the HUD callout and the pause dossier:
     /// `"8+8 slots · +18% move · +15% dmg · +1 revive"`. Empty for a neutral
     /// profile, so a fresh run prints nothing anywhere.
-    pub fn summary(&self) -> String {
+    pub fn summary(&self, carry: bool) -> String {
         let mut out = String::new();
-        self.summary_into(&mut out);
+        self.summary_into(&mut out, carry);
         out
     }
 
     /// [`RunModifiers::summary`] into a caller-owned buffer (the HUD keeps one
     /// for the whole run, so the pause line and the floor callout allocate
     /// nothing per frame).
-    pub fn summary_into(&self, out: &mut String) {
+    pub fn summary_into(&self, out: &mut String, carry: bool) {
         out.clear();
         if self.is_neutral() {
             return;
@@ -676,7 +689,11 @@ impl RunModifiers {
             parts.push(format!("+{}% luck", pct(self.luck)));
         }
         if self.carry_bonus > 0 {
-            parts.push(format!("keep {}", KEEP_COUNT + self.carry_bonus as usize));
+            parts.push(if carry {
+                format!("keep {}", KEEP_COUNT + self.carry_bonus as usize)
+            } else {
+                Track::CarryOver.value_text(self.carry_bonus, false)
+            });
         }
         if self.revives > 0 {
             parts.push(format!("{} revive", self.revives));
@@ -1070,38 +1087,38 @@ mod tests {
 
     #[test]
     fn value_text_reads_the_running_total_and_the_flavour_speaks_for_the_rat() {
-        assert_eq!(Track::WeaponSlots.value_text(0), "4 weapon slots");
-        assert_eq!(Track::WeaponSlots.value_text(4), "8 weapon slots");
-        assert_eq!(Track::PassiveSlots.value_text(2), "6 passive slots");
-        assert_eq!(Track::MoveSpeed.value_text(6), "+18% move");
-        assert_eq!(Track::PickupRange.value_text(5), "+40% pickup");
-        assert_eq!(Track::Damage.value_text(6), "+15.0% damage");
-        assert_eq!(Track::MaxHp.value_text(6), "+48 HP");
-        assert_eq!(Track::Regen.value_text(5), "+0.40 HP/s");
+        assert_eq!(Track::WeaponSlots.value_text(0, true), "4 weapon slots");
+        assert_eq!(Track::WeaponSlots.value_text(4, true), "8 weapon slots");
+        assert_eq!(Track::PassiveSlots.value_text(2, true), "6 passive slots");
+        assert_eq!(Track::MoveSpeed.value_text(6, true), "+18% move");
+        assert_eq!(Track::PickupRange.value_text(5, true), "+40% pickup");
+        assert_eq!(Track::Damage.value_text(6, true), "+15.0% damage");
+        assert_eq!(Track::MaxHp.value_text(6, true), "+48 HP");
+        assert_eq!(Track::Regen.value_text(5, true), "+0.40 HP/s");
         // Every level of every track reads differently from the one before:
         // a purchase always changes the line the player bought it for.
         for track in Track::ALL {
             for level in 1..=track.max_level() {
                 assert_ne!(
-                    track.value_text(level),
-                    track.value_text(level - 1),
+                    track.value_text(level, true),
+                    track.value_text(level - 1, true),
                     "{track:?} level {level} prints the same value as the level below"
                 );
             }
         }
-        assert_eq!(Track::Armor.value_text(4), "-2.0 dmg/hit");
-        assert_eq!(Track::DashCooldown.value_text(5), "-0.25s dash");
-        assert_eq!(Track::XpGain.value_text(5), "+20% XP");
-        assert_eq!(Track::GoldGain.value_text(5), "+25% gold");
-        assert_eq!(Track::Luck.value_text(4), "+60% rare finds");
+        assert_eq!(Track::Armor.value_text(4, true), "-2.0 dmg/hit");
+        assert_eq!(Track::DashCooldown.value_text(5, true), "-0.25s dash");
+        assert_eq!(Track::XpGain.value_text(5, true), "+20% XP");
+        assert_eq!(Track::GoldGain.value_text(5, true), "+25% gold");
+        assert_eq!(Track::Luck.value_text(4, true), "+60% rare finds");
         assert_eq!(
-            Track::CarryOver.value_text(1),
+            Track::CarryOver.value_text(1, true),
             format!("keep {} between floors", KEEP_COUNT + 1)
         );
-        assert_eq!(Track::Revive.value_text(0), "no revive");
-        assert_eq!(Track::Revive.value_text(1), "one revive a run");
+        assert_eq!(Track::Revive.value_text(0, true), "no revive");
+        assert_eq!(Track::Revive.value_text(1, true), "one revive a run");
         // Clamped: a hand-edited level above the cap reads as the cap.
-        assert_eq!(Track::Luck.value_text(200), Track::Luck.value_text(4));
+        assert_eq!(Track::Luck.value_text(200, true), Track::Luck.value_text(4, true));
     }
 
     // ---- the profile -----------------------------------------------------
@@ -1311,16 +1328,16 @@ mod tests {
 
     #[test]
     fn the_summary_names_only_what_was_bought() {
-        assert_eq!(RunModifiers::NONE.summary(), "");
+        assert_eq!(RunModifiers::NONE.summary(true), "");
         assert_eq!(RunModifiers::NONE.tracks_owned(), 0);
         let mods = RunModifiers::from_profile(&only(Track::MoveSpeed));
         assert_eq!(mods.tracks_owned(), 1);
-        let summary = mods.summary();
+        let summary = mods.summary(true);
         assert!(summary.contains("+18% move"), "{summary}");
         assert!(!summary.contains("slots"), "nothing else was bought: {summary}");
         let maxed = RunModifiers::from_profile(&MetaProfile::maxed());
         assert_eq!(maxed.tracks_owned(), Track::ALL.len() as u32);
-        let summary = maxed.summary();
+        let summary = maxed.summary(true);
         for needle in [
             "8+8 slots",
             "+18% move",
@@ -1342,12 +1359,12 @@ mod tests {
         // The first armour level is half a point, not "+0 armor".
         let mut one = MetaProfile::default();
         one.set_level(Track::Armor, 1);
-        let summary = RunModifiers::from_profile(&one).summary();
+        let summary = RunModifiers::from_profile(&one).summary(true);
         assert!(summary.contains("+0.5 armor"), "{summary}");
         // `summary_into` writes the same text into a caller's buffer.
         let mut buf = String::from("stale");
-        maxed.summary_into(&mut buf);
-        assert_eq!(buf, maxed.summary());
+        maxed.summary_into(&mut buf, true);
+        assert_eq!(buf, maxed.summary(true));
     }
 
     // ---- banking ---------------------------------------------------------

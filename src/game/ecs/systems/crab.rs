@@ -81,19 +81,19 @@ pub fn release_pot_crab(
     live_crabs: usize,
     blocked: bool,
 ) -> Option<Enemy> {
-    release_pot_crab_with(level, at, rat, difficulty, elapsed, live_crabs, blocked, &crate::tuning::Director::default())
+    release_pot_crab_with(level, at, rat, difficulty, elapsed, live_crabs, blocked, &crate::tuning::Tuning::default())
 }
 
 #[allow(clippy::too_many_arguments)] // The pot's existing gate plus the run-local curve.
 pub fn release_pot_crab_with(
     level: &Level, at: Vec2, rat: Vec2, difficulty: usize, elapsed: f32,
-    live_crabs: usize, blocked: bool, tuning: &crate::tuning::Director,
+    live_crabs: usize, blocked: bool, tuning: &crate::tuning::Tuning,
 ) -> Option<Enemy> {
     let clear_rat = PLAYER_RADIUS + CRAB_RADIUS;
     if level.theme != Theme::Outfall
         || blocked
-        || elapsed >= tuning.boss_time
-        || live_crabs >= live_cap(tuning.curve_clock(difficulty, elapsed))
+        || elapsed >= tuning.director.boss_time
+        || live_crabs >= live_cap(tuning.director.curve_clock(difficulty, elapsed))
         || at.dist_sq(rat) <= clear_rat * clear_rat
         || !outfall_sand_clear(level, at, CRAB_RADIUS, SizeClass::of_enemy(KIND))
     {
@@ -103,7 +103,7 @@ pub fn release_pot_crab_with(
         at,
         rat,
         tuning.horde_hp_mult_for(difficulty, elapsed),
-        tuning.enemy_mods_for(difficulty, elapsed),
+        tuning.director.enemy_mods_for(difficulty, elapsed),
         0.0,
     ))
 }
@@ -232,7 +232,7 @@ pub fn spawn_crabs_system(
     if count < 2 {
         return;
     }
-    let hp_mult = tuning.director.horde_hp_mult_for(difficulty.0, elapsed);
+    let hp_mult = tuning.horde_hp_mult_for(difficulty.0, elapsed);
     let mods = tuning.director.enemy_mods_for(difficulty.0, elapsed);
     let (mut next_spawn, mut next_enemy) = ids;
     for (i, &at) in points[..count].iter().enumerate() {

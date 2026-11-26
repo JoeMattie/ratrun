@@ -1014,6 +1014,9 @@ impl AutoRun {
         if self.finished() {
             return;
         }
+        if self.world.elapsed == 0.0 && self.world.pending_levelups > 0 {
+            self.take_pending_upgrades();
+        }
         self.ticks += 1;
         let input = self.bot.decide(&self.world, dt);
         self.snapshot_threats();
@@ -1035,19 +1038,7 @@ impl AutoRun {
         self.account_tick(dt, hp_before, regen, boss_before);
 
         // Decisions the real App would have made between ticks.
-        if self.world.pending_levelups > 0 && !self.world.game_over {
-            let at = self.world.elapsed;
-            let stats = self.level_stats();
-            if stats.first_levelup.is_none() {
-                stats.first_levelup = Some(at);
-            }
-        }
-        while self.world.pending_levelups > 0 && !self.world.game_over {
-            self.world.pending_levelups -= 1;
-            let elapsed = self.world.elapsed;
-            self.level_stats().level_up_times.push(elapsed);
-            self.take_upgrade();
-        }
+        self.take_pending_upgrades();
         let before_chests = self.world.gold;
         Bot::claim_chests(&mut self.world);
         let chest_gold = self.world.gold.saturating_sub(before_chests);
@@ -1191,6 +1182,22 @@ impl AutoRun {
         &mut self.stats.levels[pos]
     }
 
+    fn take_pending_upgrades(&mut self) {
+        if self.world.pending_levelups > 0 && !self.world.game_over {
+            let at = self.world.elapsed;
+            let stats = self.level_stats();
+            if stats.first_levelup.is_none() {
+                stats.first_levelup = Some(at);
+            }
+        }
+        while self.world.pending_levelups > 0 && !self.world.game_over {
+            self.world.pending_levelups -= 1;
+            let elapsed = self.world.elapsed;
+            self.level_stats().level_up_times.push(elapsed);
+            self.take_upgrade();
+        }
+    }
+
     fn take_upgrade(&mut self) {
         // The App's own path (`App::open_levelup` / `apply_levelup`): the cards
         // are drawn against the rat's real health, so a Bandage is hidden at
@@ -1221,7 +1228,7 @@ impl AutoRun {
         self.level_stats().upgrades.push(title);
     }
 
-    /// The boss died: carry three powerups on, or finish the run.
+    /// The boss died: start the next sector or finish the run.
     fn finish_level(&mut self) {
         // Completing a level *is* killing its boss; record it even if the
         // boss's death tick and the completion flag landed on different ticks.
@@ -1239,9 +1246,13 @@ impl AutoRun {
         let practice = self.campaign.is_none();
         let mut level_finished = true;
         if !practice && !final_level {
-            let items = self.world.keepables();
-            let picks = self.bot.pick_keep(&self.world, &items);
-            let chosen: Vec<Keepable> = picks.iter().map(|&i| items[i]).collect();
+            let carry = self.world.tuning().campaign.carry;
+            let chosen: Vec<Keepable> = if carry {
+                let items = self.world.keepables();
+                self.bot.pick_keep(&self.world, &items).iter().map(|&i| items[i]).collect()
+            } else {
+                Vec::new()
+            };
             let kept: Vec<String> = chosen.iter().map(|k| k.title()).collect();
             let carried = self.campaign.as_mut().and_then(|c| {
                 c.complete_level(&self.world, &chosen)
@@ -1256,22 +1267,20 @@ impl AutoRun {
                     self.banked_time += self.world.elapsed;
                     self.banked_kills += self.world.kills;
                     self.banked_score += self.world.score;
-                    let seed = self.campaign.as_ref().map(|c| c.level_seed()).unwrap_or(0);
-                    let theme = self.campaign.as_ref().map(|c| c.theme());
-                    let totals = self
-                        .campaign
-                        .as_ref()
-                        .map(|c| c.totals)
-                        .unwrap_or_default();
-                    let mut world = World::new_level_tuned(
-                        next, campaign::level_theme(next), seed, loadout, campaign::CampaignTotals::default(),
-                        self.world.tuning().clone(),
-                    );
-                    if let Some(theme) = theme {
-                        world.level.theme = theme;
-                    }
-                    world.carried = totals;
-                    self.world = world;
+                    let state = self.campaign.as_ref().expect("campaign is advancing");
+                    let tuning = self.world.tuning().clone();
+                    self.world = if carry {
+                        // Preserve the original batch path for comparison with old runs.
+                        let mut world = World::new_level_tuned(
+                            next, campaign::level_theme(next), state.level_seed(), loadout,
+                            campaign::CampaignTotals::default(), tuning,
+                        );
+                        world.level.theme = state.theme();
+                        world.carried = state.totals;
+                        world
+                    } else {
+                        World::from_campaign_tuned(state, tuning)
+                    };
                     self.stats.levels.push(LevelStats::new(next));
                     self.bot.on_new_level(next);
                     self.reset_boss_book();
@@ -2669,7 +2678,7 @@ mod tests {
         assert_eq!(a.stats().total_score, b.stats().total_score);
     }
 
-    /// The campaign's between-levels path (keep three → next `World`) and the
+    /// The campaign's between-levels reset and the
     /// final-level victory, driven without waiting for a real boss kill.
     ///
     /// Four levels since batch twelve: the Flatbed is the last one, so the run
@@ -2682,17 +2691,22 @@ mod tests {
         }
         assert_eq!(run.world().level_index, 0);
 
-        // Level 1 boss dies: the runner must keep three and build level 2.
+        // The next sector starts with a fresh build even when the bot already
+        // owns upgrades.
+        run.world_mut().player.loadout.apply(
+            &crate::game::loadout::Upgrade::NewWeapon(WeaponKind::TailWhip)
+        );
         run.world_mut().mark_level_complete();
         run.step(1.0 / 60.0);
         assert_eq!(run.world().level_index, 1, "campaign advanced to Kitchen");
         assert_eq!(run.world().level.theme, campaign::level_theme(1));
         assert!(!run.finished());
-        // The carried pack is at most three entries, never empty of weapons.
-        assert!(!run.world().player.loadout.weapons.is_empty());
-        let carried = run.world().player.loadout.weapons.len()
-            + run.world().player.loadout.passives.len();
-        assert!((1..=campaign::KEEP_COUNT).contains(&carried));
+        let loadout = &run.world().player.loadout;
+        assert_eq!(loadout.weapons.len(), 1);
+        assert_eq!(loadout.weapons[0].kind, Loadout::START_WEAPON);
+        assert_eq!(loadout.weapons[0].level, 1);
+        assert!(loadout.passives.is_empty());
+        assert!(run.stats().levels[0].kept.is_empty());
 
         run.world_mut().mark_level_complete();
         run.step(1.0 / 60.0);

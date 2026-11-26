@@ -33,6 +33,10 @@ macro_rules! section {
     };
 }
 
+section!(Campaign {
+    carry: bool = false; "Carry a selected build between sectors and use the original campaign balance",
+});
+
 section!(Player {
     max_hp: f32 = 158.954; "Starting maximum health (HP)",
     regen: f32 = 0.46474266; "Starting regeneration (HP/s)",
@@ -75,6 +79,8 @@ section!(Director {
     build_hp: [(f32, f32); 7] = d::BUILD_HP; "Build HP correction knots [curve seconds, multiplier]",
     build_hp_level: [f32; 4] = [0.6262416, 2.6255746, 3.595_260_1, 2.2739563]; "Build HP correction multipliers by campaign sector",
     level_hp_extra: [f32; 4] = d::LEVEL_HP_EXTRA; "Horde-only HP multipliers reached at the boss by sector",
+    fresh_build_hp_level: [f32; 3] = [0.64, 0.66, 0.68]; "Build HP correction by sector with campaign carry disabled",
+    fresh_level_hp_extra: [f32; 3] = [1.23, 1.26, 1.29]; "Horde-only HP at the boss by sector with campaign carry disabled",
     level_hp_extra_after: f32 = d::LEVEL_HP_EXTRA_AFTER; "Horde-only HP ramp grace period (s)",
     level_damage_top: [f32; 4] = [0.61121884, 1.0319662, 1.2344486, 2.0158477]; "Horde contact damage multipliers reached at the boss by sector",
     level_speed_top: [f32; 4] = d::LEVEL_SPEED_TOP; "Horde speed multipliers reached at the boss by sector",
@@ -196,6 +202,11 @@ section!(Enemies {
 section!(Minibosses {
     times: [f32; 4] = std::array::from_fn(|i| d::MINIBOSS_TIMES[i]); "Scheduled arrivals by appointment (simulation seconds)",
     hp: [[f32; 4]; 4] = std::array::from_fn(|sector| std::array::from_fn(|slot| miniboss::appointment_hp_for(sector, slot))); "Actual starting HP [sector][appointment]",
+    fresh_hp: [[f32; 4]; 3] = [
+        [300.0, 1550.0, 2800.0, 4250.0],
+        [330.0, 1600.0, 2900.0, 4350.0],
+        [360.0, 1650.0, 3000.0, 4450.0],
+    ]; "Actual starting HP [sector][appointment] with campaign carry disabled",
     strike_damage: [f32; 4] = std::array::from_fn(miniboss::appointment_signature_damage); "Signature damage by appointment (HP before armor)",
     contact_damage: f32 = miniboss::MINIBOSS_CONTACT_DAMAGE; "Body contact damage (HP before armor)",
     xp: [u32; 4] = std::array::from_fn(miniboss::appointment_xp); "XP dropped by appointment",
@@ -221,6 +232,7 @@ section!(Boss {
 section!(Bosses {
     hp_mult: f32 = 0.76265487; "Global named boss HP multiplier",
     build_level: [f32; 4] = [0.9580967, 0.65357122, 0.380501, 0.77749956]; "Boss-only build HP multipliers by campaign sector",
+    fresh_build_level: [f32; 3] = [0.80, 0.72, 0.75]; "Boss-only build HP multipliers with campaign carry disabled",
     contact_damage_mult: f32 = 1.0; "Global named boss grounded contact damage multiplier",
     kinds: BTreeMap<BossKind, Boss> = boss_defaults(); "Per-kind named boss stats",
 });
@@ -288,6 +300,7 @@ fn boss_defaults() -> BTreeMap<BossKind, Boss> {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tuning {
+    pub campaign: Campaign,
     pub player: Player,
     pub xp: Xp,
     pub director: Director,
@@ -376,6 +389,16 @@ impl Selection {
 }
 
 impl Tuning {
+    pub fn miniboss_hp(&self, level: usize, appointment: usize) -> f32 {
+        let level = level.min(3);
+        let appointment = appointment.min(3);
+        if level == 0 || self.campaign.carry {
+            self.minibosses.hp[level][appointment]
+        } else {
+            self.minibosses.fresh_hp[level - 1][appointment]
+        }
+    }
+
     pub fn parse(source: &str) -> Result<Self> {
         let overrides = source.parse::<Table>()?;
         let mut values = Table::try_from(Self::default())?;
@@ -559,7 +582,7 @@ impl Tuning {
         let schema = readable_table(&Self::schema().canonical());
         let mut output = String::from("# Rat Run balance defaults. Omitted fields use the shipped game values.\n");
         for (section, comments) in [
-            ("player", Player::COMMENTS), ("xp", Xp::COMMENTS), ("director", Director::COMMENTS),
+            ("campaign", Campaign::COMMENTS), ("player", Player::COMMENTS), ("xp", Xp::COMMENTS), ("director", Director::COMMENTS),
             ("enemies", Enemies::COMMENTS), ("minibosses", Minibosses::COMMENTS),
             ("bosses", Bosses::COMMENTS), ("loot", Loot::COMMENTS), ("weapons", Weapons::COMMENTS),
         ] {
@@ -722,6 +745,24 @@ mod tests {
         let selection = Selection { run: RunTuning { values: Arc::new(tuning), changed: true }, path: None };
         assert_eq!(selection.report().diff.keys().collect::<Vec<_>>(),
             ["enemies.hp_mult", "enemies.kinds.Pillbug.xp"]);
+    }
+
+    #[test]
+    fn campaign_carry_selects_the_matching_hp_tables() {
+        let fresh = Tuning::default();
+        let legacy = Tuning::parse("[campaign]\ncarry = true").unwrap();
+        assert!(!fresh.campaign.carry && legacy.campaign.carry);
+        let at = fresh.director.boss_time;
+        assert_eq!(fresh.horde_hp_mult_for(0, at), legacy.horde_hp_mult_for(0, at));
+        assert_eq!(fresh.boss_hp_mult_for(0), legacy.boss_hp_mult_for(0));
+        assert_eq!(fresh.miniboss_hp(0, 0), legacy.miniboss_hp(0, 0));
+        for level in 1..4 {
+            assert!(fresh.horde_hp_mult_for(level, at) < legacy.horde_hp_mult_for(level, at));
+            assert!(fresh.boss_hp_mult_for(level) < legacy.boss_hp_mult_for(level));
+            for appointment in 0..4 {
+                assert!(fresh.miniboss_hp(level, appointment) < legacy.miniboss_hp(level, appointment));
+            }
+        }
     }
 
     #[test]

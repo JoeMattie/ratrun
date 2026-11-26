@@ -919,6 +919,32 @@ pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMo
     }
 }
 
+impl crate::tuning::Tuning {
+    fn fresh_hp_slot(&self, level: usize) -> Option<usize> {
+        level_slot(level).checked_sub(1).filter(|_| !self.campaign.carry)
+    }
+
+    pub fn horde_hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
+        let slot = level_slot(level);
+        let d = &self.director;
+        let (build, extra) = match self.fresh_hp_slot(level) {
+            Some(i) => (d.fresh_build_hp_level[i], d.fresh_level_hp_extra[i]),
+            None => (d.build_hp_level[slot], d.level_hp_extra[slot]),
+        };
+        d.horde_hp_mult_for(level, elapsed, build, extra)
+    }
+
+    pub fn boss_hp_mult_for(&self, level: usize) -> f32 {
+        let slot = level_slot(level);
+        let d = &self.director;
+        let (build, boss) = match self.fresh_hp_slot(level) {
+            Some(i) => (d.fresh_build_hp_level[i], self.bosses.fresh_build_level[i]),
+            None => (d.build_hp_level[slot], self.bosses.build_level[slot]),
+        };
+        d.hp_mult_for(level, d.boss_time, build) * BOSS_POOL_SCALE * boss
+    }
+}
+
 impl crate::tuning::Director {
     pub fn curve_clock(&self, level: usize, elapsed: f32) -> f32 {
         elapsed.min(self.boss_time) * self.curve_speed + LEVEL_CLOCK_OFFSET[level_slot(level)]
@@ -929,16 +955,15 @@ impl crate::tuning::Director {
             / (self.horde_speed_ramp_end / (self.horde_speed_top - 1.0)) + 1.0
     }
 
-    fn hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
+    fn hp_mult_for(&self, level: usize, elapsed: f32, build_mult: f32) -> f32 {
         let curve = self.curve_clock(level, elapsed);
         (1.0 + curve / RUN_SECONDS)
             * lerp_table(&self.level_bonus_hp, curve)
             * lerp_table(&self.build_hp, curve)
-            * self.build_hp_level[level_slot(level)]
+            * build_mult
     }
 
-    pub fn horde_hp_mult_for(&self, level: usize, elapsed: f32) -> f32 {
-        let top = self.level_hp_extra[level_slot(level)];
+    fn horde_hp_mult_for(&self, level: usize, elapsed: f32, build_mult: f32, top: f32) -> f32 {
         let grace = self.level_hp_extra_after;
         let span = self.boss_time - grace;
         let progress = if span > 0.0 {
@@ -946,11 +971,7 @@ impl crate::tuning::Director {
         } else {
             0.0
         };
-        self.hp_mult_for(level, elapsed) * (1.0 + (top.max(1.0) - 1.0) * progress)
-    }
-
-    pub fn boss_hp_mult_for(&self, level: usize, build_level: &[f32; 4]) -> f32 {
-        self.hp_mult_for(level, self.boss_time) * BOSS_POOL_SCALE * build_level[level_slot(level)]
+        self.hp_mult_for(level, elapsed, build_mult) * (1.0 + (top.max(1.0) - 1.0) * progress)
     }
 
     pub fn enemy_mods_for(&self, level: usize, elapsed: f32) -> crate::game::enemy::EnemyMods {
