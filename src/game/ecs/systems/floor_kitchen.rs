@@ -57,6 +57,7 @@ use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
+use crate::detmath::DetF32;
 
 // ---- Crumb Ant -------------------------------------------------------------
 

@@ -2308,6 +2308,7 @@ dependencies = [
  "gilrs",
  "image",
  "libc",
+ "libm",
  "rand 0.10.4",
  "rascii_art",
  "ratatui",

@@ -304,12 +304,12 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// in place, all six rows still matched (`update` passes `DashHold::NONE` and
 /// charge 0, where each new multiplier is exactly x1).
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 12598556083475879105),
-    (Script::Wander, Theme::Kitchen, 29, 16466828812832906636),
-    (Script::Wander, Theme::Lab, 1234, 13088733753644560304),
-    (Script::Evade, Theme::Sewer, 11, 11123280267109333833),
-    (Script::Evade, Theme::Kitchen, 29, 17197628063960020220),
-    (Script::Evade, Theme::Lab, 1234, 5520679170150135003),
+    (Script::Wander, Theme::Sewer, 11, 1768730785502271223),
+    (Script::Wander, Theme::Kitchen, 29, 4150135606520838820),
+    (Script::Wander, Theme::Lab, 1234, 4027607409685003064),
+    (Script::Evade, Theme::Sewer, 11, 6504620649538191378),
+    (Script::Evade, Theme::Kitchen, 29, 10214728360354825656),
+    (Script::Evade, Theme::Lab, 1234, 2416122020903115581),
 ];
 
 #[test]
