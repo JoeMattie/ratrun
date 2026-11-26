@@ -10,7 +10,7 @@
 //! ```
 //!
 //! `<floor>` is a floor name as the captures spell it (`sewer`, `kitchen`,
-//! `lab`, `laundry`, `printworks`, `flatbed`).
+//! `laundry`, `outfall`, `lab`, `printworks`, `flatbed`).
 
 use std::io::Write;
 use std::sync::atomic::AtomicU32;
@@ -35,7 +35,7 @@ pub fn render_floor_at(
     sample_rate: u32,
 ) -> Result<Vec<f32>> {
     let Some(theme) = theme_by_floor(floor) else {
-        bail!("--music-render: unknown floor {floor:?} (sewer, kitchen, lab, laundry, printworks, flatbed)");
+        bail!("--music-render: unknown floor {floor:?} (sewer, kitchen, laundry, outfall, lab, printworks, flatbed)");
     };
     if !(seconds.is_finite() && seconds > 0.0) {
         bail!("--music-render: seconds must be a positive number, got {seconds}");
@@ -158,6 +158,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sewer.wav");
         let samples = render_floor_at("sewer", 0.5, 2, 22_050).unwrap();
+        assert!(!samples.is_empty());
+        assert!(samples.iter().all(|s| s.is_finite()));
+        write_wav(&path, &samples, 22_050).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(bytes.len(), 44 + samples.len() * 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn renders_outfall_to_a_readable_wav() {
+        let dir = std::env::temp_dir().join("ratrun-music-render-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("outfall.wav");
+        let samples = render_floor_at("outfall", 0.5, 2, 22_050).unwrap();
         assert!(!samples.is_empty());
         assert!(samples.iter().all(|s| s.is_finite()));
         write_wav(&path, &samples, 22_050).unwrap();

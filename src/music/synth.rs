@@ -2665,6 +2665,7 @@ mod tests {
             "Lab" => Theme::Lab,
             "Laundry" => Theme::Laundry,
             "Printworks" => Theme::Printworks,
+            "Outfall" => Theme::Outfall,
             _ => Theme::Trailer,
         }
     }
@@ -3104,6 +3105,64 @@ mod tests {
                 onset < steady,
                 "{theme:?}: menu fade-in onset ({onset:.4}) should be softer than steady ({steady:.4})"
             );
+        }
+    }
+
+    #[test]
+    fn outfall_return_current_meets_mix_transition_and_palette_targets() {
+        let song = song_for(Theme::Outfall);
+        assert_eq!(song.name, "Return Current");
+        assert_eq!(song.floor, "Outfall");
+        assert_eq!(song.bpm, 84);
+        assert_eq!(song.beats_per_bar, 4);
+        assert_eq!(song.bars, 24);
+        assert!(song.style.enhanced_drums);
+        assert!(song.style.pad_detune <= 0.006);
+        for role in Role::ALL {
+            assert!(
+                !song.parts[role.index()].is_empty(),
+                "Outfall {} part should be populated",
+                role.name()
+            );
+        }
+        // Smooth intensity transitions across 0 -> 1 -> 2 -> 3 -> 2 -> 0 in both palettes:
+        // switching intensity slews role gains over GAIN_SLEW_SECS so the transition
+        // window never exceeds normal steady-state transient deltas.
+        for mode in [SynthMode::Bit16, SynthMode::Chip] {
+            let intensity = Arc::new(AtomicU32::new(0));
+            let mut synth = SongSynth::with_sample_rate_and_mode(
+                Theme::Outfall,
+                Arc::clone(&intensity),
+                22_050,
+                mode,
+            );
+            let mut prev = 0.0f32;
+            let mut body_delta = 0.0f32;
+            for _ in 0..22_050 {
+                let s = synth.next().unwrap();
+                assert!(s.is_finite() && s.abs() <= 0.55);
+                body_delta = body_delta.max((s - prev).abs());
+                prev = s;
+            }
+            for &lvl in &[1u32, 2, 3, 2, 0] {
+                intensity.store(lvl, Ordering::Relaxed);
+                let mut trans_delta = 0.0f32;
+                for i in 0..22_050 {
+                    let s = synth.next().unwrap();
+                    assert!(s.is_finite() && s.abs() <= 0.55);
+                    let d = (s - prev).abs();
+                    if i < 256 {
+                        trans_delta = trans_delta.max(d);
+                    } else {
+                        body_delta = body_delta.max(d);
+                    }
+                    prev = s;
+                }
+                assert!(
+                    trans_delta <= body_delta * 1.15 + 0.05 && trans_delta < 0.45,
+                    "Outfall {mode:?} -> tier {lvl}: harsh transition step {trans_delta:.4} (body={body_delta:.4})"
+                );
+            }
         }
     }
 }
