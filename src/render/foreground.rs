@@ -20,6 +20,7 @@ const ALPHA_FLOOR_RAT: f32 = 120.0;
 const FADE_RAT_PX: f32 = 48.0;
 const FADE_THREAT_PX: f32 = 48.0;
 const FADE_RAMP_PX: f32 = 40.0;
+const EDGE_FADE_PX: f32 = 16.0;
 const SWAY_HZ: f32 = 3.0;
 const COVERAGE_PCT: u32 = 45;
 const COVERAGE_SKIP_PCT: u32 = 85;
@@ -65,7 +66,6 @@ const SKY_QUANT_HZ: f32 = 30.0;
 const SKY_BRANCH_PERIOD: f32 = 7.0;
 const SKY_BRANCH_SPEED: f32 = 220.0;
 const SKY_CLOUD_SPEED: f32 = 12.0;
-const SKY_MARGIN: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForeKind {
@@ -530,11 +530,29 @@ fn shadow_screen(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
 
 
 #[derive(Clone, Copy, Debug)]
+struct Plane {
+    cross: i32,
+    span: (f32, f32),
+    fade: f32,
+}
+
+impl Plane {
+    fn new(cross: f32, extent: (f32, f32), view_span: (f32, f32), zoom: f32) -> Self {
+        let cross = cross.round() as i32;
+        let span = (cross as f32 + extent.0, cross as f32 + extent.1);
+        // Measure how far the leading side has passed the nearer view edge.
+        let penetration = (span.1 - view_span.0).min(view_span.1 - span.0);
+        let fade = (penetration / (EDGE_FADE_PX * zoom)).clamp(0.0, 1.0);
+        Self { cross, span, fade }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Plan {
     item: ForeItem,
     normal: Vec2,
-    screen_cross: i32,
-    shadow_cross: i32,
+    body: Plane,
+    shadow: Plane,
     centre_cross: f32,
     along: (f32, f32),
     half_thickness: f32,
@@ -547,10 +565,12 @@ struct Plan {
 
 impl Plan {
     fn body_area(&self, size: Vec2) -> f32 {
-        let cross = self.screen_cross as f32;
+        if self.body.fade == 0.0 {
+            return 0.0;
+        }
         let (lo, hi) = project(size, self.normal);
-        let start = (cross - self.half_thickness).max(lo);
-        let end = (cross + self.half_thickness).min(hi);
+        let start = self.body.span.0.max(lo);
+        let end = self.body.span.1.min(hi);
         if end <= start {
             return 0.0;
         }
@@ -565,8 +585,15 @@ impl Plan {
             + width_at(end)) / 6.0
     }
 
+    fn visible_lines(&self) -> impl Iterator<Item = i32> {
+        [self.body, self.shadow].into_iter()
+            .filter_map(|plane| (plane.fade > 0.0).then_some(plane.cross))
+    }
+
     fn centre_distance(&self) -> f32 {
-        (self.screen_cross as f32 - self.centre_cross).abs()
+        self.visible_lines()
+            .map(|cross| (cross as f32 - self.centre_cross).abs())
+            .fold(f32::INFINITY, f32::min)
     }
 }
 
@@ -658,17 +685,20 @@ impl ForeLayer {
         let sky = sky_items(level, view, elapsed);
         let items = sky.into_iter().flatten().chain(self.items.iter().map(|p| p.item));
 
-        // Select nearest first, comparing in screen pixels across either axis.
+        // Select by the nearest visible plane of each band, in screen pixels.
         // A second pass is enough to find the next candidate with room beside
-        // the first. Candidate order breaks ties (the pinned wires come first).
+        // the first. Parallel bands need space between all their visible lines.
         for _ in 0..MAX_BANDS_IN_VIEW {
             let next = items.clone()
                 .filter_map(|item| plan_band(view, item, rat, threats))
                 .filter(|p| {
                     self.frame.iter().all(|other| {
                         p.item.axis != other.item.axis
-                            || (p.screen_cross - other.screen_cross).abs() as f32
-                                >= MIN_SCREEN_SPACING * view.zoom
+                            || p.visible_lines().all(|cross| {
+                                other.visible_lines().all(|other_cross| {
+                                    (cross - other_cross).abs() as f32 >= MIN_SCREEN_SPACING * view.zoom
+                                })
+                            })
                     })
                 })
                 .min_by(|a, b| a.centre_distance().total_cmp(&b.centre_distance()));
@@ -696,7 +726,8 @@ impl ForeLayer {
         }
         if let [back, front] = self.frame.as_mut_slice() {
             let near_rat = |p: &Plan| {
-                p.rat_distance <= p.half_thickness + CLEAR_DISC_IN_PX * view.zoom
+                p.body.fade > 0.0
+                    && p.rat_distance <= p.half_thickness + CLEAR_DISC_IN_PX * view.zoom
             };
             front.crossing_rat = back.item.axis != front.item.axis
                 && back.item.kind != ForeKind::CloudBand
@@ -715,24 +746,42 @@ struct View {
     zoom: f32,
 }
 
+fn blur_radius(item: ForeItem, zoom: f32) -> i32 {
+    // Depth is 1.8–3.0. Keep the radius in screen pixels as the view eases.
+    (((item.depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN) * 2.0 + 2.0)
+        * zoom).round().max(1.0) as i32
+}
+
+fn cross_extent(item: ForeItem, block: i32, pad: i32) -> (f32, f32) {
+    let samples = art_foreground::cross_samples(&item);
+    ((samples.start * block - pad) as f32, (samples.end * block + pad) as f32)
+}
+
+fn shadow_offset(item: ForeItem) -> f32 {
+    10.0 + 4.0 * item.axis.x.abs()
+}
+
 fn plan_band(view: View, item: ForeItem, rat: Vec2, threats: &[(Vec2, f32)]) -> Option<Plan> {
     let normal = item.normal();
-    let cam_cross = view.cam.dot(normal);
-    let (lo, hi) = project(view.size, normal);
-    let centre_cross = (lo + hi) * 0.5;
-    let world_cross = item.cross - cam_cross;
-    let screen_cross = (centre_cross + (world_cross - centre_cross) * item.depth).round() as i32;
+    let view_span = project(view.size, normal);
+    let centre_cross = (view_span.0 + view_span.1) * 0.5;
+    let world_cross = item.cross - view.cam.dot(normal);
+    let screen_cross = centre_cross + (world_cross - centre_cross) * item.depth;
     let k = pixel_scale(&item);
-    // Depth is 1.8–3.0. Keep the radius in screen pixels as the view eases.
-    let radius = (((item.depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN) * 2.0 + 2.0)
-        * view.zoom).round().max(1.0) as i32;
-    let half_thickness = art_foreground::thickness(&item) * 0.5 * k as f32 + radius as f32;
-    let cross = screen_cross as f32;
-    if cross + half_thickness < lo || cross - half_thickness >= hi {
+    let radius = blur_radius(item, view.zoom);
+    // Account for the tent on the body and the half-sample filter on the shadow.
+    let mut body = Plane::new(screen_cross, cross_extent(item, k, radius), view_span, view.zoom);
+    let shadow = Plane::new(
+        world_cross + shadow_offset(item), cross_extent(item, k, k / 2), view_span, view.zoom,
+    );
+    if item.kind == ForeKind::CloudBand {
+        body.fade = 0.0;
+    }
+    if body.fade == 0.0 && shadow.fade == 0.0 {
         return None;
     }
-
-    let line_distance = |body: Vec2| ((body - view.cam).dot(normal) - cross).abs();
+    let half_thickness = art_foreground::thickness(&item) * 0.5 * k as f32 + radius as f32;
+    let line_distance = |at: Vec2| ((at - view.cam).dot(normal) - body.cross as f32).abs();
     let rat_distance = line_distance(rat);
     let mut alpha = proximity_alpha(
         ALPHA_MAX as f32, rat_distance / view.zoom, FADE_RAT_PX, ALPHA_FLOOR_RAT,
@@ -746,9 +795,8 @@ fn plan_band(view: View, item: ForeItem, rat: Vec2, threats: &[(Vec2, f32)]) -> 
     if item.kind == ForeKind::CloudBand {
         alpha = alpha.min(CLOUD_ALPHA_MAX as f32);
     }
-    let shadow_cross = world_cross + 10.0 + 4.0 * item.axis.x.abs();
     Some(Plan {
-        item, normal, screen_cross, shadow_cross: shadow_cross.round() as i32,
+        item, normal, body, shadow,
         centre_cross, along: project(view.size, item.axis), half_thickness, rat_distance,
         alpha: alpha.round() as u8, k, radius, crossing_rat: false,
     })
@@ -841,6 +889,8 @@ struct Focus {
     bottom: i32,
     body: Vec<[u8; 4]>,
     shadow: Vec<u8>,
+    #[cfg(test)]
+    rebuilds: usize,
 }
 
 impl Focus {
@@ -866,10 +916,12 @@ impl Focus {
             scale: item.scale,
             theme: scene.level.theme,
             sway: sway_of(&item, scene.elapsed),
-            toward_centre: if plan.screen_cross as f32 <= plan.centre_cross { 1 } else { -1 },
+            toward_centre: if plan.body.cross as f32 <= plan.centre_cross { 1 } else { -1 },
             block,
             radius: plan.radius,
         };
+        // Keep both planes warm on the same world-aligned page as either
+        // one enters or leaves the view. Edge opacity is only used at blit.
         if self.key != Some(key) || first < self.first || last > self.last {
             self.first = first.div_euclid(RASTER_PAGE) * RASTER_PAGE;
             self.last = last.div_euclid(RASTER_PAGE) * RASTER_PAGE + RASTER_PAGE;
@@ -894,6 +946,10 @@ impl Focus {
             *scratch = TARGET.with(|t| t.borrow_mut().take()).unwrap_or_default();
             self.filter(scratch, key);
             self.key = Some(key);
+            #[cfg(test)]
+            {
+                self.rebuilds += 1;
+            }
         }
 
         let along_origin = (self.first * block) as f32 - cam_along;
@@ -903,10 +959,10 @@ impl Focus {
         } else {
             141 + opacity * 115 / u32::from(ALPHA_MAX)
         };
+        let shadow_opacity = (shadow_opacity as f32 * plan.shadow.fade).round() as u32;
+        let body_opacity = (opacity as f32 * plan.body.fade).round() as u32;
         self.blit(pb, plan, along_origin, shadow_opacity, true);
-        if item.kind != ForeKind::CloudBand {
-            self.blit(pb, plan, along_origin, opacity, false);
-        }
+        self.blit(pb, plan, along_origin, body_opacity, false);
     }
 
     /// Filter the expanded art with a tent kernel in each direction. Each
@@ -977,9 +1033,12 @@ impl Focus {
     }
 
     fn blit(&self, pb: &mut PixelBuffer, plan: &Plan, along_origin: f32, opacity: u32, shade: bool) {
+        if opacity == 0 {
+            return;
+        }
         let axis = plan.item.axis;
         let normal = plan.normal;
-        let cross = if shade { plan.shadow_cross } else { plan.screen_cross } as f32;
+        let cross = if shade { plan.shadow.cross } else { plan.body.cross } as f32;
         let (width, height) = (pb.w, pb.h);
         let (cx, cy, zoom, disc) = CLEAR_DISC.with(|c| c.get());
         let disc_active = disc && (!shade || plan.crossing_rat);
@@ -1291,38 +1350,48 @@ fn hash_u32(seed: u64, index: u64) -> u32 {
     mix32(seed as u32 ^ (seed >> 32) as u32 ^ mix32(index as u32 ^ 0x5BD1_E995))
 }
 
-/// Analytic tracks in screen space, expressed as world cross positions for
-/// the same planner as static bands. Only the track needs the view to set its
-/// crossing distance. Along-axis detail still follows the world camera.
+/// Cross coordinates, relative to the camera, where a sky track can wrap or
+/// stop with both planes outside the viewport.
+fn sky_track(view: View, item: ForeItem) -> (f32, f32) {
+    let (lo, hi) = project(view.size, item.normal());
+    let k = pixel_scale(&item);
+    let (shadow_lo, shadow_hi) = cross_extent(item, k, k / 2);
+    let offset = shadow_offset(item);
+    let mut start = lo - shadow_hi - offset;
+    let mut end = hi - shadow_lo - offset;
+    if item.kind != ForeKind::CloudBand {
+        let (body_lo, body_hi) = cross_extent(item, k, blur_radius(item, view.zoom));
+        let centre = (lo + hi) * 0.5;
+        start = start.min(centre + (lo - body_hi - centre) / item.depth);
+        end = end.max(centre + (hi - body_lo - centre) / item.depth);
+    }
+    // Allow for rounding either plane's centre to buffer pixels.
+    (start - 1.0, end + 1.0)
+}
+
+/// Analytic tracks measured across each band's normal. Along-axis detail
+/// still follows the world camera.
 fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeItem>; 3] {
     if level.theme != Theme::Trailer {
         return [None; 3];
     }
     let seed = crate::game::level::level_seed(level.theme, level.seed, GEN_SALT);
     let t = (elapsed.max(0.0) * SKY_QUANT_HZ).floor() / SKY_QUANT_HZ;
-    let at = |kind, horizontal, cross, depth, scale, seed| {
+    let item = |kind, horizontal, depth, scale, seed| {
         let axis = placement_axis(kind, horizontal, seed);
-        let mut item = ForeItem { kind, axis, cross: 0.0, depth, scale, seed };
-        let normal = item.normal();
-        let centre = view.size * 0.5;
-        let point = if horizontal {
-            Vec2::new(centre.x, cross * view.zoom)
-        } else {
-            Vec2::new(cross * view.zoom, centre.y)
-        };
-        item.cross = (view.cam + centre + (point - centre) * (1.0 / depth)).dot(normal);
-        fit_scale(item)
+        fit_scale(ForeItem { kind, axis, cross: 0.0, depth, scale, seed })
     };
 
     // The centre line keeps the wires present even when both movers qualify.
-    let wires = at(ForeKind::PowerLines, true, view.size.y * 0.5 / view.zoom,
-        2.0, 1.15, hash_u32(seed, 0x12));
+    let mut wires = item(ForeKind::PowerLines, true, 2.0, 1.15, hash_u32(seed, 0x12));
+    wires.cross = (view.cam + view.size * 0.5).dot(wires.normal());
 
-    let width = view.size.x / view.zoom;
-    let travel = width + 2.0 * SKY_MARGIN;
-    let cloud_phase = (hash01(seed, 0xC10D) * travel + t * SKY_CLOUD_SPEED).rem_euclid(travel);
-    let cloud = at(ForeKind::CloudBand, false, cloud_phase - SKY_MARGIN,
-        1.8, 1.25, hash_u32(seed, 0xC10D));
+    let mut cloud = item(ForeKind::CloudBand, false, 1.8, 1.25, hash_u32(seed, 0xC10D));
+    let (start, end) = sky_track(view, cloud);
+    let travel = end - start;
+    let speed = SKY_CLOUD_SPEED * view.zoom / cloud.depth;
+    let phase = (hash01(seed, 0xC10D) * travel + t * speed).rem_euclid(travel);
+    cloud.cross = view.cam.dot(cloud.normal()) + start + phase;
 
     // Successive starts differ by 5–9 s. The branch travels from the cab
     // side of the frame to the tail (right to left).
@@ -1330,9 +1399,21 @@ fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeItem>; 3] {
     let nearest = (t / SKY_BRANCH_PERIOD).floor() as u64;
     let branch = (nearest.saturating_sub(1)..=nearest + 1).rev().find_map(|event| {
         let age = t - (SKY_BRANCH_PERIOD * event as f32 + jitter(event));
-        (age >= 0.0 && age * SKY_BRANCH_SPEED < travel).then(|| {
-            at(ForeKind::BranchCanopy, false, width + SKY_MARGIN - age * SKY_BRANCH_SPEED,
-                2.8, 1.4, hash_u32(seed ^ 0x1EAF_0000, event))
+        if age < 0.0 || age >= SKY_BRANCH_PERIOD + 2.0 {
+            return None;
+        }
+        let mut branch = item(ForeKind::BranchCanopy, false, 2.8, 1.4,
+            hash_u32(seed ^ 0x1EAF_0000, event));
+        let normal = branch.normal();
+        let (start, end) = sky_track(view, branch);
+        // Fit the crossing before the next event even on very wide views.
+        let speed = (SKY_BRANCH_SPEED * view.zoom / branch.depth)
+            .max((end - start) / (SKY_BRANCH_PERIOD - 2.0));
+        let travelled = age * speed;
+        (travelled < end - start).then(|| {
+            let cross = if normal.x < 0.0 { start + travelled } else { end - travelled };
+            branch.cross = view.cam.dot(normal) + cross;
+            branch
         })
     });
     [Some(wires), Some(cloud), branch]
@@ -1358,7 +1439,9 @@ pub(crate) fn sky_capture_time(
         let t = elapsed + step as f32 / SKY_QUANT_HZ;
         layer.plan_frame(view, level, cam + size * 0.5, t, &[]);
         if layer.frame.iter().any(|p| {
-            p.item.kind == kind && p.centre_distance() <= 12.0 * zoom
+            let plane = if kind == ForeKind::CloudBand { p.shadow } else { p.body };
+            p.item.kind == kind && plane.fade > 0.0
+                && (plane.cross as f32 - p.centre_cross).abs() <= 12.0 * zoom
         }) {
             return Some(t);
         }
@@ -1496,6 +1579,71 @@ mod tests {
     }
 
     #[test]
+    fn shadows_enter_from_both_edges_while_the_body_is_offscreen() {
+        let mut world = World::new(Theme::Sewer, 7);
+        let zoom = 2.0;
+        let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32) * zoom;
+        for axis in [HORIZONTAL, VERTICAL, Vec2::new(0.6, 0.8)] {
+            let item = ForeItem { axis, ..pipe(true, 0.0, 3.0) };
+            let normal = item.normal();
+            let (lo, hi) = project(size, normal);
+            let k = pixel_scale(&item);
+            let (shadow_lo, shadow_hi) = cross_extent(item, k, k / 2);
+            for (edge, start, inward) in [(lo, lo - shadow_hi, 1.0), (hi, hi - shadow_lo, -1.0)] {
+                let mut layer = ForeLayer::new();
+                force_items(&mut layer, &world.level, &[item]);
+                let camera = |step| normal * (shadow_offset(item) - (start + inward * step as f32));
+                let mut depths = Vec::new();
+                for step in -2..=28 {
+                    let cam = camera(step);
+                    let (pb, used) = render(&mut world, &mut layer, cam, zoom, 0.0);
+                    assert_eq!(used, 0);
+                    if let Some(plan) = layer.frame.first() {
+                        assert_eq!(plan.body.fade, 0.0);
+                        assert_eq!(plan.body_area(size), 0.0);
+                    }
+                    let deepest = pb.pixels().iter().enumerate().filter(|(_, px)| **px != FLOOR)
+                        .map(|(i, &(r, g, b))| {
+                            assert!(r <= FLOOR.0 && g <= FLOOR.1 && b <= FLOOR.2);
+                            let xy = Vec2::new((i % pb.w) as f32, (i / pb.w) as f32);
+                            (xy.dot(normal) - edge) * inward
+                        })
+                        .reduce(f32::max);
+                    if let Some(depth) = deepest {
+                        depths.push((step, depth));
+                    }
+                }
+                let &(first_step, first_depth) = depths.first().expect("shadow never reached the viewport");
+                assert!(first_step > 0 && first_depth <= 4.0, "{axis:?}, edge {edge}: {depths:?}");
+                let growth = depths.windows(2).filter(|w| w[1].0 == w[0].0 + 1 && w[1].1 > w[0].1).count();
+                assert!(growth >= 5, "{axis:?}, edge {edge}: {depths:?}");
+                let (inside, _) = render(&mut world, &mut layer, camera(28), zoom, 0.0);
+                let plan = &layer.frame[0];
+                let raster = &layer.rasters[0];
+                let along = (raster.first * k) as f32 - camera(28).dot(axis);
+                let mut body = PixelBuffer::new(inside.w, inside.h);
+                body.clear(FLOOR);
+                raster.blit(&mut body, plan, along, u32::from(ALPHA_MAX), false);
+                assert!(body.pixels().iter().all(|&px| px == FLOOR));
+                assert_eq!(raster.rebuilds, 1, "cross-axis motion should reuse the same raster");
+
+                // The last body-free frame is identical when frozen and when
+                // returning to it after the body has crossed the viewport.
+                let (still, _) = render(&mut world, &mut layer, camera(28), zoom, 0.0);
+                assert_eq!(inside.pixels(), still.pixels());
+                let centre_step = (((lo + hi) * 0.5 + shadow_offset(item)) - start) * inward;
+                let (_, used) = render(&mut world, &mut layer, camera(centre_step.round() as i32), zoom, 0.0);
+                assert!(used > 0);
+                let (leaving, used) = render(&mut world, &mut layer, camera(28), zoom, 0.0);
+                assert_eq!(used, 0);
+                assert_eq!(inside.pixels(), leaving.pixels());
+                let (outside, _) = render(&mut world, &mut layer, camera(-2), zoom, 0.0);
+                assert!(outside.pixels().iter().all(|&px| px == FLOOR));
+            }
+        }
+    }
+
+    #[test]
     fn soft_focus_replaces_hard_blocks_with_intermediate_coverage() {
         let mut art = Scratch::default();
         art.reset(0, -4, 8, 8);
@@ -1557,7 +1705,7 @@ mod tests {
         let mut near = ForeItem { kind: ForeKind::Kelp, axis: Vec2::new(0.6, 0.8), ..pipe(true, 0.0, 2.0) };
         near.cross = centre.dot(near.normal());
         let close = ForeItem { cross: near.cross + 20.0, ..near };
-        let spaced = ForeItem { cross: near.cross - 25.0, ..near };
+        let spaced = ForeItem { cross: near.cross - 62.0, ..near };
         force_items(&mut layer, &world.level, &[close, spaced, near]);
         layer.plan_frame(view, &world.level, centre, 0.0, &[]);
         assert_eq!(layer.frame[0].item, near);
@@ -1571,7 +1719,7 @@ mod tests {
         let along = near.axis * 14.0;
         let still = plan_band(view, near, centre, &[]).unwrap();
         let slid = plan_band(View { cam: along, ..view }, near, centre, &[]).unwrap();
-        assert_eq!(still.screen_cross, slid.screen_cross);
+        assert_eq!(still.body.cross, slid.body.cross);
     }
 
     #[test]
@@ -1579,13 +1727,13 @@ mod tests {
         let mut world = World::new(Theme::Sewer, 7);
         let mut layer = ForeLayer::new();
         for zoom in [1.0, 2.0] {
-            let side = (120.0 * zoom) as usize;
+            let side = (240.0 * zoom) as usize;
             let mut pb = PixelBuffer::new(side, side);
             let centre = pb.h as f32 * 0.5;
             let near = pipe(true, centre, 2.0);
-            let too_close = pipe(true, centre + zoom * 47.0 / 2.0, 2.0);
-            let spaced = pipe(true, centre - zoom * 48.0 / 2.0, 2.0);
-            let farther = pipe(true, centre + zoom * 56.0 / 2.0, 2.0);
+            let too_close = pipe(true, centre + zoom * 47.0, 2.0);
+            let spaced = pipe(true, centre + zoom * 48.0, 2.0);
+            let farther = pipe(true, centre - zoom * 70.0 - 14.0, 2.0);
             force_items(&mut layer, &world.level, &[farther, too_close, spaced, near]);
             let mut scene = ForeScene {
                 ecs: &mut world.ecs,
@@ -1599,8 +1747,30 @@ mod tests {
             assert_eq!(layer.frame.len(), MAX_BANDS_IN_VIEW);
             assert_eq!(layer.frame[0].item, near);
             assert_eq!(layer.frame[1].item, spaced);
-            assert_eq!((layer.frame[0].screen_cross - layer.frame[1].screen_cross).abs() as f32, 48.0 * zoom);
+            assert_eq!(layer.frame[1].shadow.cross - layer.frame[0].shadow.cross, (48.0 * zoom) as i32);
         }
+    }
+
+    #[test]
+    fn shadow_only_bands_participate_in_the_two_line_spacing_rule() {
+        let world = World::new(Theme::Sewer, 7);
+        let mut layer = ForeLayer::new();
+        let view = View { cam: Vec2::ZERO, size: Vec2::splat(360.0), zoom: 1.0 };
+        let rat = view.size * 0.5;
+        let nearest = pipe(true, 112.0 - 14.0, 3.0);
+        let too_close = pipe(true, 112.0 - 14.0 - 47.0, 3.0);
+        let spaced = pipe(true, 310.0 - 14.0, 3.0);
+        let items = [spaced, too_close, nearest];
+        for item in items {
+            let plan = plan_band(view, item, rat, &[]).unwrap();
+            assert_eq!(plan.body.fade, 0.0);
+            assert!(plan.shadow.fade > 0.0);
+        }
+        force_items(&mut layer, &world.level, &items);
+        layer.plan_frame(view, &world.level, rat, 0.0, &[]);
+        assert_eq!(layer.frame.len(), MAX_BANDS_IN_VIEW);
+        assert_eq!(layer.frame[0].item, nearest);
+        assert_eq!(layer.frame[1].item, spaced);
     }
 
     #[test]
@@ -1649,8 +1819,8 @@ mod tests {
         let plan = plan_band(view, item, rat, &[]).unwrap();
         assert_eq!(plan.alpha, ALPHA_FLOOR_RAT as u8);
         let moved = plan_band(View { cam: Vec2::new(6.0, 4.0), ..view }, item, rat, &[]).unwrap();
-        assert_eq!(plan.screen_cross - moved.screen_cross, 10);
-        assert_eq!(plan.shadow_cross - moved.shadow_cross, 4);
+        assert_eq!(plan.body.cross - moved.body.cross, 10);
+        assert_eq!(plan.shadow.cross - moved.shadow.cross, 4);
         let far = plan_band(view, item, Vec2::new(1000.0, 0.0), &[]).unwrap();
         assert_eq!(far.alpha, ALPHA_MAX);
     }
@@ -1714,6 +1884,61 @@ mod tests {
                 assert!(layer.frame.len() <= MAX_BANDS_IN_VIEW);
             }
         }
+    }
+
+    #[test]
+    fn flatbed_movers_fade_at_their_track_ends() {
+        let world = World::new(Theme::Trailer, 5);
+        let view = View { cam: Vec2::ZERO, size: Vec2::new(240.0, 160.0), zoom: 1.0 };
+        let rat = view.size * 0.5;
+        let mut previous_cloud = None;
+        let mut previous_branch: (f32, f32) = (0.0, 0.0);
+        let mut branch_body_seen = false;
+        let mut cloud_wrapped = false;
+        let mut branch_led = false;
+        let mut branch_trailed = false;
+        for step in 0..(50 * SKY_QUANT_HZ as u32) {
+            let elapsed = (step as f32 + 0.25) / SKY_QUANT_HZ;
+            let [_, cloud, branch] = sky_items(&world.level, view, elapsed);
+            let cloud = cloud.unwrap();
+            let cloud_fade = plan_band(view, cloud, rat, &[]).map_or(0.0, |p| p.shadow.fade);
+            if let Some((cross, fade)) = previous_cloud {
+                if cloud.cross < cross {
+                    assert_eq!((fade, cloud_fade), (0.0, 0.0));
+                    cloud_wrapped = true;
+                }
+            }
+            previous_cloud = Some((cloud.cross, cloud_fade));
+
+            let (shadow, body) = branch.and_then(|item| plan_band(view, item, rat, &[]))
+                .map_or((0.0, 0.0), |p| (p.shadow.fade, p.body.fade));
+            if step > 0 {
+                if previous_branch.0 == 0.0 && shadow > 0.0 {
+                    assert!(shadow <= 0.25, "canopy shadow appeared at {shadow}");
+                }
+                if previous_branch.0 > 0.0 && shadow == 0.0 {
+                    assert!(previous_branch.0 <= 0.25, "canopy shadow left at {}", previous_branch.0);
+                }
+                if previous_branch.1 == 0.0 && body > 0.0 {
+                    assert!(body <= 0.5, "canopy body appeared at {body}");
+                }
+                if previous_branch.1 > 0.0 && body == 0.0 {
+                    assert!(previous_branch.1 <= 0.5, "canopy body left at {}", previous_branch.1);
+                }
+            }
+            if branch.is_none() {
+                branch_body_seen = false;
+            }
+            if shadow > 0.0 && body == 0.0 && !branch_body_seen {
+                branch_led = true;
+            }
+            if shadow > 0.0 && body == 0.0 && branch_body_seen {
+                branch_trailed = true;
+            }
+            branch_body_seen |= body > 0.0;
+            previous_branch = (shadow, body);
+        }
+        assert!(cloud_wrapped && branch_led && branch_trailed);
     }
 
     #[test]
