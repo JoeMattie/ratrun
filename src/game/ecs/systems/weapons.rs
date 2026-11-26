@@ -1598,7 +1598,7 @@ fn fire_one(
             let dir = pick
                 .map(|(_, pos)| (pos - ppos).normalized())
                 .unwrap_or(aim_u);
-            let mut bit = false;
+            let mut bit_at = None;
             if let Some((entity, pos)) = pick {
                 if let Ok((_, _, mut e)) = enemies.get_mut(entity) {
                     let hp_before = e.hp.max(0.0);
@@ -1626,12 +1626,12 @@ fn fire_one(
                         killed,
                         DamageSource::Normal,
                     );
-                    bit = true;
+                    bit_at = Some(pos);
                 }
             }
             // The boss is a body too: the jaw closes on it when the rat is
             // pressed against it, with the bite's own damage this cast.
-            if !bit {
+            if bit_at.is_none() {
                 for mut boss in bosses.iter_mut() {
                     if boss.dead {
                         continue;
@@ -1678,11 +1678,20 @@ fn fire_one(
                         killed,
                         DamageSource::Normal,
                     );
-                    bit = true;
+                    bit_at = Some(if evolved {
+                        shapes
+                            .iter()
+                            .filter(|shape| shape.grounded())
+                            .map(|shape| shape.center())
+                            .min_by(|a, b| a.dist_sq(ppos).total_cmp(&b.dist_sq(ppos)))
+                            .unwrap_or(boss_pos)
+                    } else {
+                        boss_pos
+                    });
                     break;
                 }
             }
-            if bit {
+            if let Some(bit_at) = bit_at {
                 // A decoration, not a body: it carries no `SpawnId`, so the
                 // spawn-order sequence every other system orders by is not
                 // perturbed by a jaw snap.
@@ -1692,22 +1701,18 @@ fn fire_one(
                     t: BITE_SECS,
                     total: BITE_SECS,
                 });
-                // Milk Teeth (`WAVE3_DESIGN` §3) evolves the old lead dart: the
-                // evolved bite also spits the tooth, which lodges for 1 s and
-                // comes home biting every body it crosses
-                // (`evolutions::milk_teeth_system`). The base weapon stays a
-                // bite; the evolution adds its own projectile on top, so an
-                // earned evolution is never a downgrade.
+                // Each evolved bite lobs one tooth. Successive casts in a
+                // volley fan into a tight cluster around the same target.
                 if evolved {
-                    commands.spawn((
-                        MilkTooth::new(
-                            ppos,
-                            dir * evolutions::MILK_SPEED,
-                            dmg,
-                            stats.ranged_reach(evolutions::MILK_REACH),
-                        ),
-                        next_id.take(),
-                    ));
+                    const SPREAD: [f32; 3] = [0.0, -4.0, 4.0];
+                    let target = if aimed.is_some() { aim.unwrap_or(bit_at) } else { bit_at };
+                    let to = target - ppos;
+                    let spread = to.normalized().perp() * SPREAD[evo.milk_slot];
+                    evo.milk_slot = (evo.milk_slot + 1) % SPREAD.len();
+                    let reach = stats.ranged_reach(evolutions::MILK_REACH);
+                    let target = ppos + (to + spread).clamp_len(reach);
+                    let landing = super::weapon_lava::landing_floor(level, ppos, target);
+                    commands.spawn((MilkTooth::new(ppos, landing, dmg), next_id.take()));
                 }
                 vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, 0.0);
                 fired = true;
@@ -2416,9 +2421,9 @@ mod tests {
         assert!((target.y - p.y).abs() < 1.0, "the clamped lob left the aim line");
     }
 
-    /// **Milk Teeth, aimed**: the evolved lead tooth follows the reticle too.
+    /// The aimed casts land in a fixed cluster around the reticle.
     #[test]
-    fn milk_teeth_follows_the_aim() {
+    fn milk_teeth_spreads_around_the_aim_point() {
         let mut w = World::new(Theme::Sewer, 27);
         open_map(&mut w);
         w.clear_enemies();
@@ -2428,15 +2433,21 @@ mod tests {
         w.player.loadout.weapons[0].evolved = true;
         let p = w.player.pos;
         // The tooth is spat with the bite, so there is a body in the jaw.
-        w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, 14.0), 50.0);
-        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(0.0, 150.0)));
+        w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, 14.0), 400.0);
+        let target = p + Vec2::new(0.0, 150.0);
+        for _ in 0..4 {
+            w.player.loadout.weapons[0].timer = 0.0;
+            run_weapons_aim(&mut w, 1.0 / 60.0, Some(target));
+        }
         let mut q = w.ecs.query::<(&MilkTooth, &SpawnId)>();
-        let tooth = q
-            .iter(&w.ecs)
-            .min_by_key(|(_, id)| id.0)
-            .map(|(t, _)| t.vel)
-            .expect("the lead tooth");
-        assert!(tooth.y > 0.0 && tooth.x.abs() < 1.0, "tooth flew {tooth:?}");
+        let landings: Vec<_> = q.iter(&w.ecs)
+            .sort_by_key::<&SpawnId, _>(|id| id.0)
+            .map(|(tooth, _)| tooth.landing - target)
+            .collect();
+        assert_eq!(
+            landings,
+            [Vec2::ZERO, Vec2::new(4.0, 0.0), Vec2::new(-4.0, 0.0), Vec2::ZERO],
+        );
     }
 
     /// **Fondue Fork, aimed**: the two tines straddle the reticle, so the

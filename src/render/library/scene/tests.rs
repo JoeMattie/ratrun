@@ -763,6 +763,24 @@ fn the_evolutions_run() {
     }
 }
 
+#[test]
+fn the_milk_teeth_plate_lobs_a_tooth() {
+    use crate::game::ecs::components::{MilkPhase, MilkTooth};
+
+    let mut scene = LibraryScene::build(Key::Evolution(WeaponKind::Gnaw)).unwrap();
+    let mut saw_lob = false;
+    let mut saw_landing = false;
+    one_loop(&mut scene, |s| {
+        let w = s.world();
+        let mut query = w.ecs.query::<&MilkTooth>();
+        for tooth in query.iter(&w.ecs) {
+            saw_lob |= tooth.phase == MilkPhase::Out && tooth.height() > 8.0;
+            saw_landing |= tooth.phase == MilkPhase::Lodged;
+        }
+    });
+    assert!(saw_lob && saw_landing, "the plate must show the throw and its landing");
+}
+
 /// The field guide separates what a body springs from what the rat is the
 /// point of: a glue board, a mousetrap, a steam grate and an ink pad are shown
 /// being sprung by fodder (the rat is not drawn); a pit, a rat-hole and the

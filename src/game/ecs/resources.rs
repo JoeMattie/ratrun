@@ -1446,6 +1446,8 @@ pub struct EvoRuntime {
     /// Molt, or dropping and re-acquiring the weapon — restarts the parity at
     /// zero, so a new orbit never inherits half of the old one's cycle.
     pub fairy_key: u32,
+    /// Next landing offset in Milk Teeth's repeating spread. One tooth per cast.
+    pub milk_slot: usize,
 }
 
 impl EvoRuntime {

@@ -1117,8 +1117,9 @@ impl LightMap {
 
             // Milk Teeth dart: warm ivory glint.
             if let Some(dart) = entity.get::<MilkTooth>() {
-                let sx = dart.pos.x - cam.x;
-                let sy = dart.pos.y - cam.y;
+                let body = dart.body_pos();
+                let sx = body.x - cam.x;
+                let sy = body.y - cam.y;
                 let r = 18.0;
                 if in_range(sx, sy, r) {
                     self.lights.push(PointLight {
