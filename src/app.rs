@@ -576,9 +576,10 @@ pub struct App {
     boss_slain: bool,
     prev_boss_alive: bool,
     last_summary: Option<RunSummary>,
-    /// Expanded minimap (Tab / clicking the compact map). The simulation keeps
-    /// running while it is open.
+    /// Expanded minimap (Tab / clicking the compact map) pauses the simulation.
     map_open: bool,
+    /// Start of the player marker's render-only wall clock.
+    map_animation_start: std::time::Instant,
     /// Panel rects from the last frame, for pointer hit tests and tests.
     last_minimap: Rect,
     last_map: Rect,
@@ -804,6 +805,7 @@ impl App {
             prev_boss_alive: false,
             last_summary: None,
             map_open: false,
+            map_animation_start: std::time::Instant::now(),
             last_minimap: Rect::new(0, 0, 0, 0),
             last_map: Rect::new(0, 0, 0, 0),
             minimap_scratch: minimap::MinimapScratch::new(),
@@ -3365,8 +3367,8 @@ impl App {
     fn update_playing(&mut self, dt: f32, click: Option<Target>) {
         let testbed_changed_field = !self.map_open && self.update_testbed_keys();
         // The minimap is the first claim on Tab, a click on the compact map and
-        // Esc: while it is open those *close* it instead of pausing. The
-        // simulation keeps running either way.
+        // Esc: while the expanded map is open those close it before the
+        // pause-screen handling below.
         // Keyboard zoom for players without a wheel: `Z` pulls in, `X` widens
         // (the same ladder the wheel steps). Discrete presses only.
         if self.input.action_pressed(Action::ZoomIn) {
@@ -4884,27 +4886,23 @@ impl App {
     /// How often the current screen wants rendering: every frame while the
     /// simulation runs, the menu cadence everywhere else (`present::FramePacer`).
     pub fn frame_demand(&self) -> crate::present::Demand {
-        if matches!(self.screen, Screen::Playing) {
-            crate::present::Demand::Live
-        } else {
-            crate::present::Demand::Menu
+        match self.screen {
+            Screen::Playing if self.map_open => crate::present::Demand::AnimatedMenu,
+            Screen::Playing => crate::present::Demand::Live,
+            _ => crate::present::Demand::Menu,
         }
     }
 
-    /// Must the next frame be rendered now, whatever the pacer's cadence says?
+    /// Does input or a known animation require the screen to stay active?
     ///
     /// True when input of any kind arrived this frame (keys, pointer motion,
     /// pad, focus, a resize), when the screen changed, and while a clock the
     /// app knows about is running on a screen that is otherwise still: the
     /// console, the zoom easing, the volume/zoom read-outs, the auto-pick
-    /// toast spacing and the Library's animating card. Anything not listed
-    /// here is still caught by the pacer, which only stops rendering a screen
-    /// whose frames have stopped changing.
+    /// toast spacing, the Library's animating card and the expanded map marker.
     pub fn repaint_urgent(&self) -> bool {
-        self.repaint
-            || self.input.events > 0
-            || self.input.pad.active()
-            || self.console.open
+        self.map_open
+            || self.repaint_immediate()
             || self.hud.flashing()
             || self.auto_pick_wait > 0.0
             // The Library's card scene steps at a fixed dt; a new step is a
@@ -4915,6 +4913,11 @@ impl App {
                 .world
                 .as_ref()
                 .is_some_and(|w| w.zoom_view != w.zoom_view_target())
+    }
+
+    /// Repaint requests that can interrupt the expanded map's regular cadence.
+    pub(crate) fn repaint_immediate(&self) -> bool {
+        self.repaint || self.input.events > 0 || self.input.pad.active() || self.console.open
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
@@ -5846,6 +5849,10 @@ impl App {
         }
         view.map_key = &self.map_key_label;
         view.size_key = &self.size_key_label;
+        // The compact map remains a still backdrop under pause and level-up.
+        if matches!(self.screen, Screen::Playing) {
+            view.player_clock = self.map_animation_start.elapsed().as_secs_f64();
+        }
         minimap::draw(frame, game, &view, w, &mut self.minimap_scratch);
         if expanded {
             let panel = minimap_source::expanded_rect(game);
@@ -12363,6 +12370,36 @@ mod tests {
     }
 
     #[test]
+    fn the_open_map_requests_repaints_without_ticking_the_world() {
+        fn snapshot(w: &World) -> (u64, f32, Vec2, u32, u64) {
+            use rand::RngExt;
+            (
+                w.ticks,
+                w.elapsed,
+                w.player.pos,
+                w.fog().clock(),
+                w.rng.clone().random::<u64>(),
+            )
+        }
+
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.frame(&[]);
+        let before = snapshot(h.app.world.as_ref().unwrap());
+        h.frame(&[KeyCode::Tab]);
+        assert_eq!(h.app.frame_demand(), crate::present::Demand::AnimatedMenu);
+        h.frame(&[]);
+        let draws = h.app.world_draws;
+        for _ in 0..10 {
+            h.frame(&[]);
+            assert!(h.app.repaint_urgent());
+            assert!(!h.app.repaint_immediate(), "the pulse uses the 30 Hz cadence");
+        }
+        assert_eq!(snapshot(h.app.world.as_ref().unwrap()), before);
+        assert_eq!(h.app.world_draws, draws, "map animation reuses the frozen picture");
+    }
+
+    #[test]
     fn clicking_the_compact_minimap_toggles_the_map_but_only_with_the_left_button() {
         let mut hh = Harness::new(120, 40);
         hh.enter_playing();
@@ -15831,6 +15868,8 @@ mod tests {
             forced.app.set_smooth(true);
             flat.app.subcell_env = Some(Choice::Force(set));
             for h in [&mut plain, &mut forced, &mut flat] {
+                // Compare the playfield independently of the wall-clock map marker.
+                h.app.scores.minimap_size = minimap::MinimapSize::Hidden;
                 h.enter_playing();
                 for i in 0..90 {
                     h.frame(&[[KeyCode::Right, KeyCode::Down][(i / 30) % 2]]);

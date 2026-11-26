@@ -50,6 +50,7 @@ first time.
 - **Gene splices last one sector.** Both sockets are empty again on the next
   floor, so the shop matters every time.
 - **Loot markers shrink when the view is zoomed out.**
+- **Your position pulses with a soft halo on the map and minimap.**
 - **MIT licence.**
 - **Foreground layer, rebuilt.** The overhead things are few, huge and
   attached: pipes, ducts, rails and clotheslines run wall to wall, hoods and

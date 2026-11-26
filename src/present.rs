@@ -640,6 +640,8 @@ pub enum Demand {
     /// A menu, plate or overlay: 30 Hz while it moves, a slow probe when it
     /// has stood still.
     Menu,
+    /// An animated overlay that keeps the 30 Hz cadence even when quiet.
+    AnimatedMenu,
 }
 
 /// Decides, each loop iteration, whether to render and present at all.
@@ -650,6 +652,7 @@ pub enum Demand {
 ///   screen**, the screen is treated as standing still and is only probed
 ///   every [`IDLE_INTERVAL`]; the first probe that changes a cell (or any
 ///   urgent frame) returns it to 30 Hz.
+/// * [`Demand::AnimatedMenu`] stays at [`MENU_INTERVAL`] without idle probes.
 /// * An **urgent** frame — input arrived, the terminal resized, a known
 ///   animation clock is running — is always rendered at once.
 ///
@@ -695,6 +698,10 @@ impl FramePacer {
             }
             Demand::Menu if self.idle() => since >= IDLE_INTERVAL,
             Demand::Menu => since >= MENU_INTERVAL,
+            Demand::AnimatedMenu => {
+                self.quiet = 0;
+                since >= MENU_INTERVAL
+            }
         }
     }
 
@@ -765,8 +772,12 @@ impl FrameLoop {
             // the bench, which never touch a TTY).
             terminal.autoresize()?;
         }
-        let urgent = app.repaint_urgent() || self.presenter.stale_for(terminal);
-        if !self.pacer.should_render(now, app.frame_demand(), urgent) {
+        let demand = app.frame_demand();
+        let urgent = match demand {
+            Demand::AnimatedMenu => app.repaint_immediate(),
+            _ => app.repaint_urgent(),
+        } || self.presenter.stale_for(terminal);
+        if !self.pacer.should_render(now, demand, urgent) {
             return Ok(None);
         }
         let shown = self.presenter.frame(terminal, |f| {
@@ -1006,6 +1017,28 @@ mod tests {
             }
         }
         assert_eq!(rendered, 60, "30 Hz");
+    }
+
+    #[test]
+    fn animated_menu_keeps_thirty_hertz_even_when_frames_are_unchanged() {
+        let t0 = Instant::now();
+        let frame = Duration::from_micros(16_667);
+        let mut pacer = FramePacer::default();
+        for i in 0..QUIET_FRAMES {
+            pacer.rendered(t0 + frame * (i * 2), false);
+        }
+        assert!(pacer.idle());
+
+        let mut rendered = 0;
+        for i in 0..120 {
+            let now = t0 + frame * (QUIET_FRAMES * 2 + i);
+            if pacer.should_render(now, Demand::AnimatedMenu, false) {
+                pacer.rendered(now, false);
+                rendered += 1;
+            }
+        }
+        assert_eq!(rendered, 60);
+        assert!(!pacer.idle());
     }
 
     #[test]
