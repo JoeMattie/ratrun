@@ -54,6 +54,25 @@ Crab, miniboss strikes, boss contact, hazards and projectiles, and the
 floors' own hazards (mousetraps, crab pots, steam, the drip shaft, the pits on
 Outfall and Flatbed, sliding cargo).
 
+`[enemies] separation_passes` (3), `separation_max_push_px` (10.0) and
+`separation_after_walls` (true) tune how hard a crowd is pushed apart. Each
+pass nudges every overlapping pair apart by half the overlap, clamps one
+body's total nudge to `separation_max_push_px` (world px) and reads the
+positions the previous pass left, over the tick's one spatial grid. The wall
+step then runs, and with `separation_after_walls` one more pass follows, after
+which only the bodies that pass moved are pushed back out of walls, so a body
+never ends a tick inside one. `separation_passes = 1`,
+`separation_max_push_px = 6.0` and `separation_after_walls = false` is the old
+single-pass crowd, exactly. The pass count is capped at 8: each pass costs one
+broadphase query per live body (600 at the cap).
+
+```toml
+[enemies]
+separation_passes = 1
+separation_max_push_px = 6.0
+separation_after_walls = false
+```
+
 There is **no** player-side sector knob, by owner ruling: the rat's HP, armor,
 regeneration, heals, passives and splices are one set of numbers on every
 floor (`[player] max_hp` ships at `79.477`, the fresh-start level-one value).

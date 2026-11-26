@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Overlap.** A crowd of enemies spreads out instead of stacking on top of
+  itself. Bodies push each other apart harder, and a body pushed into a wall
+  is pushed back out before the tick ends. A balance file can restore the
+  looser crowd; see [TUNING.md](TUNING.md).
+
 ## 0.4.4 (2026-11-26, playtest build)
 
 - **Level.** Your level is a gold badge on the bottom bar, beside the XP

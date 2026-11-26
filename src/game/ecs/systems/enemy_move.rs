@@ -31,6 +31,32 @@
 //! (legacy `self.enemies[j].pos`); final positions are written back to the
 //! components in the same order.
 //!
+//! `enemies.separation_passes` (three shipped) repeats that pass over the same
+//! snapshot, each pass reading the positions the previous one left, and clamps
+//! one body's nudge per pass to `enemies.separation_max_push_px` (10 px
+//! shipped). The spatial grid is **not** rebuilt between passes: a pass moves
+//! a body by at most that clamp (a fraction of the 16 px cell) and the
+//! neighbour window is already padded by a cell or more, so the same buckets
+//! answer the same neighbour set. A pair that only drifts into reach mid-tick
+//! can be missed until the next tick's grid build; it was out of reach at
+//! build time, so that is a marginal touch, never a deep overlap. After `wall_resolve_system`, `separation_after_walls_system`
+//! (enemies.separation_after_walls, shipped true) plays one more pass and then
+//! re-ejects only the bodies that pass moved, so a tick never ends with a body
+//! inside a wall. That ejection is anchored at the body's pre-pass position, so
+//! a pass that shoves a body past a wall face keeps it on the near side instead
+//! of dropping it through a thin wall.
+//!
+//! The legacy single-pass crowd is one tuning line away:
+//! `separation_passes = 1`, `separation_max_push_px = 6.0` and
+//! `separation_after_walls = false`. The exact-position tests at the bottom of
+//! this file pin that triple.
+//!
+//! Every exception the legacy loop had is kept: `position_locked`,
+//! `crab_pot_held` and `buried` bodies are handled exactly as before (a planted
+//! body does not move but still pushes its crowd), and elites, minibosses,
+//! glued bodies and Lilliputian squads get no special case here — they did not
+//! before either.
+//!
 //! ## `EnemyIndex` validity window (this module owns it)
 //!
 //! `grid_build_system` (schedule point 6) fills [`EnemyIndex`] in `SpawnId`
@@ -42,7 +68,7 @@
 //!
 //! | after | valid until | usable by |
 //! | --- | --- | --- |
-//! | `grid_build_system` | `grid_refresh_system` | `separation_system`, `wall_resolve_system`, `grid_refresh_system` |
+//! | `grid_build_system` | `grid_refresh_system` | `separation_system`, `wall_resolve_system`, `separation_after_walls_system`, `grid_refresh_system` |
 //! | `grid_refresh_system` | `loot::reap_enemies_system` despawns | `weapons::fire_weapons_system`, `projectiles::*`, `combat::*` (all before the reap) |
 //!
 //! It is **stale** at these points, so never read it there:
@@ -448,48 +474,42 @@ pub fn grid_build_system(
     scratch.max_radius = cache.iter().map(|entry| entry.3).fold(0.0, f32::max);
 }
 
-/// Legacy `World::separate_enemies` .
+/// One body's soft-separation state: `(pos, radius, planted, buried)`.
 ///
-/// The widest possible overlapping pair spans two largest radii
-/// (`reach = max_radius * 2.0`). Enemy `i` is read, its neighbours' current
-/// positions are read (so earlier pushes are already visible) and the clamped
-/// nudge is written back, exactly like the legacy in-place loop.
-pub fn separation_system(
-    grid: Res<SpatialGrid>,
-    index: Res<EnemyIndex>,
-    scratch: Res<GridScratch>,
-    mut neigh: ResMut<NeighborScratch>,
-    mut state: Local<Vec<(Vec2, f32, bool, bool)>>,
-    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
-) {
-    // Debug builds (i.e. every `cargo test`): prove the cached order is still
-    // the live `SpawnId` order before indexing the grid with it.
-    #[cfg(debug_assertions)]
-    debug_assert_enemy_index(
-        &index.0,
-        enemies.iter().map(|(entity, id, _)| (id.0, entity)),
-    );
-    // Snapshot `(pos, radius)` once into the reused buffer, in `EnemyIndex`
-    // (= legacy `self.enemies`) order: the legacy loop then only touches that
-    // flat array, so the tick pays two entity lookups per enemy instead of one
-    // per neighbour in the 5x5 bucket query.
-    state.clear();
-    for &entity in index.0.iter() {
-        let Ok((_, _, e)) = enemies.get(entity) else {
-            continue;
-        };
-        state.push((e.pos, e.radius, e.position_locked || e.crab_pot_held, e.buried));
-    }
+/// `planted` is `position_locked || crab_pot_held`: the body does not move this
+/// tick, but it still pushes its neighbours (a glued or locked body holds its
+/// crowd on the board). A `buried` body is invisible in both directions.
+type SepEntry = (Vec2, f32, bool, bool);
 
-    let reach = scratch.max_radius * 2.0;
+/// Play one separation pass over `state`, in `EnemyIndex` order.
+///
+/// `state` is updated in place, so a later body in the same pass reads the
+/// pushes the earlier ones already took — the legacy in-place sequential
+/// semantics, repeated pass after pass. One body's nudge is clamped to
+/// `max_push` (world px) **per pass**.
+///
+/// Cost at the 600-body cap (`constants::ENEMY_CAP`): one `neighbors_within`
+/// per mobile body — a 5 × 5 bucket scan on the 16 px grid, reach
+/// `2 * max_radius` — plus one cheap pair test per candidate. A crowded cluster
+/// returns a handful of candidates per query, so a pass is a few thousand float
+/// compares: tens of microseconds, and the shipped four passes (three plus the
+/// post-wall one) stay well under a millisecond a tick. Nothing is allocated:
+/// `state` and `neigh` are the systems' reused scratch.
+fn separation_pass(
+    grid: &SpatialGrid,
+    state: &mut [SepEntry],
+    neigh: &mut Vec<u32>,
+    reach: f32,
+    max_push: f32,
+) {
     for i in 0..state.len() {
         let (pi, ri, planted, buried) = state[i];
         if planted || buried {
             continue;
         }
-        grid.neighbors_within(pi, reach, &mut neigh.0);
+        grid.neighbors_within(pi, reach, &mut *neigh);
         let mut push = Vec2::ZERO;
-        for &j in &neigh.0 {
+        for &j in neigh.iter() {
             let j = j as usize;
             if j == i {
                 continue;
@@ -514,7 +534,65 @@ pub fn separation_system(
         }
         // Legacy wrote `self.enemies[i].pos += push`, so a later neighbour read
         // must see this push: update the array in place, not a copy.
-        state[i].0 += push.clamp_len(6.0);
+        state[i].0 += push.clamp_len(max_push);
+    }
+}
+
+/// Legacy `World::separate_enemies`, played `enemies.separation_passes` times
+/// per tick (three shipped) with the per-pass clamp
+/// `enemies.separation_max_push_px` (10 px shipped).
+///
+/// The widest possible overlapping pair spans two largest radii
+/// (`reach = max_radius * 2.0`). Enemy `i` is read, its neighbours' current
+/// positions are read (so earlier pushes are already visible) and the clamped
+/// nudge is written back, exactly like the legacy in-place loop. The next pass
+/// starts from the positions this one left.
+///
+/// The spatial grid is built once this tick and **not** rebuilt between
+/// passes: a pass moves a body by at most `separation_max_push_px`, a fraction
+/// of the 16 px cell, and the neighbour window is already padded by a cell or
+/// more, so the same buckets return the same neighbour set. The one thing
+/// reused buckets can miss is a *pair* that only drifts into reach mid-tick;
+/// the next tick's `grid_build_system` sees it, and it was out of reach at
+/// build time, so that is a marginal touch, not a deep overlap. Why this is enough to matter: the old single pass left the crowd
+/// pressed together because the clamp, the steering and the wall step pulled it
+/// back in every tick.
+pub fn separation_system(
+    tuning: Res<crate::tuning::RunTuning>,
+    grid: Res<SpatialGrid>,
+    index: Res<EnemyIndex>,
+    scratch: Res<GridScratch>,
+    mut neigh: ResMut<NeighborScratch>,
+    mut state: Local<Vec<SepEntry>>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+) {
+    // Debug builds (i.e. every `cargo test`): prove the cached order is still
+    // the live `SpawnId` order before indexing the grid with it.
+    #[cfg(debug_assertions)]
+    debug_assert_enemy_index(
+        &index.0,
+        enemies.iter().map(|(entity, id, _)| (id.0, entity)),
+    );
+    // Snapshot `(pos, radius)` once into the reused buffer, in `EnemyIndex`
+    // (= legacy `self.enemies`) order: the legacy loop then only touches that
+    // flat array, so the tick pays two entity lookups per enemy instead of one
+    // per neighbour in the 5x5 bucket query. Every pass then works on the
+    // positions the previous pass left in that array.
+    state.clear();
+    for &entity in index.0.iter() {
+        let Ok((_, _, e)) = enemies.get(entity) else {
+            continue;
+        };
+        state.push((e.pos, e.radius, e.position_locked || e.crab_pot_held, e.buried));
+    }
+
+    let reach = scratch.max_radius * 2.0;
+    let max_push = tuning.enemies.separation_max_push_px.max(0.0);
+    // `Tuning::validate` keeps a parsed file in 1..=8; the clamp also bounds a
+    // hand-built `Tuning` (tests, a host that skips validation) so a tick can
+    // never repeat the pass an unbounded number of times.
+    for _ in 0..tuning.enemies.separation_passes.clamp(1, 8) {
+        separation_pass(&grid, state.as_mut_slice(), &mut neigh.0, reach, max_push);
     }
 
     // Write the final positions back in the same order (no sort, no clone).
@@ -524,6 +602,32 @@ pub fn separation_system(
         };
         e.pos = state[i].0;
     }
+}
+
+/// Eject one body from every wall tile it touches and keep it in the arena —
+/// the final position constraint [`wall_resolve_system`] applies.
+///
+/// One tile-grid query per body: the cells it touches, never the level's walls.
+/// `None` = no one-way-door permission, so a gate is solid to the horde from
+/// both sides forever.
+fn resolve_body_walls(level: &Level, e: &mut Enemy) {
+    let class = SizeClass::of_enemy(e.kind);
+    e.pos = level.tiles.resolve_circle(e.pos, e.radius, class, None);
+    e.pos = e.pos.clamp_box(Vec2::splat(2.0), level.arena - Vec2::splat(2.0));
+}
+
+/// The post-wall pass's ejection for one body the pass moved.
+///
+/// `before` is the position the body held when the pass started, which the wall
+/// step had just made legal. `resolve_circle_step` keeps that position when the
+/// pass shoved the circle into a wall face (a 16 px cell is less than two
+/// 10 px pushes wide, and the nearest-side ejection would otherwise drop the
+/// body on the far side of a thin wall); everywhere else it resolves the graze
+/// exactly like [`resolve_body_walls`] does.
+fn resolve_moved_body_walls(level: &Level, before: Vec2, e: &mut Enemy) {
+    let class = SizeClass::of_enemy(e.kind);
+    e.pos = level.tiles.resolve_circle_step(before, e.pos, e.radius, class);
+    e.pos = e.pos.clamp_box(Vec2::splat(2.0), level.arena - Vec2::splat(2.0));
 }
 
 /// Legacy `World::resolve_enemy_walls` : push enemies out of
@@ -544,21 +648,82 @@ pub fn wall_resolve_system(
         &index.0,
         enemies.iter().map(|(entity, id, _)| (id.0, entity)),
     );
-    let arena = level.arena;
     for &entity in index.0.iter() {
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        let r = e.radius;
         if e.crab_pot_held {
             continue;
         }
-        let class = SizeClass::of_enemy(e.kind);
-        // One tile-grid query per enemy: the cells it touches, never the
-        // level's walls. `None` = no one-way-door permission, so a gate is
-        // solid to the horde from both sides forever.
-        e.pos = level.tiles.resolve_circle(e.pos, r, class, None);
-        e.pos = e.pos.clamp_box(Vec2::splat(2.0), arena - Vec2::splat(2.0));
+        resolve_body_walls(&level, &mut e);
+    }
+}
+
+/// One more separation pass after the wall step, then only that body's wall
+/// ejection again (`enemies.separation_after_walls`, shipped true).
+///
+/// Soft separation can shove a body into a wall face the wall step had just
+/// cleared (a crowd pressed against a wall is the ordinary case), so the tick
+/// ends with one more pass and a second wall ejection
+/// ([`resolve_moved_body_walls`]) for **exactly the bodies that pass moved**:
+/// every other body is already clear, and re-resolving it would buy nothing but
+/// a tile query. With the knob off this system reads one bool and returns, so it
+/// costs nothing and the schedule order is unchanged.
+///
+/// It sits inside the same `EnemyIndex` window as `separation_system` and
+/// `wall_resolve_system` — nothing spawns or despawns here — and reuses the
+/// grid built this tick (same reasoning as [`separation_system`]: one pass
+/// moves a body by at most `separation_max_push_px`). Positions are written in
+/// `SpawnId` order and no rng is drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn separation_after_walls_system(
+    tuning: Res<crate::tuning::RunTuning>,
+    level: Res<Level>,
+    grid: Res<SpatialGrid>,
+    index: Res<EnemyIndex>,
+    scratch: Res<GridScratch>,
+    mut neigh: ResMut<NeighborScratch>,
+    mut state: Local<Vec<SepEntry>>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+) {
+    if !tuning.enemies.separation_after_walls {
+        return;
+    }
+    #[cfg(debug_assertions)]
+    debug_assert_enemy_index(
+        &index.0,
+        enemies.iter().map(|(entity, id, _)| (id.0, entity)),
+    );
+    state.clear();
+    for &entity in index.0.iter() {
+        let Ok((_, _, e)) = enemies.get(entity) else {
+            continue;
+        };
+        state.push((e.pos, e.radius, e.position_locked || e.crab_pot_held, e.buried));
+    }
+    let reach = scratch.max_radius * 2.0;
+    separation_pass(
+        &grid,
+        state.as_mut_slice(),
+        &mut neigh.0,
+        reach,
+        tuning.enemies.separation_max_push_px.max(0.0),
+    );
+    for (i, &entity) in index.0.iter().enumerate() {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        let pos = state[i].0;
+        if pos == e.pos {
+            // Planted, buried or not overlapping: the wall step's answer still
+            // stands.
+            continue;
+        }
+        let before = e.pos;
+        e.pos = pos;
+        if !e.crab_pot_held {
+            resolve_moved_body_walls(&level, before, &mut e);
+        }
     }
 }
 
@@ -621,6 +786,87 @@ mod tests {
         w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
         run(w);
         w.end_tick();
+    }
+
+    /// Today's single-pass crowd, one tuning line away: one pass, the old 6 px
+    /// clamp and no post-wall pass. The exact-position tests below pin this
+    /// triple, so the shipped 3 / 10.0 / true can never drift the legacy result
+    /// by construction.
+    fn legacy_separation() -> crate::tuning::RunTuning {
+        let mut values = crate::tuning::Tuning::default();
+        values.enemies.separation_passes = 1;
+        values.enemies.separation_max_push_px = 6.0;
+        values.enemies.separation_after_walls = false;
+        crate::tuning::RunTuning::new(values)
+    }
+
+    /// The shipped separation with the pass count and the post-wall pass
+    /// overridden, so a crowd test changes exactly one thing. The 10 px clamp
+    /// stays at its shipped value.
+    fn separation_tuning(passes: u32, after_walls: bool) -> crate::tuning::RunTuning {
+        let mut values = crate::tuning::Tuning::default();
+        values.enemies.separation_passes = passes;
+        values.enemies.separation_after_walls = after_walls;
+        crate::tuning::RunTuning::new(values)
+    }
+
+    /// One tick of the real movement chain (grid build, separation, wall step,
+    /// the post-wall pass, grid refresh) without steering, so a test can watch
+    /// separation alone.
+    fn settle_tick(w: &mut World) {
+        tick(w, |w| {
+            w.ecs.run_system_cached(grid_build_system).unwrap();
+            w.ecs.run_system_cached(separation_system).unwrap();
+            w.ecs.run_system_cached(wall_resolve_system).unwrap();
+            w.ecs.run_system_cached(separation_after_walls_system).unwrap();
+            w.ecs.run_system_cached(grid_refresh_system).unwrap();
+        });
+    }
+
+    /// Total pairwise overlap of the live bodies: the sum of `r_i + r_j - d`
+    /// over every overlapping pair, in world px. Zero means no two bodies
+    /// touch.
+    fn total_overlap(w: &mut World) -> f32 {
+        let enemies = w.enemies();
+        let mut total = 0.0;
+        for i in 0..enemies.len() {
+            for j in (i + 1)..enemies.len() {
+                let (a, b) = (&enemies[i], &enemies[j]);
+                let sum = a.radius + b.radius;
+                let d = a.pos.dist(b.pos);
+                if d < sum {
+                    total += sum - d;
+                }
+            }
+        }
+        total
+    }
+
+    /// Thirty cats released in a 9 × 7.5 px clump on clear floor in the level's
+    /// largest hall, so only separation moves them.
+    fn crowd(passes: u32, after_walls: bool, seed: u64) -> World {
+        let mut w = World::with_tuning(Theme::Sewer, seed, separation_tuning(passes, after_walls));
+        w.clear_enemies();
+        let class = SizeClass::of_enemy(EnemyKind::Cat);
+        let hall = w.level.largest_hall().expect("a hall").rect;
+        let centre = hall
+            .cells()
+            .map(|(x, y)| TileMap::tile_rect(x, y).center())
+            .filter(|&p| w.level.tiles.circle_clear(p, 36.0, class))
+            .min_by(|a, b| a.dist_sq(hall.center_world()).total_cmp(&b.dist_sq(hall.center_world())))
+            .expect("clear space for the crowd");
+        for i in 0..30 {
+            let p = centre + Vec2::new((i % 6) as f32 * 1.5 - 3.75, (i / 6) as f32 * 1.5 - 3.0);
+            w.spawn_enemy(EnemyKind::Cat, p, 1.0);
+        }
+        w
+    }
+
+    /// Every live body free of walls (the final position constraint's promise).
+    fn crowd_is_wall_clear(w: &mut World) -> bool {
+        w.enemies()
+            .iter()
+            .all(|e| w.level.tiles.circle_clear(e.pos, e.radius, SizeClass::of_enemy(e.kind)))
     }
 
     #[test]
@@ -884,9 +1130,12 @@ mod tests {
     /// Legacy `exactly_stacked_enemies_are_nudged_apart`, plus the exact
     /// positions the in-place sequential algorithm produces (earlier pushes
     /// visible to later neighbour reads).
+    /// Pins the legacy triple `(1 pass, 6 px clamp, no post-wall pass)`: with it
+    /// the shipped multi-pass separation reproduces today's positions exactly,
+    /// so reverting the feel is one tuning line, not a code change.
     #[test]
     fn exactly_stacked_enemies_are_nudged_apart() {
-        let mut w = World::new(Theme::Sewer, 41);
+        let mut w = World::with_tuning(Theme::Sewer, 41, legacy_separation());
         w.clear_enemies();
         let p = w.level.arena * 0.5;
         w.spawn_enemy(EnemyKind::Cat, p, 1.0);
@@ -1059,7 +1308,7 @@ mod tests {
     /// reused array must not carry the previous tick's pushes into this one).
     #[test]
     fn separation_rebuilds_its_scratch_each_tick() {
-        let mut w = World::new(Theme::Sewer, 43);
+        let mut w = World::with_tuning(Theme::Sewer, 43, legacy_separation());
         w.clear_enemies();
         let p = w.level.arena * 0.5;
         w.spawn_enemy(EnemyKind::Cat, p, 1.0);
@@ -1079,5 +1328,125 @@ mod tests {
         // 0 is pushed a further -1.0, 1 a further +0.5.
         assert!(approx_v(w.enemies()[0].pos, Vec2::new(p.x - 5.0, p.y)), "{:?}", w.enemies()[0].pos);
         assert!(approx_v(w.enemies()[1].pos, Vec2::new(p.x + 2.5, p.y)), "{:?}", w.enemies()[1].pos);
+    }
+
+    /// The owner's cheap overlap fix. Same seed, same thirty-body clump, same
+    /// 30 ticks: only the pass count differs, and three passes leave the crowd
+    /// at most three quarters of the single pass's total pairwise overlap.
+    #[test]
+    fn three_separation_passes_settle_a_crowd_much_further() {
+        let mut one = crowd(1, false, 77);
+        let mut three = crowd(3, false, 77);
+        for _ in 0..30 {
+            settle_tick(&mut one);
+            settle_tick(&mut three);
+        }
+        let one_overlap = total_overlap(&mut one);
+        let three_overlap = total_overlap(&mut three);
+        // Stated fraction: 3/4 of the single-pass overlap, with one hundredth of
+        // a pixel of arithmetic slack (a fully settled crowd is ~0 either way).
+        assert!(
+            three_overlap <= one_overlap * 0.75 + 0.01,
+            "3 passes left {three_overlap:.2} px of overlap against {one_overlap:.2} px with 1"
+        );
+        // Both runs end outside the walls, and the settled crowd is still a
+        // crowd (no body was flung across the hall).
+        assert!(crowd_is_wall_clear(&mut one), "a body ended inside a wall with 1 pass");
+        assert!(crowd_is_wall_clear(&mut three), "a body ended inside a wall with 3 passes");
+        let hall = three.level.largest_hall().expect("a hall").rect;
+        for e in three.enemies() {
+            assert!(
+                hall.contains_world(e.pos),
+                "separation threw a body out of the hall: {:?}",
+                e.pos
+            );
+        }
+    }
+
+    /// The shipped settings (`separation_after_walls` on) end a crowded tick
+    /// with every body clear of the walls, which is the second promise of the
+    /// post-wall pass.
+    #[test]
+    fn the_post_wall_pass_leaves_the_crowd_wall_clear() {
+        let mut w = crowd(3, true, 78);
+        for _ in 0..30 {
+            settle_tick(&mut w);
+        }
+        assert!(crowd_is_wall_clear(&mut w), "the post-wall pass left a body inside a wall");
+    }
+
+    /// Why the post-wall pass exists. Two cats 0.5 px apart along a wall
+    /// normal, the front one (spawned first, so index 0) 0.5 px clear of the
+    /// face: the wall step leaves them clear, and the one extra pass — the shove
+    /// the post-wall slot makes — pushes the front body at the wall. The
+    /// re-eject in the same system is what keeps it on the near side, so the
+    /// tick can never end buried.
+    #[test]
+    fn the_post_wall_pass_ejects_what_its_own_shove_buries() {
+        let class = SizeClass::of_enemy(EnemyKind::Cat);
+        let mut pair = World::with_tuning(Theme::Sewer, 91, separation_tuning(3, true));
+        pair.clear_enemies();
+        let front = (1..pair.level.tiles.cols() - 3)
+            .flat_map(|cx| (1..pair.level.tiles.rows() - 1).map(move |cy| (cx, cy)))
+            .find_map(|(cx, cy)| {
+                // A solid cell with two open cells in front of it: the wall face
+                // is the left edge of the first open cell, and the front body
+                // sits 0.5 px clear of it (the back one 0.5 px further out).
+                if pair.level.tiles.get(cx, cy) != TileKind::Wall(WallKind::Solid)
+                    || !pair.level.tiles.passable(cx + 1, cy, class)
+                    || !pair.level.tiles.passable(cx + 2, cy, class)
+                {
+                    return None;
+                }
+                let r = TileMap::tile_rect(cx + 1, cy);
+                let front = Vec2::new(r.x + 4.5, r.center().y);
+                (pair.level.tiles.circle_clear(front, 4.0, class)
+                    && pair.level.tiles.circle_clear(front + Vec2::new(0.5, 0.0), 4.0, class))
+                    .then_some(front)
+            })
+            .expect("a wall face with open floor in front");
+        // Index 0 is the body nearest the wall, so a pass pushes it *at* the
+        // face; the one behind it is 0.5 px further out.
+        pair.spawn_enemy(EnemyKind::Cat, front, 1.0);
+        pair.spawn_enemy(EnemyKind::Cat, front + Vec2::new(0.5, 0.0), 1.0);
+
+        // The main chain up to and including the wall step leaves both clear.
+        tick(&mut pair, |w| {
+            w.ecs.run_system_cached(grid_build_system).unwrap();
+            w.ecs.run_system_cached(separation_system).unwrap();
+            w.ecs.run_system_cached(wall_resolve_system).unwrap();
+        });
+        assert!(crowd_is_wall_clear(&mut pair), "the wall step must clear the pair first");
+
+        // One more pass on its own — inside the system, before its re-eject —
+        // buries the front body in the face. This probe mutates only this
+        // snapshot, so the components still hold the post-wall positions.
+        let index = pair.ecs.resource::<EnemyIndex>().0.clone();
+        let mut state: Vec<SepEntry> = index
+            .iter()
+            .map(|&e| {
+                let b = pair.ecs.get::<Enemy>(e).unwrap();
+                (b.pos, b.radius, false, false)
+            })
+            .collect();
+        let mut neigh = Vec::new();
+        let grid = SpatialGrid::build(state.iter().map(|s| s.0), pair.level.arena, GRID_CELL);
+        // Reach is 2 × the cat's 4 px radius, the same rule `grid_build_system`
+        // records in `GridScratch`; the 10 px clamp is the shipped one.
+        separation_pass(&grid, &mut state, &mut neigh, 8.0, 10.0);
+        assert!(
+            !pair.level.tiles.circle_clear(state[0].0, state[0].1, class),
+            "the probe did not push the front body into the wall: {:?}",
+            state[0].0
+        );
+
+        // The real system, from the same post-wall state: pass plus re-eject.
+        tick(&mut pair, |w| {
+            w.ecs.run_system_cached(separation_after_walls_system).unwrap();
+        });
+        assert!(
+            crowd_is_wall_clear(&mut pair),
+            "the post-wall pass left a body inside a wall"
+        );
     }
 }
