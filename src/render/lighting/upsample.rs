@@ -8,7 +8,9 @@
 //!   pixel's own (covering) sample gets weight 0 and the rest are
 //!   renormalised: corridor light never bleeds across a wall face. A cell
 //!   whose four taps are equal takes the old per-run fast path, so flat light
-//!   is bit-identical to the old composite. Compact stays flat (old blocks).
+//!   is bit-identical to the old composite. Hard, Coarse and Compact correct
+//!   cast edges from pixel coverage before tone mapping. Compact keeps the
+//!   covering sample's flat shade apart from that correction.
 //! * The tone curve — `mul` may now reach [`MUL_CEILING`]; [`tone`] is a soft
 //!   shoulder above [`KNEE`], applied to a sample's **peak** channel and the
 //!   other two scaled by the same factor, so a bright core keeps its hue
@@ -373,10 +375,11 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
         let scratch = &mut *scratch;
         scratch.toned.clear();
         scratch.toned.extend(grid.samples[..n].iter().map(tone_sample));
-        if frame.mode == LightingMode::Compact {
+        let compact = frame.mode == LightingMode::Compact;
+        if compact && !grid.hard_shadows.active {
             flat(grid, &scratch.toned, canvas.px, w, h, frame.depth);
         } else {
-            bilinear(grid, scratch, canvas.px, w, h, frame.depth);
+            bilinear(grid, scratch, canvas.px, (w, h), frame.depth, compact);
         }
     });
 }
@@ -422,9 +425,9 @@ fn bilinear(
     grid: &Grid,
     scratch: &mut Scratch,
     pixels: &mut [Rgb],
-    w: usize,
-    h: usize,
+    (w, h): (usize, usize),
     depth: ColorDepth,
+    compact: bool,
 ) {
     let Scratch { toned, cols, flat } = scratch;
     let (gw, gh) = (grid.w, grid.h);
@@ -448,7 +451,7 @@ fn bilinear(
         let (s0y, wy) = locate(by, stride);
         let (top, bot) = (clamp_y(s0y), clamp_y(s0y + 1));
         let own_row = (by / stride).min(gh - 1);
-        if cached != Some((top, bot, wy)) {
+        if !compact && cached != Some((top, bot, wy)) {
             cached = Some((top, bot, wy));
             let (wt, wb) = (256 - wy, wy);
             for sx in 0..gw {
@@ -478,19 +481,50 @@ fn bilinear(
         let mut x = 0;
         while x < w {
             let bx = x + ox;
-            let (s0x, _) = locate(bx, stride);
+            let (s0x, wx0) = locate(bx, stride);
             // Pixels up to the next sample centre share these four taps.
             let end = (((s0x + 1) * s + half) as usize - ox).min(w);
             let (l, r) = (clamp_x(s0x), clamp_x(s0x + 1));
             let (tl, tr) = (top * gw + l, top * gw + r);
             let (bl, br) = (bot * gw + l, bot * gw + r);
+            let deltas = grid.hard_shadows.row(s0x, s0y, x, y, end);
+            if let Some(deltas) = deltas {
+                let taps = [tl, tr, bl, br].map(|i| channels(&grid.samples[i]));
+                let left: [i32; CH] = std::array::from_fn(|j| taps[0][j] * (256 - wy) + taps[2][j] * wy);
+                let right: [i32; CH] = std::array::from_fn(|j| taps[1][j] * (256 - wy) + taps[3][j] * wy);
+                for (dx, (pixel, delta)) in row[x..end].iter_mut().zip(deltas).enumerate() {
+                    let wx = wx0 + dx as i32 * (256 / s);
+                    let own = own_row * gw + ((bx + dx) / stride).min(gw - 1);
+                    let channel = |j: usize| -> i32 {
+                        if compact {
+                            channels(&grid.samples[own])[j]
+                        } else {
+                            (left[j] * (256 - wx) + right[j] * wx + (1 << 15)) >> 16
+                        }
+                    };
+                    let sample = tone_sample(&Sample {
+                        mul: std::array::from_fn(|j| {
+                            (channel(j) + i32::from(delta.mul[j])).clamp(0, MUL_CEILING) as u16
+                        }),
+                        add: std::array::from_fn(|j| {
+                            (channel(j + 3) + i32::from(delta.add[j]))
+                                .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+                        }),
+                        tint: std::array::from_fn(|j| channel(j + 6) as u8),
+                    });
+                    let lit = sample.shade_exact(*pixel);
+                    *pixel = if low_colour { palette_dither(lit, depth, bx + dx, by) } else { lit };
+                }
+                x = end;
+                continue;
+            }
             let edge = shadow_edge(grid, [tl, tr, bl, br]);
             let uniform = !edge
                 && flat[l]
                 && flat[r]
                 && class(grid, tl) == class(grid, tr)
                 && near(&toned[tl], &toned[tr]);
-            if uniform && !skip_flat {
+            if compact || (uniform && !skip_flat) {
                 // All four taps equal (or as good as): each pixel takes its own
                 // sample, which for equal taps is the old composite exactly.
                 let split = (((s0x + 1) * s).max(0) as usize).saturating_sub(ox).clamp(x, end);
@@ -520,7 +554,6 @@ fn bilinear(
             // Within the segment the horizontal weight steps by exactly
             // `256 / stride` a pixel (the stride is a power of two) and the
             // pixel's own sample changes once, at the block boundary.
-            let (_, wx0) = locate(bx, stride);
             let dw = 256 / s;
             let split = (((s0x + 1) * s).max(0) as usize).saturating_sub(ox).clamp(x, end);
             for (lo, hi) in [(x, split), (split, end)] {

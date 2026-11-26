@@ -10366,6 +10366,7 @@ mod tests {
                 let lighting = match std::env::var("RATRUN_DUMP_LIGHTS").as_deref() {
                     Ok("hard") => LightingMode::Hard,
                     Ok("coarse") => LightingMode::Coarse,
+                    Ok("compact") => LightingMode::Compact,
                     _ => LightingMode::Full,
                 };
                 hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;

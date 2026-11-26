@@ -417,6 +417,7 @@ pub(super) mod testkit {
                 w * h
             ],
             info: vec![LightInfo::default(); w * h],
+            hard_shadows: Default::default(),
         }
     }
 

@@ -17,7 +17,7 @@
 //!   A blocker lower than the light casts a *finite* shadow of
 //!   length `d_b · h / (H − h)` (similar triangles), so a low fixture (a sconce
 //!   at 9 px, a fire at 6) throws long casts and a high pendant short ones.
-//!   Hard is the crisp old tap, Coarse/Compact the old path.
+//!   Hard, Coarse and Compact refine their crisp cast edges in `shadow.rs`.
 //! * [`BodyShadows`] + [`entity_shadows`]: every on-screen body (≤ 64, nearest
 //!   the rat first) casts a soft wedge away from each of the ≤ 2 strongest
 //!   lights reaching it, removing that light's share of the floor's light.
@@ -166,8 +166,7 @@ pub(super) fn bake(soft: &mut SoftProfile, geometry: &Geometry, light: &Light, t
 pub(super) fn visibility(profile: &ShadowProfile, soft: Option<&SoftProfile>, q: &ShadowQuery<'_>) -> f32 {
     let soft = match soft {
         Some(s) if q.mode == LightingMode::Full && s.key.is_some() => s,
-        // Hard: the crisp old tap (`softness` is `None` below Full);
-        // Coarse/Compact: the old path.
+        // The grid handles the lower tiers' floor edge coverage separately.
         _ => return profile.visibility(q.delta, q.surface, q.softness),
     };
     let dist = q.delta.x.abs().max(q.delta.y.abs());

@@ -196,6 +196,11 @@ pub(super) fn splat_sample(info: &mut LightInfo, hit: &SampleHit<'_>) {
     }
 }
 
+/// Unoccluded shaft gain per RGB unit on Hard, which has no angular ray bands.
+pub(super) fn hard_shaft_weight(core: f32) -> f32 {
+    core * core * strength::SHAFTS * SHAFT_LEVELS * (256.0 / 255.0)
+}
+
 /// How deep the rays cut a wall lamp's fan and a hanging lamp's disc.
 const RAY_DEPTH_SCONCE: f32 = 0.60;
 const RAY_DEPTH_HANGING: f32 = 0.35;
@@ -457,14 +462,15 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
         for x in 0..w {
             let s = sx0 + x as i32 * step;
             let tx = (s & 0xFFFF) >> 8;
+            let x0 = (s >> 16).clamp(0, gw - 1) as usize;
+            let x1 = ((s >> 16) + 1).clamp(0, gw - 1) as usize;
+            let correction = grid.hard_shadows.row(s >> 16, sy >> 16, x, y, x + 1).map(|row| &row[0]);
             // Two cells share a horizontal weight, as the shade does.
-            let tx = if super::upsample::PAIR_X {
+            let tx = if super::upsample::PAIR_X && correction.is_none() {
                 tx & !(2 * (256 / stride) - 1)
             } else {
                 tx
             };
-            let x0 = (s >> 16).clamp(0, gw - 1) as usize;
-            let x1 = ((s >> 16) + 1).clamp(0, gw - 1) as usize;
             // Bilinear weights, Q16; they sum to 65536 before the wall mask.
             let w00 = (256 - tx) * (256 - ty);
             let w10 = tx * (256 - ty);
@@ -490,7 +496,12 @@ pub(super) fn composite(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_
                     + i32::from(grid.info[i01].air[n]) * m01
                     + i32::from(grid.info[i11].air[n]) * m11;
                 // Q16 weights over Q8.8 air: 24 bits down to output levels.
-                ((sum + (1 << 23)) >> 24).clamp(0, 255)
+                let levels = if let Some(correction) = correction {
+                    (i64::from(sum) + (i64::from(correction.air[n]) << 16) + (1 << 23)) >> 24
+                } else {
+                    i64::from((sum + (1 << 23)) >> 24)
+                };
+                (levels as i32).clamp(0, 255)
             };
             let mut air = [air(0), air(1), air(2)];
             let fog = (i32::from(grid.info[i00].fog) * w00

@@ -1,5 +1,6 @@
 //! Compact, world-aligned occluders and finite visibility queries.
 
+use super::engine::Blend;
 use super::{LayerMask, Light, ShadowSoftness};
 use crate::game::art_walls::{one_way_gate_rect, wall_colliders, WallKind};
 use crate::game::collision::{TileKind, TileMap};
@@ -8,6 +9,223 @@ use crate::math::Vec2;
 
 const SUB: f32 = 4.0;
 pub(super) const RAYS: usize = 256;
+
+/// A light's unoccluded weight and the portion that the grid received.
+#[derive(Clone, Copy, Default)]
+struct EdgeTap {
+    weight: f32,
+    visible: f32,
+    coverage: f32,
+    shaft: f32,
+    shaft_visible: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct EdgeDelta {
+    pub mul: [i16; 3],
+    pub add: [i16; 3],
+    pub air: [i16; 3],
+}
+
+/// Hard, Coarse and Compact keep their coarse light grids. Only quads where
+/// one caster straddles the shadow edge get a pixel coverage correction.
+/// The correction replaces the interpolated occlusion for that light while
+/// the other light, ambient, bounce and vignette still come from the grid.
+#[derive(Default)]
+pub(super) struct HardShadows {
+    size: (usize, usize),
+    grid: (usize, usize),
+    stride: usize,
+    start: Vec2,
+    offset: (usize, usize),
+    compact: bool,
+    taps: Vec<EdgeTap>,
+    quads: Vec<bool>,
+    pixels: Vec<EdgeDelta>,
+    blocked: bool,
+    lit: bool,
+    pub(super) active: bool,
+}
+
+impl HardShadows {
+    pub(super) fn reset(
+        &mut self,
+        size: (usize, usize),
+        grid: (usize, usize),
+        stride: usize,
+        start: Vec2,
+        offset: (usize, usize),
+        compact: bool,
+    ) {
+        self.size = size;
+        self.grid = grid;
+        self.stride = stride;
+        self.start = start;
+        self.offset = offset;
+        self.compact = compact;
+        self.active = false;
+        self.quads.clear();
+        if self.enabled() {
+            self.quads.resize((grid.0 + 1) * (grid.1 + 1), false);
+        }
+    }
+
+    pub(super) fn enabled(&self) -> bool {
+        self.size.0 != 0 && self.size.1 != 0 && self.grid.0 > 1 && self.grid.1 > 1
+    }
+
+    pub(super) fn begin_light(&mut self) {
+        self.taps.clear();
+        self.taps.resize(self.grid.0 * self.grid.1, EdgeTap::default());
+        self.blocked = false;
+        self.lit = false;
+    }
+
+    #[inline]
+    pub(super) fn record(&mut self, i: usize, weight: f32, vis: f32, shaft: f32) {
+        let visible = weight * vis;
+        let blocked = weight - visible;
+        self.taps[i] = EdgeTap {
+            weight,
+            visible,
+            coverage: vis,
+            shaft,
+            shaft_visible: shaft * vis,
+        };
+        self.blocked |= blocked > 0.0;
+        self.lit |= visible > 0.0;
+    }
+
+    /// Rerasterise only quads with both lit and occluded taps. Reusing the
+    /// incoming light's four weights keeps falloff continuous at their joins.
+    pub(super) fn refine(
+        &mut self,
+        surfaces: &[Surface],
+        light: Light,
+        xs: std::ops::Range<usize>,
+        ys: std::ops::Range<usize>,
+        visibility: impl Fn(Vec2) -> f32,
+    ) {
+        if !self.blocked || !self.lit {
+            return;
+        }
+        let (gw, gh) = self.grid;
+        let (w, h) = self.size;
+        let step = self.stride as f32;
+        let sign = if matches!(light.blend, Blend::Subtract) {
+            -1.0
+        } else {
+            1.0
+        };
+        let color = [light.color.0, light.color.1, light.color.2].map(f32::from);
+        let (r, g, b) = light.shadow_color.rgb;
+        let shade = [r, g, b].map(f32::from);
+        let mul = color.map(|c| c * light.energy * sign * light.shadow_color.opacity);
+        let add = std::array::from_fn::<_, 3, _>(|c| {
+            (color[c] * light.scatter * sign - shade[c] * 0.20) * light.shadow_color.opacity
+        });
+        let peak = mul.into_iter().chain(add).map(f32::abs).fold(1.0, f32::max);
+        let enough = 2.0 / peak;
+        // Quad (0, 0) starts half a stride before the first sample centre.
+        // Clamp each tap just as the composite does at the viewport edges.
+        for y in ys.start..(ys.end + 1).min(gh + 1) {
+            for x in xs.start..(xs.end + 1).min(gw + 1) {
+                let quad = y * (gw + 1) + x;
+                let (left, right) = (x.saturating_sub(1), x.min(gw - 1));
+                let (top, bottom) = (y.saturating_sub(1) * gw, y.min(gh - 1) * gw);
+                let ids = [top + left, top + right, bottom + left, bottom + right];
+                let zone = surfaces[ids[0]].zone;
+                if ids.into_iter().any(|j| surfaces[j].height > 0.0 || surfaces[j].zone != zone) {
+                    continue; // The coarse shade still owns faces and zone boundaries.
+                }
+                let taps = ids.map(|j| self.taps[j]);
+                if !taps.iter().any(|p| p.visible >= enough)
+                    || !taps.iter().any(|p| p.weight - p.visible >= enough)
+                {
+                    continue;
+                }
+                // If every tap has the same coverage, this quad only varies
+                // in light strength. Its ordinary falloff needs no repair.
+                let lit = taps.map(|p| p.visible);
+                let weights = taps.map(|p| p.weight);
+                let shaft = taps.map(|p| p.shaft);
+                let shaft_visible = taps.map(|p| p.shaft_visible);
+                let has_shaft = shaft.iter().any(|s| *s > 0.0);
+                let coverage = taps.map(|p| p.coverage);
+                let (min_vis, max_vis) = coverage.into_iter().fold((1.0f32, 0.0f32), |(lo, hi), v| {
+                    (lo.min(v), hi.max(v))
+                });
+                if max_vis - min_vis < 0.10 {
+                    continue;
+                }
+                let sx = (x * self.stride) as i32 - (self.stride / 2 + self.offset.0) as i32;
+                let sy = (y * self.stride) as i32 - (self.stride / 2 + self.offset.1) as i32;
+                let base = self.start + Vec2::new((x as f32 - 1.0) * step, (y as f32 - 1.0) * step);
+                let first = !self.quads[quad];
+                if !self.active {
+                    self.pixels.resize(w * h, EdgeDelta::default());
+                    self.active = true;
+                }
+                self.quads[quad] = true;
+                for py in sy.max(0)..(sy + self.stride as i32).min(h as i32) {
+                    let dy = (py - sy) as f32;
+                    let v = dy / step;
+                    for px in sx.max(0)..(sx + self.stride as i32).min(w as i32) {
+                        let dx = (px - sx) as f32;
+                        let u = dx / step;
+                        let blend = |t: [f32; 4]| {
+                            let top = t[0] + (t[1] - t[0]) * u;
+                            let bottom = t[2] + (t[3] - t[2]) * u;
+                            top + (bottom - top) * v
+                        };
+                        let vis = visibility(base + Vec2::new(dx, dy));
+                        let change = if self.compact {
+                            let own = usize::from(u >= 0.5) + 2 * usize::from(v >= 0.5);
+                            vis * weights[own] - lit[own]
+                        } else {
+                            vis * blend(weights) - blend(lit)
+                        };
+                        let air = if has_shaft {
+                            vis * blend(shaft) - blend(shaft_visible)
+                        } else {
+                            0.0
+                        };
+                        let pixel = &mut self.pixels[py as usize * w + px as usize];
+                        if first {
+                            *pixel = EdgeDelta::default();
+                        }
+                        for channel in 0..3 {
+                            let mul = (change * mul[channel]).round() as i16;
+                            let add = (change * add[channel]).round() as i16;
+                            pixel.mul[channel] = pixel.mul[channel].saturating_add(mul);
+                            pixel.add[channel] = pixel.add[channel].saturating_add(add);
+                            if has_shaft {
+                                let shaft = (air * color[channel]).round() as i16;
+                                pixel.air[channel] = pixel.air[channel].saturating_add(shaft);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pixel corrections for one span between sample centres.
+    pub(super) fn row(
+        &self,
+        col: i32,
+        row: i32,
+        x: usize,
+        y: usize,
+        end: usize,
+    ) -> Option<&[EdgeDelta]> {
+        if !self.active || !self.quads[(row + 1) as usize * (self.grid.0 + 1) + (col + 1) as usize] {
+            return None;
+        }
+        let base = y * self.size.0;
+        Some(&self.pixels[base + x..base + end])
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct Tile {
@@ -430,6 +648,21 @@ impl ShadowProfile {
             (192, x)
         };
         Some(quadrant as f32 + (32.0 + 32.0 * n / dist))
+    }
+
+    /// Two cached rays give the hard edge pixel coverage without a new trace.
+    /// Blend their evaluated visibility because a ray may have no blocker.
+    pub(super) fn hard_coverage(&self, delta: Vec2) -> f32 {
+        let Some(ray) = Self::ray_position(delta) else {
+            return 1.0;
+        };
+        let dist = delta.x.abs().max(delta.y.abs());
+        let lo = ray as usize;
+        let tap = |i: usize| {
+            ((self.depth[i & (RAYS - 1)] + 0.9 - dist) * 0.35 + 1.0).clamp(0.0, 1.0)
+        };
+        let a = tap(lo);
+        a + (tap(lo + 1) - a) * (ray - lo as f32)
     }
 
     pub(super) fn visibility(
