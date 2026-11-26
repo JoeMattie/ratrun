@@ -941,7 +941,7 @@ impl App {
     /// The theme of the floor the title/select screen points at.
     ///
     /// The title's sector row and the sector-select grid both list every
-    /// playable floor in `Theme::playable()` order (stage one, the two
+    /// playable floor in `Theme::playable()` order (stage one, the three
     /// stage-two floors, the two stage-three floors, then the Flatbed getaway),
     /// so one cursor drives the material tint, the menu music and both lists.
     fn theme(&self) -> Theme {
@@ -4060,23 +4060,20 @@ impl App {
         self.screen = Screen::KeepThree;
     }
 
-    /// The keep screen's route chips: the two floors the next level can be
-    /// played on, original route first. `[None, None]` when the next stage has
-    /// no choice.
-    fn keep_route_chips(&self) -> [Option<campaign_ui::RouteChip<'static>>; 2] {
-        let mut chips = [None, None];
+    /// The next stage's route chips in campaign order, when it offers a choice.
+    fn keep_route_chips(&self) -> [Option<campaign_ui::RouteChip<'static>>; campaign_ui::MAX_ROUTE_CHIPS] {
+        let mut chips = [None; campaign_ui::MAX_ROUTE_CHIPS];
         let Some(camp) = self.campaign.as_ref() else {
             return chips;
         };
         let options = camp.next_options();
-        if options.len() < 2 {
-            return chips;
-        }
-        for (i, theme) in options.iter().enumerate().take(2) {
-            chips[i] = Some(campaign_ui::RouteChip {
-                name: theme.name(),
-                chosen: self.keep_route == Some(*theme),
-            });
+        if options.len() > 1 {
+            for (chip, &theme) in chips.iter_mut().zip(options) {
+                *chip = Some(campaign_ui::RouteChip {
+                    name: theme.name(),
+                    chosen: self.keep_route == Some(theme),
+                });
+            }
         }
         chips
     }
@@ -4211,30 +4208,23 @@ impl App {
             }
         }
 
-        // The route choice: Tab cycles it, and the header chips are clickable.
-        let mut route_pick: Option<usize> = match click {
+        // Tab and the rendered hit areas both index the next stage's options.
+        let options = self
+            .campaign
+            .as_ref()
+            .map_or(&[][..], |camp| camp.next_options());
+        let route_pick = match click {
             Some(Target::RouteOption(i)) => Some(i),
+            _ if self.input.just_pressed(KeyCode::Tab) && options.len() > 1 => {
+                let next = options.iter().position(|&theme| self.keep_route == Some(theme))
+                    .map_or(0, |i| (i + 1) % options.len());
+                Some(next)
+            }
             _ => None,
         };
-        if self.input.just_pressed(KeyCode::Tab) && self.keep_route_chips()[1].is_some() {
-            // Tab swaps to the other floor: the original route is chip 0, so a
-            // chosen chip 0 means picking chip 1 and vice versa.
-            route_pick = Some(if self.keep_route_chips()[0].is_some_and(|c| c.chosen) {
-                1
-            } else {
-                0
-            });
-        }
-        if let Some(i) = route_pick {
-            let options: &[Theme] = self
-                .campaign
-                .as_ref()
-                .map(|camp| camp.next_options())
-                .unwrap_or(&[]);
-            if let Some(theme) = options.get(i).copied() {
-                self.keep_route = Some(theme);
-                self.sfx(Sfx::UiMove);
-            }
+        if let Some(theme) = route_pick.and_then(|i| options.get(i)).copied() {
+            self.keep_route = Some(theme);
+            self.sfx(Sfx::UiMove);
         }
 
         let confirm = click == Some(Target::KeepConfirm)
@@ -6479,13 +6469,13 @@ mod tests {
             h.events(&[], &[(MouseEventKind::Moved, row)]);
             assert_eq!(h.app.menu_idx, 1, "the sector row is menu row 2");
             // The arrows step the sector row, which lists every playable floor
-            // (the three campaign stages, the two side-route floors, then the
-            // getaway ride), wrapping at both ends.
+            // (the three campaign stages with their alternate floors, then
+            // the getaway ride), wrapping at both ends.
             h.click("‹");
             assert_eq!(h.app.theme(), Theme::Trailer);
             h.click("›");
             assert_eq!(h.app.theme(), Theme::Sewer);
-            // The row is in route order: stage one, then both stage-two
+            // The row is in route order: stage one, then the three stage-two
             // floors, then both stage-three floors, then the getaway ride.
             // The stage number a side-route floor shows is its campaign
             // stage's (`Laundry` is stage two), so the row reads `02 Laundry`.
@@ -6877,16 +6867,16 @@ mod tests {
         }
     }
 
-    /// The sector row lists six floors in route order (stage one, the two
+    /// The sector row lists seven floors in route order (stage one, the three
     /// stage-two floors, the two stage-three floors, then the Flatbed). Every
     /// one of them fits, with its stage number, its lock mark and both arrows,
     /// at the two sizes the title is laid out for (57 x 20 and 80 x 24) and on
     /// a full terminal.
     #[test]
-    fn the_title_sector_row_fits_all_six_floors() {
+    fn the_title_sector_row_fits_all_seven_floors() {
         let floors = Theme::playable();
-        assert_eq!(floors.len(), 6);
-        // The row's order is the select screen's order: both stage-two floors,
+        assert_eq!(floors.len(), 7);
+        // The row's order is the select screen's order: three stage-two floors,
         // then both stage-three floors, then the getaway ride.
         assert_eq!(
             floors,
@@ -6894,6 +6884,7 @@ mod tests {
                 Theme::Sewer,
                 Theme::Kitchen,
                 Theme::Laundry,
+                Theme::Outfall,
                 Theme::Lab,
                 Theme::Printworks,
                 Theme::Trailer,
@@ -6901,7 +6892,7 @@ mod tests {
         );
         for theme in Theme::all() {
             assert!(
-                floors[..5].contains(&theme),
+                floors[..floors.len() - 1].contains(&theme),
                 "the campaign floor {theme:?} is missing from the sector row"
             );
         }
@@ -6928,7 +6919,7 @@ mod tests {
                 );
                 assert!(text.contains("Sector"), "{w}x{h}: the row lost its label");
             }
-            // The cursor wraps through all six, both ways.
+            // The cursor wraps through all seven, both ways.
             let mut hh = Harness::new(w, h);
             hh.app.menu_idx = 1;
             hh.frame(&[]);
@@ -8108,6 +8099,159 @@ mod tests {
                     hh.frame(&[KeyCode::F(3)]);
                 }
             }
+            "outfall-route" | "outfall-route-lab" | "outfall-route-printworks" => {
+                hh.enter_playing();
+                hh.finish_level();
+                hh.frame(&[KeyCode::Enter]);
+                hh.frame(&[KeyCode::Tab]);
+                hh.frame(&[KeyCode::Tab]);
+                if target != "outfall-route" {
+                    hh.frame(&[KeyCode::Char(' ')]);
+                    hh.frame(&[KeyCode::Enter]);
+                    hh.frame(&[KeyCode::Enter]);
+                    hh.finish_level();
+                    hh.frame(&[KeyCode::Enter]);
+                    if target == "outfall-route-printworks" {
+                        hh.frame(&[KeyCode::Tab]);
+                    }
+                }
+            }
+            "outfall-wet" | "outfall-pit" | "outfall-lure-ready" | "outfall-lure-warning"
+            | "outfall-lure-spent" | "outfall-surge" => {
+                use crate::game::hazards::{LurePhase, LURE_WARN_SECS};
+                hh.app.start_practice(Theme::Outfall);
+                hh.frame(&[KeyCode::Enter]);
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                match target.as_str() {
+                    "outfall-wet" => {
+                        let p = w.level.puddles.iter().map(|puddle| puddle.pos)
+                            .find(|&p| w.level.wet_at(p) && w.level.pit_at(p).is_none())
+                            .expect("wet sand");
+                        w.player.pos = p;
+                    }
+                    "outfall-pit" => {
+                        let pit = w.level.objects.tidal_pits.first().expect("tidal drop");
+                        let edge = pit.rect.to_world();
+                        use crate::game::collision::SizeClass;
+                        use crate::game::hazards::outfall_sand_clear;
+                        let centre = pit.center_world();
+                        w.player.pos = [
+                            Vec2::new(edge.x - 8.0, centre.y),
+                            Vec2::new(edge.right() + 8.0, centre.y),
+                            Vec2::new(centre.x, edge.y - 8.0),
+                            Vec2::new(centre.x, edge.bottom() + 8.0),
+                        ].into_iter()
+                            .find(|&p| outfall_sand_clear(
+                                &w.level, p, crate::game::ecs::constants::PLAYER_RADIUS, SizeClass::Small,
+                            ))
+                            .expect("sand beside the tidal drop");
+                    }
+                    "outfall-surge" => w.elapsed = 8.5,
+                    _ => {
+                        let lure = &mut w.level.objects.lure_traps[0];
+                        match target.as_str() {
+                            "outfall-lure-warning" => {
+                                lure.phase = LurePhase::Warning;
+                                lure.warning_left = LURE_WARN_SECS * 0.5;
+                            }
+                            "outfall-lure-spent" => lure.phase = LurePhase::Spent,
+                            _ => {}
+                        }
+                        w.player.pos = lure.pos;
+                    }
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            t if t.starts_with("outfall-miniboss-") => {
+                use crate::game::collision::SizeClass;
+                use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossState};
+                let mut parts = t["outfall-miniboss-".len()..].split('-');
+                let slot: usize = parts.next().and_then(|p| p.parse().ok()).expect("miniboss slot 1–4");
+                let live = parts.next() == Some("strike");
+                assert!((1..=4).contains(&slot));
+                hh.app.start_practice(Theme::Outfall);
+                hh.frame(&[KeyCode::Enter]);
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.elapsed = crate::game::director::MINIBOSS_TIMES[slot - 1] + 6.0;
+                let kind = miniboss::schedule_for(Theme::Outfall, slot - 1);
+                let rat = w.player.pos;
+                let pos = w.testbed_spawn_point(Vec2::new(1.0, 0.0), 32.0,
+                    kind.body_radius(), SizeClass::Large);
+                let e = w.spawn_miniboss(kind, slot - 1, pos);
+                let aim = (rat - pos).normalized();
+                let sconce = w.level.nearest_live_sconce(pos, 140.0);
+                let mut mb = w.ecs.get_mut::<Miniboss>(e).unwrap();
+                mb.state = if live { MinibossState::Active } else { MinibossState::Tell };
+                mb.timer = if live { kind.active_duration() * 0.35 } else { 0.65 };
+                mb.announced = true;
+                mb.tell_cued = true;
+                mb.origin = pos;
+                mb.target = rat;
+                mb.aim = if kind == MinibossKind::Shade {
+                    sconce.map_or(-aim, |(_, lamp)| (pos - lamp).normalized())
+                } else {
+                    aim
+                };
+                miniboss::lock_stamps(&mut mb);
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            t if t.starts_with("lantern-") => {
+                use crate::game::art_boss_lantern::LanternState;
+                use crate::game::ecs::systems::boss::Boss;
+                hh.app.start_practice(Theme::Outfall);
+                hh.frame(&[KeyCode::Enter]);
+                let w = hh.app.world.as_mut().unwrap();
+                w.configure_testbed();
+                w.player.loadout.weapons.clear();
+                assert!(w.force_boss_here(BossKind::Lantern));
+                let boss = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let scene = &t["lantern-".len()..];
+                let start_frames = if scene == "arrival" { 45 } else { 150 };
+                for _ in 0..start_frames {
+                    w.update(1.0 / 60.0, Vec2::ZERO, false);
+                }
+                let hp = match scene {
+                    "decoy" | "dark" => Some(0.60),
+                    "gape" | "stamp" => Some(0.30),
+                    "death" => Some(0.0),
+                    _ => None,
+                };
+                if let Some(hp) = hp {
+                    let mut body = w.ecs.get_mut::<Boss>(boss).unwrap();
+                    body.hp = body.max_hp * hp;
+                }
+                if scene != "arrival" && scene != "body" {
+                    let mut captured = false;
+                    for _ in 0..1200 {
+                        w.update(1.0 / 60.0, Vec2::ZERO, false);
+                        let body = w.ecs.get::<Boss>(boss).expect("the Lantern still on the floor");
+                        let view = body.lantern_view().expect("Lantern view");
+                        captured = match scene {
+                            "feint" => view.state == LanternState::FeintTell && view.progress >= 0.7,
+                            "dark" => view.state == LanternState::DarkTell && view.progress >= 0.55,
+                            "decoy" => view.decoy.is_some() && view.real_bulb.is_some(),
+                            "gape" => view.state == LanternState::GapePull && view.progress >= 0.25,
+                            "stamp" => view.state == LanternState::GapeStamp,
+                            "death" => body.dead && body.elapsed >= 0.25,
+                            _ => panic!("unknown Lantern capture: {scene}"),
+                        };
+                        if captured {
+                            break;
+                        }
+                    }
+                    assert!(captured, "Lantern did not reach {scene}");
+                }
+                if scene != "arrival" {
+                    let body = w.ecs.get::<Boss>(boss).unwrap();
+                    w.cam_focus = Some((w.player.pos + body.pos) * 0.5);
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             // The dash module and the on-rat gauge in each of their three
             // states. `RATRUN_DUMP_CTRL=1` captures the Ctrl mapping (the
             // default is the Space fallback).
@@ -8141,7 +8285,7 @@ mod tests {
                 hh.frame(&[KeyCode::Char('l')]);
             }
             // The sector-select screen with a chosen floor highlighted.
-            // `RATRUN_DUMP_FLOOR` picks the floor (0 Sewer .. 5 Flatbed); the
+            // `RATRUN_DUMP_FLOOR` picks the floor (0 Sewer .. 6 Flatbed); the
             // table is seeded so the capture shows every status: cleared, open
             // and locked, with per-floor bests.
             t if t == "select" || t.starts_with("select-") => {
@@ -9240,7 +9384,7 @@ mod tests {
                 use crate::game::ecs::systems::boss::BossKind;
                 let sub = t.strip_prefix("library-").unwrap_or("");
                 // `library-boss` is the first floor boss; `library-boss-<n>`
-                // (0..=9, `BossKind::all()` order) is any of the ten. Entries
+                // (in `BossKind::all()` order) selects a boss. Entries
                 // are named by key, never by a row index (which moves whenever
                 // a group gains an entry).
                 let boss = sub.strip_prefix("boss").map(|rest| {
@@ -9471,14 +9615,8 @@ mod tests {
             // set to 14:40 and `RATRUN_DUMP_FRAMES` plays on from there (0 is
             // the warning, 1200 the arrival at 15:00, 1800 the fight at 15:10).
             t if t.starts_with("arrival-") => {
-                let theme = match &t["arrival-".len()..] {
-                    "kitchen" => Theme::Kitchen,
-                    "lab" => Theme::Lab,
-                    "laundry" => Theme::Laundry,
-                    "printworks" => Theme::Printworks,
-                    "flatbed" => Theme::Trailer,
-                    _ => Theme::Sewer,
-                };
+                let theme = crate::autoplay::batch::parse_route(&t["arrival-".len()..])
+                    .unwrap_or(Theme::Sewer);
                 if theme == Theme::Sewer {
                     hh.enter_playing();
                 } else {
@@ -9543,14 +9681,8 @@ mod tests {
                 }
             }
             t if t.starts_with("floor-") => {
-                let theme = match &t["floor-".len()..] {
-                    "kitchen" => Theme::Kitchen,
-                    "lab" => Theme::Lab,
-                    "laundry" => Theme::Laundry,
-                    "printworks" => Theme::Printworks,
-                    "flatbed" => Theme::Trailer,
-                    _ => Theme::Sewer,
-                };
+                let theme = crate::autoplay::batch::parse_route(&t["floor-".len()..])
+                    .unwrap_or(Theme::Sewer);
                 if theme == Theme::Sewer {
                     hh.enter_playing();
                 } else {
@@ -9763,14 +9895,8 @@ mod tests {
                 use crate::game::level::LightFixtureKind;
                 let mut parts = t["lit-".len()..].splitn(2, '-');
                 let scene = parts.next().unwrap_or("sconce").to_string();
-                let theme = match parts.next().unwrap_or("sewer") {
-                    "kitchen" => Theme::Kitchen,
-                    "lab" => Theme::Lab,
-                    "laundry" => Theme::Laundry,
-                    "printworks" => Theme::Printworks,
-                    "flatbed" => Theme::Trailer,
-                    _ => Theme::Sewer,
-                };
+                let theme = crate::autoplay::batch::parse_route(parts.next().unwrap_or("sewer"))
+                    .unwrap_or(Theme::Sewer);
                 if theme == Theme::Sewer {
                     hh.enter_playing();
                 } else {
@@ -9821,9 +9947,15 @@ mod tests {
                         EnemyKind::LooseCan,
                         EnemyKind::TarRat,
                     ],
+                    Theme::Outfall => [
+                        EnemyKind::SandHopper,
+                        EnemyKind::GlassShrimp,
+                        EnemyKind::Lampfish,
+                        EnemyKind::Grouper,
+                    ],
                 };
                 let p = w.player.pos;
-                let lamp_kind = if scene == "sconce" {
+                let lamp_kind = if scene == "sconce" || theme == Theme::Outfall {
                     LightFixtureKind::Sconce
                 } else {
                     LightFixtureKind::Pendant
@@ -9851,7 +9983,7 @@ mod tests {
                         .iter()
                         .filter(|r| {
                             w.level.objects.lights.iter().any(|f| {
-                                f.kind == LightFixtureKind::Pendant && r.rect.contains_world(f.pos)
+                                f.kind == lamp_kind && r.rect.contains_world(f.pos)
                             })
                         })
                         .map(|r| r.center())
@@ -10253,7 +10385,8 @@ mod tests {
                 hh.frame(&[]);
             }
         }
-        // `RATRUN_DUMP_ZOOM=2` re-frames any in-run capture at that zoom.
+        // Reframe scripted Outfall poses without ticking their tells.
+        let posed_outfall = target.starts_with("outfall-") || target.starts_with("lantern-");
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
@@ -10261,8 +10394,18 @@ mod tests {
             if let Some(w) = hh.app.world.as_mut() {
                 w.set_zoom_instant(zoom);
                 w.damage_numbers.clear();
-                hh.frame(&[]);
+                if posed_outfall {
+                    hh.app.picture_dirty = true;
+                    hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+                } else {
+                    hh.frame(&[]);
+                }
             }
+        }
+        if posed_outfall && std::env::var("RATRUN_DUMP_LIGHTS").is_ok_and(|mode| mode == "off") {
+            hh.app.set_lighting(crate::render::lighting::LightingMode::Off);
+            hh.app.picture_dirty = true;
+            hh.terminal.draw(|f| hh.app.render(f)).unwrap();
         }
         // `RATRUN_DUMP_NAME` names the output files (several captures of one
         // target in one directory).
@@ -13321,12 +13464,11 @@ mod tests {
         assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
     }
 
-    /// The keep screen offers the next stage's route (Kitchen or Laundry),
+    /// The keep screen offers the next stage's route (Kitchen, Laundry or Outfall),
     /// keyboard and mouse both pick it, and the chosen floor is the one that
     /// loads — deterministically, from the run seed and the floor.
     #[test]
     fn keep_screen_route_choice_is_keyboard_mouse_and_carried() {
-        let left = MouseEventKind::Down(MouseButton::Left);
         for size in [(120, 40), (80, 24), (57, 20)] {
             let mut h = Harness::new(size.0, size.1);
             h.enter_playing();
@@ -13334,21 +13476,24 @@ mod tests {
             h.finish_level();
             h.frame(&[KeyCode::Enter]);
             assert_eq!(h.app.screen.name_for_test(), "KeepThree");
-            // Both floors are on the plate, and the original route starts
+            // All three floors are on the plate, and the original route starts
             // chosen (the design's "original route is the first choice").
             let text = h.screen_text();
             assert!(text.contains("Kitchen"), "{size:?}: no Kitchen chip");
             assert!(text.contains("Laundry"), "{size:?}: no Laundry chip");
+            assert!(text.contains("Outfall"), "{size:?}: no Outfall chip");
             let run_seed = h.app.campaign.as_ref().unwrap().run_seed;
             // Tab switches to the side route.
             h.frame(&[KeyCode::Tab]);
             assert_eq!(h.app.keep_route, Some(Theme::Laundry));
             h.frame(&[KeyCode::Tab]);
+            assert_eq!(h.app.keep_route, Some(Theme::Outfall));
+            h.frame(&[KeyCode::Tab]);
             assert_eq!(h.app.keep_route, Some(Theme::Kitchen));
-            // Clicking the Laundry chip picks it without packing anything.
-            h.click("Laundry");
-            assert_eq!(h.app.keep_route, Some(Theme::Laundry));
-            // Confirm the pack and the Laundry is the floor that loads.
+            // Clicking the Outfall chip picks it without packing anything.
+            h.click("Outfall");
+            assert_eq!(h.app.keep_route, Some(Theme::Outfall));
+            // Confirm the pack and the Outfall is the floor that loads.
             let mut packed = 0;
             while packed < 3 {
                 h.frame(&[KeyCode::Char(' ')]);
@@ -13357,13 +13502,12 @@ mod tests {
             }
             h.frame(&[KeyCode::Enter]);
             let w = h.app.world.as_ref().expect("next level");
-            assert_eq!(w.level.theme, Theme::Laundry, "{size:?}: wrong floor");
+            assert_eq!(w.level.theme, Theme::Outfall, "{size:?}: wrong floor");
             assert_eq!(
                 w.level.seed,
-                campaign::level_seed_on(run_seed, 1, Theme::Laundry),
+                campaign::level_seed_on(run_seed, 1, Theme::Outfall),
                 "the map seed must follow the chosen route"
             );
-            let _ = left;
         }
     }
 
@@ -13510,16 +13654,16 @@ mod tests {
         h.frame(&[KeyCode::Right]);
         assert!(
             h.screen_text().contains("02 Laundry") && !h.screen_text().contains("Laundry ×"),
-            "clearing the Sewer opened both stage-two floors"
+            "clearing the Sewer opened the Laundry"
         );
-        for _ in 0..2 {
-            h.frame(&[KeyCode::Right]); // Laundry -> Lab -> Printworks
+        for _ in 0..3 {
+            h.frame(&[KeyCode::Right]); // Laundry -> Outfall -> Lab -> Printworks
         }
         assert!(
             h.screen_text().contains("03 Printworks ×"),
             "stage three is still locked on the title row"
         );
-        for _ in 0..4 {
+        for _ in 0..5 {
             h.frame(&[KeyCode::Left]); // back to the Sewer
         }
         h.frame(&[KeyCode::Enter]);
@@ -13531,15 +13675,15 @@ mod tests {
         assert!(text.contains("BEST 6420"), "the stored best score: {text}");
         assert!(text.contains("04:12"), "the stored best time: {text}");
         assert!(
-            text.contains("1/6 CLEARED"),
+            text.contains("1/7 CLEARED"),
             "the header counts cleared floors: {text}"
         );
 
         // A locked floor can be selected and read, but Enter refuses to start
         // it and the select screen stays put. (With only the Sewer cleared,
         // stage two is open and stage three is not.)
-        for _ in 0..3 {
-            h.frame(&[KeyCode::Right]); // Sewer -> Kitchen -> Laundry -> Lab
+        for _ in 0..4 {
+            h.frame(&[KeyCode::Right]); // Sewer -> Kitchen -> Laundry -> Outfall -> Lab
         }
         assert_eq!(h.app.theme(), Theme::Lab, "the cursor reached the Lab");
         h.frame(&[KeyCode::Enter]);
@@ -13551,8 +13695,8 @@ mod tests {
         assert!(h.app.world.is_none());
 
         // The Kitchen starts a labelled single-floor practice run.
-        for _ in 0..2 {
-            h.frame(&[KeyCode::Left]); // Lab -> Laundry -> Kitchen
+        for _ in 0..3 {
+            h.frame(&[KeyCode::Left]); // Lab -> Outfall -> Laundry -> Kitchen
         }
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "LevelIntro");

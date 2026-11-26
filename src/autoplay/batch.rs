@@ -2497,7 +2497,7 @@ pub fn maybe_run_cli() -> Option<i32> {
 
 const USAGE: &str = "\
 usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-4>] [--practice] \
-[--carry none|typical] [--route sewer|kitchen|lab|laundry|printworks|flatbed] \
+[--carry none|typical] [--route sewer|kitchen|laundry|outfall|lab|printworks|flatbed] \
 [--skill expert|skilled|casual] [--cycle-skills] \
 [--seed-exact] [--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] \
 [--trace] [--caps <W:P>] \
@@ -2509,8 +2509,8 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-4>] [--practice] \
   --analyze        also run the anomaly scan (see autoplay::anomaly) and list
                    every class it finds with example seeds (costs ~10 %)
   --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
-  --route          a campaign takes this floor at its own level (laundry is
-                   level 2, printworks level 3, flatbed the level-4 finale);
+  --route          a campaign takes this floor at its own level (laundry and
+                   outfall are level 2, printworks level 3, flatbed level 4);
                    with --practice it is the floor played, at its own level
                    unless --level says otherwise
   --level N        start at campaign level N (1 Sewer, 2 stage two, 3 stage
@@ -2539,7 +2539,7 @@ pub fn parse_caps(s: &str) -> Result<(usize, usize), String> {
     Ok((w, p))
 }
 
-/// Parse a `--route` argument: the five campaign floors (and the flatbed).
+/// Parse a `--route` argument: the playable sectors.
 pub fn parse_route(s: &str) -> Result<crate::game::level::Theme, String> {
     use crate::game::level::Theme;
     match s.to_ascii_lowercase().as_str() {
@@ -2549,6 +2549,7 @@ pub fn parse_route(s: &str) -> Result<crate::game::level::Theme, String> {
         "laundry" => Ok(Theme::Laundry),
         "printworks" | "print" => Ok(Theme::Printworks),
         "flatbed" | "trailer" | "getaway" => Ok(Theme::Trailer),
+        "outfall" => Ok(Theme::Outfall),
         other => Err(format!("unknown route {other:?}")),
     }
 }
@@ -3306,6 +3307,7 @@ mod tests {
         let opts = parse_args(&args).expect("parses").expect("our flag");
         assert_eq!(opts.route, Some(Theme::Laundry));
         assert_eq!(parse_route("PRINTWORKS"), Ok(Theme::Printworks));
+        assert_eq!(parse_route("OUTFALL"), Ok(Theme::Outfall));
         assert!(parse_route("kitchenette").is_err());
 
         // The world the run builds is that floor.
@@ -3322,6 +3324,20 @@ mod tests {
         practice.route = Some(Theme::Printworks);
         let run = AutoRun::new(7, auto_opts(&practice));
         assert_eq!(run.world().level.theme, Theme::Printworks);
+    }
+
+    #[test]
+    fn outfall_route_supports_bare_practice_and_typical_carry() {
+        use crate::game::level::Theme;
+        for (carry, difficulty) in [("none", Some(0)), ("typical", None)] {
+            let args = ["--bot-batch", "1", "--practice", "--route", "outfall", "--carry", carry]
+                .into_iter().map(str::to_string).collect::<Vec<_>>();
+            let opts = parse_args(&args).expect("parses").expect("batch options");
+            let run = AutoRun::new(7, auto_opts(&opts));
+            assert_eq!(run.world().level.theme, Theme::Outfall);
+            assert_eq!(run.world().level_index(), 1);
+            assert_eq!(run.world().difficulty_override, difficulty);
+        }
     }
 
     /// `--route flatbed` accepts the ride in **both** contexts now: it is the

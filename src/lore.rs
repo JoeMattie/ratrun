@@ -28,6 +28,8 @@ pub const INTRO: &[&str] = &[
     "Claws out, rat. Run.",
 ];
 
+pub const OUTFALL_INTRO: &str = "Storm-gate discharge reached the service culvert. Follow the pilings to the return hatch.";
+
 /// (heading, flavor) shown on the pre-run intro card for each map.
 pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
     match theme {
@@ -64,6 +66,7 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
             "Forty feet of wet deck doing eighty into the dark. The cab is \
              forward. So is the magpie, and it thinks the rig is its nest.",
         ),
+        Theme::Outfall => ("SECTOR 02C — THE OUTFALL", OUTFALL_INTRO),
     }
 }
 
@@ -94,6 +97,7 @@ pub fn victory(theme: Theme) -> &'static str {
             "The magpie drops astern in the road roar. At the next shoulder \
              you hop the tailgate onto warm, open asphalt."
         }
+        Theme::Outfall => "The lure stays lit. The return hatch opens on the ebb.",
     }
 }
 

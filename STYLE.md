@@ -36,8 +36,8 @@ Use **one name per concept** everywhere:
 |---|---|---|
 | Player character | **Subject R-47** (dossiers/lore), **you** (cards/hints) | the rat (in system stats), player |
 | Campaign stages | **Sector** (`SECTOR 1/3`, `Sector`) | floor (in headers), stage, map (on sector picker) |
-| Sector names | **The Sewers**, **The Kitchen**, **The Laundry**, **The Lab**, **The Printworks**; bonus ride: **The Flatbed** | Sewer Level, Stage 1 |
-| Short sector names | **Sewer**, **Kitchen**, **Laundry**, **Lab**, **Printworks**, **Flatbed** | — |
+| Sector names | **The Sewers**, **The Kitchen**, **The Laundry**, **The Outfall**, **The Lab**, **The Printworks**; bonus ride: **The Flatbed** | Sewer Level, Stage 1 |
+| Short sector names | **Sewer**, **Kitchen**, **Laundry**, **Outfall**, **Lab**, **Printworks**, **Flatbed** | — |
 | Currency | **Gold** (`47¢` in HUD/shop badges; `gold` in prose) | coins (as currency name), credits, cash |
 | Experience | **XP** (`gem XP`, `XP` bar) | exp, points (for XP) |
 | Health & defense | **HP**, **max HP**, **HP/s regen**, **armor** | health points, flat dmg cut |
@@ -48,6 +48,7 @@ Use **one name per concept** everywhere:
 | Shop upgrades | **Splices** (`SPLICES 0/2`, max 2 per run) | splice sockets, mutations, perks |
 | Shop services | **Stitch** (heal 35%), **Turn the Shelf** (reroll stock), **Molt** (replace an upgrade with a new Lv1 upgrade of the same type) | swap a kind, rack |
 | Floor pickups | **Medkit**, **Magnet**, **Purge**, **Bottle Cap**, **Wind-Up Mouse**, **Pocket Watch**, **Clean Socks**, **Growth Serum**, **Chest**, **Cache** | pocket finds |
+| Outfall hazards | **surge** (`SURGE INBOUND`), **tidal drop**, **lure trap** | current event, pit tile |
 | Map views | **Map** (`Tab`, pauses the game) and **Minimap** (`N`, cycles `Normal` / `Small` / `Hidden`) | radar (except as secondary noun for the corner widget) |
 | Defeated enemies | **Kills** (`KILLS` in tables; `KO` only on the 1-row HUD top rail) | frags, takedowns |
 

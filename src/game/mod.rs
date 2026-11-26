@@ -87,3 +87,7 @@ pub mod art_puddle;
 pub mod art_droppings;
 pub mod art_lava;
 pub mod art_gems;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+pub mod art_boss_lantern;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+pub mod art_roster_outfall;

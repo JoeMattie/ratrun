@@ -7,10 +7,9 @@ screen shake, running entirely in a text terminal. Built in Rust with
 
 You are **Subject R-47**, a lab rat that chewed out of its cage. The facility's
 extermination protocol is awake, and everything in it wants you back. You only
-*move*; your weapons fire themselves. Claw up through the Sewers, the Kitchens
-and the Lab core, or take the side routes through the Laundry and the
-Printworks — and take a practice run on the back of a moving flatbed when you
-want a different kind of floor.
+*move* and your weapons fire themselves. From the Sewers, take the stairs to
+the Kitchen or Laundry, or go through the storm gate to the Outfall. The Lab
+and Printworks both lead to the Flatbed getaway.
 
 ## Screenshots
 
@@ -77,16 +76,10 @@ dark.*
 
 ## What is new
 
-- **Every floor has its own cast.** 48 ordinary enemy kinds, eight to a floor
-  and none shared between floors: the Sewer opens on Skitterers, the Laundry on
-  Wool Pills. (The 33 newest are named, statted and in the Library;
-  most still move like the body they are built on and get their own trick in a
-  later update.)
-- **24 named minibosses**, four per floor in a fixed order, each with one
-  signature shape, a one-second tell and a chest on death.
-- **Three more floors**: the Laundry and the Printworks as side routes with
-  their own hazards and bosses, and the Flatbed, a practice ride with pits,
-  sliding cargo and a slipstream.
+- **The Outfall** opens beyond the storm gate after the Sewer. Watch the surge,
+  tidal drops and lure traps, then face The Lantern.
+- **56 ordinary enemies and 28 named minibosses** across seven floors. The
+  Outfall adds eight ordinary enemies and four named encounters.
 - **Hold-to-charge Super Dash**, thirteen chest evolutions, the gene-splice shop
   behind the mouse holes, and the Nest's fifteen permanent tracks.
 - **Remappable controls** for keyboard, mouse and gamepad (26 actions, three
@@ -96,18 +89,16 @@ dark.*
 
 - **You only move.** Eight-direction movement with a dash; every weapon fires,
   aims and reloads itself.
-- **Four sectors on a route, with two side routes.** Sewer → Kitchen *or*
-  Laundry → Lab *or* Printworks → the Flatbed, the getaway ride and the finale.
-  Between sectors you pack up to three powerups and pick which floor the next
-  sector plays. The Flatbed is also always open as a practice floor from sector
-  select.
+- **Four sectors on a branching route.** Sewer → (Kitchen | Laundry | Outfall)
+  → (Lab | Printworks) → the Flatbed. Pack up to three powerups between sectors
+  and choose your next door with Tab or a click. Clearing the Sewer opens
+  Outfall practice. Sector select always offers Flatbed practice.
 - **Every floor has its own roster**: eight enemy kinds that unlock on the
   clock, from the first fodder to a third trick at 9:45, and its own four
-  minibosses — 48 ordinary kinds and 24 named minibosses across the six floors.
+  minibosses — 56 ordinary kinds and 28 named minibosses across seven floors.
 - **Fifteen minutes a floor**, escalating hordes, **four named minibosses** at
   3:00, 6:00, 9:00 and 12:00 (each leaves a chest), then **the floor's boss** at
-  15:00. There is no arena to walk to: the boss comes to wherever you are. Ten bosses across the six floors; a floor draws its boss from its own
-  pool.
+  15:00. There is no arena to walk to: the boss comes to wherever you are. Each floor draws its boss from a pool of one or two of the eleven bosses.
 - **13 weapons**, **12 passives**, and **13 evolutions** — a maxed weapon plus
   the right passive evolves into something else entirely when you open a chest.
   Level-ups are rare (about thirteen a floor) and every one adds 4% weapon
@@ -139,9 +130,10 @@ dark.*
 | **The Sewers** | sector 1 | glue boards and baited mousetraps | The Jungle Cat, The Horseshoe |
 | **The Kitchen** | sector 2 | glue boards and baited mousetraps | The Sweeper, SUBJECT R-01 |
 | **The Laundry** | sector 2, side route | steam grates that warn, then plume | The Mangle |
+| **The Outfall** | sector 2, storm gate | surges, tidal drops and lure traps | The Lantern |
 | **The Lab** | sector 3 | glue boards and baited mousetraps | TURF-REAPER MK.IV, KING COBRA |
 | **The Printworks** | sector 3, side route | ink pads that slow you while you stand in them | THE NIGHT EDITION |
-| **The Flatbed** | practice only | pits in the bed, sliding cargo, the slipstream | The Magpie, The Redtail |
+| **The Flatbed** | sector 4, getaway and practice | pits in the bed, sliding cargo, the slipstream | The Magpie, The Redtail |
 
 ## Install
 
@@ -305,7 +297,7 @@ ratrun --bot-render batch.json
 ```
 
 `--bot-batch` flags: `--seed`, `--level` (1–3, or 4 for the getaway ride),
-`--practice`, `--carry none|typical`, `--route sewer|kitchen|lab|laundry|printworks|flatbed`,
+`--practice`, `--carry none|typical`, `--route sewer|kitchen|laundry|outfall|lab|printworks|flatbed`,
 `--skill expert|skilled|casual`, `--cycle-skills`, `--seed-exact`,
 `--max-sim-seconds`, `--threads`, `--analyze`, `--json`, `--trace`,
 `--caps W:P` (distinct-kind slot caps, e.g. `4:4` fresh or `8:8` maxed) and
@@ -320,7 +312,7 @@ keyboard-protocol query. `--color truecolor|256|16` and
 
 ### Testbed
 
-Launch `ratrun --testbed [--floor sewer|kitchen|laundry|lab|printworks|flatbed]`
+Launch `ratrun --testbed [--floor sewer|kitchen|laundry|outfall|lab|printworks|flatbed]`
 or enter `testbed [floor]` in the console. The default is Sewer. You start in
 the sector's largest hall with god mode enabled. XP still counts, and the
 testbed skips upgrade cards, scheduled encounters, scores, and banking.

@@ -103,7 +103,7 @@ impl Default for PlateKeys<'static> {
 }
 
 /// The cleared-sector verdict and narrative line for a boss that is **not**
-/// its floor's original fight (`None` for the six originals, whose words are
+/// its floor's original fight (`None` for the seven originals, whose words are
 /// [`CampaignLevel::boss_verdict`] / [`CampaignLevel::boss_triumph_line`]).
 ///
 /// Four floors draw one of two bosses by seed; without this the plate told a
@@ -131,7 +131,8 @@ pub const fn alternate_boss_plate(kind: BossKind) -> Option<(&'static str, &'sta
         | BossKind::Mower
         | BossKind::Mangle
         | BossKind::NightEdition
-        | BossKind::Magpie => None,
+        | BossKind::Magpie
+        | BossKind::Lantern => None,
     }
 }
 
@@ -218,6 +219,7 @@ pub enum CampaignLevel {
     /// (batch twelve) with its own bosses (the Magpie and the Redtail), and a
     /// floor the player can practise alone.
     Trailer = 5,
+    Outfall = 6,
 }
 
 impl CampaignLevel {
@@ -244,6 +246,7 @@ impl CampaignLevel {
             Theme::Laundry => CampaignLevel::Laundry,
             Theme::Printworks => CampaignLevel::Printworks,
             Theme::Trailer => CampaignLevel::Trailer,
+            Theme::Outfall => CampaignLevel::Outfall,
         }
     }
 
@@ -270,7 +273,7 @@ impl CampaignLevel {
     pub const fn stage(self) -> usize {
         match self {
             CampaignLevel::Sewer => 0,
-            CampaignLevel::Kitchen | CampaignLevel::Laundry => 1,
+            CampaignLevel::Kitchen | CampaignLevel::Laundry | CampaignLevel::Outfall => 1,
             CampaignLevel::Lab | CampaignLevel::Printworks => 2,
             CampaignLevel::Trailer => 3,
         }
@@ -280,7 +283,7 @@ impl CampaignLevel {
     pub const fn stage_number(self) -> u8 {
         match self {
             CampaignLevel::Sewer => 1,
-            CampaignLevel::Kitchen | CampaignLevel::Laundry => 2,
+            CampaignLevel::Kitchen | CampaignLevel::Laundry | CampaignLevel::Outfall => 2,
             CampaignLevel::Lab | CampaignLevel::Printworks => 3,
             CampaignLevel::Trailer => 4,
         }
@@ -295,6 +298,7 @@ impl CampaignLevel {
             CampaignLevel::Laundry => 2,
             CampaignLevel::Printworks => 3,
             CampaignLevel::Trailer => 4,
+            CampaignLevel::Outfall => 2,
         }
     }
 
@@ -305,7 +309,7 @@ impl CampaignLevel {
     pub const fn next(self) -> Option<CampaignLevel> {
         match self {
             CampaignLevel::Sewer => Some(CampaignLevel::Kitchen),
-            CampaignLevel::Kitchen | CampaignLevel::Laundry => Some(CampaignLevel::Lab),
+            CampaignLevel::Kitchen | CampaignLevel::Laundry | CampaignLevel::Outfall => Some(CampaignLevel::Lab),
             CampaignLevel::Lab | CampaignLevel::Printworks => Some(CampaignLevel::Trailer),
             CampaignLevel::Trailer => None,
         }
@@ -319,6 +323,7 @@ impl CampaignLevel {
             CampaignLevel::Laundry => "THE LAUNDRY",
             CampaignLevel::Printworks => "THE PRINTWORKS",
             CampaignLevel::Trailer => "THE FLATBED",
+            CampaignLevel::Outfall => "THE OUTFALL",
         }
     }
 
@@ -330,6 +335,7 @@ impl CampaignLevel {
             CampaignLevel::Laundry => "Laundry",
             CampaignLevel::Printworks => "Printworks",
             CampaignLevel::Trailer => "Flatbed",
+            CampaignLevel::Outfall => "Outfall",
         }
     }
 
@@ -342,6 +348,7 @@ impl CampaignLevel {
             CampaignLevel::Printworks => "SECTOR 03B",
             // The finale: the rig is the way out, and it is still sector four.
             CampaignLevel::Trailer => "SECTOR 04",
+            CampaignLevel::Outfall => "SECTOR 02C",
         }
     }
 
@@ -357,6 +364,7 @@ impl CampaignLevel {
             CampaignLevel::Laundry => "THE MANGLE",
             CampaignLevel::Printworks => "THE NIGHT EDITION",
             CampaignLevel::Trailer => "THE MAGPIE",
+            CampaignLevel::Outfall => "THE LANTERN",
         }
     }
 
@@ -373,7 +381,9 @@ impl CampaignLevel {
             CampaignLevel::Lab => (Self::Lab.boss_name(), Some("KING COBRA")),
             CampaignLevel::Trailer => (Self::Trailer.boss_name(), Some("THE REDTAIL")),
             // One boss each: the Mangle and the Night Edition are pinned.
-            CampaignLevel::Laundry | CampaignLevel::Printworks => (self.boss_name(), None),
+            CampaignLevel::Laundry | CampaignLevel::Printworks | CampaignLevel::Outfall => {
+                (self.boss_name(), None)
+            }
         }
     }
 
@@ -385,6 +395,7 @@ impl CampaignLevel {
             CampaignLevel::Laundry => "THE MANGLE  —  JAMMED",
             CampaignLevel::Printworks => "THE NIGHT EDITION  —  STOPPED",
             CampaignLevel::Trailer => "THE MAGPIE  —  SHAKEN OFF",
+            CampaignLevel::Outfall => "THE LANTERN  —  DOWN",
         }
     }
 
@@ -408,6 +419,7 @@ impl CampaignLevel {
             CampaignLevel::Trailer => {
                 "The magpie's last shriek is carried off down the deck with the road noise. The cab's brake lines pop and the rig starts to drift. The facility is behind you."
             }
+            CampaignLevel::Outfall => "The lure stays lit. The return culvert is clear.",
         }
     }
 
@@ -433,6 +445,7 @@ impl CampaignLevel {
                 // paragraph was cut off after three rows on every plate.
                 "Forty feet of wet deck doing eighty into the dark. The cab is forward. So is the magpie, and it thinks the rig is its nest."
             }
+            CampaignLevel::Outfall => crate::lore::OUTFALL_INTRO,
         }
     }
 
@@ -445,6 +458,7 @@ impl CampaignLevel {
             CampaignLevel::Laundry => (159, 200, 200),
             CampaignLevel::Printworks => (182, 180, 165),
             CampaignLevel::Trailer => (206, 178, 132),
+            CampaignLevel::Outfall => (111, 188, 190),
         }
     }
 
@@ -546,8 +560,10 @@ pub struct RouteChip<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct KeepThreeView<'a> {
-    /// Sector just cleared (unchosen upgrades stay behind here).
+pub struct KeepThreeView<'a, const ROUTES: usize = MAX_ROUTE_CHIPS> {
+    pub const MAX_ROUTE_CHIPS: usize = 3;
+
+/// Sector just cleared (unchosen upgrades stay behind here).
     pub from_level: CampaignLevel,
     /// Next sector the player is packing for.
     pub next_level: CampaignLevel,
@@ -567,7 +583,7 @@ pub struct KeepThreeView<'a> {
     /// The two floors the next level may be played on (original route first),
     /// or `[None, None]` when the next level has no choice (stage one, or the
     /// campaign is over).
-    pub route: [Option<RouteChip<'a>>; 2],
+    pub route: [Option<RouteChip<'a>>; ROUTES],
     /// The **gene splices** in the rat, by name (`shop::SpliceKind::name`).
     ///
     /// Splices occupy neither rack (`WAVE3_DESIGN` §6) so they are not
@@ -672,7 +688,7 @@ pub struct LevelBest {
     pub cleared: bool,
 }
 
-/// Room for the floors a host can hand [`LevelSelectView`]: the six playable
+/// Room for the floors a host can hand [`LevelSelectView`]: the seven playable
 /// floors today plus two spare, so a seventh floor needs no change in the art.
 pub const MAX_LEVEL_SLOTS: usize = 8;
 
@@ -729,12 +745,12 @@ pub struct CampaignProgressView {
 // ---------------------------------------------------------------------------
 
 /// Required number of selections before Keep Three confirm becomes enabled.
-pub fn keep_three_required(view: &KeepThreeView<'_>) -> usize {
+pub fn keep_three_required<const ROUTES: usize>(view: &KeepThreeView<'_, ROUTES>) -> usize {
     view.max_keep.min(view.items.len())
 }
 
 /// Count how many valid indices in `view.items` are currently marked selected.
-pub fn keep_three_selected_count(view: &KeepThreeView<'_>) -> usize {
+pub fn keep_three_selected_count<const ROUTES: usize>(view: &KeepThreeView<'_, ROUTES>) -> usize {
     view.items
         .iter()
         .enumerate()
@@ -743,7 +759,7 @@ pub fn keep_three_selected_count(view: &KeepThreeView<'_>) -> usize {
 }
 
 /// Whether the Keep Three confirm button is enabled (`selected == min(max_keep, items.len())`).
-pub fn keep_three_can_confirm(view: &KeepThreeView<'_>) -> bool {
+pub fn keep_three_can_confirm<const ROUTES: usize>(view: &KeepThreeView<'_, ROUTES>) -> bool {
     keep_three_selected_count(view) == keep_three_required(view)
 }
 
@@ -1234,6 +1250,14 @@ fn draw_boss_triumph_emblem(buf: &mut Buffer, area: Rect, level: CampaignLevel, 
                     break;
                 }
                 put_centered(buf, area, y + i as u16, line, ink(*col).bg(PLATE));
+            }
+        }
+        CampaignLevel::Outfall => {
+            for (i, line) in OUTFALL_EMBLEM.iter().enumerate() {
+                if y + i as u16 >= area.height {
+                    break;
+                }
+                put_centered(buf, area, y + i as u16, line, ink(level.accent()).bg(PLATE));
             }
         }
     }
@@ -1733,19 +1757,19 @@ fn draw_manifest_row(
 /// - each visible upgrade row → [`KeepThreeAction::ToggleItem(idx)`]
 /// - scroll up/down arrows (when `items.len() > visible`) → `ScrollUp` / `ScrollDown`
 /// - confirm button → [`KeepThreeAction::Confirm`] (only emitted when enabled!)
-pub fn draw_keep_three(
+pub fn draw_keep_three<const ROUTES: usize>(
     f: &mut Frame,
     area: Rect,
-    view: &KeepThreeView<'_>,
+    view: &KeepThreeView<'_, ROUTES>,
 ) -> HitList<KeepThreeAction, 32> {
     draw_keep_three_with(f, area, view, &PlateKeys::DEFAULT)
 }
 
 /// [`draw_keep_three`] with the key names its buttons and legends print.
-pub fn draw_keep_three_with(
+pub fn draw_keep_three_with<const ROUTES: usize>(
     f: &mut Frame,
     area: Rect,
-    view: &KeepThreeView<'_>,
+    view: &KeepThreeView<'_, ROUTES>,
     keys: &PlateKeys<'_>,
 ) -> HitList<KeepThreeAction, 32> {
     let mut hits = HitList::new();
@@ -1776,7 +1800,9 @@ pub fn draw_keep_three_with(
     }
 
     let mut cap = StackBuf::<64>::new();
-    if layout.panel_rect.width >= 64 {
+    if view.route.iter().flatten().count() == MAX_ROUTE_CHIPS && layout.panel_rect.width < 80 {
+        let _ = write!(cap, " PACK {} ", required);
+    } else if layout.panel_rect.width >= 64 {
         let _ = write!(
             cap,
             " PACK FOR ESCAPE   /   TO {} ",
@@ -2401,10 +2427,10 @@ pub fn draw_keep_three_with(
         }
     }
 
-    // The next stage's route (`WAVE3_DESIGN.md` §1). The two chips live on the
+    // The next stage's route choices live on the
     // panel header, after the caption, so every layout (120x40, 80x24, 57x20)
     // shows the choice without losing a manifest row. Original route first;
-    // Tab toggles, and the chips are clickable.
+    // Tab cycles, and the chips are clickable.
     let has_route = view.route.iter().any(|chip| chip.is_some());
     if has_route && layout.panel_rect.width >= 40 {
         let y = layout.panel_rect.y;
@@ -2530,6 +2556,12 @@ fn draw_scrollbar(
 // 3. Level Intro Screen (Levels 2 & 3, consistent with menu::draw_map_intro)
 // ---------------------------------------------------------------------------
 
+pub(super) const OUTFALL_EMBLEM: [&str; 3] = [
+    "  │   ╲──◆   │  ",
+    "  │   ▄▀▀▄   │  ",
+    "══╧═══▀▚▞▀═══╧══",
+];
+
 fn level_emblem(level: CampaignLevel) -> [&'static str; 3] {
     match level {
         CampaignLevel::Sewer => [
@@ -2565,6 +2597,7 @@ fn level_emblem(level: CampaignLevel) -> [&'static str; 3] {
             "──╡▓▓▓▓▓▓▓▓▓▓▓▓╞──",
             "  ╧═╧═╧═╧═╧═╧═╧═╧  ",
         ],
+        CampaignLevel::Outfall => OUTFALL_EMBLEM,
     }
 }
 
@@ -3363,6 +3396,33 @@ fn draw_level_slot(
         },
     );
 
+    // At 57×20 the seven cards leave a single row inside each frame.
+    // Keep the floor name there and use the borders for status and bests.
+    if h == 1 {
+        let mut status = StackBuf::<24>::new();
+        let _ = write!(
+            status,
+            " {} {} {} ",
+            if is_sel { "▸" } else { "·" },
+            chip.as_str(),
+            slot_status(slot),
+        );
+        put_str(
+            buf, rect.x + 1, rect.y, status.as_str(), rect.width.saturating_sub(2),
+            slot_status_style(slot, bg),
+        );
+        if let Some(best) = slot.best {
+            let time = fmt_time(best.best_time_secs);
+            let mut record = StackBuf::<40>::new();
+            let _ = write!(record, " BEST {} · {} ", best.score, time.as_str());
+            put_str(
+                buf, rect.x + 1, rect.bottom() - 1, record.as_str(),
+                rect.width.saturating_sub(2), ink(TRAIL_GOLD).bg(bg),
+            );
+        }
+        return;
+    }
+
     // Tall cards keep the old bay cards' emblem.
     if h >= 11 && ci.width >= 19 {
         for (ey, line) in (3u16..).zip(level_emblem(slot.level)) {
@@ -3434,7 +3494,7 @@ fn draw_level_slot(
 }
 
 /// Draw the Campaign Level Select screen: **every** playable floor as its own
-/// slot, in route order (stage one, the two stage-two alternatives, the two
+/// slot, in route order (stage one, the three stage-two alternatives, the two
 /// stage-three alternatives, then the getaway ride).
 ///
 /// The layout is a grid — three columns on a wide terminal, two on a medium
@@ -3513,7 +3573,7 @@ pub fn draw_level_select_with(
     }
     // Grid geometry. Everything fits when each row can keep two lines; a
     // taller terminal spreads the cards instead. When it does not fit, the
-    // window follows the selection (a seventh floor would scroll into view).
+    // window follows the selection (extra rows scroll into view).
     let cols = level_select_cols(area);
     let rows_all = view.slots.len().div_ceil(cols);
     let (visible_rows, card_h) = if rows_all as u16 * 2 <= avail_h {
@@ -3531,10 +3591,8 @@ pub fn draw_level_select_with(
         .min(grid_w);
     let used_w = card_w * cols as u16 + gap_total;
     let grid_x = inner.x + 1 + grid_w.saturating_sub(used_w) / 2;
-    // Row 0: the unlock rule when the cards are tall enough to name the boss
-    // fight themselves, and the **selected floor's** boss line when they are
-    // not (the 57x20 grid leaves three content rows, so a card has no room —
-    // but the screen still has to say who is waiting on that floor).
+    // Row 0 holds the unlock rule above tall cards or the selected floor's
+    // boss line above compact cards.
     if subtitle {
         if card_h >= 8 {
             let line = if inner.width >= 70 {
@@ -4067,6 +4125,7 @@ mod tests {
             route: [
                 Some(RouteChip { name: "Kitchen", chosen: true }),
                 Some(RouteChip { name: "Laundry", chosen: false }),
+                Some(RouteChip { name: "Outfall", chosen: false }),
             ],
             splices: &[],
         };
@@ -4087,7 +4146,7 @@ mod tests {
                 // The fifth packed upgrade (Tail Whip) has a pill of its own.
                 assert!(txt.contains("[◈ Tail"), "{w}x{h}: the fifth pill is missing");
             }
-            for (i, name) in ["[Kitchen]", "[Laundry]"].into_iter().enumerate() {
+            for (i, name) in ["[Kitchen]", "[Laundry]", "[Outfall]"].into_iter().enumerate() {
                 assert!(txt.contains(name), "{w}x{h}: route chip {name} is not whole");
                 let rect = hits
                     .find(KeepThreeAction::Route(i as u8))
@@ -4121,6 +4180,7 @@ mod tests {
             route: [
                 Some(RouteChip { name: "Kitchen", chosen: false }),
                 Some(RouteChip { name: "Laundry", chosen: true }),
+                Some(RouteChip { name: "Outfall", chosen: false }),
             ],
             splices: &[],
         };
@@ -4258,7 +4318,7 @@ mod tests {
                     } else {
                         Some(KeepThreeAction::ToggleItem(1))
                     },
-                    route: [None, None],
+                    route: [None; MAX_ROUTE_CHIPS],
                     splices: &[],
                 };
                 assert_eq!(keep_three_can_confirm(&view), *expect_confirm);
@@ -4299,7 +4359,7 @@ mod tests {
                 cursor: 0,
                 scroll: 0,
                 hovered: None,
-                route: [None, None],
+                route: [None; MAX_ROUTE_CHIPS],
                 splices: &[],
             };
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -4336,7 +4396,7 @@ mod tests {
             cursor: 0,
             scroll: 0,
             hovered: None,
-            route: [None, None],
+            route: [None; MAX_ROUTE_CHIPS],
             splices: &[],
         };
         assert!(keep_three_can_confirm(&few_view));
@@ -4386,7 +4446,7 @@ mod tests {
                 cursor: 16,
                 scroll: 2,
                 hovered: Some(KeepThreeAction::ScrollUp),
-                route: [None, None],
+                route: [None; MAX_ROUTE_CHIPS],
                 splices: &[],
             };
             wide_term
@@ -4674,18 +4734,18 @@ mod tests {
         let names: Vec<&str> = slots.iter().map(|s| s.level.short_name()).collect();
         assert_eq!(
             names,
-            vec!["Sewer", "Kitchen", "Laundry", "Lab", "Printworks", "Flatbed"]
+            vec!["Sewer", "Kitchen", "Laundry", "Outfall", "Lab", "Printworks", "Flatbed"]
         );
         assert_eq!(
             slots[2].stage, slots[1].stage,
             "the Kitchen and the Laundry are both stage two"
         );
         assert_eq!(
-            slots[5].stage,
+            slots[6].stage,
             crate::game::campaign::LEVEL_COUNT - 1,
             "the ride is the campaign's fourth level"
         );
-        assert!(slots[5].unlocked, "the practice ride is always open");
+        assert!(slots[6].unlocked, "the practice ride is always open");
     }
 
     #[test]
@@ -4720,7 +4780,7 @@ mod tests {
             assert!(txt.contains("6420"), "no best score at {w}x{h}");
             // The ride's chip is its own level number now, not GETAWAY.
             assert!(txt.contains("S4"), "no S4 chip at {w}x{h}");
-            // Every floor is named on the screen: six slots, not three.
+            // Every floor is named on the screen: all seven slots.
             for slot in &slots {
                 assert!(
                     txt.contains(slot.level.name()),
@@ -4734,7 +4794,7 @@ mod tests {
         let locked = LevelSelectView {
             back_key: "Esc",
             slots: &slots,
-            selected: 3, // the Lab, locked in the sample
+            selected: 4, // the Lab, locked in the sample
             hovered: None,
         };
         let (_, hits) = draw_select_hits(&locked, 80, 24);
@@ -4847,9 +4907,8 @@ mod tests {
         }
     }
 
-    /// The cards carry both names of a pooled floor, and at 57x20 — where a card
-    /// is three content rows and has no boss row — the selected floor's pair is
-    /// named on the screen's own subtitle line instead.
+    /// Tall cards carry both boss names. Short cards use the subtitle line
+    /// above the grid to name the selected floor's fight.
     #[test]
     fn the_sector_cards_name_both_bosses_of_a_pooled_floor() {
         // Every floor open, so no card reads BOSS CLASSIFIED.
@@ -4857,7 +4916,8 @@ mod tests {
         for slot in all_open.iter_mut() {
             slot.unlocked = true;
         }
-        for &(w, h) in &[(80u16, 24u16), (120, 40)] {
+        {
+            let (w, h) = (120, 40);
             let view = LevelSelectView {
                 back_key: "Esc",
                 slots: &all_open,
@@ -4882,28 +4942,22 @@ mod tests {
                 }
             }
         }
-        // 57x20: the selected floor's pool is printed above the grid.
-        let slots = sample_slots();
-        for selected in [0usize, 1, 5] {
-            let view = LevelSelectView {
-                back_key: "Esc",
-                slots: &slots,
-                selected,
-                hovered: None,
-            };
-            let (term, _) = draw_select_hits(&view, 57, 20);
-            let txt = buffer_text(&term);
-            let (first, second) = slots[selected].level.boss_pair();
-            assert!(
-                txt.contains(first),
-                "57x20: {} is missing its first boss {first}:\n{txt}",
-                slots[selected].level.name()
-            );
-            assert!(
-                txt.contains(second.unwrap_or("")),
-                "57x20: {} does not name its second boss:\n{txt}",
-                slots[selected].level.name()
-            );
+        for (w, h) in [(57, 20), (80, 24)] {
+            for selected in [0usize, 1, 3, 6] {
+                let view = LevelSelectView {
+                    back_key: "Esc",
+                    slots: &all_open,
+                    selected,
+                    hovered: None,
+                };
+                let (term, _) = draw_select_hits(&view, w, h);
+                let txt = buffer_text(&term);
+                let (first, second) = all_open[selected].level.boss_pair();
+                assert!(txt.contains(first), "{w}x{h}: missing {first}:\n{txt}");
+                if let Some(second) = second {
+                    assert!(txt.contains(second), "{w}x{h}: missing {second}:\n{txt}");
+                }
+            }
         }
     }
 
@@ -4941,6 +4995,7 @@ mod tests {
         for (lvl, want) in [
             (CampaignLevel::Sewer, "◆ ○ ○"),
             (CampaignLevel::Laundry, "● ◆ ○"),
+            (CampaignLevel::Outfall, "● ◆ ○"),
             (CampaignLevel::Kitchen, "● ◆ ○"),
             (CampaignLevel::Printworks, "● ● ◆"),
             (CampaignLevel::Lab, "● ● ◆"),
@@ -5123,7 +5178,7 @@ mod tests {
                     cursor,
                     scroll,
                     hovered: hov,
-                    route: [None, None],
+                    route: [None; MAX_ROUTE_CHIPS],
                     splices: &[],
                 };
                 term.draw(|f| {
@@ -5256,7 +5311,7 @@ mod tests {
                 cursor: 0,
                 scroll: 0,
                 hovered: None,
-                route: [None, None],
+                route: [None; MAX_ROUTE_CHIPS],
                 splices: &splices,
             };
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();

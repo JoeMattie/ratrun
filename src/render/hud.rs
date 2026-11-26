@@ -251,6 +251,7 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
         BossKind::Hawk => return (crate::lore::HAWK_NAME, crate::lore::HAWK_CLASS),
         // The Lab's other specimen, with a plate of its own for the same reason.
         BossKind::Cobra => return (crate::lore::COBRA_NAME, crate::lore::COBRA_CLASS),
+        BossKind::Lantern => CampaignLevel::Outfall,
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
@@ -262,6 +263,7 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
         // the getaway ride now has a plate of its own and the match must say
         // what a corvid is.
         CampaignLevel::Trailer => "CLASS-V CORVID THIEF",
+        CampaignLevel::Outfall => "Fishes with the house current.",
     };
     (level.boss_name(), class_tag)
 }
@@ -1371,6 +1373,12 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         && !boss_phase
         && world.elapsed >= director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS;
     let elite_due = elite_badge_due(world);
+    use crate::game::hazards::{outfall_surge, SurgePhase};
+    let surge = if world.outfall_surge_enabled() {
+        outfall_surge(world.level.seed, world.elapsed).phase
+    } else {
+        SurgePhase::Quiet
+    };
     let pulse = 0.5 + 0.5 * (state.clock * 7.5).sin();
 
     // Format numbers into retained buffers (zero per-frame heap allocation).
@@ -1452,6 +1460,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
             let _ = write!(b, " ▲ BOSS {:02}s ", rem);
         } else if urgent {
             b.push_str(" ▲ BOSS INBOUND ");
+        } else if surge == SurgePhase::Warning {
+            b.push_str(" ▲ SURGE INBOUND ");
+        } else if surge == SurgePhase::Active {
+            b.push_str(" ▲ SURGE ");
         } else if elite_due {
             b.push_str(" ▲ ELITE ");
         } else if state.telemetry.muted {
@@ -1786,7 +1798,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
                 .fg(PLATE)
                 .bg(WARN_AMBER)
                 .add_modifier(Modifier::BOLD)
-        } else if elite_due {
+        } else if elite_due || surge != SurgePhase::Quiet {
             Style::default()
                 .fg(WARN_AMBER)
                 .bg(PLATE)

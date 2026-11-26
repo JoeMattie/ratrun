@@ -206,6 +206,10 @@ pub enum MinimapCell {
     /// A **hair-trigger** snap trap once seen: the same floor mark in the
     /// warning red, because its risk is one a player wants on the map.
     TrapHair,
+    /// A working Outfall lure.
+    Lure,
+    /// A tidal drop, shown as water inside the visible banks.
+    TidalDrop,
 }
 
 /// Read-only world & fog-of-war data source implemented by the simulation.
@@ -257,6 +261,9 @@ pub struct MinimapPalette {
     pub accent: Rgb,
     pub blood: Rgb,
 }
+
+const TIDAL_DROP_RGB: Rgb = (28, 74, 111);
+const LURE_RGB: Rgb = (116, 227, 218);
 
 impl MinimapPalette {
     pub const SEWER: Self = Self {
@@ -316,6 +323,15 @@ impl MinimapPalette {
         wall_edge: (168, 132, 86),
         accent: (226, 178, 84),
         blood: (150, 66, 48),
+    };
+
+    pub const OUTFALL: Self = Self {
+        bg: (19, 26, 33),
+        bg_alt: (26, 38, 46),
+        wall: (64, 95, 102),
+        wall_edge: (115, 157, 158),
+        accent: (115, 229, 221),
+        blood: (171, 111, 142),
     };
 }
 
@@ -1087,6 +1103,7 @@ pub fn draw_compact(
                 let mut one_way_n = 0u32;
                 let mut hole_linked_n = 0u32;
                 let mut hole_near_n = 0u32;
+                let mut tidal_drop = false;
 
                 for dy in 0..2 {
                     let cy = cy0 + dy;
@@ -1112,7 +1129,8 @@ pub fn draw_compact(
                             // Traps drop out in Small so amber stays exclusive to the bearing.
                             MinimapCell::Floor
                             | MinimapCell::Trap
-                            | MinimapCell::TrapHair => {
+                            | MinimapCell::TrapHair
+                            | MinimapCell::Lure => {
                                 floor_n += 1;
                                 frontier = frontier || floor_borders_fog(source, cx, cy);
                             }
@@ -1127,6 +1145,7 @@ pub fn draw_compact(
                             MinimapCell::MazeWall => maze_n += 1,
                             MinimapCell::Doorway => door_n += 1,
                             MinimapCell::OneWayDoor(_) => one_way_n += 1,
+                            MinimapCell::TidalDrop => tidal_drop = true,
                             MinimapCell::RatHole(axis) => {
                                 if source.rat_hole_far_known(cx, cy, axis) {
                                     hole_linked_n += 1;
@@ -1160,6 +1179,8 @@ pub fn draw_compact(
                     (theme.doorway, false)
                 } else if maze_n > 0 {
                     (theme.maze_wall, false)
+                } else if tidal_drop {
+                    (TIDAL_DROP_RGB, false)
                 } else if wall_rim {
                     (theme.wall_rim, false)
                 } else if wall_n > 0 && floor_n + boss_floor_n == 0 {
@@ -1593,6 +1614,8 @@ pub fn draw_expanded(
             let mut hole_linked_n = 0u32;
             let mut hole_near_n = 0u32;
             let mut trap_n = 0u32;
+            let mut lure = false;
+            let mut tidal_drop = false;
 
             for cy in cy0..cy1 {
                 for cx in cx0..cx1 {
@@ -1633,6 +1656,8 @@ pub fn draw_expanded(
                             }
                         }
                         MinimapCell::Trap | MinimapCell::TrapHair => trap_n += 1,
+                        MinimapCell::Lure => lure = true,
+                        MinimapCell::TidalDrop => tidal_drop = true,
                     }
                 }
             }
@@ -1662,6 +1687,10 @@ pub fn draw_expanded(
                 (theme.doorway, false)
             } else if maze_n > 0 {
                 (theme.maze_wall, false)
+            } else if tidal_drop {
+                (TIDAL_DROP_RGB, false)
+            } else if lure {
+                (palette::mix(floor_col, LURE_RGB, 0.62), false)
             } else if wall_rim {
                 (theme.wall_rim, false)
             } else if wall_n > 0 && floor_n + boss_floor_n + trap_n == 0 {
@@ -2475,6 +2504,8 @@ fn compact_cell_color(
         }
         MinimapCell::Trap => palette::mix(theme.floor_live, WARN_AMBER_RGB, 0.42),
         MinimapCell::TrapHair => palette::mix(theme.floor_live, (236, 66, 52), 0.50),
+        MinimapCell::Lure => palette::mix(theme.floor_live, LURE_RGB, 0.62),
+        MinimapCell::TidalDrop => TIDAL_DROP_RGB,
     }
 }
 
@@ -2494,6 +2525,7 @@ fn wall_borders_floor(source: &(impl MinimapSource + ?Sized), cx: i32, cy: i32) 
                         | MinimapCell::Doorway
                         | MinimapCell::Trap
                         | MinimapCell::TrapHair
+                        | MinimapCell::Lure
                 )
         })
 }

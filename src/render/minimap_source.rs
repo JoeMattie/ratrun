@@ -276,6 +276,7 @@ impl MinimapFrame {
             Theme::Laundry => MinimapPalette::LAUNDRY,
             Theme::Printworks => MinimapPalette::PRINTWORKS,
             Theme::Trailer => MinimapPalette::TRAILER,
+            Theme::Outfall => MinimapPalette::OUTFALL,
         };
         let cols = world.level.tiles.cols().max(1);
         let rows = world.level.tiles.rows().max(1);
@@ -369,6 +370,16 @@ pub fn minimap_cell(level: &Level, cx: i32, cy: i32) -> MinimapCell {
         TileKind::Wall(WallKind::RatHole { axis }) => MinimapCell::RatHole(minimap_axis(axis)),
         TileKind::Open => {
             let p = crate::game::collision::TileMap::tile_rect(cx, cy).center();
+            if level.theme == Theme::Outfall {
+                if level.pit_at(p).is_some() {
+                    return MinimapCell::TidalDrop;
+                }
+                if level.objects.lure_traps.iter().any(|trap| {
+                    trap.is_lit() && crate::game::collision::cell_of(trap.pos) == (cx, cy)
+                }) {
+                    return MinimapCell::Lure;
+                }
+            }
             if let Some(trap) = trap_at(level, p) {
                 trap
             } else if level
@@ -583,6 +594,23 @@ mod tests {
             minimap_cell(&level, 5, 1),
             MinimapCell::OneWayDoor(MinimapDir::West)
         );
+    }
+
+    #[test]
+    fn outfall_marks_tidal_water_and_working_lures() {
+        use crate::game::hazards::{LurePhase, LureTrap};
+        use crate::game::level::{Pit, PitKind, TileRect};
+
+        let mut level = blank(12, 12);
+        level.theme = Theme::Outfall;
+        level.objects.tidal_pits.push(Pit::new(
+            TileRect::new(4, 4, 2, 2), PitKind::TidalDrop,
+        ));
+        level.objects.lure_traps.push(LureTrap::new(TileMap::tile_rect(7, 4).center(), vec![]));
+        assert_eq!(minimap_cell(&level, 4, 4), MinimapCell::TidalDrop);
+        assert_eq!(minimap_cell(&level, 7, 4), MinimapCell::Lure);
+        level.objects.lure_traps[0].phase = LurePhase::Spent;
+        assert_eq!(minimap_cell(&level, 7, 4), MinimapCell::Floor);
     }
 
     #[test]

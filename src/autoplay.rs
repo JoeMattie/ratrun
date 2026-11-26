@@ -130,7 +130,7 @@ impl CarryPreset {
 pub struct AutoOpts {
     /// Campaign level to start on (0 Sewer, 1 Kitchen, 2 Lab).
     pub start_level: usize,
-    /// `true`: play the whole three-level campaign from `start_level`.
+    /// `true`: play the whole four-level campaign from `start_level`.
     /// `false`: play `start_level` alone (practice) and stop after its boss.
     pub campaign: bool,
     /// How well the bot plays.
@@ -139,12 +139,8 @@ pub struct AutoOpts {
     /// always builds its loadout through [`crate::game::campaign`]).
     pub carry: CarryPreset,
     /// Play `start_level` on a specific floor instead of the original route's
-    /// (`--route`). This is how the batch reaches the **Laundry** and
-    /// **Printworks** side routes: `start_level` 1 plays the Kitchen by default,
-    /// and there was no way to ask for the Laundry floor at all. A campaign
-    /// started this way carries the choice only into that first level; the
-    /// levels after it follow the original route (the app's own fork picker is
-    /// what a player uses).
+    /// (`--route`). A campaign uses a side-route floor at its existing stage.
+    /// With practice, this chooses the only floor played.
     pub route: Option<Theme>,
 }
 
@@ -279,6 +275,10 @@ pub enum DamageCause {
     FloorAttack(EnemyKind),
     /// Nothing matched the HP loss (should be rare).
     Unknown,
+    /// A fall into a tidal drop in the Outfall.
+    TidalDrop,
+    /// A Pistol Shrimp's bubble pellet.
+    PistolShrimpBubble,
 }
 
 /// The boss attack a hazard telegraph belongs to, named by the boss state the
@@ -330,6 +330,10 @@ pub enum BossAttack {
     CobraTail,
     CobraSway,
     CobraSpiral,
+    LanternJaw,
+    LanternDarkLunge,
+    LanternDecoyLeap,
+    LanternGapeStamp,
 }
 
 impl BossAttack {
@@ -374,6 +378,10 @@ impl BossAttack {
             BossAttack::CobraTail => "tail whip",
             BossAttack::CobraSway => "the sway",
             BossAttack::CobraSpiral => "the spiral lane",
+            BossAttack::LanternJaw => "lure snap",
+            BossAttack::LanternDarkLunge => "dark lunge",
+            BossAttack::LanternDecoyLeap => "decoy leap",
+            BossAttack::LanternGapeStamp => "gape stamp",
         }
     }
 }
@@ -432,7 +440,16 @@ impl DamageCause {
             DamageCause::EnemyContact(EnemyKind::TollGull) => "toll gull contact",
             DamageCause::EnemyContact(EnemyKind::LooseBungee) => "loose bungee contact",
             DamageCause::EnemyContact(EnemyKind::Drake) => "drake contact",
+            DamageCause::EnemyContact(EnemyKind::SandHopper) => "sand hopper contact",
+            DamageCause::EnemyContact(EnemyKind::GlassShrimp) => "glass shrimp contact",
+            DamageCause::EnemyContact(EnemyKind::Conger) => "conger contact",
+            DamageCause::EnemyContact(EnemyKind::Skater) => "skater contact",
+            DamageCause::EnemyContact(EnemyKind::PistolShrimp) => "pistol shrimp contact",
+            DamageCause::EnemyContact(EnemyKind::Lampfish) => "lampfish contact",
+            DamageCause::EnemyContact(EnemyKind::Grouper) => "grouper contact",
+            DamageCause::EnemyContact(EnemyKind::FrySchool) => "fry school contact",
             DamageCause::EnemyBullet => "spitter bullets",
+            DamageCause::PistolShrimpBubble => "pistol shrimp bubble",
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
             DamageCause::BossContact(BossKind::Broom) => "broom human body",
             DamageCause::BossContact(BossKind::Mower) => "mower body",
@@ -527,10 +544,14 @@ impl DamageCause {
             },
             // It fires nothing but its own spit; the arm keeps the label honest.
             DamageCause::BossProjectile(BossKind::Cobra) => "cobra venom",
+            DamageCause::BossContact(BossKind::Lantern) => "lantern body",
+            DamageCause::BossHazard(BossKind::Lantern, attack) => attack.name(),
+            DamageCause::BossProjectile(BossKind::Lantern) => "lantern projectile",
             DamageCause::MinibossBody => "miniboss body",
             DamageCause::Trap => "mousetrap",
             DamageCause::Steam => "steam grate",
             DamageCause::Pit => "deck hole",
+            DamageCause::TidalDrop => "tidal drop",
             DamageCause::Cargo => "sliding cargo",
             DamageCause::FloorAttack(kind) => floor_attack_name(kind),
             DamageCause::MinibossSignature(kind) => {
@@ -608,6 +629,10 @@ impl DamageCause {
                 crate::game::ecs::systems::miniboss::MinibossKind::RoadAtlas => {
                     "miniboss: the road atlas"
                 }
+                crate::game::ecs::systems::miniboss::MinibossKind::Gasket => "miniboss: the gasket",
+                crate::game::ecs::systems::miniboss::MinibossKind::Swell => "miniboss: the swell",
+                crate::game::ecs::systems::miniboss::MinibossKind::Shade => "miniboss: the shade",
+                crate::game::ecs::systems::miniboss::MinibossKind::FalseBulb => "miniboss: the false bulb",
             }
         }
         DamageCause::Unknown => "unknown",
@@ -1634,7 +1659,7 @@ impl AutoRun {
                 let d = segment_point_dist(b.prev_pos, b.pos, p);
                 if d < b.radius + R + 2.0 {
                     self.threats.push((
-                        DamageCause::EnemyBullet,
+                        if b.outfall_bubble { DamageCause::PistolShrimpBubble } else { DamageCause::EnemyBullet },
                         (b.damage - armor).max(1.0),
                         d,
                     ));
@@ -1659,7 +1684,8 @@ impl AutoRun {
                     let warn_left = h.warn - h.elapsed;
                     // Active now, or warning out inside this tick's dt.
                     let landing = h.is_active() || (warn_left > 0.0 && warn_left < 0.05);
-                    if landing && h.shape.contains(p, R) {
+                    let hit_radius = if attack == BossAttack::LanternGapeStamp { 0.0 } else { R };
+                    if landing && h.shape.contains(p, hit_radius) {
                         self.threats.push((
                             DamageCause::BossHazard(boss.kind, attack),
                             (h.damage - armor).max(1.0),
@@ -1766,6 +1792,10 @@ impl AutoRun {
             use crate::game::ecs::systems::trailer::FALL_PLAYER_DAMAGE;
             self.threats.push((DamageCause::Pit, (FALL_PLAYER_DAMAGE - armor).max(1.0), 0.0));
         }
+        if w.level.theme == crate::game::level::Theme::Outfall && w.level.touches_tidal_pit(p, R + 3.0) {
+            use crate::game::ecs::systems::trailer::FALL_PLAYER_DAMAGE;
+            self.threats.push((DamageCause::TidalDrop, (FALL_PLAYER_DAMAGE - armor).max(1.0), 0.0));
+        }
         for slide in &deck.slides {
             use crate::game::ecs::systems::trailer::SLIDE_DAMAGE;
             let offset = crate::game::level::TrailerDeck::slide_offset(slide, w.elapsed);
@@ -1838,6 +1868,16 @@ fn floor_attack_landing(en: &Enemy, p: Vec2) -> Option<f32> {
                 && striking
                 && [en.w4.trail[0], en.w4.trail[1]].iter().any(|f| f.dist(p) <= reach))
             .then_some(floor_printworks::STAPLE_FOOT_DAMAGE)
+        }
+        EnemyKind::Skater | EnemyKind::Lampfish => {
+            use crate::game::ecs::systems::floor_outfall::{
+                outfall_enemy_tell, OutfallTellPhase, LAMPFISH_LUNGE_DAMAGE, SKATER_SPLASH_DAMAGE,
+            };
+            let tell = outfall_enemy_tell(en)?;
+            let base = if en.kind == EnemyKind::Skater { SKATER_SPLASH_DAMAGE } else { LAMPFISH_LUNGE_DAMAGE };
+            (tell.shape.contains(p, slack)
+                && (tell.phase == OutfallTellPhase::Strike || tell.remaining <= SOON))
+                .then_some(base * en.damage / en.kind.damage())
         }
         // The tongue only slows: it has no damage to book.
         EnemyKind::SumpLeech => None,
@@ -1923,6 +1963,8 @@ fn floor_attack_name(kind: EnemyKind) -> &'static str {
         EnemyKind::InkBlot => "ink blot burst",
         // The guest: the only thing a Sewer Drake does to the rat.
         EnemyKind::Drake => "drake peck",
+        EnemyKind::Skater => "skater splash",
+        EnemyKind::Lampfish => "lampfish lunge",
         _ => match kind.archetype() {
             EnemyKind::BellFlea => "bell flea landing",
             EnemyKind::Turnkey => "turnkey crossbar",
@@ -1943,6 +1985,7 @@ fn classify_death(w: &World, cause: DamageCause) -> String {
         DamageCause::Trap => "trap: mousetrap snap".to_string(),
         DamageCause::Steam => "hazard: steam plume".to_string(),
         DamageCause::Pit => "hazard: fell through the deck".to_string(),
+        DamageCause::TidalDrop => "hazard: tidal drop".to_string(),
         DamageCause::Cargo => "hazard: sliding cargo".to_string(),
         DamageCause::FloorAttack(kind) => format!("floor attack: {}", floor_attack_name(kind)),
         DamageCause::MinibossSignature(kind) => format!("miniboss: {} signature", kind.name()),
@@ -1954,6 +1997,7 @@ fn classify_death(w: &World, cause: DamageCause) -> String {
         DamageCause::BossProjectile(kind) => {
             format!("boss: {} projectile", boss_name(kind))
         }
+        DamageCause::PistolShrimpBubble => "pistol shrimp bubble".to_string(),
         DamageCause::EnemyBullet => {
             let (near60, near120) = enemy_density(w);
             if near60 >= 5 {
@@ -2047,6 +2091,14 @@ fn enemy_kind_name(kind: EnemyKind) -> &'static str {
         EnemyKind::TollGull => "toll gull",
         EnemyKind::LooseBungee => "loose bungee",
         EnemyKind::Drake => "drake",
+        EnemyKind::SandHopper => "sand hopper",
+        EnemyKind::GlassShrimp => "glass shrimp",
+        EnemyKind::Conger => "conger",
+        EnemyKind::Skater => "skater",
+        EnemyKind::PistolShrimp => "pistol shrimp",
+        EnemyKind::Lampfish => "lampfish",
+        EnemyKind::Grouper => "grouper",
+        EnemyKind::FrySchool => "fry school",
     }
 }
 
@@ -2062,6 +2114,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::MegaRat => "subject r-01",
         BossKind::Hawk => "the redtail",
         BossKind::Cobra => "king cobra",
+        BossKind::Lantern => "the lantern",
     }
 }
 
@@ -2345,6 +2398,18 @@ fn boss_attack(state: &BossState) -> BossAttack {
             | crate::game::art_boss_cobra::CobraState::SpiralChase => BossAttack::CobraSpiral,
             _ => BossAttack::Other,
         },
+        BossState::Lantern(s) => {
+            use crate::game::art_boss_lantern::LanternState;
+            match s {
+                LanternState::FeintTell | LanternState::JawSnap => BossAttack::LanternJaw,
+                LanternState::DarkTell | LanternState::DarkLunge => BossAttack::LanternDarkLunge,
+                LanternState::DecoyLeapTell | LanternState::DecoyLeap => BossAttack::LanternDecoyLeap,
+                LanternState::GapeTell | LanternState::GapePull | LanternState::GapeStamp => {
+                    BossAttack::LanternGapeStamp
+                }
+                _ => BossAttack::Other,
+            }
+        }
         BossState::HorseshoeCrab(s) => match s {
             crate::game::art_boss_horseshoe_crab::CrabState::TelsonTell
             | crate::game::art_boss_horseshoe_crab::CrabState::TelsonSweep => BossAttack::Telson,

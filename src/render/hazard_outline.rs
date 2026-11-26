@@ -57,6 +57,7 @@ pub fn warn_colour(kind: BossKind, active: bool) -> Rgb {
         // Venom on a cold tile: the same amber tell, a greener hot beat so a
         // live puddle is never mistaken for the loop's clock.
         BossKind::Cobra => ((255, 196, 92), (210, 255, 96)),
+        BossKind::Lantern => ((255, 188, 120), (255, 244, 224)),
     };
     if active {
         hot
@@ -251,37 +252,49 @@ pub fn draw_ink(
     unit: f32,
     elapsed: f32,
 ) {
-    let mut pts = [Vec2::ZERO; MAX_PTS];
-    let mut screen = [(0i32, 0i32); MAX_PTS];
-    let thickness = ((1.0 / unit.max(0.01)).round() as i32).clamp(1, 3);
     for hazard in &boss.hazards {
-        if hazard.is_expired() {
-            continue;
-        }
-        let n = boundary(&hazard.shape, &mut pts);
-        if n < 2 {
-            continue;
-        }
-        for i in 0..n {
-            screen[i] = (
-                ((pts[i].x - cam.x) / scale.x).round() as i32,
-                ((pts[i].y - cam.y) / scale.y).round() as i32,
+        if !hazard.is_expired() {
+            let active = hazard.is_active();
+            draw_shape_ink(
+                pb, &hazard.shape, cam, scale, unit, elapsed,
+                warn_colour(boss.kind, active), active,
             );
         }
-        let active = hazard.is_active();
-        let colour = warn_colour(boss.kind, active);
-        let phase = (elapsed * 10.0) as i32;
-        for i in 0..n {
-            if is_seam(&hazard.shape, i, n) {
-                continue;
-            }
-            let a = screen[i];
-            let b = screen[(i + 1) % n];
-            if active {
-                thick_line(pb, a, b, colour, thickness);
-            } else {
-                dashed_line(pb, a, b, colour, thickness, phase + i as i32);
-            }
+    }
+}
+
+/// Re-stamp a published combat footprint at the ink pass's pixel scale.
+pub fn draw_shape_ink(
+    pb: &mut PixelBuffer,
+    shape: &HazardShape,
+    cam: Vec2,
+    scale: Vec2,
+    unit: f32,
+    elapsed: f32,
+    colour: Rgb,
+    active: bool,
+) {
+    let mut pts = [Vec2::ZERO; MAX_PTS];
+    let n = boundary(shape, &mut pts);
+    if n < 2 {
+        return;
+    }
+    let thickness = ((1.0 / unit.max(0.01)).round() as i32).clamp(1, 3);
+    let phase = (elapsed * 10.0) as i32;
+    let screen = |p: Vec2| (
+        ((p.x - cam.x) / scale.x).round() as i32,
+        ((p.y - cam.y) / scale.y).round() as i32,
+    );
+    for i in 0..n {
+        if is_seam(shape, i, n) {
+            continue;
+        }
+        let a = screen(pts[i]);
+        let b = screen(pts[(i + 1) % n]);
+        if active {
+            thick_line(pb, a, b, colour, thickness);
+        } else {
+            dashed_line(pb, a, b, colour, thickness, phase + i as i32);
         }
     }
 }
