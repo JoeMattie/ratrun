@@ -16,6 +16,9 @@
 - **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
   circles, and Bell Diver leaves a crack where it will surface. All 24 have
   two attacks, with their own pace and a Library entry for both.
+- Added an interactive testbed for trying every weapon, evolution, pickup,
+  enemy, miniboss, and boss on any sector. Launch it with `--testbed` or the
+  console's `testbed` command.
 
 ## 0.3.0 (2026-11-25)
 

@@ -65,7 +65,7 @@ use crate::render::zoom;
 
 use super::bullet::{Bullet, Faction};
 use super::campaign::{self, CampaignState, CampaignTotals, Keepable};
-use super::collision::{SpatialGrid, TileKind, TileMap};
+use super::collision::{SizeClass, SpatialGrid, TileKind, TileMap};
 use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
@@ -154,6 +154,8 @@ pub struct World {
     /// Console debug switches. Copied into [`DebugFlags`] in `begin_tick`.
     pub freeze: bool,
     pub peace: bool,
+    /// The App's testbed uses manual boss and miniboss arrivals.
+    pub(crate) testbed: bool,
     /// Console `noclip on`: the rat walks through walls.
     pub noclip: bool,
     /// Render-only: draw collision shapes over the world (console `hitboxes`).
@@ -524,6 +526,7 @@ impl World {
             cvars: Cvars::default(),
             freeze: false,
             peace: false,
+            testbed: false,
             noclip: false,
             hitboxes: false,
             ticks: 0,
@@ -617,7 +620,7 @@ impl World {
     /// Has the level reached the boss time (the horde now fights on until the
     /// boss or the player dies)?
     pub fn boss_time_reached(&self) -> bool {
-        self.elapsed >= director::BOSS_TIME
+        !self.testbed && self.elapsed >= director::BOSS_TIME
     }
 
     /// Spend from the run's wallet. A failed purchase leaves the balance intact.
@@ -928,6 +931,9 @@ impl World {
 
     /// The next appointment clock, if one is pending.
     pub fn next_miniboss_time(&self) -> Option<f32> {
+        if self.testbed {
+            return None;
+        }
         self.ecs
             .resource::<super::ecs::systems::miniboss::MinibossSchedule>()
             .next_appointment()
@@ -1447,6 +1453,7 @@ impl World {
             game_over: self.game_over,
             won: self.won,
             level_complete: self.level_complete,
+            testbed: self.testbed,
         });
         self.ecs.insert_resource(Shake {
             amount: self.shake,
@@ -1526,7 +1533,6 @@ impl World {
         self.game_over = counters.game_over;
         self.won = counters.won;
         self.level_complete = counters.level_complete;
-
         // The console's boss override is consumed by `boss_spawn_system`; sync
         // its post-tick value back so a one-shot override does not linger.
         self.boss_override = self
@@ -1545,6 +1551,15 @@ impl World {
             .remove_resource::<SfxQueue>()
             .expect("SfxQueue must be inserted by begin_tick");
         self.sfx = sfx.0;
+
+        if self.testbed {
+            self.pending_levelups = 0;
+            if self.level_complete {
+                self.level_complete = false;
+                self.won = false;
+                self.clear_testbed_boss();
+            }
+        }
     }
 
     // ---- Spawn helpers (systems use Commands directly) -------------------
@@ -1653,6 +1668,94 @@ impl World {
         let entities: Vec<Entity> = query.iter(&self.ecs).map(|(entity, _)| entity).collect();
         for entity in entities {
             let _ = self.ecs.despawn(entity);
+        }
+    }
+
+    /// Set up the practice field in the largest generated hall. Flatbed
+    /// halls can contain cargo walls, so use the nearest clear point inside.
+    pub(crate) fn configure_testbed(&mut self) {
+        self.testbed = true;
+        self.peace = true;
+        self.player.god = true;
+        if let Some(hall) = self.level.largest_hall() {
+            let rect = hall.rect;
+            let center = rect.center_world();
+            let usable = |p| {
+                self.level.pit_at(p).is_none()
+                    && self.level.tiles.circle_clear(p, PLAYER_RADIUS, SizeClass::Small)
+            };
+            let start = if usable(center) {
+                Some(center)
+            } else {
+                rect.cells()
+                    .map(|(x, y)| TileMap::tile_rect(x, y).center())
+                    .filter(|&p| usable(p))
+                    .min_by(|a, b| a.dist_sq(center).total_cmp(&b.dist_sq(center)))
+            };
+            if let Some(pos) = start {
+                self.player.pos = pos;
+                self.cam = pos - self.render_viewport * 0.5;
+                self.flow.update(&self.level.tiles, pos, NavBudget::FULL);
+                self.fog.reveal_cell(&self.level, super::collision::cell_of(pos));
+                self.ecs.insert_resource(PuddleSteps::at(pos));
+            }
+        }
+    }
+
+    /// Try the requested placement first, then rotate around the rat and
+    /// shorten the distance if the generated floor blocks the full ring.
+    pub(crate) fn testbed_spawn_point(
+        &self,
+        direction: Vec2,
+        distance: f32,
+        radius: f32,
+        class: SizeClass,
+    ) -> Vec2 {
+        for scale in [1.0, 0.75, 0.5, 0.25] {
+            for step in 0..16 {
+                let turn = (step + 1) / 2 * if step % 2 == 0 { -1 } else { 1 };
+                let heading = direction.rotate(turn as f32 * std::f32::consts::TAU / 16.0);
+                let pos = self.player.pos + heading * (distance * scale);
+                if self.level.pit_at(pos).is_none()
+                    && self.level.tiles.circle_clear(pos, radius, class)
+                {
+                    return pos;
+                }
+            }
+        }
+        self.player.pos
+    }
+
+    /// Remove the boss and its shots and restore the ordinary horde pace.
+    pub(crate) fn clear_testbed_boss(&mut self) {
+        self.clear_components::<Boss>();
+        self.clear_components::<BossProjectile>();
+        *self.ecs.resource_mut::<BossFight>() = BossFight::default();
+        *self.ecs.resource_mut::<BossDue>() = BossDue::default();
+        *self.ecs.resource_mut::<BossVirus>() = BossVirus::default();
+        self.boss_override = None;
+        self.director.boss_spawned = false;
+    }
+
+    /// Mark visible bodies for the normal reap and boss defeat paths.
+    pub(crate) fn kill_testbed_visible(&mut self) {
+        let cam = self.cam;
+        let viewport = self.render_viewport;
+        let visible = |pos: Vec2, radius| {
+            let p = pos - cam;
+            on_screen((p.x.round() as i32, p.y.round() as i32), radius, viewport)
+        };
+        let mut enemies = self.ecs.query::<&mut Enemy>();
+        for mut enemy in enemies.iter_mut(&mut self.ecs) {
+            if visible(enemy.pos, enemy.radius) {
+                enemy.hp = 0.0;
+            }
+        }
+        let mut bosses = self.ecs.query::<&mut Boss>();
+        for mut boss in bosses.iter_mut(&mut self.ecs) {
+            if visible(boss.pos, boss.kind.body_radius()) {
+                boss.hp = 0.0;
+            }
         }
     }
 

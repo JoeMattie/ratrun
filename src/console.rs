@@ -1128,6 +1128,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         read_only: true,
         handler: cmd_glyphfx,
     },
+    CommandSpec {
+        name: "testbed",
+        aliases: &[],
+        usage: "testbed [floor]",
+        summary: "Open a testbed on the selected sector.",
+        args: &[ArgKind::Floor],
+        read_only: false,
+        handler: cmd_testbed,
+    },
 ];
 
 /// Find a command by name or alias.
@@ -2115,6 +2124,17 @@ fn cmd_floor(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_testbed(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let theme = match args {
+        [] => Theme::Sewer,
+        [name] => find_floor(name).ok_or_else(|| format!("unknown sector `{name}`"))?,
+        _ => return Err("testbed [floor]".into()),
+    };
+    app.start_testbed(theme);
+    app.console_line(format!("testbed open on {}", theme.name()), LineKind::Success);
+    Ok(())
+}
+
 fn cmd_campaign(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     let stage = args.first().ok_or("usage: campaign <stage> [route]")?;
     let n = parse_usize(stage, "stage")?;
@@ -2597,7 +2617,7 @@ fn find_pickup(name: &str) -> Option<PickupKind> {
         .find(|p| slug(p.name()) == s || slug(p.label()) == s)
 }
 
-fn find_floor(name: &str) -> Option<Theme> {
+pub(crate) fn find_floor(name: &str) -> Option<Theme> {
     let s = slug(name);
     Theme::playable().into_iter().find(|t| slug(t.name()) == s)
 }

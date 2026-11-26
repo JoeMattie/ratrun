@@ -1114,7 +1114,10 @@ pub fn draw_pause_compact(
     }
     let r = panel(f, centered_rect(w, h, area), " RUN CONTROL ", MUTED);
     center(f, r, 0, Span::styled("━━━  ▌▌  PAUSED  ━━━", heavy(TAIL)));
-    let clock_text = if world.boss_time_reached() {
+    let clock_text = if world.testbed {
+        let elapsed = world.elapsed as u32;
+        format!("TESTBED · {:02}:{:02}", elapsed / 60, elapsed % 60)
+    } else if world.boss_time_reached() {
         let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
         format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
     } else {
@@ -2155,7 +2158,10 @@ pub fn draw_pause_with_run(
 
     // The clock counts down to the boss and stops there; once the boss fight is
     // on, show how long it has been running instead of a dead 00:00.
-    let clock_text = if world.boss_time_reached() {
+    let clock_text = if world.testbed {
+        let elapsed = world.elapsed as u32;
+        format!("TESTBED · {:02}:{:02}", elapsed / 60, elapsed % 60)
+    } else if world.boss_time_reached() {
         let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
         format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
     } else {

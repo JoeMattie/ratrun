@@ -1157,7 +1157,8 @@ pub fn miniboss_system(
     let elapsed = counters.elapsed;
     let ppos = player.pos;
     let pvel = player.vel;
-    let retiring = schedule.next_appointment().map_or(elapsed >= BOSS_TIME, |at| elapsed >= at);
+    let retiring = !counters.testbed
+        && schedule.next_appointment().map_or(elapsed >= BOSS_TIME, |at| elapsed >= at);
     owners.clear();
 
     // 1. Tick the living minibosses.
@@ -1271,6 +1272,9 @@ pub fn miniboss_system(
     }
     schedule.active = alive;
     movement.clean_summons(&mut commands, owners, summon_order);
+    if counters.testbed {
+        return;
+    }
 
     // 2. Appointments. A surviving miniboss retreats without loot when the
     //    next one arrives, so only one is ever on the floor.

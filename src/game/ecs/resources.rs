@@ -320,6 +320,8 @@ pub struct RunCounters {
     /// level-complete hook), read by `loot::outcome_system` to set `won` on the
     /// final level, and round-tripped to `World::level_complete`.
     pub level_complete: bool,
+    /// Manual arrivals only. Used by the testbed.
+    pub testbed: bool,
 }
 
 /// Which campaign level is being simulated: 0 Sewer, 1 Kitchen, 2 Lab.

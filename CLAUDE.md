@@ -9,6 +9,7 @@ Rat Run is a terminal **bullet-hell horde survivor** (Vampire-Survivors-shaped) 
 ```sh
 cargo run --release                 # play (needs a real TTY)
 cargo run --release -- --ai 16      # wall of 16 self-playing games
+cargo run --release -- --testbed --floor sewer   # interactive testbed (floor defaults to sewer)
 cargo run --release -- --bot-batch 30 --seed 1000 --json > batch.json
 cargo build
 cargo test                          # full suite (see Testing strategy)
@@ -256,6 +257,18 @@ A level is a **200 × 160** lattice of 16 px tiles (3200 × 2560 world px) plus 
 ## Audio
 
 `audio.rs` is fully procedural — no asset files. `AudioEngine::new()` returns `None` when there is no device and everything no-ops silently. The simulation never calls audio: systems push `Sfx` variants into `SfxQueue`, and the App drains and de-duplicates them per frame (a 16-shot nova is one sound) and sets music intensity. **Floor music is six songs** (`src/music/`), each a file of `(delta, midi, gate, velocity)` note tables plus a `Style` (`music::song_for(theme)` is the one theme → song table). **All six are arranged by hand from the owner's audio stems** (by a music worker working by ear, checked against the stems with a numpy copy of the synth): Sewer "Silent Return" (24 bars), Kitchen "The Great Dash" (24), Laundry "A Minor Waltz" (64 bars in 3/4), Lab "B–C–D♯ Warning" (16), Printworks "Platen Pace" (28), Flatbed "Rat on the Flatbed" (32). Edit those files directly and never regenerate them: `tools/midi2music.py` is the original MIDI converter, kept only as a tool, and its output would overwrite the arrangements. `Style` carries the per-song voice: the original mix/filter fields plus ten with neutral defaults in `Style::base()` (`pad_attack_ms`, `pad_decay_ms`, `pad_hp_hz`, `bass_decay_ms`, `lead_tri`, `lead_decay_ms`, `lead_bright_ms`, `lead_vib_depth`, `stab_decay_ms`, `enhanced_drums` — the last switches on band-passed drums, the open hat, woodblock/timpani and the one-pole bright voices). **`pad_detune` is a frequency ratio** on the pad's second oscillator, not cents: every song is ≤ 0.0045 (about 7 cents; 0.06 is a semitone, and the first tables shipped 0.07–0.20), pinned by `sewer_and_kitchen_have_v2_brightness_and_clear_pad_detune`. `SongSynth` sequences them on a 16th-note clock into procedural voices (24 voices, per-role caps, a limiter and a 0.50 ceiling) as an infinite `rodio::Source`. **It plays a 16-bit palette by default** (`Style::patches`/`drum_kit`/`mix_16`: 2- and 4-operator FM, wavetables, Karplus-Strong plucks, seven sampled-style drum kits, an echo send and a master low-pass; all buffers are allocated in the constructor; `Style::base()` is all `Patch::Chip`). `RATRUN_MUSIC` picks the backend (`AudioEngine::music_selection_for_env`): unset or `16bit` the 16-bit palette, `chip` the old chip oscillators on the same songs (bit-identical to the previous build), `classic` the pre-MIDI `MusicSynth`. About 5 ms of CPU per second of audio (it was 2). The `Arc<AtomicU32>` intensity (0..=3) gates layers: calm is bass, pad and light percussion; 1 adds drums and the arpeggio; 2 the lead; 3 everything plus an octave bass pulse on the beats the bass rests. The title and menus play the selected floor's song at the calm tier with a soft entry (`AudioEngine::play_menu_music` → `SongSynth::new_menu`: a 300 ms fade-in and two bars of bass and pad); the Victory plate plays the Flatbed song at tier 3; `RATRUN_MUSIC=classic` keeps `MusicSynth` everywhere. `--music-render <floor> <secs> <out.wav> [--intensity N]` writes a preview without a terminal, a device or the save (with `RATRUN_MUSIC=classic`, the classic synth). Volumes are 0..=100 in steps of 5 and persisted; `RATRUN_MUSIC_VOLUME`/`RATRUN_SFX_VOLUME` pin them for a session.
+
+## Testbed
+
+`--testbed [--floor <name>]` and the console's `testbed [floor]` open a
+practice world at the largest hall on the selected sector. The App flags it
+as console-used up front and equips one rank-5 weapon on neutral stats.
+`J` toggles ordinary director spawns through `peace`. The testbed flag
+gates scheduled bosses and minibosses and suppresses pending upgrade cards
+between ticks. Manual bosses use `force_boss_here` and pay out normally
+without ending the run. `T` restarts on the next playable theme while
+keeping selections. Capture the panel with `RATRUN_DUMP=testbed` or
+`RATRUN_DUMP=testbed-boss`.
 
 ## Bot and batch tooling
 

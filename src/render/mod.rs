@@ -52,3 +52,4 @@ pub mod zoom;
 pub mod foreground;
 pub mod glyphfx;
 pub mod graphics;
+pub mod testbed;
