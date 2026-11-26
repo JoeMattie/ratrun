@@ -1549,6 +1549,21 @@ impl Bot {
                 }
                 true
             }
+            EnemyKind::ShoreCrab => {
+                if let Some((shape, warn, active_left, damage)) =
+                    crate::game::ecs::systems::crab::claw_warning(en)
+                {
+                    if self.sees(w, p, shape.center()) {
+                        self.threats.push(Threat::Hazard {
+                            shape,
+                            warn_left: self.quantise_warn(warn),
+                            active_left,
+                            damage,
+                        });
+                    }
+                }
+                true
+            }
             _ => false,
         }
     }

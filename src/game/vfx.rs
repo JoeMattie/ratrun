@@ -1542,6 +1542,7 @@ pub fn emit_enemy_death(
         EnemyKind::Lampfish => Some(((164, 255, 255), (28, 118, 146), 8, 68.0)),
         EnemyKind::Grouper => Some(((192, 222, 214), (36, 56, 62), 11, 52.0)),
         EnemyKind::FrySchool => Some(((244, 252, 255), (74, 138, 168), 10, 64.0)),
+        EnemyKind::ShoreCrab => Some(((255, 175, 112), (137, 51, 39), 7, 58.0)),
         _ => None,
     };
     if let Some((hot, cold, count, speed)) = outfall_accent {

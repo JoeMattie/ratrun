@@ -325,6 +325,7 @@ fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
         EnemyKind::SandHopper | EnemyKind::GlassShrimp | EnemyKind::PistolShrimp => {
             return r * 3.0 + 4.0;
         }
+        EnemyKind::ShoreCrab => return r * 3.0 + 8.0,
         _ => {}
     }
     let kind = kind.archetype();
@@ -670,6 +671,18 @@ thread_local! {
 /// hooks.
 type BodyDraw = fn(&mut PixelBuffer, &Frame, &Enemy, Vec2, bool);
 
+fn draw_shore_crab(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    let mut view = crate::game::ecs::systems::crab::crab_view(e);
+    view.elite = elite;
+    crate::game::art_crab::draw_crab(pb, &view, cam, fr.accent);
+}
+
+fn draw_shore_crab_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    let mut view = crate::game::ecs::systems::crab::crab_view(e);
+    view.elite = elite;
+    crate::game::art_crab::draw_crab_lod(pb, &view, cam, fr.accent);
+}
+
 fn bespoke_body(kind: EnemyKind) -> Option<BodyDraw> {
     /// The per-floor art batch adds its rows here:
     /// `(EnemyKind::PipeEel, draw_pipeeel as BodyDraw)`.
@@ -715,6 +728,7 @@ fn bespoke_body(kind: EnemyKind) -> Option<BodyDraw> {
         (EnemyKind::Lampfish, crate::game::art_roster_outfall::draw_lampfish as BodyDraw),
         (EnemyKind::Grouper, crate::game::art_roster_outfall::draw_grouper as BodyDraw),
         (EnemyKind::FrySchool, crate::game::art_roster_outfall::draw_fry_school as BodyDraw),
+        (EnemyKind::ShoreCrab, draw_shore_crab as BodyDraw),
     ];
     TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
 }
@@ -764,6 +778,7 @@ fn bespoke_lod(kind: EnemyKind) -> Option<BodyDraw> {
         (EnemyKind::Lampfish, crate::game::art_roster_outfall::draw_lampfish_lod as BodyDraw),
         (EnemyKind::Grouper, crate::game::art_roster_outfall::draw_grouper_lod as BodyDraw),
         (EnemyKind::FrySchool, crate::game::art_roster_outfall::draw_fry_school_lod as BodyDraw),
+        (EnemyKind::ShoreCrab, draw_shore_crab_lod as BodyDraw),
     ];
     TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
 }

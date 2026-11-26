@@ -1,8 +1,8 @@
 //! Enemies: kinds, per-kind stats, and steering behavior toward the player.
 //!
 //! `EnemyKind` is append-only and `EnemyKind::all()` lists every kind: the 56
-//! ordinary bodies the floor rosters own (`game/roster.rs`), one **guest**
-//! (the Drake, which no roster slot carries) and the legacy `Boss` body: 58.
+//! ordinary bodies the floor rosters own (`game/roster.rs`), two **guests**
+//! (the Drake and Shore Crab, outside the roster) and the legacy `Boss` body: 59.
 //! Stats, name, colour and XP key on the kind itself; behaviour keys on
 //! [`EnemyKind::archetype`], the existing body whose steering, attack and nav
 //! size class a kind reuses until it has a rule of its own.
@@ -143,6 +143,8 @@ pub enum EnemyKind {
     Lampfish,
     Grouper,
     FrySchool,
+    /// The Outfall's guest. Groups arrive on their own clock.
+    ShoreCrab,
 }
 
 impl EnemyKind {
@@ -222,6 +224,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => 11.0,
             EnemyKind::Grouper => 60.0,
             EnemyKind::FrySchool => 26.0,
+            EnemyKind::ShoreCrab => 15.0,
         }
     }
     pub fn speed(self) -> f32 {
@@ -289,6 +292,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => 24.0,
             EnemyKind::Grouper => 16.0,
             EnemyKind::FrySchool => 22.0,
+            EnemyKind::ShoreCrab => 46.0,
         }
     }
     /// Collision radius, which also picks the navigation size class
@@ -330,6 +334,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => 3.0,
             EnemyKind::Grouper => 6.5,
             EnemyKind::FrySchool => 12.0,
+            EnemyKind::ShoreCrab => crate::game::art_crab::CRAB_RADIUS,
             // A registration borrows its base body's collision radius, and so
             // its navigation size class. Kinds with their own archetype
             // must define a radius above.
@@ -404,6 +409,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => 5.0,
             EnemyKind::Grouper => 15.0,
             EnemyKind::FrySchool => 5.0,
+            EnemyKind::ShoreCrab => 4.0,
         }
     }
     pub fn xp(self) -> u32 {
@@ -469,6 +475,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => 3,
             EnemyKind::Grouper => 10,
             EnemyKind::FrySchool => 3,
+            EnemyKind::ShoreCrab => 3,
         }
     }
     pub fn color(self) -> Rgb {
@@ -552,6 +559,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => (123, 187, 208),
             EnemyKind::Grouper => (146, 125, 164),
             EnemyKind::FrySchool => (175, 199, 150),
+            EnemyKind::ShoreCrab => (224, 104, 65),
         }
     }
 
@@ -683,6 +691,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => self,
             EnemyKind::Grouper => EnemyKind::Brute,
             EnemyKind::FrySchool => self,
+            EnemyKind::ShoreCrab => EnemyKind::Skitterer,
         }
     }
 
@@ -756,9 +765,8 @@ impl EnemyKind {
     /// Every kind, in enum order. The console's `spawn` command and its Tab
     /// completion read this table rather than a retyped list.
     ///
-    /// 58 kinds: the 16 earlier bodies (including the legacy Boss), the 33
-    /// wave-four registrations, the Drake guest, and the eight Outfall bodies.
-    pub fn all() -> [EnemyKind; 58] {
+    /// The 56 roster bodies, two guests, and the legacy Boss.
+    pub fn all() -> [EnemyKind; 59] {
         [
             EnemyKind::Skitterer,
             EnemyKind::Bat,
@@ -820,6 +828,7 @@ impl EnemyKind {
             EnemyKind::Lampfish,
             EnemyKind::Grouper,
             EnemyKind::FrySchool,
+            EnemyKind::ShoreCrab,
         ]
     }
 
@@ -887,6 +896,7 @@ impl EnemyKind {
             EnemyKind::Lampfish => "lampfish",
             EnemyKind::Grouper => "grouper",
             EnemyKind::FrySchool => "fryschool",
+            EnemyKind::ShoreCrab => "shorecrab",
         }
     }
 }
@@ -1430,6 +1440,25 @@ impl Enemy {
         }
     }
 
+    /// Crab steering shares the ordinary control, flash, and contact clocks.
+    pub(crate) fn steer_crab(
+        &mut self, level: &crate::game::level::Level, target: Vec2, flow_dir: Vec2,
+        dt: f32, gait: f32,
+    ) {
+        if self.position_locked {
+            self.vel = Vec2::ZERO;
+        }
+        if self.tick_control(dt) {
+            return;
+        }
+        if !self.position_locked && self.targetable() {
+            let speed = self.kind.speed() * self.speed_scale * gait * self.slow_mult;
+            crate::game::ecs::systems::crab::scuttle(self, level, target, flow_dir, dt, speed);
+        }
+        self.flash = (self.flash - dt).max(0.0);
+        self.contact_cd = (self.contact_cd - dt).max(0.0);
+    }
+
     pub fn hurt(&mut self, dmg: f32) {
         self.apply_damage(dmg, None);
     }
@@ -1553,13 +1582,12 @@ impl Enemy {
         }
     }
 
-    /// Fry School is vulnerable from every direction while bunched. Both
-    /// direct hits and pools read this multiplier through their damage paths.
+    /// Outfall vulnerability windows apply to direct hits and area damage.
     fn outfall_damage_mult(&self) -> f32 {
-        if self.kind == EnemyKind::FrySchool && self.outfall.bunched {
-            2.0
-        } else {
-            1.0
+        match self.kind {
+            EnemyKind::FrySchool if self.outfall.bunched => 2.0,
+            EnemyKind::ShoreCrab => crate::game::ecs::systems::crab::incoming_damage_mult(self),
+            _ => 1.0,
         }
     }
 
@@ -1778,8 +1806,8 @@ mod tests {
         let all = EnemyKind::all();
         assert_eq!(
             all.len(),
-            58,
-            "16 earlier kinds + 33 registrations + the guest + eight Outfall bodies"
+            59,
+            "56 roster bodies, two guests and the legacy Boss"
         );
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
@@ -1795,6 +1823,7 @@ mod tests {
         assert_eq!(all[49], EnemyKind::Drake);
         assert!(!EnemyKind::Drake.is_registration());
         assert_eq!(EnemyKind::Drake.archetype(), EnemyKind::Brute);
+        assert_eq!(all[58], EnemyKind::ShoreCrab);
     }
 
     #[test]

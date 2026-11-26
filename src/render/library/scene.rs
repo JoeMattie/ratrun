@@ -1535,6 +1535,9 @@ fn stage(key: Key) -> Option<Staged> {
 /// The floor whose roster fields `kind` (no kind is on two floors). A kind on
 /// no floor (the legacy boss body, which has no scene) answers the Sewer.
 fn home_floor(kind: EnemyKind) -> Theme {
+    if kind == EnemyKind::ShoreCrab {
+        return Theme::Outfall;
+    }
     Theme::playable()
         .into_iter()
         .find(|t| roster::floor(*t).slot_of(kind).is_some())
@@ -1950,6 +1953,9 @@ fn stage_outfall_trick(kind: EnemyKind) -> Staged {
             script.fixture = Some(outfall_card_sconce(&mut level, wall));
             // The school reaches the sconce's range before the dummy's.
             aim - Vec2::new(92.0, 0.0)
+        }
+        EnemyKind::ShoreCrab => {
+            aim - Vec2::new(crate::game::art_crab::CLAW_REACH - 1.0, 0.0)
         }
         _ => unreachable!("the Outfall trick slots"),
     };

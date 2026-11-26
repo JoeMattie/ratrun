@@ -82,7 +82,7 @@ use super::ecs::resources::{
     EnemyIndex, EvoRuntime, GridScratch,
     LaserFx, LastPickups, LevelIndex, MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId,
     NukeTick, PickupScratch, PuddleSteps, RngRes, RunCounters, SfxQueue, Shake, TickInput,
-    Viewport, XpBank,
+    Viewport, XpBank, CrabSpawner,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
@@ -488,6 +488,7 @@ impl World {
         // scratch, like `BossDue`; a fresh level starts with no Drake and no
         // gap running.
         ecs.insert_resource(DrakeSpawner::default());
+        ecs.insert_resource(CrabSpawner::default());
         ecs.insert_resource(super::ecs::systems::floor_sewer::OpeningSpawns::default());
         // The boss fight's own state (private rng stream, damage-number id,
         // reusable scratch). Permanent, like `BossDue`; a spawn re-seeds it.
@@ -4430,6 +4431,7 @@ pub(crate) fn floor_tell_reach(kind: EnemyKind, radius: f32) -> Option<f32> {
         EnemyKind::Lampfish => Some(
             radius + floor_outfall::LAMPFISH_LUNGE_LEN.max(floor_outfall::LAMPFISH_BULB_OFFSET) + 8.0,
         ),
+        EnemyKind::ShoreCrab => Some(super::art_crab::CLAW_REACH + super::art_crab::CLAW_HALF + 4.0),
         _ => match kind.archetype() {
             // Unchanged: the Bell Flea's crosses and the Turnkey's crossbar.
             EnemyKind::BellFlea | EnemyKind::Turnkey => Some(radius * 3.0 + 8.0),
@@ -4453,6 +4455,9 @@ fn draw_floor_tell(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: palette::
             crate::game::art_roster_printworks::draw_staple_tell(pb, e, cam)
         }
         EnemyKind::Skater | EnemyKind::Lampfish => art_roster_outfall::draw_tell(pb, e, cam, accent),
+        EnemyKind::ShoreCrab => super::art_crab::draw_crab_tell(
+            pb, &super::ecs::systems::crab::crab_view(e), cam,
+        ),
         _ => art_enemy::draw_w3_tells(pb, e, cam, accent),
     }
 }

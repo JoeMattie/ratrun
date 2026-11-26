@@ -28,6 +28,7 @@
 //! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); before 4b |
 //! | 4b | `boss::boss_spawn_system` | boss hand-off (reads `BossDue`) |
 //! | 4c | `boss::megarat::boss_summon_system` | a boss's `Call` spawns its rats here, outside the `EnemyIndex` window |
+//! | 4d | `crab::spawn_crabs_system` | Outfall guest groups, after named arrivals and before steering and the grid |
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
 //! | 6 | `enemy_move::enemy_fire_system` | `update_enemies` fire |
 //! | 7 | `enemy_move::grid_build_system` | first grid build + `max_radius` |
@@ -58,6 +59,7 @@
 //! | 16c2 | `enemy_wave4::wave4_system` | wave-4 kinds' tells and hazards (new); right after 16c |
 //! | 16c3 | `floor_sewer::floor_sewer_system`, `floor_kitchen::floor_kitchen_system`, `floor_lab::floor_lab_system`, `floor_laundry::floor_laundry_system`, `floor_printworks::floor_printworks_system`, `floor_flatbed::floor_flatbed_system`, `floor_outfall::floor_outfall_system` | the per-floor roster rules (new), in this order; right after 16c2 |
 //! | 16c3a | `drake::drake_system` | the guest's tell → peck → recover (Sewer only, a no-op without a Drake); in the same slot, right after `floor_sewer_system` |
+//! | 16c3b | `crab::crab_system` | the Shore Crab's tell → pinch → recover; immediately after the Drake |
 //! | 16c4 | `approach::approach_sfx_system` | fodder approach sounds (new; writes only `SfxQueue`); right after 16c3 |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
 //! | 16d-outfall | `outfall::outfall_falls_system` | recover bodies and loose drops after grid readers and before death jumps and loot |
@@ -111,7 +113,7 @@ use super::systems::{
     floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer, fog, fx, gates, hazards,
     loot, miniboss, player, powerups, projectiles, puddles, shop, spawn, trailer, traps,
     weapon_spiketail, weapons, weapons_wave3a, weapons_wave3b,
-    weapon_lava, weapons_wave5, floor_outfall, outfall,
+    weapon_lava, weapons_wave5, floor_outfall, outfall, crab,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -201,6 +203,7 @@ pub fn build_tick_schedule() -> Schedule {
             // `Call` queued last tick lands here — before `grid_build_system`
             // sees the field.
             boss::megarat::boss_summon_system,
+            crab::spawn_crabs_system,
             enemy_move::enemy_steering_system,
             enemy_move::enemy_fire_system,
             enemy_move::grid_build_system,
@@ -415,6 +418,7 @@ pub fn build_tick_schedule() -> Schedule {
                 // already seen it, and the peck's hit on the rat lands before
                 // the reap like every other floor strike.
                 drake::drake_system,
+                crab::crab_system,
                 floor_kitchen::floor_kitchen_system,
                 floor_lab::floor_lab_system,
                 floor_laundry::floor_laundry_system,

@@ -304,7 +304,11 @@ pub fn enemy_steering_system(
                 &mut e, &level, ppos, rat_wet, &outfall_bulbs, &mut target, &mut flow_dir, dt,
             );
         }
-        e.steer(target, flow_dir, dt, gait);
+        if e.kind == EnemyKind::ShoreCrab {
+            e.steer_crab(&level, target, flow_dir, dt, glue * ink * chase * clamp);
+        } else {
+            e.steer(target, flow_dir, dt, gait);
+        }
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.

@@ -6357,7 +6357,7 @@ mod tests {
         h.frame(&arrays);
         let picks = h.app.testbed.unwrap();
         assert_eq!(picks.pickup, *PickupKind::all().last().unwrap());
-        assert_eq!(picks.enemy, *EnemyKind::all().last().unwrap());
+        assert_eq!(picks.enemy, EnemyKind::ShoreCrab);
         assert_eq!(picks.boss, *BossKind::all().last().unwrap());
         assert_eq!(picks.miniboss, *MinibossKind::all().last().unwrap());
         h.frame(&[KeyCode::Char('5'), KeyCode::Char('8'), KeyCode::F(2), KeyCode::F(6)]);

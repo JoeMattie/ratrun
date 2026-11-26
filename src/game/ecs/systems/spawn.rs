@@ -418,6 +418,11 @@ pub fn director_system(
         };
         let budget = director::horde_live_budget(elapsed, boss_phase).saturating_sub(reserved);
         let live = enemies.iter_mut().count();
+        let guests = if level.theme == Theme::Outfall {
+            enemies.iter_mut().filter(|(_, e)| e.kind == EnemyKind::ShoreCrab).count()
+        } else {
+            0
+        };
         if schedule.suppress(elapsed) || console.debug.peace {
             // Quiet after the death, or `peace on`: hold every fresh spawn,
             // but keep the boss hand-off alive.
@@ -457,7 +462,7 @@ pub fn director_system(
         // counts queued bodies toward every cap).
         let mut slot_counts = live_slot_counts(level.theme, enemies.iter_mut().map(|(_, e)| e));
         for i in 0..count {
-            if live + queued >= cap || live + queued >= budget {
+            if live + queued >= cap || live - guests + queued >= budget {
                 break;
             }
             // One weighted draw over the floor's eight slots (see
@@ -477,7 +482,7 @@ pub fn director_system(
                     .count();
                 let room = cap
                     .saturating_sub(live + queued)
-                    .min(budget.saturating_sub(live + queued))
+                    .min(budget.saturating_sub(live - guests + queued))
                     .min(crate::game::ecs::systems::enemy_wave4::LILLI_SQUAD_SIZE)
                     .min(director::WAVE4_LILLI_LIVE_CAP.saturating_sub(live_lill));
                 if room == 0 {

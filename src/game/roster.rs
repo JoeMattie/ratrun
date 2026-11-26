@@ -50,9 +50,8 @@
 //! `EnemyKind::Drake` (the Sewer's big duck that pecks) is on a floor without
 //! being in one: it holds no slot here, spends no slot cap and no live budget,
 //! and it is not an ordinary kind this table can name. Its own clock and rule
-//! live in `ecs::systems::drake`, and `first_unlock` answers `None` for it. A
-//! future guest follows the same seam: a body with a rule of its own and no
-//! row here.
+//! live in `ecs::systems::drake`. The Outfall's Shore Crab has its own group
+//! clock in `ecs::systems::crab`. `first_unlock` answers `None` for both.
 //!
 //! ## Rules still pending (the per-floor batch's list)
 //!
@@ -983,12 +982,9 @@ mod tests {
             );
         }
         // Every existing kind has a home somewhere, so no floor is short and
-        // the console's spawn table is fully covered. Two exceptions, neither
-        // of them an ordinary roster body: the level boss (`Boss`) is nobody's
-        // row, and the **guest** (the Drake) is deliberately in no slot — the
-        // director's own clock brings it (see `systems::drake`).
+        // The legacy Boss and both guests are outside the roster.
         for k in EnemyKind::all() {
-            if k == Boss || k == EnemyKind::Drake {
+            if matches!(k, Boss | EnemyKind::Drake | EnemyKind::ShoreCrab) {
                 continue;
             }
             assert!(first_unlock(k).is_some(), "{k:?} is on no floor");
@@ -997,6 +993,7 @@ mod tests {
             first_unlock(EnemyKind::Drake).is_none(),
             "the guest must not hold a roster slot"
         );
+        assert!(first_unlock(EnemyKind::ShoreCrab).is_none());
     }
 
     /// The ordinary roster has no stand-ins left: every slot names the
