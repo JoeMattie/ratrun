@@ -723,7 +723,7 @@ pub(super) fn draw_giant_rat_with_outfit(
     }
 }
 
-pub(crate) fn headlamp_mount(
+pub(super) fn headlamp_mount(
     player: &Player,
     elapsed: f32,
     scale: f32,
