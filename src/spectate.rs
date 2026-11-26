@@ -1072,7 +1072,7 @@ impl LiveWall {
                 std::thread::Builder::new()
                     .name(format!("ratrun-ai-{i}"))
                     .spawn(move || {
-                        worker_loop(i, base, auto_opts, once, shared, tx, tuning, outcome_tx)
+                        worker_loop(i, base, auto_opts, once, shared, tuning, (tx, outcome_tx))
                     })
             };
             match worker {
@@ -1193,9 +1193,8 @@ fn worker_loop(
     auto_opts: AutoOpts,
     once: bool,
     shared: Arc<WorkerShared>,
-    tx: SyncSender<TileFrame>,
     tuning: crate::tuning::RunTuning,
-    outcome_tx: mpsc::Sender<TileInfo>,
+    (tx, outcome_tx): (SyncSender<TileFrame>, mpsc::Sender<TileInfo>),
 ) {
     let mut run_index = 0u64;
     let mut seed = tile_seed(base, run_index);
