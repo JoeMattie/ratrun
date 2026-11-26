@@ -61,7 +61,7 @@
 //! * The rat is `god`: a card may show the rat being hit, never killed (a
 //!   death would end the loop and freeze the plate on `game_over`). A hidden
 //!   rat is still the real one, so its invulnerability is the real guarantee.
-//! * Every plate is `flat_lit`: a card is a portrait, and the pitch-dark
+//! * Bestiary plates are `flat_lit`: a card is a portrait, and the pitch-dark
 //!   ambient of a floor hides the very thing it is about. The hostile layer and
 //!   the card's dummy are self-lit on top, as always.
 //! * The scene world keeps its own rng (`SEED`), so no card can move a golden
@@ -92,10 +92,10 @@
 //! * **THE REDTAIL** is fought at hover height (a scripted state cue), not
 //!   overhead: while it circles, the art gives it no hit shape at all and the
 //!   plate showed a shadow and nothing else.
-//! * A **floor's** card is the real generated map lit by its real lighting and
-//!   framed on a furnished room ([`floor_window`]) — walls, props, a lamp and a
-//!   wall sconce — with the floor's two fodder kinds wandering through it and
-//!   no rat: the rat pinned at the edge of an empty floor was not a sector.
+//! * A **floor's** card is lit by its real lighting and framed on a furnished
+//!   room ([`floor_window`]), with its fodder wandering through it and no rat.
+//!   The Outfall's hand-staged bank also keeps a wet patch and a working lure
+//!   in the pan.
 //! * A **tiny body** (a radius under 4 px: the Bell Flea, the Wick Moth, the
 //!   Lilliputians, the Ink Blot) is drawn at 2 ×, which is what makes it a body
 //!   and not a speck; its practice dummy stands at least 14 px off.
@@ -113,6 +113,7 @@ use crate::game::art_boss_cat;
 use crate::game::art_boss_cobra;
 use crate::game::art_boss_hawk;
 use crate::game::art_boss_horseshoe_crab;
+use crate::game::art_boss_lantern::{self, LanternState};
 use crate::game::art_boss_magpie;
 use crate::game::art_boss_megarat;
 use crate::game::art_boss_mower;
@@ -123,16 +124,22 @@ use crate::game::bullet::{Bullet, Faction};
 use crate::game::campaign::CampaignTotals;
 use crate::game::collision::{SizeClass, TileKind, TileMap};
 use crate::game::ecs::resources::{spawn_with_id, DashHold};
-use crate::game::ecs::systems::boss::{Boss, BossArtView, BossHitShape, BossKind, BossState};
+use crate::game::ecs::systems::boss::{
+    Boss, BossArtView, BossHitShape, BossKind, BossState, HazardShape,
+};
+use crate::game::ecs::systems::floor_outfall::{
+    lampfish_bulb, outfall_enemy_tell, LAMPFISH_TRIGGER_REACH,
+};
 use crate::game::ecs::systems::miniboss::{
     Miniboss, MinibossKind, MinibossShape, RECOVER_TIME, TELL_TIME,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Gold, Pickup, PickupKind};
-use crate::game::hazards::{InkPad, SteamGrate};
+use crate::game::hazards::{InkPad, LureTrap, SteamGrate};
 use crate::game::level::{
-    BossArena, Level, LevelObjects, LightFixtureKind, OneWayDoor, Palette, Pit, PitKind, RatHole,
-    RoomKind, ShopHole, ShopHoleRole, SlidingCargo, Theme, TileRect, TrailerDeck,
+    BossArena, Level, LevelObjects, LightFixture, LightFixtureKind, OneWayDoor, Palette, Pit,
+    PitKind, Prop, PropKind, Puddle, RatHole, RoomKind, ShopHole, ShopHoleRole, SlidingCargo, Theme,
+    TileRect, TrailerDeck,
 };
 use crate::game::library::{self, Key, ObjectKind};
 use crate::game::loadout::{Loadout, PassiveKind};
@@ -387,9 +394,10 @@ struct Script {
     /// Draw the card's own practice target where the hidden rat stands.
     dummy: bool,
     /// Frame the plate on the subject's **live footprint** (body + tell) and
-    /// take the zoom from its bounds, instead of the fixed zoom above. A named
-    /// fight is the only family whose subject and hazard are one shape.
+    /// take the zoom from its bounds, instead of the fixed zoom above.
     fit: bool,
+    /// A fixture whose position explains the subject's behavior.
+    fixture: Option<Vec2>,
     /// How far past the dummy the aim point is framed: a leading shot's pellet
     /// travels past its target, so the plate has to hold that far too.
     lead: f32,
@@ -438,6 +446,7 @@ impl Script {
             lean: Vec2::ZERO,
             pan: Vec2::new(30.0, 10.0),
             fit: false,
+            fixture: None,
             lead: 0.0,
             boss_fit: false,
             trail: false,
@@ -891,6 +900,20 @@ impl LibraryScene {
             self.world.cam,
             self.world.elapsed,
         );
+        let level = &self.world.level;
+        if level.theme == Theme::Outfall && self.world.flat_lit {
+            for puddle in &level.puddles {
+                crate::game::art_puddle::draw_puddle_among_with(
+                    &mut self.floor_buf,
+                    puddle,
+                    &level.puddles,
+                    self.world.cam,
+                    self.world.elapsed,
+                    level.theme,
+                    false,
+                );
+            }
+        }
         self.floor_plate.resize(w, h);
         if k == 1 {
             self.floor_buf.resample_to(&mut self.floor_plate);
@@ -904,36 +927,49 @@ impl LibraryScene {
 
     /// The world rectangle a fitted plate must hold: the subject's drawn body,
     /// its live telegraph (the widest the footprint gets) and the aim point.
-    fn fit_bounds(&mut self) -> Option<(Vec2, Vec2)> {
+    fn fit_bounds(&self) -> Option<(Vec2, Vec2)> {
         let e = self.subject?;
-        let (pos, radius) = {
-            let body = self.world.ecs.get::<Enemy>(e)?;
-            (body.pos, body.radius)
-        };
+        if let Some(boss) = self.world.ecs.get::<Boss>(e) {
+            let (lo, hi) = boss_body_bounds(boss);
+            let mut bounds = Bounds::new(lo);
+            bounds.grow(lo, hi);
+            bounds.point(self.world.player.pos, DUMMY_R + 2.0);
+            if let Some(fixture) = self.script.fixture {
+                bounds.point(fixture, 5.0);
+            }
+            return Some(bounds.get());
+        }
+        let body = self.world.ecs.get::<Enemy>(e)?;
+        let (pos, radius) = (body.pos, body.radius);
         // A named body's sprite is 2.5-3 × its collision radius to the sides and
         // **taller than that upwards**: the art draws a 30-34 px animal from a
         // 7 px hit disc (a stamp hoisted on its plunger, a carton on its feet),
         // and a symmetric 3 × disc cut the top of the first frame.
-        let side = (radius * 3.0).max(6.0);
-        let up = (radius * 4.6).max(10.0);
-        let down = (radius * 1.8).max(6.0);
-        let mut lo = pos - Vec2::new(side, up);
-        let mut hi = pos + Vec2::new(side, down);
-        let shape = self
-            .world
-            .ecs
-            .get::<Miniboss>(e)
-            .and_then(|mb| mb.telegraph());
-        if let Some(shape) = shape {
-            let (slo, shi) = shape_bounds(shape);
-            lo = Vec2::new(lo.x.min(slo.x), lo.y.min(slo.y));
-            hi = Vec2::new(hi.x.max(shi.x), hi.y.max(shi.y));
+        let mut bounds = Bounds::new(pos);
+        if let Some(mb) = self.world.ecs.get::<Miniboss>(e) {
+            let side = (radius * 3.0).max(6.0);
+            let up = (radius * 4.6).max(10.0);
+            let down = (radius * 1.8).max(6.0);
+            bounds.grow(pos - Vec2::new(side, up), pos + Vec2::new(side, down));
+            if let Some(shape) = mb.telegraph() {
+                let (lo, hi) = shape_bounds(shape);
+                bounds.grow(lo, hi);
+            }
+        } else {
+            bounds.point(pos, radius + 5.0);
+            if let Some(tell) = outfall_enemy_tell(body) {
+                bounds.hazard(tell.shape);
+            }
+            if let Some(bulb) = lampfish_bulb(body) {
+                bounds.point(bulb, 5.0);
+            }
+        }
+        if let Some(fixture) = self.script.fixture {
+            bounds.point(fixture, 5.0);
         }
         // The target of the attack is part of the picture.
-        let aim = self.world.player.pos;
-        lo = Vec2::new(lo.x.min(aim.x), lo.y.min(aim.y));
-        hi = Vec2::new(hi.x.max(aim.x), hi.y.max(aim.y));
-        Some((lo, hi))
+        bounds.point(self.world.player.pos, 0.0);
+        Some(bounds.get())
     }
 
     /// Measure the union of the boss's drawn body over **one whole loop**, by
@@ -1071,6 +1107,39 @@ impl Bounds {
         self.grow(at - Vec2::splat(r), at + Vec2::splat(r));
     }
 
+    fn hazard(&mut self, shape: HazardShape) {
+        match shape {
+            HazardShape::Circle { center, radius } => self.point(center, radius),
+            HazardShape::Annulus { center, outer, .. } => self.point(center, outer),
+            HazardShape::Arc { center, outer, facing, half_angle, .. } => {
+                let dir = facing_of(facing);
+                self.point(center, 0.0);
+                for a in [-half_angle, 0.0, half_angle] {
+                    self.point(center + dir.rotate(a) * outer, 0.0);
+                }
+                for axis in [Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)] {
+                    for cardinal in [axis, -axis] {
+                        if cardinal.dot(dir) >= half_angle.cos() {
+                            self.point(center + cardinal * outer, 0.0);
+                        }
+                    }
+                }
+            }
+            HazardShape::Rect { center, facing, half, half_perp } => {
+                let dir = facing_of(facing);
+                for along in [-half, half] {
+                    for across in [-half_perp, half_perp] {
+                        self.point(center + dir * along + dir.perp() * across, 0.0);
+                    }
+                }
+            }
+            HazardShape::Corridor { from, to, half_width } => {
+                self.point(from, half_width);
+                self.point(to, half_width);
+            }
+        }
+    }
+
     fn get(self) -> (Vec2, Vec2) {
         (self.lo, self.hi)
     }
@@ -1188,6 +1257,22 @@ fn boss_body_bounds(boss: &Boss) -> (Vec2, Vec2) {
                 if p.dist(head) <= COBRA_COIL_VIEW {
                     b.point(*p, art_boss_cobra::COIL_BODY_HALF + 3.0);
                 }
+            }
+        }
+        BossArtView::Lantern(v) => {
+            let dir = facing_of(v.facing);
+            b.point(v.head, art_boss_lantern::HEAD_RADIUS);
+            if v.state != LanternState::ArrivalLure {
+                // The visible body trails the head. Bound its long axis
+                // separately from the reach of the lure and locked attacks.
+                b.point(v.head - dir * 30.0, 24.0);
+                b.point(v.head - dir * 66.0, 16.0);
+            }
+            for bulb in [v.real_bulb, v.decoy].into_iter().flatten() {
+                b.point(bulb.pos, 6.0);
+            }
+            for shape in [v.attack, v.stamp].into_iter().flatten() {
+                b.hazard(shape);
             }
         }
     }
@@ -1358,6 +1443,18 @@ fn walled(mut level: Level, wall_x: i32, gap_y: i32, gap: TileKind) -> Level {
 /// The centre of a cell, in world pixels.
 fn cell_centre(cell: (i32, i32)) -> Vec2 {
     TileMap::tile_rect(cell.0, cell.1).center()
+}
+
+/// A working sconce mounted on the south face of a solid tile.
+fn outfall_card_sconce(level: &mut Level, wall: (i32, i32)) -> Vec2 {
+    let pos = cell_centre(wall) + Vec2::new(0.0, 8.5);
+    level.objects.lights.push(LightFixture {
+        pos,
+        kind: LightFixtureKind::Sconce,
+        radius: 110.0,
+        seed: 1,
+    });
+    pos
 }
 
 /// A scene world over `level`: no director, an evenly lit plate, an unarmed
@@ -1560,7 +1657,7 @@ fn lap_of(kind: EnemyKind) -> Lap {
     match kind {
         // The eel's own rule is its half turning rate round a pipe end, and the
         // slug's is a ruled line past an obstacle: both need the stub.
-        EnemyKind::PipeEel | EnemyKind::TypeSlug => Lap::Pipe,
+        EnemyKind::PipeEel | EnemyKind::TypeSlug | EnemyKind::Conger => Lap::Pipe,
         // Every other Cat-lineage chaser is the one stopped by a rat-hole.
         kind if kind.archetype() == EnemyKind::Cat => Lap::Hole,
         _ => Lap::Pipe,
@@ -1789,6 +1886,9 @@ fn gull_strafe(world: &mut World, subject: Option<Entity>, tick: u32) {
 /// crossbar, a burst, a dive lane, a slide, a needle, jaws, feet, a can's roll
 /// and its rebound).
 fn stage_trick(theme: Theme, kind: EnemyKind) -> Staged {
+    if theme == Theme::Outfall {
+        return stage_outfall_trick(kind);
+    }
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
     let aim = world.player.pos;
@@ -1820,6 +1920,52 @@ fn stage_trick(theme: Theme, kind: EnemyKind) -> Staged {
     (world, script, Some(e))
 }
 
+fn stage_outfall_trick(kind: EnemyKind) -> Staged {
+    let mut level = patch(Theme::Outfall, 40, 30);
+    let aim = level.start;
+    let (cx, cy) = crate::game::collision::cell_of(aim);
+    let mut script = Script::new(5.0, 1.5);
+    script.dummy = true;
+    script.fit = true;
+    let at = match kind {
+        EnemyKind::Skater => {
+            // Start on dry sand within reach of the pool. The lit edge is
+            // wide enough to give the splash room before the far bank.
+            level.puddles.push(Puddle {
+                pos: aim - Vec2::new(18.0, 0.0),
+                rx: 25.0,
+                ry: 18.0,
+                seed: 2,
+            });
+            script.cue = Some(skater_bank_cue);
+            aim - Vec2::new(54.0, 0.0)
+        }
+        EnemyKind::Lampfish => {
+            // The dummy sits inside the lunge trigger with clear sand past it.
+            aim - Vec2::new(LAMPFISH_TRIGGER_REACH - 1.0, 0.0)
+        }
+        EnemyKind::FrySchool => {
+            let wall = (cx - 3, cy - 2);
+            level = blocked(level, wall.0, wall.1, 1, 1);
+            script.fixture = Some(outfall_card_sconce(&mut level, wall));
+            // The school reaches the sconce's range before the dummy's.
+            aim - Vec2::new(92.0, 0.0)
+        }
+        _ => unreachable!("the Outfall trick slots"),
+    };
+    let mut world = sandbox(level);
+    hide_rat(&mut world);
+    let e = world.spawn_enemy(kind, at, 1.0);
+    (world, script, Some(e))
+}
+
+/// First let the Skater find the water while the dummy is on the bank, then
+/// bring the mark across the shallows to invite its splash.
+fn skater_bank_cue(world: &mut World, _subject: Option<Entity>, tick: u32) {
+    let progress = ((tick as f32 * TICK - 1.4) / 0.8).clamp(0.0, 1.0);
+    world.player.pos = world.level.start - Vec2::new(progress * 24.0, 0.0);
+}
+
 /// A heavy (and the Elite card, which is the floor's heavy wearing its gild):
 /// the body lumbering in at its real 16 px/s past the dummy, a size reference,
 /// on a camera that holds still so the crossing is the movement.
@@ -1844,13 +1990,23 @@ fn stage_heavy(theme: Theme, kind: EnemyKind, elite: bool) -> Staged {
 }
 
 fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
-    let mut world = sandbox(patch(theme, 40, 30));
-    hide_rat(&mut world);
-    let aim = world.player.pos;
+    let mut level = patch(theme, 40, 30);
+    let aim = level.start;
     // Stage the primary attack on its own mark, with room for its footprint.
     // The preview skips the movement interlude and loops after one recovery.
     let primary = kind.signatures()[0];
     let mark = aim + Vec2::new(-kind.engage_range_for(primary).min(40.0), 0.0);
+    let fixture = if kind == MinibossKind::Shade {
+        let (cx, cy) = crate::game::collision::cell_of(mark);
+        // Light behind the Shade, so the cone faces across the open sand.
+        let wall = (cx - 2, cy - 1);
+        level = blocked(level, wall.0, wall.1, 1, 1);
+        Some(outfall_card_sconce(&mut level, wall))
+    } else {
+        None
+    };
+    let mut world = sandbox(level);
+    hide_rat(&mut world);
     let e = world.spawn_miniboss(kind, 0, mark);
     world.ecs.get_mut::<Miniboss>(e).expect("staged miniboss").preview = true;
     let cycle = TELL_TIME + primary.active + RECOVER_TIME;
@@ -1861,10 +2017,14 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
     // Salt Hen's three pads), centre on their midpoint, and takes its zoom from
     // those bounds: what clipped the right edge of the wide rows.
     script.fit = true;
+    script.fixture = fixture;
     (world, script, Some(e))
 }
 
 fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
+    if kind == BossKind::Lantern {
+        return stage_lantern();
+    }
     let mut level = patch(theme, 44, 34);
     if theme == Theme::Trailer {
         // The scheduled arrival spawns on the map's boss arena, and a map
@@ -1902,6 +2062,51 @@ fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
         script.cue = Some(hawk_hover_cue);
     }
     (world, script, None)
+}
+
+fn stage_lantern() -> Staged {
+    let mut level = patch(Theme::Outfall, 44, 34);
+    let aim = level.start;
+    let (cx, cy) = crate::game::collision::cell_of(aim);
+    let wall = (cx, cy - 2);
+    level = blocked(level, wall.0, wall.1, 1, 1);
+    let fixture = outfall_card_sconce(&mut level, wall);
+    level.puddles.push(Puddle {
+        pos: aim + Vec2::new(24.0, 27.0),
+        rx: 34.0,
+        ry: 18.0,
+        seed: 2,
+    });
+    let mut world = sandbox(level);
+    hide_rat(&mut world);
+    world.shake_scale = 0.0;
+    // The close arrival uses the game's own fight setup and a legal head
+    // landing on this open patch. The sconce is the phase-two snuff target.
+    world.force_boss_here(BossKind::Lantern);
+    let subject = world
+        .ecs
+        .iter_entities()
+        .find(|entity| entity.contains::<Boss>())
+        .map(|entity| entity.id());
+    let mut script = Script::new(25.0, 2.0);
+    script.fit = true;
+    script.dummy = true;
+    script.fixture = Some(fixture);
+    script.cue = Some(lantern_phase_cue);
+    (world, script, subject)
+}
+
+/// Advance only the health thresholds. The controller finishes its locked
+/// move, snuffs the fixture, releases its decoy and runs Gape on its own.
+fn lantern_phase_cue(world: &mut World, subject: Option<Entity>, tick: u32) {
+    let hp_fraction = match tick {
+        300 => 0.60,
+        990 => 0.32,
+        _ => return,
+    };
+    if let Some(mut boss) = subject.and_then(|e| world.ecs.get_mut::<Boss>(e)) {
+        boss.hp = boss.max_hp * hp_fraction;
+    }
 }
 
 /// The Redtail's card script: keep the bird in the low fight (the hover and its
@@ -2386,8 +2591,16 @@ fn stage_pickup(theme: Theme, kind: PickupKind) -> Staged {
 /// floor's two fodder kinds wandering through. No rat: the sector is the
 /// subject, and a rat pinned at the edge of an empty floor was neither.
 fn stage_floor(theme: Theme) -> Staged {
-    let level = Level::generate(theme, SEED);
-    let window = floor_window(&level);
+    let (level, window) = if theme == Theme::Outfall {
+        let level = outfall_floor_patch();
+        let (cx, cy) = crate::game::collision::cell_of(level.start);
+        let (w, h) = FLOOR_WINDOW;
+        (level, TileRect::new(cx - w / 2, cy - h / 2, w, h))
+    } else {
+        let level = Level::generate(theme, SEED);
+        let window = floor_window(&level);
+        (level, window)
+    };
     let centre = window.center_world();
     // The crop's own middle may be the room's wall face (the window was shifted
     // to hold its sconce): the card stands its bodies and its pan on the
@@ -2431,6 +2644,44 @@ fn stage_floor(theme: Theme) -> Staged {
     script.window = Some(window);
     script.wander = Some((open, Vec2::new(20.0, 10.0)));
     (world, script, None)
+}
+
+/// A cross-section of an Outfall bank. The fixtures share the same level data
+/// and systems as the generated floor, so entering the bulb's range plays its
+/// warning and release as the card pans.
+pub(super) fn outfall_floor_patch() -> Level {
+    let mut level = patch(Theme::Outfall, 24, 18);
+    level.start += Vec2::new(0.0, 8.0);
+    let (cx, cy) = crate::game::collision::cell_of(level.start);
+    level = blocked(level, cx - 5, cy - 2, 11, 1);
+    outfall_card_sconce(&mut level, (cx - 1, cy - 2));
+    for (kind, dx, dy) in [
+        (PropKind::OutfallPiling, -2, 0),
+        (PropKind::OutfallRib, 2, 1),
+    ] {
+        let x = cx + dx;
+        let y = cy + dy;
+        let (w, h) = kind.size();
+        let tile = crate::game::collision::TILE_F;
+        level = blocked(level, x, y, (w / tile).ceil() as i32, (h / tile).ceil() as i32);
+        level.props.push(Prop {
+            kind,
+            rect: crate::game::level::Rectf::new(x as f32 * tile, y as f32 * tile, w, h),
+        });
+    }
+    let aim = level.start;
+    level.puddles.push(Puddle {
+        pos: aim + Vec2::new(-9.0, 8.0),
+        rx: 25.0,
+        ry: 15.0,
+        seed: 2,
+    });
+    let bulb = aim + Vec2::new(25.0, 0.0);
+    level.objects.lure_traps.push(LureTrap::new(
+        bulb,
+        vec![bulb + Vec2::new(0.0, 24.0)],
+    ));
+    level
 }
 
 /// The 12 × 8-tile window a floor's card is cut from: the most furnished room

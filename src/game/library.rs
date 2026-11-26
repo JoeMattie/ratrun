@@ -146,7 +146,7 @@ impl Category {
 }
 
 pub const CATEGORY_COUNT: usize = Category::ALL.len();
-/// Kinds one category can hold. Above today's largest (49 enemies); a new
+/// Kinds one category can hold. Above today's largest (58 enemies); a new
 /// variant past it is a test failure, not silent corruption.
 pub const MAX_KINDS: usize = 64;
 /// 64-bit words per category bitset.
@@ -280,6 +280,7 @@ pub fn name_of(key: Key) -> &'static str {
         Key::Splice(k) => k.name(),
         Key::Pickup(k) => pickup_name(k),
         Key::Prop(k) => prop_name(k),
+        Key::Floor(Theme::Outfall) => "The Outfall",
         Key::Floor(t) => t.name(),
         Key::Object(k) => object_name(k),
     }
@@ -339,6 +340,14 @@ fn enemy_name(k: EnemyKind) -> &'static str {
         EnemyKind::LooseBungee => "Loose Bungee",
         // The guest, appended after the roster's registrations.
         EnemyKind::Drake => "Drake",
+        EnemyKind::SandHopper => "Sand Hopper",
+        EnemyKind::GlassShrimp => "Glass Shrimp",
+        EnemyKind::Conger => "Conger",
+        EnemyKind::Skater => "Skater",
+        EnemyKind::PistolShrimp => "Pistol Shrimp",
+        EnemyKind::Lampfish => "Lampfish",
+        EnemyKind::Grouper => "Grouper",
+        EnemyKind::FrySchool => "Fry School",
     }
 }
 
@@ -358,6 +367,7 @@ fn boss_name(k: BossKind) -> &'static str {
         }
         BossKind::Hawk => crate::render::hud::boss_codename_kind(BossKind::Hawk).0,
         BossKind::Cobra => crate::render::hud::boss_codename_kind(k).0,
+        BossKind::Lantern => crate::render::hud::boss_codename_kind(k).0,
     }
 }
 
@@ -402,6 +412,9 @@ fn prop_name(k: PropKind) -> &'static str {
         PropKind::Toolbox => "Toolbox",
         PropKind::PipeStack => "Pipe Stack",
         PropKind::ChainCoil => "Chain Coil",
+        PropKind::OutfallPiling => "Barnacled Piling",
+        PropKind::OutfallBallast => "Ballast Crate",
+        PropKind::OutfallRib => "Broken Hull Rib",
     }
 }
 
@@ -450,6 +463,15 @@ pub fn theme_of(key: Key) -> Theme {
         Key::Object(ObjectKind::Pit)
         | Key::Object(ObjectKind::SlidingCargo)
         | Key::Object(ObjectKind::Slipstream) => Theme::Trailer,
+        Key::Enemy(
+            EnemyKind::SandHopper | EnemyKind::GlassShrimp | EnemyKind::Conger
+            | EnemyKind::Skater | EnemyKind::PistolShrimp | EnemyKind::Lampfish
+            | EnemyKind::Grouper | EnemyKind::FrySchool,
+        )
+        | Key::Miniboss(
+            MinibossKind::Gasket | MinibossKind::Swell | MinibossKind::Shade
+            | MinibossKind::FalseBulb,
+        ) => Theme::Outfall,
         Key::Splice(_) => Theme::Laundry,
         _ => Theme::Sewer,
     }
@@ -544,6 +566,14 @@ pub fn all_rows() -> Vec<Row> {
         // The guest: no roster slot anywhere, but it is on the floor and it
         // has its own card.
         EnemyKind::Drake,
+        EnemyKind::SandHopper,
+        EnemyKind::GlassShrimp,
+        EnemyKind::Conger,
+        EnemyKind::Skater,
+        EnemyKind::PistolShrimp,
+        EnemyKind::Lampfish,
+        EnemyKind::Grouper,
+        EnemyKind::FrySchool,
     ] {
         let (hint, dossier) = enemy_text(k);
         rows.push(Row {
@@ -589,6 +619,7 @@ pub fn all_rows() -> Vec<Row> {
         BossKind::MegaRat,
         BossKind::Hawk,
         BossKind::Cobra,
+        BossKind::Lantern,
     ] {
         let (hint, dossier) = boss_text(k);
         rows.push(Row {
@@ -746,7 +777,7 @@ pub fn all_rows() -> Vec<Row> {
             key: Key::Floor(t),
             tab: Tab::Floors,
             group: FLOOR,
-            name: t.name(),
+            name: name_of(Key::Floor(t)),
             hint,
             dossier,
         });
@@ -997,6 +1028,38 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
              them; then it stands exposed for 1.3 s. Step off the line during the \
              warning and hit it while it recovers.",
         ),
+        EnemyKind::SandHopper => (
+            "Outfall · from the start",
+            "The bottom sample pursues on foot. Watch its line change when the current carries it across the sand.",
+        ),
+        EnemyKind::GlassShrimp => (
+            "Outfall · from 0:45",
+            "Two eyes in a clear shell. It weaves above the drops and the current carries it sideways.",
+        ),
+        EnemyKind::Conger => (
+            "Outfall · from 1:15",
+            "A long body takes its time turning. Break sight around a piling. A spent lure may have one already on the bank.",
+        ),
+        EnemyKind::Skater => (
+            "Outfall · from 2:00",
+            "Wet sand gives it speed and a warned splash. It seeks the nearest reachable shallows when you stay ashore. Fight it on the dry bank.",
+        ),
+        EnemyKind::PistolShrimp => (
+            "Outfall · from 3:35",
+            "It strafes and fires a bubble along a clear lane. Cross the shot's path or take cover behind a piling.",
+        ),
+        EnemyKind::Lampfish => (
+            "Outfall · from 4:30",
+            "It plants when you come close. A ring marks the start of a straight lunge. Step across the lane and aim for the body.",
+        ),
+        EnemyKind::Grouper => (
+            "Outfall · from 6:35",
+            "The current passes a Grouper in place. An elite with a split stalk snuffs a nearby wall lamp until it leaves or loses sight of the mount.",
+        ),
+        EnemyKind::FrySchool => (
+            "Outfall · from 9:45",
+            "The school spreads in the dark. Near a live light or Subject R-47, it bunches and stops. Strike the smaller, softer target while it holds.",
+        ),
     }
 }
 
@@ -1146,6 +1209,22 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
              V, the tip where you stand, and brings them down left, tip, right. Cross a \
              spent print and face the next one.",
         ),
+        MinibossKind::Gasket => (
+            "Outfall · 3:00",
+            "Mind the hole. The ring locks just ahead of the body. Use the open centre or cross the outside rim before it fills.",
+        ),
+        MinibossKind::Swell => (
+            "Outfall · 6:00",
+            "The gap drifts. The opening holds still once the warning locks. Use that lane through the sweep or go around the ends.",
+        ),
+        MinibossKind::Shade => (
+            "Outfall · 9:00",
+            "Stand on the lit side. The cone locks away from a live wall lamp in sight. With the lamps out, watch which way the outline settles.",
+        ),
+        MinibossKind::FalseBulb => (
+            "Outfall · 12:00",
+            "One of them bites. The bulb nearest you at the lock grows a jaw. Leave its outlined lane. The other bulb pops harmlessly.",
+        ),
     }
 }
 
@@ -1221,6 +1300,13 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              the talon print, and be there when it buries its feet in the oak. When it \
              stoops to hover it is finally in reach, and it knows it: darts, a marked \
              grab and a talon rake down the boards.",
+        ),
+        BossKind::Lantern => (
+            "Outfall · 15:00",
+            "Fishes with the house current. Let the real lure snap, then strike the cheek. \
+             A darkened lamp can send out a decoy. Shooting it can draw a leap down the \
+             marked lane. Once the real lamp drops, dash across the cone to escape the \
+             pull and keep clear of the mouth.",
         ),
     }
 }
@@ -1736,6 +1822,9 @@ fn prop_text(k: PropKind) -> (&'static str, &'static str) {
         PropKind::Toolbox => ("Flatbed", "A steel toolbox. The driver's, presumably, before the rest of this."),
         PropKind::PipeStack => ("Flatbed", "A strap-bound stack of pipes, riding out the joints."),
         PropKind::ChainCoil => ("Flatbed", "A coiled chain on a hook, swinging with the deck."),
+        PropKind::OutfallPiling => ("Outfall", "A barnacled post that breaks a line of fire."),
+        PropKind::OutfallBallast => ("Outfall", "A ballast crate, still where it sank."),
+        PropKind::OutfallRib => ("Outfall", "A broken hull rib. The sand holds the lower end."),
     }
 }
 
@@ -1770,6 +1859,12 @@ fn floor_text(t: Theme) -> (&'static str, &'static str) {
             "Getaway · practice floor",
             "Forty feet of oak deck and a hundred kilometres of night, with the road \
              roaring underneath. The cab is forward. So is the magpie.",
+        ),
+        Theme::Outfall => (
+            "Side route · sector 2",
+            "Follow the storm discharge through sand bowls and pilings. The warning points \
+             with the current. Give the black drops and the cyan lure traps a wide berth. \
+             The return culvert leads to the Lab or the Printworks.",
         ),
     }
 }
@@ -1857,6 +1952,8 @@ pub fn facts(key: Key) -> Facts {
 }
 
 fn enemy_facts(k: EnemyKind, f: &mut Facts) {
+    use crate::game::ecs::systems::floor_outfall as outfall;
+
     const HP_REF: f32 = 60.0; // the brute: the top of the ordinary scale
     const SPEED_REF: f32 = 42.0; // the bat: the top of the ordinary scale
     f.push_bar(
@@ -1864,11 +1961,19 @@ fn enemy_facts(k: EnemyKind, f: &mut Facts) {
         format!("{:.0}", k.base_hp()),
         k.base_hp() / HP_REF,
     );
-    f.push_bar(
-        "SPEED",
-        format!("{:.0} px/s", k.speed()),
-        k.speed() / SPEED_REF,
-    );
+    if k == EnemyKind::Skater {
+        f.push_bar(
+            "SPEED",
+            format!("{:.0} dry · {:.0} wet px/s", k.speed(), outfall::SKATER_WET_SPEED),
+            outfall::SKATER_WET_SPEED / SPEED_REF,
+        );
+    } else {
+        f.push_bar(
+            "SPEED",
+            format!("{:.0} px/s", k.speed()),
+            k.speed() / SPEED_REF,
+        );
+    }
     f.push("CONTACT", format!("{:.0}", k.damage()));
     f.push("GEM XP", k.xp());
     let (chance, gold) = shop::gold_row(k);
@@ -1888,6 +1993,33 @@ fn enemy_facts(k: EnemyKind, f: &mut Facts) {
         f.push("FOUND ON", home);
     }
     f.push("TELL", enemy_answer(k));
+    match k {
+        EnemyKind::Skater => f.push(
+            "SPLASH",
+            format!(
+                "{:.0} damage · {:.2}s warning",
+                outfall::SKATER_SPLASH_DAMAGE,
+                outfall::SKATER_TELL_SECS,
+            ),
+        ),
+        EnemyKind::Lampfish => f.push(
+            "LUNGE",
+            format!(
+                "{:.0} damage · {:.1}s warning",
+                outfall::LAMPFISH_LUNGE_DAMAGE,
+                outfall::LAMPFISH_TELL_SECS,
+            ),
+        ),
+        EnemyKind::Grouper => f.push(
+            "ELITE",
+            format!("snuffs a lamp within {:.0} px", outfall::GROUPER_SNUFF_REACH),
+        ),
+        EnemyKind::FrySchool => f.push(
+            "BUNCHES",
+            format!("within {:.0} px of a live light", outfall::SCHOOL_LIGHT_REACH),
+        ),
+        _ => {}
+    }
 }
 
 /// Where a kind actually spawns, read from the per-floor rosters
@@ -1984,6 +2116,14 @@ pub fn enemy_answer(k: EnemyKind) -> &'static str {
         EnemyKind::LooseBungee => "dotted cord — round the free end",
         // The guest.
         EnemyKind::Drake => "lane locks, then 3 pecks",
+        EnemyKind::SandHopper => "surge carries it",
+        EnemyKind::GlassShrimp => "weaves over drops",
+        EnemyKind::Conger => "break sight at a piling",
+        EnemyKind::Skater => "splash lane on wet sand",
+        EnemyKind::PistolShrimp => "sidestep the bubble",
+        EnemyKind::Lampfish => "ring warns of a lunge",
+        EnemyKind::Grouper => "split stalk snuffs a lamp",
+        EnemyKind::FrySchool => "bunches near light",
     }
 }
 
@@ -2099,6 +2239,7 @@ fn boss_answer(k: BossKind) -> &'static str {
         BossKind::MegaRat => "leave the mark, punish the miss",
         BossKind::Hawk => "leave the print, bite the nape",
         BossKind::Cobra => "leave by the gap, hit the hood",
+        BossKind::Lantern => "bait the snap, hit the cheek",
     }
 }
 
@@ -2386,6 +2527,10 @@ fn floor_facts(t: Theme, f: &mut Facts) {
         );
     }
     f.push("HAZARD", floor_hazard(t));
+    if t == Theme::Outfall {
+        use crate::game::hazards::{SURGE_DISTANCE, SURGE_PERIOD};
+        f.push("SURGE", format!("{SURGE_DISTANCE:.0} px every {SURGE_PERIOD:.0}s"));
+    }
     f.push(
         "SHOP HOLES",
         // `placement::place_shop_holes` cuts two per level.
@@ -2408,6 +2553,7 @@ fn floor_hazard(t: Theme) -> &'static str {
         Theme::Laundry => "steam grates",
         Theme::Printworks => "ink pads",
         Theme::Trailer => "pits, sliding cargo, slipstream",
+        Theme::Outfall => "surge, lure traps, tidal drops",
     }
 }
 
@@ -2979,6 +3125,7 @@ fn boss_at(i: usize) -> Option<BossKind> {
         BossKind::MegaRat,
         BossKind::Hawk,
         BossKind::Cobra,
+        BossKind::Lantern,
     ]
     .get(i)
     .copied()
@@ -3009,11 +3156,13 @@ fn prop_at(i: usize) -> Option<PropKind> {
 }
 
 fn floor_at(i: usize) -> Option<Theme> {
-    Theme::playable().get(i).copied()
+    // The Library saves the enum discriminant. The sector picker uses route
+    // order, which changes when new doors open.
+    Theme::playable().into_iter().find(|&theme| theme as usize == i)
 }
 
 /// Every prop kind, in the order [`all_rows`] lists them.
-pub const PROP_KINDS: [PropKind; 23] = [
+pub const PROP_KINDS: [PropKind; 26] = [
     PropKind::PipeV,
     PropKind::PipeH,
     PropKind::Valve,
@@ -3037,6 +3186,9 @@ pub const PROP_KINDS: [PropKind; 23] = [
     PropKind::Toolbox,
     PropKind::PipeStack,
     PropKind::ChainCoil,
+    PropKind::OutfallPiling,
+    PropKind::OutfallBallast,
+    PropKind::OutfallRib,
 ];
 
 // ---- The discovery survey --------------------------------------------------
