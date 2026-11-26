@@ -34,6 +34,16 @@ mkdir -p "$dist"
     --target web --no-typescript --remove-name-section --out-dir "$dist"
 "$WASM_OPT" -O3 "$dist/ratrun_bg.wasm" -o "$dist/ratrun_bg.wasm"
 cp LICENSE web/index.html web/game.js web/canvas.js "$dist/"
+cp web/manifest.webmanifest "$dist/"
+if [ -d web/icons ]; then
+    cp -R web/icons "$dist/"
+else
+    printf 'web/icons is missing; the page links icons the art pass has not delivered yet\n' >&2
+fi
+# The service worker's cache name is the Cargo version, so a new build installs
+# a new cache and activate deletes the old ones.
+version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+sed "s/__RATRUN_CACHE__/ratrun-$version/" web/sw.js > "$dist/sw.js"
 # Remove assets from an in-place rebuild of the former browser renderer.
 rm -f "$dist/vendor/xterm.css" "$dist/vendor/xterm.mjs" "$dist/vendor/addon-fit.mjs" \
     "$dist/vendor/xterm.LICENSE" "$dist/vendor/addon-fit.LICENSE"
