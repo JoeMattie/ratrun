@@ -36,27 +36,33 @@
 //! A tell that leaves no walkable escape is re-aimed (up to eight tries),
 //! then skipped if it still traps the rat. Tell, strike, Library framing and
 //! bot danger read the same world-space shape.
+//! On the Outfall, the lock samples the actual commitment instant and checks
+//! the rat's whole escape path for walls, tidal drops and the planted body.
+//! The Shade commits to its live lamp direction, and The False Bulb to the
+//! nearest lure. If those fixed warnings leave no escape, the strike is skipped.
 
 #![allow(clippy::too_many_arguments)]
 
 use bevy_ecs::prelude::*;
 use rand::rngs::StdRng;
 
-use super::miniboss_behaviour::{Manoeuvre, Motion, MoveStyle, MovementParams};
+use super::miniboss_behaviour::{self as behaviour, Manoeuvre, Motion, MoveStyle, MovementParams};
 
 use crate::audio::Sfx;
 use crate::detmath::DetF32;
 use crate::game::collision::SizeClass;
 use crate::game::ecs::components::SpawnId;
+use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::director::MINIBOSS_TIMES;
 use crate::game::ecs::resources::{
     NextEnemyId, NextSpawnId, RatTrack, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
 };
 use super::miniboss_shapes::{self as shapes, SignatureTrack, WakeTrail};
-use crate::game::ecs::systems::spawn::{spawn_point_reachable, SpawnScratch};
+use crate::game::ecs::systems::spawn::{in_maze, spawn_point_reachable, widest_view, SpawnScratch};
 use crate::game::director::BOSS_TIME;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Gold;
+use crate::game::hazards::clamp_outfall_displacement;
 use crate::game::level::{Level, Theme};
 use crate::game::particle::Particles;
 use crate::game::player::Player;
@@ -140,10 +146,8 @@ pub const ENGAGE_RANGE: f32 = 70.0;
 /// footprint and has to make the row's answer.
 pub const ENGAGE_REACH_FRACTION: f32 = 0.7;
 
-/// The twenty-four named minibosses: `WAVE4_ROSTERS.md`, "Named appointments
-/// and elites". The first six are wave 3's; the rest are wave 4's eighteen,
-/// appended in the design table's order (three per floor: the 9:00 and 12:00
-/// appointments on every floor).
+/// The named minibosses. The first twenty-four fill the original six floors;
+/// the Outfall's appointments follow them in arrival order.
 ///
 /// **Append-only.** `library::Key::Miniboss` uses the discriminant as the
 /// inside-category index, so a new variant must go at the end and an old
@@ -176,6 +180,10 @@ pub enum MinibossKind {
     AxleNut,
     ChainDog,
     RoadAtlas,
+    Gasket,
+    Swell,
+    Shade,
+    FalseBulb,
 }
 
 impl MinibossKind {
@@ -205,13 +213,17 @@ impl MinibossKind {
             MinibossKind::AxleNut => "Axle Nut",
             MinibossKind::ChainDog => "Chain Dog",
             MinibossKind::RoadAtlas => "The Road Atlas",
+            MinibossKind::Gasket => "The Gasket",
+            MinibossKind::Swell => "The Swell",
+            MinibossKind::Shade => "The Shade",
+            MinibossKind::FalseBulb => "The False Bulb",
         }
     }
 
     /// Every named miniboss, in enum order. The console's `miniboss` command,
     /// its Tab completion, the Library's Named Minibosses section and the
     /// roster test all read this table rather than a retyped list.
-    pub fn all() -> [MinibossKind; 24] {
+    pub fn all() -> [MinibossKind; 28] {
         [
             MinibossKind::Corkscrew,
             MinibossKind::SisterSnip,
@@ -237,7 +249,15 @@ impl MinibossKind {
             MinibossKind::AxleNut,
             MinibossKind::ChainDog,
             MinibossKind::RoadAtlas,
+            MinibossKind::Gasket,
+            MinibossKind::Swell,
+            MinibossKind::Shade,
+            MinibossKind::FalseBulb,
         ]
+    }
+
+    pub(super) fn is_outfall(self) -> bool {
+        matches!(self, Self::Gasket | Self::Swell | Self::Shade | Self::FalseBulb)
     }
 
     /// Seconds the active window lasts. One source of truth: the row's
@@ -274,6 +294,10 @@ impl MinibossKind {
             MinibossKind::AxleNut => 7.0,
             MinibossKind::ChainDog => 7.0,
             MinibossKind::RoadAtlas => 7.5,
+            MinibossKind::Gasket => 7.0,
+            MinibossKind::Swell => 7.5,
+            MinibossKind::Shade => 7.0,
+            MinibossKind::FalseBulb => 7.0,
         }
     }
 
@@ -309,13 +333,20 @@ impl MinibossKind {
                 StampLayout::Along { spacing } => spacing * 3.0 + half,
                 StampLayout::AroundRat { .. } | StampLayout::V { .. } => return ENGAGE_RANGE,
             },
+            S::Annulus { outer, .. } if self == Self::Gasket => GASKET_OFFSET + outer,
             S::Annulus { .. } | S::Overlap { .. } | S::Comb { .. } | S::Wake { .. } | S::Drip { .. } => {
                 return ENGAGE_RANGE;
             }
             S::Tide { travel, half, .. } => travel + half,
             S::Return { len, half, .. } => len + half,
             S::Shear { len, .. } | S::Umbra { len, .. } => len,
+            S::False { forward, len, .. } => forward + len,
         };
+        if self == Self::Shade && matches!(sig.shape, S::Umbra { .. }) {
+            // The warned emergence is 40 px out. It must be able to cast
+            // from there when the rat stays within the wedge's full reach.
+            return reach;
+        }
         (reach * ENGAGE_REACH_FRACTION).clamp(self.body_radius() + 10.0, ENGAGE_RANGE)
     }
 
@@ -410,6 +441,12 @@ impl MinibossKind {
                 bar_len: len,
                 covered: len,
             },
+            SignatureShape::False { forward, across, len, half } => {
+                false_shape(mb, forward, across, len, half, false)
+            }
+            SignatureShape::Annulus { inner, outer } if self == Self::Gasket => {
+                MinibossShape::Annulus { origin: mb.origin + mb.aim * GASKET_OFFSET, inner, outer }
+            }
             shape => shapes::resolve(shape, mb, None),
         }
     }
@@ -509,6 +546,12 @@ impl MinibossKind {
                 covered: (len + bar_len) * p,
             },
             SignatureShape::Wake { delay, .. } if TELL_TIME - TELL_LOCK + t < delay => return None,
+            SignatureShape::False { forward, across, len, half } => {
+                false_shape(mb, forward, across, len, half, true)
+            }
+            SignatureShape::Annulus { inner, outer } if self == Self::Gasket => {
+                MinibossShape::Annulus { origin: mb.origin + mb.aim * GASKET_OFFSET, inner, outer }
+            }
             shape => shapes::resolve(shape, mb, Some((p, t))),
         })
     }
@@ -570,6 +613,8 @@ pub enum SignatureShape {
     Wake { delay: f32, window: f32, half: f32 },
     Drip { radius: f32 },
     Umbra { half_angle: f32, len: f32 },
+    /// Two lateral bulbs with a rectangular jaw extending from either one.
+    False { forward: f32, across: f32, len: f32, half: f32 },
 }
 
 /// Where a row's three stamps sit, relative to what the tell locked.
@@ -595,6 +640,23 @@ pub struct Signature {
 
 /// Seconds between one stamp landing and the next.
 pub const STAMP_STEP: f32 = 0.3;
+const GASKET_OFFSET: f32 = 16.0;
+const SHADE_SCONCE_REACH: f32 = 140.0;
+
+fn false_shape(mb: &Miniboss, forward: f32, across: f32, jaw_len: f32, jaw_half: f32, active: bool)
+    -> MinibossShape
+{
+    let origin = mb.origin;
+    let aim = mb.aim.normalized();
+    let mid = origin + aim * forward;
+    let offset = aim.perp() * across;
+    let bulbs = [mid - offset, mid + offset];
+    let committed = active || mb.state == MinibossState::Active || mb.timer >= TELL_LOCK;
+    // The perpendicular bisector is the aim line. Its zero projects to
+    // the left bulb, and stored `target` is the unled rat at lock.
+    let selected = committed.then(|| usize::from((mb.target - origin).dot(aim.perp()) > 1e-4));
+    MinibossShape::False { origin, aim, bulbs, selected, jaw_len, jaw_half }
+}
 
 /// A distinct signature footprint. All units are world pixels.
 /// Wake keeps its fixed history inline so resolving a footprint never allocates.
@@ -668,6 +730,16 @@ pub enum MinibossShape {
     /// All three circles when warning, a single circle when striking.
     Drip { centers: [Vec2; 3], radius: f32, mask: u8 },
     Umbra { origin: Vec2, aim: Vec2, half_angle: f32, len: f32 },
+    /// Both proposals while tracking; index zero is the left bulb. The
+    /// committed tell and strike carry the same `selected` jaw and decoy.
+    False {
+        origin: Vec2,
+        aim: Vec2,
+        bulbs: [Vec2; 2],
+        selected: Option<usize>,
+        jaw_len: f32,
+        jaw_half: f32,
+    },
 }
 
 impl MinibossShape {
@@ -691,6 +763,10 @@ impl MinibossShape {
                 bar_len,
                 ..
             } => origin + aim.normalized() * ((covered - bar_len * 0.5).max(0.0)),
+            MinibossShape::False { aim, bulbs, selected, jaw_len, .. } => selected.map_or(
+                (bulbs[0] + bulbs[1]) * 0.5,
+                |i| bulbs[i] + aim * (jaw_len * 0.5),
+            ),
             shape => shape.signature_bounds().map_or(Vec2::ZERO, |(lo, hi)| (lo + hi) * 0.5),
         }
     }
@@ -1126,6 +1202,41 @@ fn spawn_miniboss(
     commands.spawn((e, Miniboss::new(kind, appointment), next_id.take()));
 }
 
+/// The ordinary spawn ring needs only 4 px of clearance. Fit the larger
+/// named body near that result, in the same reachable region and out of sight
+/// if the ring was out of sight, without rolling the ring again.
+fn fit_outfall_arrival(
+    level: &Level, scratch: &SpawnScratch, pos: Vec2, rat: Vec2, viewport: Vec2, radius: f32,
+) -> Option<Vec2> {
+    use crate::game::collision::{cell_of, TileMap, TILE_F};
+
+    if behaviour::clear(level, pos, radius, SizeClass::Large) {
+        return Some(pos);
+    }
+    let half_view = widest_view(viewport) * 0.5 + Vec2::splat(radius);
+    let off_screen = |p: Vec2| (p.x - rat.x).abs() > half_view.x || (p.y - rat.y).abs() > half_view.y;
+    let keep_hidden = off_screen(pos);
+    let min_dist = pos.dist(rat) - TILE_F;
+    let (x, y) = cell_of(pos);
+    for ring in 0..=3i32 {
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs().max(dy.abs()) != ring {
+                    continue;
+                }
+                let at = TileMap::tile_rect(x + dx, y + dy).center();
+                if (!keep_hidden || off_screen(at)) && at.dist(rat) >= min_dist
+                    && scratch.is_reachable(level, at) && !in_maze(level, at)
+                    && behaviour::clear(level, at, radius, SizeClass::Large)
+                {
+                    return Some(at);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Default)]
 pub(crate) struct MinibossScratch {
     order: Vec<(u64, Entity)>,
@@ -1194,6 +1305,7 @@ pub fn miniboss_system(
         }
         let contact_cd = e.contact_cd;
         let flash = e.flash;
+        let previous_timer = mb.timer;
         mb.timer += dt;
         mb.multi_hit_iframes = (mb.multi_hit_iframes - dt).max(0.0);
         match mb.state {
@@ -1227,17 +1339,21 @@ pub fn miniboss_system(
                 let signature = mb.signature();
                 let timer = mb.timer;
                 mb.signature_track.update(signature.shape, timer, &rat_track);
-                if mb.timer < TELL_LOCK {
-                    // A re-aim that closes the rat's escape keeps the last good lock.
-                    let _ = aim_signature(&mut mb, e.pos, ppos, pvel, &level);
+                if !track_tell(&mut mb, previous_timer, e.pos, ppos, pvel, &level, &rat_track) {
+                    skip_tell(&mut mb);
                 } else {
-                    e.vel = Vec2::ZERO;
-                    strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
-                }
-                if mb.timer >= TELL_TIME {
-                    mb.state = MinibossState::Active;
-                    mb.timer = 0.0;
-                    mb.active_cued = false;
+                    if timer >= TELL_LOCK {
+                        e.vel = Vec2::ZERO;
+                        strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
+                    }
+                    if timer >= TELL_TIME {
+                        mb.state = MinibossState::Active;
+                        mb.timer = 0.0;
+                        mb.active_cued = false;
+                        if mb.kind.is_outfall() {
+                            strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
+                        }
+                    }
                 }
             }
             MinibossState::Active => {
@@ -1289,8 +1405,16 @@ pub fn miniboss_system(
             }
             // Spawn the new one just outside the view.
             scratch.sync(&level);
-            if let Some(pos) = spawn_point_reachable(&mut rng.0, &level, &player, viewport.0, &mut scratch) {
-                let kind = schedule_for(level.theme, schedule.next);
+            let kind = schedule_for(level.theme, schedule.next);
+            let pos = spawn_point_reachable(&mut rng.0, &level, &player, viewport.0, &mut scratch);
+            let pos = if level.theme == Theme::Outfall {
+                pos.and_then(|at| fit_outfall_arrival(
+                    &level, &scratch, at, player.pos, viewport.0, kind.body_radius(),
+                ))
+            } else {
+                pos
+            };
+            if let Some(pos) = pos {
                 spawn_miniboss(
                     &mut commands,
                     kind,
@@ -1375,6 +1499,26 @@ pub(super) fn multi_hit_bit(signature: Signature, timer: f32) -> Option<u8> {
     }
 }
 
+/// Keep tracking through the first half of the warning. Outfall signatures
+/// evaluate the actual lock instant and can decline an unsafe commitment.
+fn track_tell(
+    mb: &mut Miniboss, previous_timer: f32, body: Vec2, rat: Vec2, rat_vel: Vec2,
+    level: &Level, rat_track: &RatTrack,
+) -> bool {
+    if mb.timer < TELL_LOCK {
+        // A bad tracking pose keeps the last legal warning until lock.
+        let _ = aim_signature(mb, body, rat, rat_vel, level);
+    } else if mb.kind.is_outfall() && previous_timer < TELL_LOCK {
+        let at_lock = if rat_track.is_empty() {
+            rat
+        } else {
+            rat_track.at_age(f64::from(mb.timer - TELL_LOCK))
+        };
+        return aim_signature(mb, body, at_lock, rat_vel, level);
+    }
+    true
+}
+
 /// Aim the signature from a body at `body` at a rat at `ppos` moving at
 /// `pvel`: the origin, the aim, the rat lock and the stamp centres.
 ///
@@ -1410,17 +1554,29 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
             let d = at.dist(body).max(1.0);
             aim.rotate(((seam_half + half) / d).clamp(0.0, 0.7).dasin())
         }
+        SignatureShape::Umbra { .. } if mb.kind == MinibossKind::Shade => {
+            let away_from_rat = (body - ppos).normalized();
+            let fallback = if away_from_rat == Vec2::ZERO { -aim } else { away_from_rat };
+            level.nearest_live_sconce(body, SHADE_SCONCE_REACH)
+                .map(|(_, lamp)| (body - lamp).normalized())
+                .filter(|&away| away != Vec2::ZERO)
+                .unwrap_or(fallback)
+        }
         SignatureShape::Umbra { .. } => shapes::umbra_aim(level, body, aim),
         _ => aim,
     };
     let before = (mb.origin, mb.aim, mb.target, mb.stamp_centers);
     mb.origin = body;
     mb.aim = aim;
-    mb.target = at;
+    mb.target = if matches!(shape, SignatureShape::False { .. }) { ppos } else { at };
     lock_stamps(mb);
     // Reposition when the signature leaves no walkable escape: try rotating
     // the aim until a sample direction is clear.
-    let attempts = if matches!(shape, SignatureShape::Umbra { .. }) { 1 } else { 8 };
+    let attempts = if matches!(shape, SignatureShape::Umbra { .. } | SignatureShape::False { .. }) {
+        1
+    } else {
+        8
+    };
     for _ in 0..attempts {
         if escape_exists(mb, ppos, level) {
             return true;
@@ -1446,14 +1602,18 @@ fn begin_tell(
     rat_track: &RatTrack,
 ) {
     mb.timer = 0.0;
+    if mb.kind.is_outfall() {
+        // Swell's gap begins at the tracking edge, including when the
+        // previous state was cooldown.
+        mb.state = MinibossState::Tell;
+    }
     let shape = mb.signature().shape;
     if matches!(shape, SignatureShape::Wake { .. } | SignatureShape::Drip { .. }) {
         mb.signature_track = SignatureTrack::start(shape, ppos, rat_track);
     }
     if !aim_signature(mb, e.pos, ppos, pvel, level) {
         // Still trapped: skip this signature and go straight to cooldown.
-        mb.state = MinibossState::Cooldown;
-        mb.timer = 0.0;
+        skip_tell(mb);
         return;
     }
     mb.state = MinibossState::Tell;
@@ -1467,10 +1627,18 @@ fn begin_tell(
     crate::game::particle::vfx::emit_miniboss_tell(particles, rng, e.pos, (255, 226, 140));
 }
 
+fn skip_tell(mb: &mut Miniboss) {
+    mb.state = MinibossState::Cooldown;
+    mb.timer = 0.0;
+}
+
 /// Is there at least one walkable direction out of the rat's position that the
 /// telegraph does not cover? Sampled at 8 compass points.
 fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
     let shape = mb.kind.telegraph(mb);
+    if mb.kind.is_outfall() {
+        return outfall_escape_exists(&shape, mb.origin, mb.kind.body_radius(), ppos, level);
+    }
     // A ring has exactly one answer — its break — and the 12 px samples below
     // sit inside its rim, so they cannot judge it. Require the break itself
     // to be floor the rat can walk; `begin_tell` turns the aim, and the break
@@ -1535,6 +1703,77 @@ fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
         }
     }
     false
+}
+
+fn outfall_escape_exists(
+    shape: &MinibossShape, body: Vec2, body_radius: f32, rat: Vec2, level: &Level,
+) -> bool {
+    const MAX_WALK: f32 = 36.0;
+    let contact = body_radius + PLAYER_RADIUS;
+    if !behaviour::clear(level, rat, PLAYER_RADIUS, SizeClass::Small) {
+        return false;
+    }
+    let safe = |at: Vec2| {
+        if at.dist_sq(rat) > MAX_WALK * MAX_WALK
+            || at.dist_sq(body) <= contact * contact
+            || shape.contains(at, PLAYER_RADIUS)
+            || !behaviour::clear(level, at, PLAYER_RADIUS, SizeClass::Small)
+        {
+            return false;
+        }
+        // If already inside contact, the rat can step out. A route starting
+        // clear must never require walking through the planted body.
+        if rat.dist_sq(body) > contact * contact && segment_dist(body, rat, at) <= contact {
+            return false;
+        }
+        let end = clamp_outfall_displacement(level, rat, at - rat, PLAYER_RADIUS, SizeClass::Small);
+        end.dist_sq(at) < 1e-4
+    };
+    if safe(rat) {
+        return true;
+    }
+    let clear_margin = PLAYER_RADIUS + 1.0;
+    match *shape {
+        MinibossShape::Annulus { origin, outer, .. } => {
+            let away = (rat - origin).normalized();
+            if safe(origin) || safe(origin + away * (outer + clear_margin)) {
+                return true;
+            }
+        }
+        MinibossShape::Tide { origin, aim, len, from, to, gap } => {
+            let cross = aim.perp();
+            let along = (rat - origin).dot(aim).clamp(from, to);
+            let edge = len * 0.5 + clear_margin;
+            let gap_center = (gap.0 + gap.1) * 0.5;
+            let gap_route = safe(origin + aim * along + cross * gap_center)
+                && [from - clear_margin, to + clear_margin].into_iter().any(|end| {
+                    let through = origin + cross * gap_center;
+                    let delta = aim * (end - along);
+                    let start = through + aim * along;
+                    let reached = clamp_outfall_displacement(
+                        level, start, delta, PLAYER_RADIUS, SizeClass::Small,
+                    );
+                    reached.dist_sq(start + delta) < 1e-4
+                        && segment_dist(body, start, start + delta) > contact
+                });
+            if gap_route || [-edge, edge].into_iter().any(|side| {
+                safe(origin + aim * along + cross * side)
+            }) {
+                return true;
+            }
+        }
+        MinibossShape::Umbra { origin, aim, .. } => {
+            let bank = origin - aim * (contact + 1.0);
+            if safe(bank) {
+                return true;
+            }
+        }
+        _ => {}
+    }
+    (0..8).any(|i| {
+        let dir = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 8.0);
+        (1..=3).any(|step| safe(rat + dir * (12.0 * step as f32)))
+    })
 }
 
 /// Lock the three stamp centres for the aim the tell just fixed, in the row's
@@ -1915,16 +2154,17 @@ mod tests {
                 ChainDog,
                 RoadAtlas,
             ]),
+            (Theme::Outfall, [Gasket, Swell, Shade, FalseBulb]),
         ];
         for (theme, row) in rows {
             for (i, kind) in row.into_iter().enumerate() {
                 assert_eq!(schedule_for(theme, i), kind, "{theme:?} appointment {i}");
             }
         }
-        // Every named miniboss has exactly one home (24 names, 24 slots), so no
+        // Every named miniboss has exactly one home, so no
         // floor borrows another floor's body and none of the six's work is
         // lost. This is the "tie them to specific floors" rule.
-        assert_eq!(MinibossKind::all().len(), 24);
+        assert_eq!(MinibossKind::all().len(), 28);
         for (i, kind) in MinibossKind::all().into_iter().enumerate() {
             let homes: Vec<(Theme, usize)> = Theme::playable()
                 .iter()
@@ -1954,7 +2194,7 @@ mod tests {
             // Out-of-range appointments clamp to the last row.
             assert_eq!(schedule_for(theme, 9), row[3]);
         }
-        assert_eq!(seen.len(), 24, "the six floors must field all 24 names");
+        assert_eq!(seen.len(), 28, "the seven floors must field all 28 names");
     }
 
     #[test]
@@ -2492,11 +2732,11 @@ mod tests {
         }
     }
 
-    /// `all()` is the enum, in order, with 24 unique display names.
+    /// `all()` is the enum, in order, with 28 unique display names.
     #[test]
-    fn all_has_twenty_four_unique_names() {
+    fn all_has_twenty_eight_unique_names() {
         let all = MinibossKind::all();
-        assert_eq!(all.len(), 24);
+        assert_eq!(all.len(), 28);
         let mut names: Vec<&'static str> = Vec::new();
         for (i, kind) in all.into_iter().enumerate() {
             assert_eq!(kind as usize, i);
@@ -2525,6 +2765,220 @@ mod tests {
     /// A locked miniboss at a fixed spot, for the geometry tests.
     fn locked(kind: MinibossKind) -> Miniboss {
         mb(kind, Vec2::new(200.0, 160.0), Vec2::new(1.0, 0.0))
+    }
+
+    #[test]
+    fn outfall_appointments_keep_the_shared_schedule_and_stats() {
+        let rows = [
+            (MinibossKind::Gasket, 180.0, 18.0, 0.7, 7.0, 2610.0, 270.0),
+            (MinibossKind::Swell, 360.0, 22.0, 1.0, 7.5, 5136.0, 1498.0),
+            (MinibossKind::Shade, 540.0, 26.0, 0.55, 7.0, 9216.0, 2736.0),
+            (MinibossKind::FalseBulb, 720.0, 30.0, 0.20, 7.0, 8869.0, 4163.0),
+        ];
+        for (i, (kind, at, damage, active, radius, stage_two, practice)) in
+            rows.into_iter().enumerate()
+        {
+            assert_eq!(schedule_for(Theme::Outfall, i), kind);
+            assert_eq!(MINIBOSS_TIMES[i], at);
+            assert_eq!(appointment_signature_damage(i), damage);
+            assert_eq!(kind.body_radius(), radius);
+            assert_eq!(kind.active_duration(), active);
+            assert_eq!(kind.temperament().speed, 48.0);
+            assert_eq!(kind.temperament().gap, 2.6);
+            assert!((appointment_hp_for(1, i) - stage_two).abs() < 0.01);
+            assert!((appointment_hp_for(0, i) - practice).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn gasket_hole_clears_both_contact_and_rim() {
+        let m = locked(MinibossKind::Gasket);
+        let center = m.origin + m.aim * 16.0;
+        let tell = m.kind.telegraph(&m);
+        assert_eq!(tell, MinibossShape::Annulus { origin: center, inner: 8.0, outer: 18.0 });
+        assert_eq!(m.kind.active_shape(&m, 0.35), Some(tell));
+        assert!(center.dist(m.origin) > m.kind.body_radius() + PLAYER_RADIUS);
+        assert!(!tell.contains(center + m.aim * 4.99, PLAYER_RADIUS));
+        assert!(tell.contains(center + m.aim * 5.0, PLAYER_RADIUS));
+        assert!(tell.contains(center + m.aim * 21.0, PLAYER_RADIUS));
+        assert!(!tell.contains(center + m.aim * 21.01, PLAYER_RADIUS));
+    }
+
+    #[test]
+    fn swell_tracks_a_sixteen_pixel_gap_then_sweeps_with_it_fixed() {
+        let mut m = locked(MinibossKind::Swell);
+        m.state = MinibossState::Tell;
+        for (t, expected_gap) in [(0.0, (-20.0, -4.0)), (0.25, (-8.0, 8.0)), (0.5, (4.0, 20.0))] {
+            m.timer = t;
+            let MinibossShape::Tide { gap, len, from, to, .. } = m.kind.telegraph(&m) else {
+                panic!("expected the Tide warning");
+            };
+            assert_eq!((gap, len, from, to), (expected_gap, 64.0, -3.0, 51.0));
+        }
+        let told = m.kind.telegraph(&m);
+        m.timer = 0.9;
+        assert_eq!(told, m.kind.telegraph(&m));
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let live = m.kind.active_shape(&m, t).expect("live bar");
+            let middle = m.origin + m.aim * (48.0 * t);
+            let sample = |y| middle + m.aim.perp() * y;
+            for shape in [told, live] {
+                assert!(!shape.contains(sample(12.0), PLAYER_RADIUS));
+                assert!(!shape.contains(sample(7.01), PLAYER_RADIUS));
+                assert!(shape.contains(sample(7.0), PLAYER_RADIUS));
+                assert!(shape.contains(sample(17.0), PLAYER_RADIUS));
+                assert!(!shape.contains(sample(36.0), PLAYER_RADIUS));
+            }
+        }
+    }
+
+    #[test]
+    fn shade_rereads_live_lamps_at_lock_then_keeps_the_lit_side_safe() {
+        use crate::game::level::{LightFixture, LightFixtureKind};
+
+        let mut level = Level::empty(Theme::Outfall);
+        let mut m = locked(MinibossKind::Shade);
+        let body = m.origin;
+        let x = m.aim;
+        let y = x.perp();
+        let rat = body + x * 36.0;
+        level.objects.lights = [body - x * 60.0, body - y * 36.0].map(|pos| LightFixture {
+            pos, kind: LightFixtureKind::Sconce, radius: 80.0, seed: 1,
+        }).to_vec();
+        let track = RatTrack::default();
+        m.state = MinibossState::Tell;
+        m.timer = 0.25;
+        assert!(track_tell(&mut m, 0.2, body, rat, Vec2::ZERO, &level, &track));
+        assert_eq!(m.aim, y);
+        level.objects.outfall_elite_snuff = Some(1);
+        m.timer = 0.51;
+        assert!(track_tell(&mut m, 0.49, body, rat, Vec2::ZERO, &level, &track));
+        assert_eq!(m.aim, x);
+        let warned = m.kind.telegraph(&m);
+        let MinibossShape::Umbra { half_angle, len, .. } = warned else { panic!("expected Umbra") };
+        assert_eq!(len, 46.0);
+        assert!((half_angle.to_degrees() * 2.0 - 50.0).abs() < 1e-4);
+        assert!(!warned.contains(body - x * 20.0, PLAYER_RADIUS));
+        assert!(warned.contains(body + x * 46.0, PLAYER_RADIUS));
+        assert!(!warned.contains(body + x * 50.0, PLAYER_RADIUS));
+        assert!(warned.contains(body + x.rotate(24.5_f32.to_radians()) * 40.0, 0.0));
+        assert!(!warned.contains(body + x.rotate(25.5_f32.to_radians()) * 40.0, 0.0));
+        level.objects.lights.clear();
+        m.timer = 0.75;
+        assert!(track_tell(&mut m, 0.7, body, rat, Vec2::ZERO, &level, &track));
+        assert_eq!(warned, m.kind.telegraph(&m));
+        assert_eq!(m.kind.active_shape(&m, 0.4), Some(warned));
+        assert!(aim_signature(&mut m, body, rat, Vec2::ZERO, &level));
+        assert_eq!(m.aim, -x, "without a live fixture the wedge points away from the rat");
+    }
+
+    #[test]
+    fn false_bulb_selects_at_lock_and_only_the_selected_jaw_can_hit() {
+        let mut m = locked(MinibossKind::FalseBulb);
+        let level = Level::empty(Theme::Outfall);
+        let body = m.origin;
+        let x = m.aim;
+        let y = x.perp();
+        let rat = body + x * 24.0 + y * 8.0;
+        let vel = -y * 16.0;
+        m.state = MinibossState::Tell;
+        m.timer = 0.35;
+        let mut track = RatTrack::default();
+        track.record(0.0, rat);
+        assert!(track_tell(&mut m, 0.3, body, rat, vel, &level, &track));
+        let tracking = m.kind.telegraph(&m);
+        let MinibossShape::False { bulbs, selected: None, jaw_len, jaw_half, .. } = tracking else {
+            panic!("expected both proposed jaws");
+        };
+        assert_eq!(bulbs, [body + x * 22.0 - y * 14.0, body + x * 22.0 + y * 14.0]);
+        assert_eq!((jaw_len, jaw_half), (18.0, 3.0));
+        assert!(bulbs.into_iter().all(|bulb| tracking.contains(bulb + x * 9.0, 0.0)));
+        assert!(m.active_shape().is_none());
+
+        m.timer = TELL_LOCK;
+        assert!(track_tell(&mut m, 0.48, body, rat, vel, &level, &track));
+        let committed = m.kind.telegraph(&m);
+        assert!(matches!(committed, MinibossShape::False { selected: Some(1), .. }));
+        assert_eq!(tracking.signature_bounds(), committed.signature_bounds());
+        m.timer = 0.85;
+        assert!(track_tell(&mut m, 0.8, body, bulbs[0], Vec2::ZERO, &level, &track));
+        assert_eq!(m.kind.telegraph(&m), committed);
+        assert!(m.active_shape().is_none());
+        let live = m.kind.active_shape(&m, 0.0).expect("jaw at start of strike");
+        assert_eq!(live, committed);
+        assert!(live.contains(bulbs[1] + x * 18.0 + y * 3.0, 0.0));
+        assert!(!live.contains(bulbs[1] + x * 18.01, 0.0));
+        assert!(!live.contains(bulbs[0] + x * 9.0, PLAYER_RADIUS));
+        assert!(m.kind.active_shape(&m, 0.201).is_none());
+
+        m.target = body + x * 24.0;
+        assert!(matches!(m.kind.telegraph(&m), MinibossShape::False { selected: Some(0), .. }));
+    }
+
+    #[test]
+    fn outfall_signatures_each_latch_one_hit() {
+        use crate::game::weapon::WeaponKind;
+
+        for (kind, t, position) in [
+            (MinibossKind::Gasket, 0.35, Vec2::new(29.0, 0.0)),
+            (MinibossKind::Swell, 0.5, Vec2::new(24.0, 0.0)),
+            (MinibossKind::Shade, 0.3, Vec2::new(24.0, 0.0)),
+            (MinibossKind::FalseBulb, 0.1, Vec2::new(31.0, -14.0)),
+        ] {
+            let mut m = locked(kind);
+            m.state = MinibossState::Active;
+            m.timer = t;
+            let live = m.active_shape().expect("active strike");
+            let mut player = Player::new(m.origin + position, WeaponKind::Gnaw);
+            assert!(apply_strike(&mut m, &mut player, &live, None), "{kind:?}");
+            player.iframes = 0.0;
+            assert!(!apply_strike(&mut m, &mut player, &live, None), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn outfall_escape_cannot_end_in_a_pit_or_pass_through_a_wall() {
+        use crate::game::art_walls::WallKind;
+        use crate::game::collision::TileKind;
+        use crate::game::level::{Pit, PitKind, TileRect};
+
+        let mut level = Level::empty(Theme::Outfall);
+        for y in 8..=12 {
+            for x in 11..=16 {
+                level.tiles.set(x, y, TileKind::Wall(WallKind::Solid));
+            }
+        }
+        level.tiles.set(13, 10, TileKind::Open);
+        level.tiles.set(14, 10, TileKind::Open);
+        let rat = Vec2::new(216.0, 168.0);
+        let m = mb(MinibossKind::Gasket, rat - Vec2::new(28.0, 0.0), Vec2::new(1.0, 0.0));
+        assert!(escape_exists(&m, rat, &level), "the open bank is an escape");
+        level.objects.tidal_pits.push(Pit::new(TileRect::new(14, 10, 1, 1), PitKind::TidalDrop));
+        assert!(!escape_exists(&m, rat, &level), "the pit is the only exit");
+        level.objects.tidal_pits.clear();
+        level.tiles.set(14, 10, TileKind::Wall(WallKind::Solid));
+        level.tiles.set(15, 10, TileKind::Open);
+        assert!(!escape_exists(&m, rat, &level), "the open tile behind the wall is unreachable");
+    }
+
+    #[test]
+    fn outfall_arrival_fits_the_named_radius_at_an_ordinary_ring_point() {
+        use crate::game::level::{Pit, PitKind, TileRect};
+
+        let mut level = Level::empty(Theme::Outfall);
+        level.objects.tidal_pits.push(Pit::new(TileRect::new(112, 80, 1, 1), PitKind::TidalDrop));
+        let mut scratch = SpawnScratch::default();
+        scratch.sync(&level);
+        let at = Vec2::new(1787.0, 1288.0);
+        let radius = MinibossKind::Swell.body_radius();
+        assert!(behaviour::clear(&level, at, 4.0, SizeClass::Large));
+        assert!(!behaviour::clear(&level, at, radius, SizeClass::Large));
+        let viewport = Vec2::new(57.0, 40.0);
+        let fitted = fit_outfall_arrival(&level, &scratch, at, level.start, viewport, radius)
+            .expect("clear sand behind the lip near the chosen arrival");
+        assert!(behaviour::clear(&level, fitted, radius, SizeClass::Large));
+        assert!(fitted.dist(at) < 16.0);
+        assert!((fitted.x - level.start.x).abs() > widest_view(viewport).x * 0.5 + radius);
     }
 
     /// §8/`WAVE4_ROSTERS.md`: outline the full footprint for the whole tell.
@@ -2637,6 +3091,10 @@ mod tests {
             CageCounter => m.rat_lock() + aim * 40.0,
             // Clear of the talon marks.
             RoadAtlas => m.rat_lock() + aim * 16.0 + side * 30.0,
+            Gasket => o + aim * GASKET_OFFSET,
+            Swell => o + aim * 24.0 + side * 12.0,
+            Shade => behind,
+            FalseBulb => o + aim * 28.0,
         }
     }
 

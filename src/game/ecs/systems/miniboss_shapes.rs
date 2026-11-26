@@ -15,6 +15,7 @@ use crate::render::palette::Rgb;
 const RETURN_HUB: f32 = 8.0;
 const SCONCE_REACH: f32 = 140.0;
 const DRIP_MIDDLE: f32 = 0.25;
+const FALSE_POP_RADIUS: f32 = 5.0;
 
 pub fn record_rat_track(input: Res<TickInput>, rat: Res<Player>, mut track: ResMut<RatTrack>) {
     track.record(input.dt, rat.pos);
@@ -313,6 +314,16 @@ pub(super) fn contains(shape: &MinibossShape, p: Vec2, r: f32) -> bool {
             let edge = aim.rotate(angle.clamp(-half_angle, half_angle));
             segment_dist_sq(p, origin, origin + edge * len) <= r * r
         }
+        MinibossShape::False { aim, bulbs, selected, jaw_len, jaw_half, .. } => {
+            bulbs.into_iter().enumerate().any(|(i, bulb)| {
+                let offset = p - bulb;
+                selected.is_none_or(|index| index == i)
+                    && rect_dist_sq(
+                        offset.dot(aim), offset.dot(aim.perp()),
+                        (0.0, jaw_len), (-jaw_half, jaw_half),
+                    ) <= r * r
+            })
+        }
         _ => unreachable!("legacy miniboss footprint"),
     }
 }
@@ -334,6 +345,20 @@ impl MinibossShape {
             Self::Drip { centers, radius, mask } => return Some(disks_bounds(&centers, radius, mask)),
             Self::Umbra { origin, aim, len, half_angle } => {
                 return Some(sector_bounds(origin, aim, len, half_angle, 0.0));
+            }
+            Self::False { origin, aim, bulbs, jaw_len, jaw_half, .. } => {
+                let (mut lo, mut hi) = disks_bounds(&bulbs, FALSE_POP_RADIUS, 0b11);
+                let cross = aim.perp() * jaw_half;
+                // Keep both possible jaws in frame through commitment. The
+                // dangerous subset comes from `contains`, independent of fit.
+                for point in std::iter::once(origin).chain(bulbs.into_iter().flat_map(|bulb| {
+                    let tip = bulb + aim * jaw_len;
+                    [bulb - cross, bulb + cross, tip - cross, tip + cross]
+                })) {
+                    lo = Vec2::new(lo.x.min(point.x), lo.y.min(point.y));
+                    hi = Vec2::new(hi.x.max(point.x), hi.y.max(point.y));
+                }
+                return Some((lo, hi));
             }
             _ => return None,
         };
@@ -384,7 +409,6 @@ fn sector_bounds(origin: Vec2, aim: Vec2, len: f32, half_angle: f32, pad: f32) -
 pub fn draw_outline(
     pb: &mut PixelBuffer, shape: &MinibossShape, cam: Vec2, scale: Vec2, colour: Rgb,
 ) {
-    let Some((lo, hi)) = shape.signature_bounds() else { return };
     if let MinibossShape::Drip { centers, radius, mask: 0b111 } = *shape {
         for (i, color) in [colour, (254, 184, 119), (225, 135, 98)].into_iter().enumerate() {
             let circle = MinibossShape::Drip { centers, radius, mask: 1 << i };
@@ -392,6 +416,13 @@ pub fn draw_outline(
         }
         return;
     }
+    rasterize(pb, shape, cam, scale, colour, false);
+}
+
+fn rasterize(
+    pb: &mut PixelBuffer, shape: &MinibossShape, cam: Vec2, scale: Vec2, colour: Rgb, fill: bool,
+) {
+    let Some((lo, hi)) = shape.signature_bounds() else { return };
     let left = (((lo.x - cam.x) / scale.x).floor() as i32).max(0);
     let right = (((hi.x - cam.x) / scale.x).ceil() as i32).min(pb.w as i32 - 1);
     let top = (((lo.y - cam.y) / scale.y).floor() as i32).max(0);
@@ -402,7 +433,7 @@ pub fn draw_outline(
         for x in left..=right {
             let p = cam + Vec2::new(x as f32 * scale.x, y as f32 * scale.y);
             if shape.contains(p, 0.0)
-                && [p - dx, p + dx, p - dy, p + dy].iter().any(|&q| !shape.contains(q, 0.0))
+                && (fill || [p - dx, p + dx, p - dy, p + dy].iter().any(|&q| !shape.contains(q, 0.0)))
             {
                 pb.plot(x, y, colour);
             }
@@ -413,6 +444,40 @@ pub fn draw_outline(
 pub fn draw_telegraph(
     pb: &mut PixelBuffer, mb: &Miniboss, footprint: &MinibossShape, cam: Vec2, scale: Vec2,
 ) {
+    if let MinibossShape::False { origin, bulbs, selected, .. } = *footprint {
+        let screen = |p: Vec2| {
+            let p = p - cam;
+            ((p.x / scale.x).round() as i32, (p.y / scale.y).round() as i32)
+        };
+        let bulb_scale = scale.x.max(scale.y).max(0.01);
+        let active = mb.state == MinibossState::Active;
+        let (ox, oy) = screen(origin);
+        for (i, bulb) in bulbs.into_iter().enumerate() {
+            let (x, y) = screen(bulb);
+            if selected.is_none_or(|index| index == i) {
+                pb.line(ox, oy, x, y, (100, 151, 162));
+            } else if active {
+                let progress = (mb.timer / mb.active_duration()).clamp(0.0, 1.0);
+                let pop = ((2.0 + (FALSE_POP_RADIUS - 2.0) * progress) / bulb_scale).round() as i32;
+                // A hollow cool pulse, with neither a line nor a jaw fill.
+                pb.ring(x, y, pop.max(1), (98, 178, 195));
+                continue;
+            }
+            let colour = if selected.is_none_or(|index| index == i) {
+                (199, 250, 251)
+            } else {
+                (77, 127, 143)
+            };
+            pb.filled_circle(x, y, (2.0 / bulb_scale).round().max(1.0) as i32, colour);
+        }
+        if active {
+            rasterize(pb, footprint, cam, scale, (182, 74, 50), true);
+            draw_outline(pb, footprint, cam, scale, (255, 236, 177));
+        } else {
+            draw_outline(pb, footprint, cam, scale, (242, 139, 81));
+        }
+        return;
+    }
     draw_outline(pb, footprint, cam, scale, (242, 139, 81));
     if let Some(live) = mb.active_shape() {
         draw_outline(pb, &live, cam, scale, (255, 236, 177));
@@ -606,6 +671,45 @@ mod tests {
                 assert!(x >= lo.x && x <= hi.x && y >= lo.y && y <= hi.y, "{shape:?}: ({x}, {y})");
             }
             assert!(marked > 0, "{shape:?} did not draw");
+        }
+    }
+
+    #[test]
+    fn outfall_warnings_draw_without_lighting_on_a_narrow_frame() {
+        for zoom in [1.0, 2.0] {
+            let scale = Vec2::splat(zoom);
+            let cam = ORIGIN - Vec2::new(44.0, 19.0) * zoom;
+            for (kind, safe) in [
+                (MinibossKind::Gasket, point(16.0, 0.0)),
+                (MinibossKind::Swell, point(24.0, 12.0)),
+                (MinibossKind::Shade, point(-16.0, 0.0)),
+                (MinibossKind::FalseBulb, point(31.0, 14.0)),
+            ] {
+                let mut mb = Miniboss::new(kind, 0);
+                mb.origin = ORIGIN;
+                mb.aim = AIM;
+                mb.target = TARGET;
+                mb.state = MinibossState::Tell;
+                mb.timer = TELL_LOCK;
+                let mut pb = PixelBuffer::new(114, 40);
+                let warned = mb.telegraph().expect("fixed warning");
+                draw_telegraph(&mut pb, &mb, &warned, cam, scale);
+                assert!(pb.pixels().contains(&(242, 139, 81)), "{kind:?} at {zoom}x");
+                let x = ((safe.x - cam.x) / zoom).round() as usize;
+                let y = ((safe.y - cam.y) / zoom).round() as usize;
+                assert_eq!(pb.pixel_at(x, y), (0, 0, 0), "{kind:?} covers its safe space");
+
+                if kind == MinibossKind::FalseBulb {
+                    mb.state = MinibossState::Active;
+                    mb.timer = 0.1;
+                    pb.clear((0, 0, 0));
+                    let warned = mb.telegraph().expect("live jaw and decoy");
+                    draw_telegraph(&mut pb, &mb, &warned, cam, scale);
+                    assert!(pb.pixels().contains(&(182, 74, 50)), "selected jaw fills");
+                    assert!(pb.pixels().contains(&(98, 178, 195)), "decoy has a hollow pop");
+                    assert_eq!(pb.pixel_at(x, y), (0, 0, 0), "the decoy has no jaw fill");
+                }
+            }
         }
     }
 
