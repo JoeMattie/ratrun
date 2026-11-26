@@ -135,7 +135,33 @@ pub const GATE_BLOCKS_BELOW_OPEN: f32 = 0.5;
 /// Cost: one cell `AABB` query over the segment, plus `0..=2` gate rects (the
 /// level's door list is tiny, and no cell is looked up per door).
 pub fn wall_hit(level: &Level, from: Vec2, to: Vec2, radius: f32) -> Option<f32> {
-    let mut best = level.tiles.segment_hit(from, to, radius);
+    let tile = level.tiles.segment_hit(from, to, radius);
+    let gate = closed_gate_hit(level, from, to, radius).map(|(t, _, _)| t);
+    match (tile, gate) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The same collision as `wall_hit` with the face and tile for a ricochet.
+pub(super) fn wall_hit_face(
+    level: &Level, from: Vec2, to: Vec2, radius: f32,
+) -> Option<(f32, Vec2, (i32, i32))> {
+    let wall = level.tiles.segment_hit_face(from, to, radius);
+    if let Some((t, rect, cell)) = closed_gate_hit(level, from, to, radius) {
+        if wall.is_none_or(|(other, _, _)| t < other) {
+            let normal = crate::game::collision::segment_rect_normal(from, to, radius, &rect);
+            return Some((t, normal, cell));
+        }
+    }
+    wall
+}
+
+#[inline]
+fn closed_gate_hit(
+    level: &Level, from: Vec2, to: Vec2, radius: f32,
+) -> Option<(f32, crate::game::level::Rectf, (i32, i32))> {
+    let mut best = None;
     for door in &level.objects.one_way_doors {
         if door.open_progress() >= GATE_BLOCKS_BELOW_OPEN {
             continue;
@@ -145,7 +171,9 @@ pub fn wall_hit(level: &Level, from: Vec2, to: Vec2, radius: f32) -> Option<f32>
         };
         let gate = crate::game::art_walls::one_way_gate_rect(door.cell.0, door.cell.1, dir);
         if let Some(t) = crate::game::collision::segment_rect_hit(from, to, radius, &gate) {
-            best = Some(best.map_or(t, |b: f32| b.min(t)));
+            if best.is_none_or(|(previous, _, _)| t < previous) {
+                best = Some((t, gate, door.cell));
+            }
         }
     }
     best

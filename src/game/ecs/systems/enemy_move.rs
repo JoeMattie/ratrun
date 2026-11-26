@@ -152,6 +152,7 @@ pub fn enemy_steering_system(
     ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
     // Console `freeze on`: the horde holds still. Default false = normal.
     debug: Res<DebugFlags>,
+    hold: Res<crate::game::ecs::resources::HoldPointFx>,
 ) {
     let dt = input.dt;
     if debug.freeze {
@@ -278,7 +279,8 @@ pub fn enemy_steering_system(
         } else {
             1.0
         };
-        e.steer(target, flow_dir, dt, speed_mult * glue * ink * chase);
+        let clamp = hold.gait_at(&player, &level, e.pos);
+        e.steer(target, flow_dir, dt, speed_mult * glue * ink * chase * clamp);
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.

@@ -158,6 +158,9 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         // A spiked tail: the asterisk that is also an eight-spiked star.
         WeaponKind::SpikedTail => '✳',
         WeaponKind::LavaBreath => '◆',
+        WeaponKind::GlassBead => '◇',
+        WeaponKind::PlumbBob => '↓',
+        WeaponKind::HoldPoint => '○',
     }
 }
 
@@ -187,6 +190,9 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
             WeaponKind::Hantavirus => "DEAD",
             WeaponKind::SpikedTail => "WIRE",
             WeaponKind::LavaBreath => "CLDR",
+            WeaponKind::GlassBead => "LB",
+            WeaponKind::PlumbBob => "SH",
+            WeaponKind::HoldPoint => "CP",
         };
     }
     match kind {
@@ -206,6 +212,9 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
         // in a two-letter rack; the tag is identity, not an abbreviation).
         WeaponKind::SpikedTail => "BARB",
         WeaponKind::LavaBreath => "LAVA",
+        WeaponKind::GlassBead => "GL",
+        WeaponKind::PlumbBob => "PL",
+        WeaponKind::HoldPoint => "HO",
     }
 }
 

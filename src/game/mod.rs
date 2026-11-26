@@ -88,3 +88,4 @@ pub mod art_droppings;
 pub mod art_lava;
 pub mod art_gems;
 pub mod art_pickups3;
+pub mod art_wave5;

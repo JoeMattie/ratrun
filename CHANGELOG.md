@@ -33,6 +33,11 @@
   catwalks and other overhead objects that cross the view.
 - **Five XP gem tiers.** Distant gems combine into larger drops that carry
   their combined XP. The Field Guide lists each tier's colour and value.
+- **Glass Bead.** Shots bounce off walls. Pair it with Lens Cap for Last Bounce.
+- **Plumb Bob.** A weight sweeps out on a chain. Pair it with Counterweight for
+  Shed Bob.
+- **Hold Point.** Stand still to charge a knockback pulse. Pair it with Thick
+  Hide for Clamp.
 
 ## 0.3.0 (2026-11-25)
 

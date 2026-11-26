@@ -371,6 +371,8 @@ pub fn emit_weapon_fire(
         WeaponKind::SpikedTail => {}
         // The live volley draws its own muzzle gout.
         WeaponKind::LavaBreath => {}
+        // Their live shapes are the firing tells.
+        WeaponKind::GlassBead | WeaponKind::PlumbBob | WeaponKind::HoldPoint => {}
     }
 }
 
@@ -384,6 +386,10 @@ pub fn emit_weapon_hit(
     _enemy_kind: EnemyKind,
     killed: bool,
 ) {
+    if let Some(kind @ (WeaponKind::GlassBead | WeaponKind::PlumbBob | WeaponKind::HoldPoint)) = weapon {
+        emit_weapon_contact(ps, pos, bullet_vel, kind, killed);
+        return;
+    }
     if weapon == Some(WeaponKind::LavaBreath) {
         // A hot contact spark whose direction comes from the hit geometry.
         ps.push(Particle {
@@ -574,7 +580,25 @@ pub fn emit_weapon_hit(
         // A spike shard striking a body: steel-grey thorn sparks.
         Some(WeaponKind::SpikedTail) => emit_lash_shard_hit(ps, rng, pos, reflect, killed),
         Some(WeaponKind::LavaBreath) => unreachable!("lava hits take the deterministic path"),
+        Some(WeaponKind::GlassBead | WeaponKind::PlumbBob | WeaponKind::HoldPoint) => {
+            unreachable!("these hits take the deterministic path")
+        }
     }
+}
+
+/// A fixed spark for contacts resolved by the deterministic weapon systems.
+pub fn emit_weapon_contact(ps: &mut Particles, pos: Vec2, travel: Vec2, kind: WeaponKind, killed: bool) {
+    ps.push(Particle {
+        pos,
+        vel: travel.normalized() * 22.0,
+        life: 0.18,
+        max_life: 0.18,
+        drag: 2.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom((255, 255, 245), kind.color()),
+        additive: true,
+        shape: if killed { Shape::Cross } else { Shape::Streak },
+    });
 }
 
 /// Crisp pink/white swipe sparks on a body clipped by `TailWhip`.

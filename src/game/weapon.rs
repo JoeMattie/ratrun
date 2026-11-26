@@ -152,7 +152,14 @@ pub const LASER_EYE_OFFSET: f32 = 3.4;
 /// indexed by [`WeaponKind::index`], so a new kind has to raise this and the
 /// arrays in one place. Wave 3 added Laser Eyes, Super Dash, Acid Rain,
 /// Hantavirus and the Spiked Tail.
-pub const WEAPON_SLOTS: usize = 14;
+pub const WEAPON_SLOTS: usize = 17;
+
+const BEAD_DAMAGE: [f32; 5] = [8.0, 10.0, 12.0, 14.0, 18.0];
+const BEAD_CYCLE: [f32; 5] = [1.30, 1.21, 1.12, 1.03, 0.95];
+const BOB_DAMAGE: [f32; 5] = [11.0, 13.0, 16.0, 19.0, 23.0];
+const BOB_COOLDOWN: f32 = 0.85;
+const HOLD_DAMAGE: [f32; 5] = [26.0, 32.0, 38.0, 44.0, 52.0];
+const HOLD_COOLDOWN: f32 = 2.2;
 
 pub const LAVA_CYCLE: [f32; 5] = [2.2, 2.1, 2.0, 1.9, 1.7];
 pub const LAVA_SPLASH_DAMAGE: [f32; 5] = [10.0, 12.0, 14.0, 17.0, 20.0];
@@ -313,6 +320,9 @@ pub enum WeaponKind {
     Hantavirus,  // leaves droppings; a body that steps in one is infected
     SpikedTail,  // single-target lash: spikes out, small burst at the hit
     LavaBreath,  // throws airborne globs that splash and leave hot pools
+    GlassBead,   // piercing ricochet
+    PlumbBob,    // swinging weight on a chain
+    HoldPoint,   // stand still to charge a close knockback pulse
 }
 
 impl WeaponKind {
@@ -332,6 +342,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus,
             WeaponKind::SpikedTail,
             WeaponKind::LavaBreath,
+            WeaponKind::GlassBead,
+            WeaponKind::PlumbBob,
+            WeaponKind::HoldPoint,
         ]
     }
 
@@ -356,10 +369,16 @@ impl WeaponKind {
     ///   is a successful player dash (`systems::player::player_system` records
     ///   the travelled segment; `weapons_wave3b` damages what it crossed).
     ///
-    /// Neither is [`WeaponKind::is_active`]: both are passive-triggered, so
+    /// Plumb Bob starts its cooldown after the full swing and Hold Point is
+    /// driven by stillness. Both are owned by `weapons_wave5`.
+    ///
+    /// These weapons are passive-triggered, so
     /// they have no charge gauge and the Space press does not spend them.
     pub fn fires_outside_fire_one(self) -> bool {
-        matches!(self, WeaponKind::LaserEyes | WeaponKind::SuperDash)
+        matches!(
+            self,
+            WeaponKind::LaserEyes | WeaponKind::SuperDash | WeaponKind::PlumbBob | WeaponKind::HoldPoint
+        )
     }
 
     /// Position in [`WeaponKind::all()`]; the index of this weapon in the
@@ -380,6 +399,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => 11,
             WeaponKind::SpikedTail => 12,
             WeaponKind::LavaBreath => 13,
+            WeaponKind::GlassBead => 14,
+            WeaponKind::PlumbBob => 15,
+            WeaponKind::HoldPoint => 16,
         }
     }
 
@@ -399,6 +421,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => "Hantavirus",
             WeaponKind::SpikedTail => "Spiked Tail",
             WeaponKind::LavaBreath => "Lava Breath",
+            WeaponKind::GlassBead => "Glass Bead",
+            WeaponKind::PlumbBob => "Plumb Bob",
+            WeaponKind::HoldPoint => "Hold Point",
         }
     }
 
@@ -423,6 +448,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => "Leaves droppings. A step tags 3 hits, then jumps.",
             WeaponKind::SpikedTail => "Lashes one foe, then bursts at the hit.",
             WeaponKind::LavaBreath => "Spits molten globs in an arc ahead.",
+            WeaponKind::GlassBead => "A bead that bounces off three walls.",
+            WeaponKind::PlumbBob => "Only the weight on the chain hits.",
+            WeaponKind::HoldPoint => "Stand still 0.45s and the floor fires.",
         }
     }
 
@@ -442,6 +470,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => "Somebody passed a note in Block C.",
             WeaponKind::SpikedTail => "The tail grew a point of view.",
             WeaponKind::LavaBreath => "The core sample was swallowed.",
+            WeaponKind::GlassBead => "It was in the drain. It still rolls.",
+            WeaponKind::PlumbBob => "Hung to find the true floor.",
+            WeaponKind::HoldPoint => "Procedure says do not move.",
         }
     }
 
@@ -465,6 +496,9 @@ impl WeaponKind {
             // barbed tail reads apart from the two rose/orange tail weapons.
             WeaponKind::SpikedTail => (206, 214, 226),
             WeaponKind::LavaBreath => (255, 140, 40),
+            WeaponKind::GlassBead => (138, 244, 255),
+            WeaponKind::PlumbBob => (255, 212, 110),
+            WeaponKind::HoldPoint => (215, 236, 255),
         }
     }
 
@@ -495,6 +529,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => VIRUS_CYCLE[0],
             WeaponKind::SpikedTail => LASH_CYCLE[0],
             WeaponKind::LavaBreath => LAVA_CYCLE[0],
+            WeaponKind::GlassBead => BEAD_CYCLE[0],
+            WeaponKind::PlumbBob => BOB_COOLDOWN,
+            WeaponKind::HoldPoint => HOLD_COOLDOWN,
         }
     }
 
@@ -547,6 +584,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => VIRUS_DAMAGE[0],
             WeaponKind::SpikedTail => LASH_DAMAGE[0],
             WeaponKind::LavaBreath => LAVA_SPLASH_DAMAGE[0],
+            WeaponKind::GlassBead => BEAD_DAMAGE[0],
+            WeaponKind::PlumbBob => BOB_DAMAGE[0],
+            WeaponKind::HoldPoint => HOLD_DAMAGE[0],
         }
     }
 
@@ -561,6 +601,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => Some(VIRUS_DAMAGE),
             WeaponKind::SpikedTail => Some(LASH_DAMAGE),
             WeaponKind::LavaBreath => Some(LAVA_SPLASH_DAMAGE),
+            WeaponKind::GlassBead => Some(BEAD_DAMAGE),
+            WeaponKind::PlumbBob => Some(BOB_DAMAGE),
+            WeaponKind::HoldPoint => Some(HOLD_DAMAGE),
             _ => None,
         }
     }
@@ -574,6 +617,9 @@ impl WeaponKind {
             WeaponKind::Hantavirus => Some(VIRUS_CYCLE),
             WeaponKind::SpikedTail => Some(LASH_CYCLE),
             WeaponKind::LavaBreath => Some(LAVA_CYCLE),
+            WeaponKind::GlassBead => Some(BEAD_CYCLE),
+            WeaponKind::PlumbBob => Some([BOB_COOLDOWN; 5]),
+            WeaponKind::HoldPoint => Some([HOLD_COOLDOWN; 5]),
             _ => None,
         }
     }
@@ -708,6 +754,24 @@ impl WeaponKind {
                 "Caldera",
                 "Pressure release was logged.",
                 "Each volley leaves a larger pool where you just stood. Pools merge.",
+            ),
+            WeaponKind::GlassBead => e(
+                super::loadout::PassiveKind::LensCap,
+                "Last Bounce",
+                "The last mark was wider.",
+                "The fourth bounce bursts in a 16px circle for half damage.",
+            ),
+            WeaponKind::PlumbBob => e(
+                super::loadout::PassiveKind::Counterweight,
+                "Shed Bob",
+                "The weight was let out.",
+                "The weight rolls 48px off the swing, then reels back.",
+            ),
+            WeaponKind::HoldPoint => e(
+                super::loadout::PassiveKind::Armor,
+                "Clamp",
+                "The procedure was extended.",
+                "The circle slows the horde to 45% speed for 1.4s.",
             ),
         }
     }
@@ -948,6 +1012,8 @@ impl Weapon {
             WeaponKind::SqueakNova => 6 + 2 * self.level as i32,
             WeaponKind::SporeOrbit => 2 + self.level as i32,
             WeaponKind::LavaBreath => LAVA_LANDINGS[(self.level.clamp(1, 5) - 1) as usize].len() as i32,
+            WeaponKind::GlassBead => 1 + i32::from(self.level >= 3),
+            WeaponKind::PlumbBob | WeaponKind::HoldPoint => 1,
             _ => self.level as i32,
         }
     }
@@ -1130,6 +1196,9 @@ mod tests {
             // The spiked tail hooks with Counterweight (the weight on the tip).
             (WeaponKind::SpikedTail, PassiveKind::Counterweight, "Barbed Wire"),
             (WeaponKind::LavaBreath, PassiveKind::LongFuse, "Caldera"),
+            (WeaponKind::GlassBead, PassiveKind::LensCap, "Last Bounce"),
+            (WeaponKind::PlumbBob, PassiveKind::Counterweight, "Shed Bob"),
+            (WeaponKind::HoldPoint, PassiveKind::Armor, "Clamp"),
         ];
         assert_eq!(rows.len(), WeaponKind::all().len(), "every kind needs a row");
         for (kind, passive, name) in rows {
@@ -1217,7 +1286,7 @@ mod tests {
     /// from level 4.
     #[test]
     fn spiked_tail_matches_its_design_tables() {
-        assert_eq!(WEAPON_SLOTS, 14);
+        assert_eq!(WEAPON_SLOTS, 17);
         let expect = [
             (1u8, 22.0f32, 1.3f32, 80.0f32, 10.0f32, 0u8),
             (2, 27.0, 1.19, 90.0, 11.5, 0),
@@ -1354,7 +1423,10 @@ mod tests {
             );
             assert_eq!(
                 kind.fires_outside_fire_one(),
-                matches!(kind, WeaponKind::LaserEyes | WeaponKind::SuperDash),
+                matches!(
+                    kind,
+                    WeaponKind::LaserEyes | WeaponKind::SuperDash | WeaponKind::PlumbBob | WeaponKind::HoldPoint
+                ),
                 "{kind:?} is driven by the wrong system"
             );
         }

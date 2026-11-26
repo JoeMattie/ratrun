@@ -1311,6 +1311,21 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
             "Level-up card · any floor",
             "Subject R-47 spits molten globs upward and forward. Each landing +             splashes and leaves a glowing pool that burns anything standing in it. +             The core sample was swallowed.",
         ),
+        WeaponKind::GlassBead => (
+            "Level-up card · any floor",
+            "One bead skips off the walls. From rank three, a second follows \
+             0.12s later. It was in the drain. It still rolls.",
+        ),
+        WeaponKind::PlumbBob => (
+            "Level-up card · any floor",
+            "The weight swings across 150 degrees and comes back. From rank four, \
+             the chain reaches 42px. Hung to find the true floor.",
+        ),
+        WeaponKind::HoldPoint => (
+            "Level-up card · any floor",
+            "Stand still to charge a circle that knocks foes back. Moving early \
+             cracks it. Growth Serum suppresses it. Procedure says do not move.",
+        ),
     }
 }
 
@@ -1393,6 +1408,20 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
         WeaponKind::LavaBreath => (
             "Chest · Lava Breath L5 + Long Fuse",
             "Each volley leaves a larger pool where you just stood. Touching pools +             join and combine their remaining burn time. Pressure release was logged.",
+        ),
+        WeaponKind::GlassBead => (
+            "Chest · Glass Bead L5 + Lens Cap",
+            "The fourth bounce bursts for half damage within 16px. The last mark was wider.",
+        ),
+        WeaponKind::PlumbBob => (
+            "Chest · Plumb Bob L5 + Counterweight",
+            "At the end of the swing, the weight rolls 48px off the chain and \
+             reels back. The weight was let out.",
+        ),
+        WeaponKind::HoldPoint => (
+            "Chest · Hold Point L5 + Thick Hide",
+            "The fired circle stays for 1.4s. The horde inside moves at 45% speed. \
+             The procedure was extended.",
         ),
     }
 }
@@ -2088,7 +2117,11 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
             cycle.push_str(" · ");
         }
         damage.push_str(&format!("{:.0}", w.damage()));
-        cycle.push_str(&format!("{:.1}", w.cooldown()));
+        if k == WeaponKind::GlassBead {
+            cycle.push_str(&format!("{:.2}", w.cooldown()));
+        } else {
+            cycle.push_str(&format!("{:.1}", w.cooldown()));
+        }
     }
     f.push(
         "KIND",
@@ -2101,7 +2134,11 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
         },
     );
     f.push("DAMAGE 1→5", damage);
-    f.push("CYCLE 1→5", format!("{cycle}s"));
+    if matches!(k, WeaponKind::PlumbBob | WeaponKind::HoldPoint) {
+        f.push("COOLDOWN", format!("{}s", k.base_cooldown()));
+    } else {
+        f.push("CYCLE 1→5", format!("{cycle}s"));
+    }
     if k == WeaponKind::LavaBreath {
         use crate::game::weapon::{LAVA_DPS, LAVA_LANDINGS, LAVA_POOL_LIFE, LAVA_POOL_RADIUS};
         let globs = LAVA_LANDINGS.map(|row| row.len().to_string()).join(" · ");
@@ -2109,6 +2146,12 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
         f.push("GLOBS 1→5", globs);
         f.push("POOL DPS", dps);
         f.push("POOL", format!("{LAVA_POOL_RADIUS}px radius · {LAVA_POOL_LIFE}s"));
+    }
+    match k {
+        WeaponKind::GlassBead => f.push("FLIGHT", "3 bounces · up to 1.8s"),
+        WeaponKind::PlumbBob => f.push("SWING", "0.55s each way"),
+        WeaponKind::HoldPoint => f.push("CHARGE", "0.45s still · 28px radius"),
+        _ => {}
     }
     f.push(
         "AT MAX",
@@ -2178,14 +2221,15 @@ fn passive_facts(k: PassiveKind, f: &mut Facts) {
         .filter(|w| w.evolution().is_some_and(|e| e.passive == k))
         .map(|w| w.name())
         .collect();
-    f.push(
-        "EVOLVES",
-        if partners.is_empty() {
-            "no evolution — raw stats".to_string()
-        } else {
-            partners.join(", ")
-        },
-    );
+    let names = partners.join(", ");
+    if partners.is_empty() {
+        f.push("EVOLVES", "no evolution — raw stats");
+    } else if names.chars().count() <= FACT_VALUE_COLS {
+        f.push("EVOLVES", names);
+    } else {
+        f.push("EVOLVES", partners[..2].join(", "));
+        f.push("AND", partners[2..].join(", "));
+    }
     f.push(
         "SLOT",
         format!(
