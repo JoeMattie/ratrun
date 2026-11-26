@@ -103,6 +103,19 @@ pub fn thickness(item: &ForeItem) -> f32 {
     base_thickness(item.kind) * item.scale.max(0.25)
 }
 
+/// Raster rows allowed by the cross-axis clip shared by both planes.
+pub(crate) fn cross_samples(item: &ForeItem) -> std::ops::Range<i32> {
+    let th = thickness(item);
+    let ht = th * 0.5;
+    let centre = cross_centre(th);
+    ((centre - ht).floor() as i32 + 1)..(centre + ht).ceil() as i32
+}
+
+fn cross_centre(th: f32) -> f32 {
+    // Align sample centres with the rounded art thickness.
+    if (th.round() as i32) & 1 == 0 { -0.5 } else { 0.0 }
+}
+
 /// Draw one foreground band into `pb`: soft floor shadow first (via [`shadow`]
 /// around `d.shadow_cross`), then the overhead silhouette body (via [`blend`]
 /// around `d.screen_cross`).
@@ -119,11 +132,7 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
     let ht = th * 0.5;
     // Align integer pixel centres to the continuous [-ht, +ht] interval so the
     // drawn cross-axis span matches `th.round()` (error <= 0.5 art px for all th).
-    let v_c = if (th.round() as i32) & 1 == 0 {
-        -0.5
-    } else {
-        0.0
-    };
+    let v_c = cross_centre(th);
     let half_i = (ht.ceil() as i32 + 1).min((MAX_V as i32 / 2) - 1);
     let dv0 = -half_i;
     let vh = ((half_i * 2 + 1) as usize).min(MAX_V);
