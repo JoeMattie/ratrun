@@ -61,6 +61,10 @@ pub(super) mod strength {
     pub const MOTES: f32 = 1.0;
     /// Caustics (`motes`).
     pub const CAUSTICS: f32 = 0.5;
+    /// Standing water (`water`): glints, lamp mirrors and body mirrors. The
+    /// master of every constant at the top of `water.rs`; 0 hands the water
+    /// back to `specular` and `softshadow::reflections` exactly as before.
+    pub const WATER: f32 = 1.0;
     /// The overhead light's ground shadow: darkening at the shadow's core
     /// (absolute, 0.30 = 30 %; the owner asked for "somewhat", 30–40 %).
     pub const OVERHEAD_DARKEN: f32 = 0.42;

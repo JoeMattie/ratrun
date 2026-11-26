@@ -19,6 +19,11 @@ use super::level::{Puddle, Theme};
 /// Lifetime of a puddle ripple ring, in seconds.
 pub const RIPPLE_LIFE: f32 = 0.45;
 
+/// With the lighting effects on (`glossy`), the unlit water is this much darker
+/// than the plain look: a dark mirror the real glints and reflections of
+/// `render::lighting::water` stand out from. 0.12 = 12 % deeper.
+pub const GLOSS_DEEPEN: f32 = 0.12;
+
 /// Held step rate for surface shimmer (4 Hz: still frames repaint rarely, and
 /// fewer than 3 % of a puddle's pixels change on any step boundary).
 const SHIMMER_HZ: f32 = 4.0;
@@ -131,6 +136,24 @@ pub fn draw_puddle_among(
     elapsed: f32,
     theme: Theme,
 ) {
+    draw_puddle_among_with(pb, puddle, neighbours, cam, elapsed, theme, false);
+}
+
+/// [`draw_puddle_among`] with the look chosen: `glossy` is the dark-mirror
+/// base the lighting effects' water stage (`render::lighting::water`) lights.
+/// It deepens the sheet by [`GLOSS_DEEPEN`] and leaves out the painted 4 Hz
+/// shimmer glints and the still wavelet dashes, which would fight the real
+/// glints; the waterline rim, the meniscus and the floating specks stay.
+/// `glossy == false` is the previous look exactly.
+pub fn draw_puddle_among_with(
+    pb: &mut PixelBuffer,
+    puddle: &Puddle,
+    neighbours: &[Puddle],
+    cam: Vec2,
+    elapsed: f32,
+    theme: Theme,
+    glossy: bool,
+) {
     if pb.w == 0 || pb.h == 0 || puddle.rx <= 0.0 || puddle.ry <= 0.0 {
         return;
     }
@@ -199,6 +222,9 @@ pub fn draw_puddle_among(
             } else {
                 let dark_bg = scale(bg, 1.0 - (1.0 - style.darken) * depth);
                 let mut c = mix(dark_bg, style.tint, style.body_alpha * (0.28 + 0.72 * depth));
+                if glossy {
+                    c = scale(c, 1.0 - GLOSS_DEEPEN * depth);
+                }
 
                 if depth <= 0.19 {
                     // 1-px darker waterline rim right at the wet meniscus.
@@ -232,7 +258,8 @@ pub fn draw_puddle_among(
                 let px_off = ((ch >> 3) % 7) as i32;
                 let py_off = ((ch >> 7) % 5) as i32;
                 let phase = (ch >> 11) & 7;
-                if oy == py_off
+                if !glossy
+                    && oy == py_off
                     && (ox == px_off || ox == px_off + 1)
                     && (step.wrapping_add(phase) & 7) == 0
                 {
@@ -241,7 +268,7 @@ pub fn draw_puddle_among(
                 // Still wavelets: a faint 3 px dash in one cell of three, the
                 // surface texture that tells a sheet of water wider than the
                 // view from the dry stone beside it. Never animated.
-                if !already_wet && (ch >> 16).is_multiple_of(3) {
+                if !glossy && !already_wet && (ch >> 16).is_multiple_of(3) {
                     let wy_off = ((ch >> 20) % 6) as i32;
                     let wx_off = ((ch >> 24) % 7) as i32;
                     if oy == wy_off && (wx_off..wx_off + 3).contains(&ox) {
@@ -337,6 +364,27 @@ fn emit_ripple_quad(pb: &mut PixelBuffer, cx: i32, cy: i32, x: i32, y: i32, alph
     }
 }
 
+/// A ripple's ring radii `(rx, ry)` in px at `age` seconds, or `None` once it
+/// has died: the ellipse [`draw_ripple`] draws, shared with the lighting's
+/// water stage so its glints ride the same ring.
+pub fn ripple_radii(age: f32, big: bool) -> Option<(f32, f32)> {
+    if !age.is_finite() || age < 0.0 || age >= RIPPLE_LIFE {
+        return None;
+    }
+    Some(ripple_radii_at((age / RIPPLE_LIFE).clamp(0.0, 1.0), big))
+}
+
+#[inline]
+fn ripple_radii_at(t: f32, big: bool) -> (f32, f32) {
+    let ease = 1.0 - (1.0 - t) * (1.0 - t);
+    let rx = if big {
+        4.0 + 12.0 * ease
+    } else {
+        2.0 + 7.0 * ease
+    };
+    (rx, (rx * 0.5).max(1.0))
+}
+
 /// Paint an expanding 1-px elliptical water ripple (2:1 wider than tall) over
 /// [`RIPPLE_LIFE`] seconds (0.45 s), fading as it expands from radius 2→9 px
 /// (`big`: 4→16 px plus three tiny arcing splash droplets at the start).
@@ -346,13 +394,7 @@ pub fn draw_ripple(pb: &mut PixelBuffer, pos_screen: (i32, i32), age: f32, big: 
     }
     let (cx, cy) = pos_screen;
     let t = (age / RIPPLE_LIFE).clamp(0.0, 1.0);
-    let ease = 1.0 - (1.0 - t) * (1.0 - t);
-    let rx = if big {
-        4.0 + 12.0 * ease
-    } else {
-        2.0 + 7.0 * ease
-    };
-    let ry = (rx * 0.5).max(1.0);
+    let (rx, ry) = ripple_radii_at(t, big);
     let base_alpha = (1.0 - t) * (1.0 - 0.30 * t) * if big { 0.68 } else { 0.56 };
     if base_alpha <= 0.01 {
         return;
@@ -520,6 +562,40 @@ mod tests {
             changed * 100 < inside * 3,
             "shimmer changed {changed}/{inside} px (> 3% budget)"
         );
+    }
+
+    #[test]
+    fn the_glossy_sheet_is_darker_and_holds_still_across_steps() {
+        let puddle = sample_puddle();
+        let floor_col: Rgb = (60, 66, 64);
+        let draw = |glossy: bool, elapsed: f32| {
+            let mut pb = PixelBuffer::new(160, 100);
+            pb.clear(floor_col);
+            draw_puddle_among_with(&mut pb, &puddle, &[], Vec2::ZERO, elapsed, Theme::Sewer, glossy);
+            pb
+        };
+        let plain = draw(false, 1.0);
+        let glossy = draw(true, 1.0);
+        let centre = (puddle.pos.x as usize, puddle.pos.y as usize);
+        let lum = |c: Rgb| u32::from(c.0) + u32::from(c.1) + u32::from(c.2);
+        assert!(lum(glossy.pixel_at(centre.0, centre.1)) < lum(plain.pixel_at(centre.0, centre.1)));
+        // No painted shimmer: the glossy sheet does not change across steps.
+        for elapsed in [1.25, 1.5, 2.0, 3.75] {
+            assert_eq!(glossy.pixels(), draw(true, elapsed).pixels(), "glossy at {elapsed}");
+        }
+        // The plain look is unchanged by the new path.
+        let mut old = PixelBuffer::new(160, 100);
+        old.clear(floor_col);
+        draw_puddle(&mut old, &puddle, Vec2::ZERO, 1.0, Theme::Sewer);
+        assert_eq!(old.pixels(), plain.pixels());
+    }
+
+    #[test]
+    fn ripple_radii_match_the_drawn_ring_and_end_with_its_life() {
+        assert_eq!(ripple_radii(0.0, false), Some((2.0, 1.0)));
+        assert_eq!(ripple_radii(0.0, true), Some((4.0, 2.0)));
+        assert_eq!(ripple_radii(RIPPLE_LIFE, false), None);
+        assert_eq!(ripple_radii(-0.1, true), None);
     }
 
     #[test]

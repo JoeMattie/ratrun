@@ -49,7 +49,7 @@
 use super::fx::{self, Canvas, FxFrame, FxLight, LightInfo, LightTag, Normal, SampleHit, ShadowQuery};
 use super::shadow::{Body, Geometry, ShadowProfile, Surface};
 use super::softshadow::SoftProfile;
-use super::{air, motes, overhead, softshadow, specular, surface, upsample};
+use super::{air, motes, overhead, softshadow, specular, surface, upsample, water};
 use super::{fixtures, LightScene, ThemeAmbient};
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -1065,8 +1065,22 @@ impl LightMap {
                 if !fx::skip("spec") {
                     specular::apply(&self.grid, &mut canvas, &self.normals, &frame);
                 }
+                // Water is `water.rs`'s while it owns it: the streak skips it.
+                let own_water = water::owns_water(scene.mode);
                 if !fx::skip("reflect") {
-                    softshadow::reflections(&self.grid, &mut canvas, &self.normals, &frame);
+                    softshadow::reflections_with(
+                        &self.grid,
+                        &mut canvas,
+                        &self.normals,
+                        &frame,
+                        own_water,
+                    );
+                }
+                // Standing water: body mirrors, lamp mirrors, glints.
+                if own_water {
+                    let mut ripples = [water::WaterRipple::NONE; water::MAX_RIPPLES];
+                    let n = water::gather_ripples(scene.ecs, frame.cam, &mut ripples);
+                    water::apply(&self.grid, &mut canvas, &frame, &ripples[..n]);
                 }
                 if !fx::skip("air") {
                     air::composite(&self.grid, &mut canvas, &frame);
