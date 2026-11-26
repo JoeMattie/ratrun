@@ -9,7 +9,6 @@ use bevy_ecs::resource::Resource;
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 
-use crate::game::art_boss_cat::SWIPE_DAMAGE;
 use crate::game::ecs::systems::{boss::BossKind, miniboss, player::DASH_SECS};
 use crate::game::{director as d, enemy::EnemyKind, gem, loadout, player, shop, weapon::WeaponKind};
 
@@ -35,14 +34,14 @@ macro_rules! section {
 }
 
 section!(Player {
-    max_hp: f32 = 130.0; "Starting maximum health (HP)",
-    regen: f32 = 0.4; "Starting regeneration (HP/s)",
+    max_hp: f32 = 158.954; "Starting maximum health (HP)",
+    regen: f32 = 0.46474266; "Starting regeneration (HP/s)",
     move_speed: f32 = 58.0; "Starting movement speed (world px/s)",
     armor: f32 = 0.0; "Starting flat damage reduction (HP per hit)",
     dash_cooldown: f32 = 2.0; "Starting dash cooldown (s)",
     dash_duration: f32 = DASH_SECS; "Uncharged dash travel duration (s)",
-    hit_iframes: f32 = 0.9; "Immunity after a projectile, boss or hazard hit (s)",
-    contact_iframes: f32 = 0.65; "Immunity after ordinary enemy contact (s)",
+    hit_iframes: f32 = 1.189484; "Immunity after a projectile, boss or hazard hit (s)",
+    contact_iframes: f32 = 1.1170288; "Immunity after ordinary enemy contact (s)",
     magnet_radius: f32 = 22.0; "Starting pickup magnet radius (world px)",
 });
 
@@ -74,10 +73,10 @@ section!(Director {
     elite_appointment_gap: f32 = d::ELITE_APPOINTMENT_GAP; "Quiet period around each named miniboss arrival (s on either side)",
     curve_speed: f32 = 1.0; "Curve seconds advanced per simulation second",
     build_hp: [(f32, f32); 7] = d::BUILD_HP; "Build HP correction knots [curve seconds, multiplier]",
-    build_hp_level: [f32; 4] = d::BUILD_HP_LEVEL; "Build HP correction multipliers by campaign sector",
+    build_hp_level: [f32; 4] = [0.6262416, 2.6255746, 3.595_260_1, 2.2739563]; "Build HP correction multipliers by campaign sector",
     level_hp_extra: [f32; 4] = d::LEVEL_HP_EXTRA; "Horde-only HP multipliers reached at the boss by sector",
     level_hp_extra_after: f32 = d::LEVEL_HP_EXTRA_AFTER; "Horde-only HP ramp grace period (s)",
-    level_damage_top: [f32; 4] = d::LEVEL_DAMAGE_TOP; "Horde contact damage multipliers reached at the boss by sector",
+    level_damage_top: [f32; 4] = [0.61121884, 1.0319662, 1.2344486, 2.0158477]; "Horde contact damage multipliers reached at the boss by sector",
     level_speed_top: [f32; 4] = d::LEVEL_SPEED_TOP; "Horde speed multipliers reached at the boss by sector",
     level_bonus_hp: [(f32, f32); 8] = d::LEVEL_BONUS_HP; "Character-level HP correction knots [curve seconds, multiplier]",
     horde_speed_top: f32 = d::HORDE_SPEED_TOP; "Top ordinary movement multiplier from the global speed ramp",
@@ -87,20 +86,20 @@ section!(Director {
     cleanup_pulse: usize = d::CLEANUP_PULSE; "Bodies per cleanup pulse",
     cleanup_live_budget: usize = d::CLEANUP_LIVE_BUDGET; "Live ordinary body budget during the boss fight",
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    sectors: BTreeMap<String, DirectorSector> = BTreeMap::new(); "Optional overrides by campaign sector (1–4, practice uses 1)",
-    pressure_beats: bool = false; "Enable the buildup pressure beats and the Sewer opening grace",
-    pressure_starts: [f32; 2] = [205.0, 675.0]; "Surge start times in simulation seconds",
-    pressure_lengths: [f32; 2] = [125.0, 125.0]; "Surge lengths in seconds",
-    pressure_recovery_lengths: [f32; 2] = [220.0, 90.0]; "Recovery lengths in seconds, immediately after each surge",
+    sectors: BTreeMap<String, DirectorSector> = director_sector_defaults(); "Overrides by campaign sector (1–4, practice uses 1)",
+    pressure_beats: bool = true; "Enable the buildup pressure beats and the Sewer opening grace",
+    pressure_starts: [f32; 2] = [198.854, 694.324]; "Surge start times in simulation seconds",
+    pressure_lengths: [f32; 2] = [104.285, 101.29]; "Surge lengths in seconds",
+    pressure_recovery_lengths: [f32; 2] = [268.076, 68.965]; "Recovery lengths in seconds, immediately after each surge",
     pressure_warning_lead: f32 = 5.0; "Seconds between each warning and surge",
-    pressure_rate_bonus: f32 = 0.4; "Extra ordinary pulse frequency during a surge, balanced against its recovery",
-    pressure_budget_bonus: f32 = 0.35; "Extra live ordinary budget as a fraction during a surge",
-    pressure_contact_bonus: f32 = 0.4; "Extra ordinary contact damage as a fraction during a surge",
-    pressure_recovery_budget_cut: f32 = 0.25; "Fraction of the live ordinary budget removed during recovery",
-    pressure_recovery_heal: f32 = 0.25; "Fraction of non-heal rare finds converted to Medkits during recovery",
-    pressure_sector_scale: [f32; 4] = [0.65, 1.0, 1.15, 1.25]; "Beat strength by campaign sector. Zero skips beats and warnings",
-    pressure_sewer_opening_secs: f32 = 150.0; "Length of Sewer opening contact grace in seconds",
-    pressure_sewer_opening_cut: f32 = 0.35; "Fraction of ordinary contact damage removed during Sewer opening grace",
+    pressure_rate_bonus: f32 = 0.24262717; "Extra ordinary pulse frequency during a surge, balanced against its recovery",
+    pressure_budget_bonus: f32 = 0.33028942; "Extra live ordinary budget as a fraction during a surge",
+    pressure_contact_bonus: f32 = 1.1266887; "Extra ordinary contact damage as a fraction during a surge",
+    pressure_recovery_budget_cut: f32 = 0.19937819; "Fraction of the live ordinary budget removed during recovery",
+    pressure_recovery_heal: f32 = 0.67160283; "Fraction of non-heal rare finds converted to Medkits during recovery",
+    pressure_sector_scale: [f32; 4] = [0.4145341, 1.1853494, 1.3945287, 1.603708]; "Beat strength by campaign sector. Zero skips beats and warnings",
+    pressure_sewer_opening_secs: f32 = 167.557_22; "Length of Sewer opening contact grace in seconds",
+    pressure_sewer_opening_cut: f32 = 0.26234644; "Fraction of ordinary contact damage removed during Sewer opening grace",
     power_scaling: bool = false; "Adjust newly spawned ordinary and elite enemy HP to recent weapon damage",
     power_hp_exponent: f32 = 0.45; "Raise the measured to expected damage ratio to this power",
     power_hp_floor: f32 = 0.7; "Minimum power-based HP multiplier",
@@ -117,7 +116,7 @@ section!(DirectorSector {
     #[serde(skip_serializing_if = "Option::is_none")]
     bodies_per_second: Option<[(f32, f32); 7]> = None; "Spawn-rate knots used for pulse size and elite cadence [curve seconds, bodies/s]",
     #[serde(skip_serializing_if = "Option::is_none")]
-    spawn_interval: Option<[(f32, f32); 7]> = None; "Base pulse interval knots [curve seconds, seconds]. Omit to use max(0.35, 1.6 - curve seconds / 900)",
+    spawn_interval: Option<[(f32, f32); 7]> = None; "Base pulse interval knots [curve seconds, seconds]",
     #[serde(skip_serializing_if = "Option::is_none")]
     elite_start: Option<f32> = None; "Earliest timed elite arrival (curve seconds)",
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +124,64 @@ section!(DirectorSector {
     #[serde(skip_serializing_if = "Option::is_none")]
     elite_interval_mult: Option<f32> = None; "Multiplier on the interval between timed elite arrivals, replacing the shared multiplier",
 });
+
+fn director_sector_defaults() -> BTreeMap<String, DirectorSector> {
+    let rows = [
+        DirectorSector {
+            live_budget: Some([
+                (0.0, 15), (60.0, 35), (180.0, 59), (360.0, 95),
+                (540.0, 124), (720.0, 152), (900.0, 152),
+            ]),
+            spawn_interval: Some([
+                (0.0, 1.7921361), (60.0, 1.717_463_7), (180.0, 1.568_119_2),
+                (360.0, 1.3441021), (540.0, 1.1200851), (720.0, 0.8960681),
+                (900.0, 0.672_051_1),
+            ]),
+            elite_interval_mult: Some(1.2033988),
+            ..DirectorSector::default()
+        },
+        DirectorSector {
+            live_budget: Some([
+                (0.0, 23), (60.0, 54), (180.0, 93), (360.0, 148),
+                (540.0, 193), (720.0, 239), (900.0, 239),
+            ]),
+            spawn_interval: Some([
+                (0.0, 2.186611), (60.0, 2.0955021), (180.0, 1.9132845),
+                (360.0, 1.6399582), (540.0, 1.366_631_9), (720.0, 1.093_305_5),
+                (900.0, 0.8199791),
+            ]),
+            elite_interval_mult: Some(1.3331294),
+            ..DirectorSector::default()
+        },
+        DirectorSector {
+            live_budget: Some([
+                (0.0, 24), (60.0, 55), (180.0, 94), (360.0, 150),
+                (540.0, 196), (720.0, 242), (900.0, 242),
+            ]),
+            spawn_interval: Some([
+                (0.0, 1.2603316), (60.0, 1.2078178), (180.0, 1.1027902),
+                (360.0, 0.9452487), (540.0, 0.78770727), (720.0, 0.6301658),
+                (900.0, 0.47262436),
+            ]),
+            elite_interval_mult: Some(1.336299),
+            ..DirectorSector::default()
+        },
+        DirectorSector {
+            live_budget: Some([
+                (0.0, 23), (60.0, 53), (180.0, 91), (360.0, 146),
+                (540.0, 190), (720.0, 234), (900.0, 234),
+            ]),
+            spawn_interval: Some([
+                (0.0, 1.3493907), (60.0, 1.293_166_2), (180.0, 1.1807169),
+                (360.0, 1.012043), (540.0, 0.8433692), (720.0, 0.6746954),
+                (900.0, 0.5060215),
+            ]),
+            elite_interval_mult: Some(1.3003603),
+            ..DirectorSector::default()
+        },
+    ];
+    SECTOR_KEYS.into_iter().map(str::to_owned).zip(rows).collect()
+}
 
 section!(Enemy {
     hp: f32 = 1.0; "Base HP before campaign and elite scaling",
@@ -138,7 +195,7 @@ section!(Enemy {
 section!(Enemies {
     hp_mult: f32 = 1.0; "Global ordinary enemy HP multiplier",
     contact_damage_mult: f32 = 1.0; "Global ordinary enemy contact damage multiplier",
-    speed_mult: f32 = 1.0; "Global ordinary enemy movement speed multiplier",
+    speed_mult: f32 = 0.85838351; "Global ordinary enemy movement speed multiplier",
     kinds: BTreeMap<EnemyKind, Enemy> = enemy_defaults(); "Per-kind ordinary enemy stats",
 });
 
@@ -156,9 +213,9 @@ section!(Boss {
     first_sector_hp_scale: f32 = 1.0; "HP multiplier on sector-one difficulty (including bare practice)",
     contact_damage_mult: f32 = 1.0; "Multiplier on grounded contact damage in every attack state",
     #[serde(skip_serializing_if = "Option::is_none")]
-    attack_damage_mult: Option<f32> = None; "Damage multiplier on timed boss hazards (default 1.0)",
+    attack_damage_mult: Option<f32> = None; "Damage multiplier on timed boss hazards",
     #[serde(skip_serializing_if = "Option::is_none")]
-    tell_time_mult: Option<f32> = None; "Multiplier on timed hazard warnings and the Cat's raised-paw tell (default 1.0)",
+    tell_time_mult: Option<f32> = None; "Multiplier on timed hazard warnings and the Cat's raised-paw tell",
     #[serde(skip_serializing_if = "Option::is_none")]
     swipe_damage: Option<f32> = None; "Cat only: base swipe hazard damage before attack_damage_mult (HP before armor)",
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,8 +225,8 @@ section!(Boss {
 });
 
 section!(Bosses {
-    hp_mult: f32 = 1.0; "Global named boss HP multiplier",
-    build_level: [f32; 4] = d::BOSS_BUILD_LEVEL; "Boss-only build HP multipliers by campaign sector",
+    hp_mult: f32 = 0.76265487; "Global named boss HP multiplier",
+    build_level: [f32; 4] = [0.9580967, 0.65357122, 0.380501, 0.77749956]; "Boss-only build HP multipliers by campaign sector",
     contact_damage_mult: f32 = 1.0; "Global named boss grounded contact damage multiplier",
     kinds: BTreeMap<BossKind, Boss> = boss_defaults(); "Per-kind named boss stats",
 });
@@ -215,12 +272,23 @@ fn enemy_defaults() -> BTreeMap<EnemyKind, Enemy> {
 }
 
 fn boss_defaults() -> BTreeMap<BossKind, Boss> {
-    BossKind::all().into_iter().map(|kind| (kind, Boss {
-        base_hp: kind.base_hp(),
-        hp_scale: kind.hp_scale(),
-        first_sector_hp_scale: kind.hp_scale_for(0),
-        ..Boss::default()
-    })).collect()
+    BossKind::all().into_iter().map(|kind| {
+        let rebalanced_hazards = matches!(
+            kind,
+            BossKind::Cat | BossKind::HorseshoeCrab | BossKind::Broom | BossKind::MegaRat
+                | BossKind::Mower | BossKind::Cobra | BossKind::Magpie | BossKind::Hawk
+        );
+        (kind, Boss {
+            base_hp: kind.base_hp(),
+            hp_scale: kind.hp_scale(),
+            first_sector_hp_scale: kind.hp_scale_for(0),
+            attack_damage_mult: rebalanced_hazards.then_some(1.1779899),
+            tell_time_mult: rebalanced_hazards.then_some(1.333_314_4),
+            swipe_damage: (kind == BossKind::Cat).then_some(17.509764),
+            swipe_windup_mult: (kind == BossKind::Cat).then_some(0.9790898),
+            ..Boss::default()
+        })
+    }).collect()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -244,6 +312,18 @@ pub struct RunTuning {
 }
 
 impl RunTuning {
+    #[cfg(test)]
+    pub(crate) fn with_base_boss_hazards(kind: BossKind) -> Self {
+        // Controller tests pin the art's unscaled hazard timing and damage.
+        let mut values = Tuning::default();
+        let boss = values.bosses.kinds.get_mut(&kind).expect("boss tuning row");
+        boss.attack_damage_mult = None;
+        boss.tell_time_mult = None;
+        boss.swipe_damage = None;
+        boss.swipe_windup_mult = None;
+        Self::new(values)
+    }
+
     pub fn new(values: Tuning) -> Self {
         let changed = values != Tuning::default();
         Self { values: Arc::new(values), changed }
@@ -317,46 +397,37 @@ impl Tuning {
     fn schema() -> Self {
         let mut schema = Self::default();
         let director = &mut schema.director;
-        let row = DirectorSector {
-            live_budget: Some(director.live_budget),
-            bodies_per_second: Some(director.bodies_per_second),
-            spawn_interval: Some(director.bodies_per_second.map(|(time, _)| {
-                (time, d::base_spawn_interval_at(time))
-            })),
-            elite_start: Some(director.elite_start),
-            elite_chance: Some(director.elite_chance),
-            elite_interval_mult: Some(director.elite_interval_mult),
-        };
-        director.sectors = SECTOR_KEYS.into_iter()
-            .map(|key| (key.to_owned(), row.clone())).collect();
+        for sector in director.sectors.values_mut() {
+            sector.bodies_per_second.get_or_insert(director.bodies_per_second);
+            sector.elite_start.get_or_insert(director.elite_start);
+            sector.elite_chance.get_or_insert(director.elite_chance);
+        }
         for boss in schema.bosses.kinds.values_mut() {
-            boss.attack_damage_mult = Some(1.0);
-            boss.tell_time_mult = Some(1.0);
+            boss.attack_damage_mult.get_or_insert(1.0);
+            boss.tell_time_mult.get_or_insert(1.0);
         }
         let cat = schema.bosses.kinds.get_mut(&BossKind::Cat).expect("Cat tuning row");
-        cat.swipe_damage = Some(SWIPE_DAMAGE);
-        cat.swipe_windup_mult = Some(1.0);
         cat.swipe_chain_gap = Some(0.0);
         schema
     }
 
     fn omit_inherited_values(&mut self) {
         let Director {
-            live_budget, bodies_per_second, elite_start, elite_chance, elite_interval_mult, sectors, ..
+            bodies_per_second, elite_start, elite_chance, sectors, ..
         } = &mut self.director;
-        sectors.retain(|_, row| {
-            omit_if_default(&mut row.live_budget, *live_budget);
+        for row in sectors.values_mut() {
+            // Budget, spawn interval and elite interval have shipped sector rows.
+            // An explicit shared value there can override the shipped row.
             omit_if_default(&mut row.bodies_per_second, *bodies_per_second);
             omit_if_default(&mut row.elite_start, *elite_start);
             omit_if_default(&mut row.elite_chance, *elite_chance);
-            omit_if_default(&mut row.elite_interval_mult, *elite_interval_mult);
-            *row != DirectorSector::default()
-        });
-        for boss in self.bosses.kinds.values_mut() {
-            omit_if_default(&mut boss.attack_damage_mult, 1.0);
-            omit_if_default(&mut boss.tell_time_mult, 1.0);
-            omit_if_default(&mut boss.swipe_damage, SWIPE_DAMAGE);
-            omit_if_default(&mut boss.swipe_windup_mult, 1.0);
+        }
+        let shipped_bosses = boss_defaults();
+        for (kind, boss) in &mut self.bosses.kinds {
+            if shipped_bosses[kind].attack_damage_mult.is_none() {
+                omit_if_default(&mut boss.attack_damage_mult, 1.0);
+                omit_if_default(&mut boss.tell_time_mult, 1.0);
+            }
             omit_if_default(&mut boss.swipe_chain_gap, 0.0);
         }
     }
@@ -511,8 +582,10 @@ impl Tuning {
             write_section(&mut output, section, table, Some(base), comments);
             if let Some(sectors) = table.get("sectors").and_then(Value::as_table) {
                 for (sector, values) in sectors {
+                    let default = base["sectors"].get(sector.as_str()).and_then(Value::as_table)
+                        .expect("default sector table");
                     write_section(&mut output, &format!("{section}.sectors.{sector}"),
-                        values.as_table().expect("sector table"), None, DirectorSector::COMMENTS);
+                        values.as_table().expect("sector table"), Some(default), DirectorSector::COMMENTS);
                 }
             }
             if let Some(kinds) = table.get("kinds").and_then(Value::as_table) {
@@ -675,13 +748,16 @@ mod tests {
         ).unwrap());
         let mut baseline = World::new(Theme::Sewer, 16);
         let mut tuned = World::with_tuning(Theme::Sewer, 16, run);
-        assert_eq!(baseline.player.xp_to_next, 6);
+        assert_eq!(baseline.player.xp_to_next, 5);
         assert_eq!(tuned.player.xp_to_next, 12);
         assert_eq!(tuned.player.max_hp(), 200.0);
         let kind = EnemyKind::Pillbug;
         let standard = baseline.spawn_enemy(kind, Vec2::ZERO, 1.0);
         let hardened = tuned.spawn_enemy(kind, Vec2::ZERO, 1.0);
         assert_eq!(baseline.ecs.get::<crate::game::enemy::Enemy>(standard).unwrap().hp, kind.base_hp());
+        let speed = baseline.ecs.get::<crate::game::enemy::Enemy>(standard).unwrap().speed();
+        assert_eq!(speed, kind.speed() * baseline.tuning().enemies.speed_mult);
+        assert!(!baseline.tuning().changed);
         assert_eq!(tuned.ecs.get::<crate::game::enemy::Enemy>(hardened).unwrap().hp, kind.base_hp() * 1.5);
     }
 
@@ -689,22 +765,44 @@ mod tests {
     fn dumped_defaults_round_trip() {
         let dump = Tuning::commented_defaults();
         assert!(dump.contains("[director.sectors.4]"));
-        assert!(dump.contains("# spawn_interval = "));
-        assert!(dump.contains("# swipe_damage = "));
-        assert_eq!(Tuning::parse(&dump).unwrap(), Tuning::default());
+        assert!(dump.contains("\nspawn_interval = "));
+        assert!(dump.contains("\nswipe_damage = "));
+        for source in ["", &dump] {
+            let values = Tuning::parse(source).unwrap();
+            assert_eq!(values, Tuning::default());
+            assert!(!RunTuning::new(values).changed);
+        }
     }
 
     #[test]
     fn inherited_overrides_keep_the_shared_tuning_hash() {
-        let shared = "[director]\nelite_interval_mult = 1.5";
-        let explicit = format!("{shared}\n[director.sectors.1]\nelite_interval_mult = 1.5\n\
-            [bosses.kinds.Cat]\nattack_damage_mult = 1\ntell_time_mult = 1\n\
-            swipe_damage = {SWIPE_DAMAGE}\nswipe_windup_mult = 1\nswipe_chain_gap = 0");
+        let shared = "[director]\nelite_start = 240";
+        let explicit = format!("{shared}\n[director.sectors.1]\nelite_start = 240\n\
+            [bosses.kinds.Lantern]\nattack_damage_mult = 1\ntell_time_mult = 1\n\
+            [bosses.kinds.Cat]\nswipe_chain_gap = 0");
         let report = |source| Selection {
             run: RunTuning::new(Tuning::parse(source).unwrap()), path: None,
         }.report();
         assert_eq!(report(shared).hash, report(&explicit).hash);
         assert_eq!(report(shared).diff, report(&explicit).diff);
+    }
+
+    #[test]
+    fn explicit_neutral_values_override_shipped_sector_and_boss_settings() {
+        let values = Tuning::parse(
+            "[director.sectors.1]\nelite_interval_mult = 1\n\
+             [bosses.kinds.Cat]\nattack_damage_mult = 1\ntell_time_mult = 1\n\
+             swipe_damage = 22\nswipe_windup_mult = 1",
+        ).unwrap();
+        let selection = Selection { run: RunTuning::new(values), path: None };
+        assert!(selection.run.changed);
+        assert_eq!(selection.report().diff.keys().map(String::as_str).collect::<Vec<_>>(), [
+            "bosses.kinds.Cat.attack_damage_mult",
+            "bosses.kinds.Cat.swipe_damage",
+            "bosses.kinds.Cat.swipe_windup_mult",
+            "bosses.kinds.Cat.tell_time_mult",
+            "director.sectors.1.elite_interval_mult",
+        ]);
     }
 
     #[test]

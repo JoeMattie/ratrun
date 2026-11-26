@@ -1944,7 +1944,7 @@ mod tests {
         assert_eq!(lo.caps, SlotCaps::FULL, "the slot tracks are the racks");
         assert_eq!(lo.meta, mods);
         let nest_only = lo.stats;
-        assert_eq!(nest_only.max_hp, 130.0 + 48.0);
+        assert_eq!(nest_only.max_hp, crate::tuning::Player::default().max_hp + 48.0);
         assert_eq!(nest_only.armor, 2.0);
         assert_eq!(nest_only.damage_mult, 1.0 + 0.025 * 6.0);
 

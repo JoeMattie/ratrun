@@ -451,8 +451,9 @@ impl World {
         level_index: usize, mut level: Level, seed: u64, mut carried: Loadout,
         carried_totals: CampaignTotals, tuning: crate::tuning::RunTuning,
     ) -> World {
-        if tuning.changed {
-            carried.tuning = Some(tuning.clone());
+        let rebuild_carried = tuning.changed || carried.tuning.as_ref().is_some_and(|prior| prior.changed);
+        carried.tuning = Some(tuning.clone());
+        if rebuild_carried {
             carried.rebuild_stats();
         }
         if level_index != 0 {
@@ -476,9 +477,7 @@ impl World {
         let fog_spare = fog.empty_like();
 
         let mut ecs = EcsWorld::new();
-        if tuning.changed {
-            ecs.register_component_hooks::<Enemy>().on_add(Enemy::apply_spawn_tuning);
-        }
+        ecs.register_component_hooks::<Enemy>().on_add(Enemy::apply_spawn_tuning);
         ecs.insert_resource(tuning);
         ecs.insert_resource(NextSpawnId(0));
         ecs.insert_resource(NeighborScratch::default());
@@ -5980,12 +5979,12 @@ mod meta_tests {
     /// A fresh profile's world is untouched by the nest: 4 + 4 racks, base
     /// stats and no revive.
     #[test]
-    fn a_fresh_profile_starts_the_world_it_always_did() {
+    fn a_fresh_profile_uses_shipped_stats_without_nest_bonuses() {
         let plain = World::new(Theme::Sewer, 5);
         let explicit = with_nest(Theme::Sewer, 5, crate::meta::RunModifiers::NONE);
         assert_eq!(plain.revives_left, 0);
         assert_eq!(explicit.revives_left, 0);
-        assert_eq!(plain.player.max_hp(), 130.0);
+        assert_eq!(plain.player.max_hp(), crate::tuning::Player::default().max_hp);
         assert_eq!(plain.player.loadout.max_weapons(), 4);
         assert_eq!(plain.player.loadout.stats.gold_mult, 1.0);
         assert_eq!(plain.player.loadout.stats.luck_mult, 1.0);
@@ -6069,7 +6068,7 @@ mod meta_tests {
     fn the_nest_s_stats_are_live_on_the_player() {
         let w = with_nest(Theme::Sewer, 3, maxed());
         let stats = w.player.loadout.stats;
-        assert_eq!(w.player.max_hp(), 130.0 + 48.0);
+        assert_eq!(w.player.max_hp(), crate::tuning::Player::default().max_hp + 48.0);
         assert_eq!(stats.armor, 2.0);
         assert_eq!(stats.magnet, 22.0 * (1.0 + 0.08 * 5.0));
         assert_eq!(stats.fire_rate_mult, 1.0 + 0.02 * 6.0);

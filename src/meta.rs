@@ -1285,12 +1285,12 @@ mod tests {
         assert_eq!(mods.caps, SlotCaps::FULL);
         assert_eq!(mods.carry_bonus, MAX_CARRY_BONUS);
         assert_eq!(mods.revives, 1);
-        assert_eq!(maxed.max_hp, 130.0 + 48.0);
+        assert_eq!(maxed.max_hp, base.max_hp + 48.0);
         assert_eq!(maxed.move_speed, 58.0 * (1.0 + 0.03 * 6.0));
         assert_eq!(maxed.magnet, 22.0 * (1.0 + 0.08 * 5.0));
         assert_eq!(maxed.fire_rate_mult, 1.0 + 0.02 * 6.0);
         assert_eq!(maxed.damage_mult, 1.0 + 0.025 * 6.0);
-        assert_eq!(maxed.regen, 0.4 + 0.08 * 5.0);
+        assert_eq!(maxed.regen, base.regen + 0.08 * 5.0);
         assert_eq!(maxed.armor, 2.0);
         assert_eq!(maxed.dash_cd, 2.0 - 0.05 * 5.0);
         assert_eq!(maxed.xp_mult, 1.0 + 0.04 * 5.0);

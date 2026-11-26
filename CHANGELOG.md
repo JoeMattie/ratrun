@@ -11,6 +11,13 @@
   alternate screen in consoles that wrap immediately.
 - **Balance tuning file.** Load balance overrides with `--tuning`, or use
   `--tuning-dump` to export the shipped values. See [TUNING.md](TUNING.md).
+- **Surges.** Horde warnings precede surges at about 3:19 and 11:34 in
+  each sector. Crowds grow and hits land harder. During recovery, the
+  crowds thin and Medkits turn up more often.
+- **Rebalance.** Subject R-47 starts with more HP, recovers faster and
+  stays protected longer after a hit. Early upgrades cost less XP.
+  Contact hits are softer for the first 2:48 in the Sewers. Horde size,
+  enemy HP and attack warnings have been adjusted across the facility.
 
 ## 0.4.1 (2026-11-26)
 

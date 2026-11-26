@@ -833,7 +833,7 @@ mod tests {
 
     impl Cat {
         fn new(seed: u64) -> Self {
-            Self::with_tuning(seed, crate::tuning::RunTuning::default())
+            Self::with_tuning(seed, crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Cat))
         }
 
         fn with_tuning(seed: u64, tuning: crate::tuning::RunTuning) -> Self {
@@ -1328,7 +1328,10 @@ mod tests {
             assert_eq!(tuned.cat_state(), BossCatState::Swipe);
         }
         let chained = tuned.run_until(3, BossCatState::SwipeWindup).expect("the chain resumes");
-        assert_eq!(chained.duration, art_boss_cat::SWIPE_WINDUP_P2);
+        let cat = &tuned.w.tuning().bosses.kinds[&BossKind::Cat];
+        let windup = art_boss_cat::SWIPE_WINDUP_P2
+            * cat.swipe_windup_mult.unwrap() * cat.tell_time_mult.unwrap();
+        assert_eq!(chained.duration, windup);
         assert_eq!(chained.swipe_side, -waiting.swipe_side);
     }
 

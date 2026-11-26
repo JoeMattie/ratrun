@@ -41,10 +41,10 @@ Use the kind keys printed by the dump. Keep the same number of entries when edit
 
 ## Sector buildup
 
-Any omitted field in `[director.sectors.1]` through `[director.sectors.4]` inherits the shared director value or curve. Each curve uses seven pairs. Times are curve seconds. Practice uses sector 1 on every floor.
+Each sector ships with its own live budget, pulse interval and elite interval multiplier. Other sector settings inherit the shared director values unless overridden in `[director.sectors.1]` through `[director.sectors.4]`. The tuning dump prints the shipped rows. Each curve uses seven pairs, with times in curve seconds. Practice uses sector 1 on every floor.
 
 - `live_budget` sets the ordinary-body budget and holds each count until the next step.
-- `spawn_interval` interpolates seconds between pulses. Use strictly increasing times and positive intervals. The shared opening and spawn interval multipliers still apply. With no override, the base interval is `max(0.35, 1.6 − curve_seconds / 900)` seconds.
+- `spawn_interval` interpolates seconds between pulses. Use strictly increasing times and positive intervals. The shared opening and spawn interval multipliers still apply.
 - `bodies_per_second` interpolates the rate used to size each pulse and compute the elite interval. Pulse size uses the shared base interval, so changing `spawn_interval` changes frequency alone.
 - `elite_start`, `elite_chance` and `elite_interval_mult` replace the shared first-arrival gate, cadence knots and repeat interval multiplier. The quiet period around a miniboss appointment still applies.
 
@@ -57,9 +57,12 @@ live_budget = [[0, 18], [60, 42], [180, 72], [255, 55], [360, 70], [540, 100], [
 
 ## Pressure beats
 
-Set `pressure_beats = true` in `[director]` to try two surge and recovery
-windows per floor. The shipped setting is off. The warning leads each surge
-by `pressure_warning_lead` seconds. Set it to zero for silent starts.
+Two surges ship enabled. At about 3:19 and 11:34 on each floor, the horde
+surges for about 104 s and 101 s, followed by about 268 s and 69 s of
+recovery. The floor-specific `HORDE WARNING` callout and sound lead each
+surge by `pressure_warning_lead` (5 s). Set the lead to zero for silent
+starts. Set `pressure_beats = false` in `[director]` to disable the
+surges, recovery and Sewer opening grace.
 
 - Set the two times with `pressure_starts`, the surge lengths with
   `pressure_lengths` and the following recovery lengths with
@@ -77,8 +80,13 @@ by `pressure_warning_lead` seconds. Set it to zero for silent starts.
   `pressure_recovery_heal` biases the existing rare finds toward Medkits
   without changing the total chance of a rare find.
 - On the Sewer, `pressure_sewer_opening_secs` and
-  `pressure_sewer_opening_cut` give the rat a timed reprieve from ordinary
-  contact damage while it picks up its first cards.
+  `pressure_sewer_opening_cut` reduce ordinary contact damage by about
+  26.2% for the first 167.6 s while the rat picks up its first cards.
+
+The shipped balance also adjusts the rat's starting HP, regeneration, hit
+immunity and XP costs, plus the horde's speed, sector HP and contact ramps,
+and boss HP. The effective defaults qualify for progression with or without
+a tuning file.
 
 ## Horde power scaling
 
@@ -98,9 +106,9 @@ between `power_hp_floor` and `power_hp_ceiling`.
 
 ## Boss hazards
 
-Every boss kind accepts `attack_damage_mult` for timed hazard damage and `tell_time_mult` for the warning portion of a queued hazard. Both default to 1.0. Body contact has its own `contact_damage_mult`. A hazard keeps its footprint and the length of its active window.
+Every boss kind accepts `attack_damage_mult` for timed hazard damage and `tell_time_mult` for the warning portion of a queued hazard. The Jungle Cat, Horseshoe Crab, Broom, MegaRat, Mower, Cobra, Magpie and Hawk ship with about ×1.18 hazard damage and ×1.33 warning time. Other bosses default to ×1.0 on both. Body contact has its own `contact_damage_mult`. A hazard keeps its footprint and the length of its active window.
 
-`[bosses.kinds.Cat]` also accepts `swipe_damage` in HP before the damage multiplier and armor (default 22), `swipe_windup_mult` for the raised-paw tell in both phases (default 1.0, compounded with `tell_time_mult`), and `swipe_chain_gap` in seconds after a completed first swipe and before the second windup (default 0). The damage and time multipliers and the base swipe damage must be positive. The chain gap may be zero.
+`[bosses.kinds.Cat]` also accepts `swipe_damage` in HP before the damage multiplier and armor (about 17.51 by default), `swipe_windup_mult` for the raised-paw tell in both phases (about 0.98 by default, compounded with `tell_time_mult`), and `swipe_chain_gap` in seconds after a completed first swipe and before the second windup (default 0). The damage and time multipliers and the base swipe damage must be positive. The chain gap may be zero.
 
 ```toml
 [bosses.kinds.Cat]

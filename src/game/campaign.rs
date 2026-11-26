@@ -1117,22 +1117,13 @@ mod tests {
         assert_eq!(next.stacks(PassiveKind::Damage), 1);
         assert_eq!(next.stacks(PassiveKind::Armor), 0);
 
-        // The stats are replayed from the stacks, not copied blindly: three
-        // MaxHp picks in total would give 160 max HP, here only the kept two do.
-        assert_eq!(next.stats.max_hp, StatsDefault::MAX_HP + 2.0 * 20.0);
+        // The stats are replayed from the stacks, not copied blindly: only
+        // the two kept MaxHp stacks contribute to the new pool.
+        assert_eq!(next.stats.max_hp, crate::tuning::Player::default().max_hp + 2.0 * 20.0);
         assert_eq!(next.stats.damage_mult, 1.15);
         // Nothing else leaks through.
-        assert_eq!(next.stats.move_speed, StatsDefault::MOVE_SPEED);
+        assert_eq!(next.stats.move_speed, crate::tuning::Player::default().move_speed);
         assert_eq!(next.weapons[0].timer, Weapon::new(WeaponKind::Gnaw).timer);
-    }
-
-    /// The default `Stats` values, so the test above states its baseline.
-    struct StatsDefault;
-    impl StatsDefault {
-        const MOVE_SPEED: f32 = 58.0;
-        /// The base pool the b3-balance pass raised from 100 (contact damage
-        /// came down with it; see `Stats::default`).
-        const MAX_HP: f32 = 130.0;
     }
 
     #[test]
@@ -1153,7 +1144,7 @@ mod tests {
         assert_eq!(next.weapons.len(), 1);
         assert_eq!(next.weapons[0].kind, STARTING_WEAPON);
         assert!(next.passives.is_empty());
-        assert_eq!(next.stats.max_hp, StatsDefault::MAX_HP);
+        assert_eq!(next.stats.max_hp, crate::tuning::Player::default().max_hp);
     }
 
     #[test]
@@ -1314,10 +1305,9 @@ mod tests {
         assert_eq!(lo.stacks(PassiveKind::MaxHp), 2);
         assert_eq!(lo.stacks(PassiveKind::Damage), 1);
         // The passives were replayed onto fresh stats: full HP at level start.
-        // The base pool is 130 HP (moved 100 → 130 in the early-game balance
-        // pass) and MaxHp is +20 per stack, so two stacks are 130 + 40 = 170.
-        assert_eq!(lo.stats.max_hp, 170.0);
-        assert_eq!(next.player.hp, 170.0);
+        let expected_hp = crate::tuning::Player::default().max_hp + 40.0;
+        assert_eq!(lo.stats.max_hp, expected_hp);
+        assert_eq!(next.player.hp, expected_hp);
         // XP/level restart; the carried powerups are the progression.
         assert_eq!(next.player.level, 1);
         assert!(next.keepables().iter().any(|k| k.kind

@@ -168,6 +168,7 @@ use crate::game::art_traps::{
 };
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{self, SizeClass, TileKind};
+#[cfg(test)]
 use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
@@ -380,7 +381,7 @@ impl BossKind {
     }
 
     pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
-        self.base_hp() * self.hp_scale_for(difficulty) * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
+        self.encounter_hp(difficulty, &[], &crate::tuning::Tuning::default())
     }
 
     fn encounter_hp(self, difficulty: usize, weapons: &[Weapon], tuning: &crate::tuning::Tuning) -> f32 {
@@ -427,7 +428,7 @@ impl BossKind {
     /// Measured with `boss::tests::measure_campaign_boss_dps`
     /// (`RATRUN_BOSS_DPS=1 cargo test boss::tests::measure_campaign_boss_dps --
     /// --nocapture`): the scripted campaign (auto-pick the first card, flee/kite
-    /// script) plays each level to [`director::BOSS_TIME`], then spends 60 s
+    /// script) plays each level to [`crate::game::director::BOSS_TIME`], then spends 60 s
     /// circling the real, unkillable boss while `boss_damage_system` books
     /// every point of damage by source ([`BossDamageTally`]). The horde is
     /// present and competes for the weapons' aim, so the boss gets whatever the

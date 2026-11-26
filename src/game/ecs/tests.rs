@@ -819,7 +819,7 @@ fn magnetized_gem_reaches_the_player() {
     w.clear_gems();
     w.player.pos = Vec2::new(200.0, 200.0);
     let ppos = w.player.pos;
-    let mut g = Gem::new(ppos + Vec2::new(100.0, 0.0), 5);
+    let mut g = Gem::new(ppos + Vec2::new(100.0, 0.0), 3);
     g.magnetized = true;
     w.spawn_gem(g);
     let xp0 = w.player.xp;

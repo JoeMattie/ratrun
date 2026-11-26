@@ -311,12 +311,6 @@ pub fn enemy_bullet_hits_system(
     }
 }
 
-/// Seconds of invulnerability a landed contact hit buys (see
-/// [`contact_system`]): shorter than [`Player::take_damage`]'s 0.9 s default
-/// because contact is the one damage class the player is meant to *walk away*
-/// from, not just survive.
-const CONTACT_IFRAMES: f32 = 0.65;
-
 /// Contact damage for one enemy (legacy `resolve_contact` loop body).
 ///
 /// Pulled out of [`contact_system`] so the two iteration sources (the tick's
@@ -469,26 +463,13 @@ pub fn contact_system(
                 armor,
             );
         }
-        // Contact grace is shorter than the 0.9 s a hazard or a bullet buys.
-        // `contact_system` already lands one hit per window (the *worst*
-        // touching body's damage, not a sum), so at 0.9 s a pack of forty
-        // bodies and one skitterer deal exactly the same damage and "do not
-        // stand in the horde" has no teeth: the only way the horde could kill
-        // was attrition over minutes, and the threat a player had to read was
-        // the wall of sprites rather than the contact itself. 0.65 s (×1.4 the
-        // rate) keeps grazing cheap — one body in, out, out again, still one
-        // hit — but a rat that is actually *surrounded* is hit half again as
-        // often, which is the mistake a moving player does not make and a
-        // cornered one cannot avoid. Measured (120 runs, two seed bases):
-        // Skilled L1 68→64 %, Casual 42→29 %, Expert 84→75 % — i.e. the
-        // horde phase now filters instead of the boss fight doing all of it.
-        // The Double Lid splice's extra grace applies to a contact hit too
-        // (`take_damage` already added it to its own 0.9 s, which the line
-        // below replaces; without the term the splice did nothing against the
-        // commonest hit in the game). Zero without the splice.
-        player.iframes =
-            player.loadout.tuning.as_ref().map_or(CONTACT_IFRAMES, |t| t.player.contact_iframes)
-            + crate::game::shop::iframe_extra(&player.loadout.splices);
+        // A contact hit uses its own immunity window. Double Lid still adds
+        // its extra grace after replacing the window from take_damage.
+        let contact_iframes = player.loadout.tuning.as_ref().map_or_else(
+            || crate::tuning::Player::default().contact_iframes,
+            |t| t.player.contact_iframes,
+        );
+        player.iframes = contact_iframes + crate::game::shop::iframe_extra(&player.loadout.splices);
         let p = player.pos;
         vfx::emit_player_hurt(&mut particles, &mut rng.0, p);
         shake.amount = shake.amount.max(5.0);
@@ -607,7 +588,7 @@ mod tests {
         );
     }
 
-    /// A landed contact hit buys `CONTACT_IFRAMES`, plus the Double Lid
+    /// A landed contact hit buys the contact immunity window, plus the Double Lid
     /// splice's extra grace when the build owns it (the splice used to be
     /// overwritten by the contact window).
     #[test]
@@ -633,15 +614,16 @@ mod tests {
             w.player.iframes
         };
 
+        let base_iframes = crate::tuning::Player::default().contact_iframes;
         let plain = hit(false);
-        assert!((plain - CONTACT_IFRAMES).abs() < 1e-6, "plain window = {plain}");
+        assert!((plain - base_iframes).abs() < 1e-6, "plain window = {plain}");
         let extra = iframe_extra(&[SpliceKind::DoubleLid]);
         assert!(extra > 0.0, "Double Lid grants no extra grace");
         let lidded = hit(true);
         assert!(
-            (lidded - (CONTACT_IFRAMES + extra)).abs() < 1e-6,
+            (lidded - (base_iframes + extra)).abs() < 1e-6,
             "lidded window = {lidded}, expected {}",
-            CONTACT_IFRAMES + extra
+            base_iframes + extra
         );
     }
 

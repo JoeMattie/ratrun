@@ -262,7 +262,7 @@ pub(crate) fn level_damage_percent_with(level: u32, per_level: f32) -> u32 {
     ((mult * 100.0).round() as u32).saturating_sub(100)
 }
 
-pub const XP_BASE: f64 = 6.0;
+pub const XP_BASE: f64 = 4.84805895;
 
 /// Growth ratio of the geometric XP curve.
 ///
@@ -295,9 +295,8 @@ pub const XP_GROWTH: f64 = 1.10;
 pub const OLD_LEVELS_PER_LEVEL: u32 = 4;
 
 /// **One old level's cost**, in XP: `round(XP_BASE * XP_GROWTH^(level-1))`, with
-/// no cap. This is the fine geometric curve the whole economy was tuned
-/// against (6, 7, 7, 8, 9, 10 … 37 at level 20, 640 at level 50); batch twelve
-/// keeps it, and [`xp_for_level`] simply charges four of them at a time.
+/// no cap. The round-three balance lowers the cost of a step, and
+/// [`xp_for_level`] charges multiple steps per card after the first.
 ///
 /// It is also the measuring stick the batch reports use through
 /// [`xp_to_reach`], so the old level a run would have reached stays readable.
@@ -341,15 +340,9 @@ fn old_level_block(level: u32, tuning: &crate::tuning::Xp) -> (u32, u32) {
 
 /// XP needed to go from `level` to `level + 1`.
 ///
-/// One level costs what **four** old levels did, after a three-card opening
-/// ramp ([`OPENING_OLD_LEVELS`]): level 1 costs old level 1 (6 XP), level 2
-/// old levels 2-3 (14), level 3 old levels 4-6 (27), and from level 4 on each
-/// costs the next block of four ([`base_xp_for_level`] over old levels
-/// `4·level − 9` through `4·level − 6`: 50, 73, 106, 155, …). No old level is
-/// skipped, so reaching level `n ≥ 4` takes exactly the XP the old curve took
-/// to reach old level `4n − 9`, and the old band of ~56 picks by the boss is
-/// ~16 (`xp_to_reach(16)` is 10 254 XP and level 17 needs 15 040; a
-/// fifteen-minute floor pays about 12 300).
+/// The first three cards cost 5, 11 and 21 XP at shipped values. Later
+/// cards each charge the next four geometric steps, giving 39, 59, 85, …
+/// No step is skipped when the number of steps per card increases.
 pub fn xp_for_level(level: u32) -> u32 {
     xp_for_level_with(level, &crate::tuning::Xp::default())
 }
@@ -515,7 +508,10 @@ impl Player {
     }
 
     fn hit_iframes(&self) -> f32 {
-        self.loadout.tuning.as_ref().map_or(0.9, |t| t.player.hit_iframes)
+        self.loadout.tuning.as_ref().map_or_else(
+            || crate::tuning::Player::default().hit_iframes,
+            |t| t.player.hit_iframes,
+        )
     }
 
     /// Add XP; returns how many level-ups were triggered.
@@ -635,8 +631,9 @@ mod tests {
             p.loadout.rebuild_stats();
             p
         };
-        let long = 0.9 + crate::game::shop::iframe_extra(&spliced().loadout.splices);
-        assert!((long - 1.12).abs() < 1e-6);
+        let base_iframes = crate::tuning::Player::default().hit_iframes;
+        let long = base_iframes + 0.22;
+        assert_eq!(crate::game::shop::iframe_extra(&spliced().loadout.splices), 0.22);
 
         // A shielded hit: consumed, no damage at all (so no Hollow Bones +3),
         // and the Double Lid window opens all the same.
@@ -661,26 +658,25 @@ mod tests {
         let mut plain = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
         plain.buffs.shield = 12.0;
         assert!(plain.take_damage(10.0));
-        assert_eq!(plain.iframes, 0.9);
+        assert_eq!(plain.iframes, base_iframes);
         plain.iframes = 0.0;
         let hp = plain.hp;
         assert!(plain.take_damage(10.0));
         assert_eq!(plain.hp, hp - 10.0);
     }
 
-    /// The fine curve the whole economy is tuned against, unchanged by batch
-    /// twelve: `round(6 × 1.10^(k-1))` per old level, no cap.
+    /// Sample the shipped geometric curve at the opening and later steps.
     #[test]
     fn the_old_fine_curve_is_geometric_and_uncapped() {
-        assert_eq!(base_xp_for_level(0), 6);
-        assert_eq!(base_xp_for_level(1), 6);
-        assert_eq!(base_xp_for_level(2), 7);
-        assert_eq!(base_xp_for_level(3), 7);
-        assert_eq!(base_xp_for_level(10), 14);
-        assert_eq!(base_xp_for_level(20), 37);
-        assert_eq!(base_xp_for_level(30), 95);
-        assert_eq!(base_xp_for_level(40), 247);
-        assert_eq!(base_xp_for_level(50), 640);
+        assert_eq!(base_xp_for_level(0), 5);
+        assert_eq!(base_xp_for_level(1), 5);
+        assert_eq!(base_xp_for_level(2), 5);
+        assert_eq!(base_xp_for_level(3), 6);
+        assert_eq!(base_xp_for_level(10), 11);
+        assert_eq!(base_xp_for_level(20), 30);
+        assert_eq!(base_xp_for_level(30), 77);
+        assert_eq!(base_xp_for_level(40), 199);
+        assert_eq!(base_xp_for_level(50), 517);
         assert!(base_xp_for_level(60) > base_xp_for_level(50));
     }
 
@@ -689,15 +685,15 @@ mod tests {
     /// cards by the boss become ~16 and the long-run pace is a quarter.
     #[test]
     fn a_level_costs_four_old_levels_after_the_opening_ramp() {
-        // The opening: 6, then 7+7, then 8+9+10.
+        // The opening charges one, two, then three geometric steps.
         assert_eq!(OPENING_OLD_LEVELS, [1, 2, 3]);
-        assert_eq!(xp_for_level(0), 6);
-        assert_eq!(xp_for_level(1), 6);
-        assert_eq!(xp_for_level(2), 14);
-        assert_eq!(xp_for_level(3), 27);
+        assert_eq!(xp_for_level(0), 5);
+        assert_eq!(xp_for_level(1), 5);
+        assert_eq!(xp_for_level(2), 11);
+        assert_eq!(xp_for_level(3), 21);
 
         // Every later level is exactly the next block of four old levels, from
-        // 4·level − 9: 11+12+13+14, then 16+17+19+21, …
+        // 4·level − 9.
         for level in 4..=60 {
             let first = OLD_LEVELS_PER_LEVEL * level - 9;
             let block: u32 = (first..first + OLD_LEVELS_PER_LEVEL)
@@ -705,11 +701,11 @@ mod tests {
                 .fold(0, |a, c| a.saturating_add(c));
             assert_eq!(xp_for_level(level), block, "level {level}");
         }
-        assert_eq!(xp_for_level(4), 50);
-        assert_eq!(xp_for_level(5), 73);
-        assert_eq!(xp_for_level(10), 486);
-        assert_eq!(xp_for_level(12), 1042);
-        assert_eq!(xp_for_level(20), 21991);
+        assert_eq!(xp_for_level(4), 39);
+        assert_eq!(xp_for_level(5), 59);
+        assert_eq!(xp_for_level(10), 393);
+        assert_eq!(xp_for_level(12), 840);
+        assert_eq!(xp_for_level(20), 17770);
     }
 
     /// Cumulative anchors: no old level is skipped, so reaching new level
@@ -718,15 +714,14 @@ mod tests {
     fn xp_to_reach_is_the_old_cumulative_curve_at_a_quarter_pace() {
         assert_eq!(xp_to_reach(0), 0);
         assert_eq!(xp_to_reach(1), 0);
-        assert_eq!(xp_to_reach(2), 6, "the first card is one old level");
-        assert_eq!(xp_to_reach(3), 20);
-        assert_eq!(xp_to_reach(4), 47);
-        assert_eq!(xp_to_reach(5), 97);
-        assert_eq!(xp_to_reach(9), 657);
-        assert_eq!(xp_to_reach(11), 1476);
-        // The measured XP of a fifteen-minute floor (~12.3k) buys level 16.
-        assert_eq!(xp_to_reach(16), 10254);
-        assert_eq!(xp_to_reach(17), 15040);
+        assert_eq!(xp_to_reach(2), 5, "the first card is one old level");
+        assert_eq!(xp_to_reach(3), 16);
+        assert_eq!(xp_to_reach(4), 37);
+        assert_eq!(xp_to_reach(5), 76);
+        assert_eq!(xp_to_reach(9), 529);
+        assert_eq!(xp_to_reach(11), 1191);
+        assert_eq!(xp_to_reach(16), 8282);
+        assert_eq!(xp_to_reach(17), 12149);
         let old_reach = |old_level: u32| -> u32 {
             (1..old_level).map(base_xp_for_level).fold(0, |a, c| a.saturating_add(c))
         };

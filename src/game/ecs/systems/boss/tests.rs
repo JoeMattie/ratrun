@@ -769,7 +769,9 @@ fn the_mower_death_blast_lands_inside_the_art_radius() {
     let seed = (0..8192u64)
         .find(|s| BossKind::for_theme_seeded(BossTheme::Lab, *s) == BossKind::Mower)
         .expect("some Lab seed fields the mower");
-    let mut w = World::new(BossTheme::Lab, seed);
+    let mut w = World::with_tuning(
+        BossTheme::Lab, seed, crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Mower),
+    );
     w.level_index = 2;
     w.ecs.resource_mut::<BossDue>().due = true;
     w.begin_tick(DT, Vec2::ZERO, false);

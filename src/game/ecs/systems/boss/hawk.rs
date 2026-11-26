@@ -1106,7 +1106,9 @@ mod tests {
 
     fn hawk_world(n: usize) -> World {
         let seed = hawk_seed(n);
-        let mut w = World::new(Theme::Trailer, seed);
+        let mut w = World::with_tuning(
+            Theme::Trailer, seed, crate::tuning::RunTuning::with_base_boss_hazards(BossKind::Hawk),
+        );
         assert_eq!(
             BossKind::pool_pick(Theme::Trailer, w.level.seed),
             BossKind::Hawk,
@@ -1269,12 +1271,7 @@ mod tests {
         let mut w = hawk_world(0);
         let boss = spawn_hawk(&mut w);
         assert!(boss.hp > 0.0);
-        let expect = art::BOSS_BASE_HP
-            * BossKind::Hawk.hp_scale()
-            * crate::game::director::boss_hp_mult_for(
-                campaign::LEVEL_COUNT - 1,
-                crate::game::director::BOSS_TIME,
-            );
+        let expect = BossKind::Hawk.hp_pool(w.level_index());
         assert!((boss.max_hp - expect).abs() < 1.0, "pool {} vs {expect}", boss.max_hp);
         assert_eq!(boss.kind.body_radius(), art::BODY_RADIUS);
         assert_eq!(boss.kind.contact_damage(), art::CONTACT_DAMAGE);

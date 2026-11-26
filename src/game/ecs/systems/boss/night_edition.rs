@@ -1066,9 +1066,7 @@ mod tests {
         // `WAVE3_DESIGN.md` §12: 3,000 HP for the Printworks, times the same
         // framework scale the others use (`BossKind::hp_scale` × BOSS_POOL_SCALE
         // 4.0 × the frozen hp curve at BOSS_TIME, 2.0).
-        let expected = art::BOSS_BASE_HP
-            * BossKind::NightEdition.hp_scale()
-            * crate::game::director::boss_hp_mult_for(2, crate::game::director::BOSS_TIME);
+        let expected = BossKind::NightEdition.hp_pool(2);
         assert!(
             (boss.max_hp - expected).abs() < 1.0,
             "pool {:.0} vs {:.0}",

@@ -1035,7 +1035,9 @@ mod tests {
     }
 
     fn kitchen_world(seed: u64) -> World {
-        World::new(Theme::Kitchen, megaseed(seed))
+        World::with_tuning(
+            Theme::Kitchen, megaseed(seed), crate::tuning::RunTuning::with_base_boss_hazards(BossKind::MegaRat),
+        )
     }
 
     fn boss_of(w: &mut World) -> Option<Boss> {
@@ -1199,9 +1201,7 @@ mod tests {
         let arena = w.level.fight_rect_around(w.player.pos);
         assert!(arena.contains_world(boss.pos), "it spawns in its arena");
         // The pool is the framework's: art pool × scale × the director curve.
-        let expect = art::BOSS_BASE_HP
-            * BossKind::MegaRat.hp_scale()
-            * crate::game::director::boss_hp_mult_for(w.level_index(), crate::game::director::BOSS_TIME);
+        let expect = BossKind::MegaRat.hp_pool(w.level_index());
         assert!(
             (boss.max_hp - expect).abs() < 1.0,
             "pool {} vs {expect}",

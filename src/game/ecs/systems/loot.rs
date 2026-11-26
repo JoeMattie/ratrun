@@ -1559,7 +1559,7 @@ mod tests {
     fn magnetized_gem_reaches_the_player() {
         let mut w = World::new(Theme::Sewer, 53);
         w.player.pos = Vec2::new(200.0, 200.0);
-        let mut g = Gem::new(w.player.pos + Vec2::new(100.0, 0.0), 5);
+        let mut g = Gem::new(w.player.pos + Vec2::new(100.0, 0.0), 3);
         g.magnetized = true;
         w.spawn_gem(g);
         let xp0 = w.player.xp;
