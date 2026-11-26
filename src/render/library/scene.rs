@@ -2276,7 +2276,6 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         script.shrink = 2;
         script.zoom = if evolved { 2.0 } else { 1.6 };
         script.lean = Vec2::new(12.0, 0.0);
-        world.flat_lit = false;
     }
     if kind == WeaponKind::HoldPoint {
         script.cue = Some(arsenal_hold_cue);
