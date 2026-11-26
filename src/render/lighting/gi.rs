@@ -19,10 +19,12 @@
 //!    level)** — 8-direction horizon occlusion against nearby wall colliders
 //!    (`Solid`, `Maze`, `RatHole` piers, `Doorway` jambs, closed one-way gates,
 //!    respecting the Flatbed's open-air boundary and skipping open pits) with a
-//!    10.5 px soft falloff and a quadratic concave-corner synergy term so
-//!    inside room corners darken ~1.8× more than straight wall faces; static
-//!    prop skirts from `Level::props` scaled in radius and depth by each prop's
-//!    material height class; and inner concave creases on wall faces.
+//!    `AO_REACH_PX` (24 px) soft falloff and a quadratic concave-corner synergy
+//!    term so inside room corners darken ~1.8× more than straight wall faces; a
+//!    **wall-foot band** on the bottom `WALL_FOOT_PX` of any wall face with open
+//!    floor below it, so the junction darkens on both sides; static prop skirts
+//!    from `Level::props` scaled in radius and depth by each prop's material
+//!    height class; and inner concave creases on wall faces.
 //! 2. **Pixel-exact prop base & wall crevices** — `capture_crevices` reads the
 //!    pre-lit albedo luminance Laplacian (`mean_4 - centre`) on wall and raised
 //!    prop pixels before bump mapping embosses the art, isolating mortar lines,
@@ -33,9 +35,12 @@
 //!    bosses and Outfall swimmers), weighted away from `overhead`'s displaced
 //!    ellipse so it grounds exposed feet without doubling the overhead core.
 //! 4. **Anti-mud & byte budget** — direct lamp irradiance (`LightInfo::dom`)
-//!    partially relieves AO inside hot pools so spotlights punch into corners;
-//!    darkness is quantised to flat steps of 6/255 and open-floor lookups share
-//!    horizontal pixel pairs so terminal SGR runs stay compact.
+//!    relieves at most 18 % of AO inside hot pools (the 0.4.4 pass relieved up
+//!    to 39 %, which erased contact shadows under every lamp); darkness is
+//!    quantised to flat steps of 6/255 so terminal SGR runs stay compact.
+//!
+//! Every strength and reach above is a single constant in the owner tuning
+//! block at the top of this file (`AO_STRENGTH`, `AO_REACH_PX`).
 //!
 //! ## Global illumination (`apply_indirect`)
 //!
@@ -49,11 +54,18 @@
 //!   popping**, and wall occlusion is enforced directly on the 4 px lattice
 //!   (both midpoint-checked stride-2 coarse steps and corner-checked stride-1
 //!   fine steps refuse to cross `WALLS` samples).
+//! * **Local, coloured, brightness-gated**: a surface only re-emits bounce
+//!   while it is *brightly* lit (`GI_SEED_KNEE`..`GI_SEED_FULL` of incident
+//!   energy), so a dim floor's albedo can never tint the whole frame; what
+//!   survives is scaled by `GI_STRENGTH`, and `GI_AMBIENT_FLOOR` removes the
+//!   last uniform lift so a pixel far from any lit surface is left exactly as
+//!   `AoOnly` drew it.
 //! * **Wall participation without leaks**: lit wall faces inject their
 //!   albedo-tinted radiosity outward into adjacent front-facing floor cells
 //!   (`dot(delta, wall.facing) >= 0`), floor diffusion spreads coloured bounce
-//!   ~38 px across open floor, and exposed wall faces gather indirect light
-//!   back from the floor cells in front of them — so a red lamp-lit wall tints
+//!   `GI_REACH_PX` (~30 px) across open floor, and exposed wall faces gather
+//!   indirect light back from the floor cells in front of them — so a red
+//!   lamp-lit wall tints
 //!   nearby floor, a lava pool warms nearby walls, green droppings tint the
 //!   floor around them, sunlit Flatbed oak planks bounce warm amber into cool
 //!   cargo shadows, and Outfall's water bounces marine cyan onto sand and
@@ -160,48 +172,115 @@ pub fn from_env() -> GlobalLight {
 }
 
 // ============================================================================
-// Tunables
+// Owner tuning block — every strength and reach lives here
 // ============================================================================
+//
+// A "more" or "less" from the owner should be a one-line change in this
+// block: everything below it (caps, skirt radii, diffusion hops) is derived
+// from these five numbers.
 
-/// Wall-to-floor horizon AO reach in world pixels (soft 6–12 px falloff).
-const WALL_AO_RADIUS: f32 = 10.5;
-/// Peak static AO darkness (`0..=255`, ~43 % ceiling in deep concave corners).
-const STATIC_AO_CAP: u8 = 110;
-/// Maximum combined AO darkness (`0..=255`, ~42 %).
-const TOTAL_AO_CAP: i32 = 108;
+/// **AO strength.** Unitless master multiplier; `1.0` is the 0.4.4 depth.
+/// Scales every occlusion term at once: the 2 px wall/floor horizon field and
+/// its inside-corner synergy, the wall-foot band, prop-base skirts, mortar and
+/// crease crevices, and grounded-body foot contact. `2.2` ≈ 2.2× the 0.4.4
+/// darkness. Above about `3.0` dark pixel art starts to crush toward black.
+const AO_STRENGTH: f32 = 2.2;
+
+/// **AO reach.** World pixels: how far a wall foot, inside corner, prop base or
+/// body foot still darkens the surface beside it, measured as the distance at
+/// which that contact shadow has faded to nothing (a soft ramp, never a hard
+/// outline). `24.0` = one and a half 16 px tiles, ~2.3× the 0.4.4 `10.5`.
+const AO_REACH_PX: f32 = 24.0;
+
+/// **GI strength.** Unitless master multiplier; `1.0` is the 0.4.4 bounce.
+/// Applied to the indirect field *after* [`GI_AMBIENT_FLOOR`] is removed, so
+/// only bounce that survives the locality gate gets louder. `2.2` ≈ 2.2× on
+/// the walls and floor beside a lamp, a lava pool or the Outfall water.
+const GI_STRENGTH: f32 = 2.2;
+
+/// **GI reach.** World pixels: how far bounced light carries from the lit
+/// surface or emitter that produced it before it fades out. Drives the number
+/// of 4 px diffusion hops below (`1 × 8 px + 5 × 4 px = 28 px` at `30.0`).
+const GI_REACH_PX: f32 = 30.0;
+
+/// **GI ambient floor.** Q8.8 indirect units (`256` = one whole `mul` level,
+/// i.e. +100 % albedo) subtracted from every GI cell before [`GI_STRENGTH`].
+/// This is the uniform lift of the dark frame that is being removed: a cell
+/// dimmer than this carries no local bounce and stays untouched. `0` restores
+/// the old frame-wide lift; raise it if distant rooms still look washed, lower
+/// it if the bounce looks patchy.
+const GI_AMBIENT_FLOOR: i32 = 24;
+
+/// [`AO_STRENGTH`] in `Q8` (`256` = `1.0`) for the integer `0..=255` AO terms.
+const AO_STRENGTH_Q8: i32 = (AO_STRENGTH * 256.0) as i32;
+
+// ---- Tuning derived from the block above (moves with it) -------------------
+
+/// Wall-to-floor horizon AO reach in world pixels (= [`AO_REACH_PX`]).
+const WALL_AO_RADIUS: f32 = AO_REACH_PX;
+/// Peak static AO darkness (`0..=255`, ~67 % in the deepest concave corner).
+const STATIC_AO_CAP: u8 = 170;
+/// Maximum combined AO darkness (`0..=255`, ~69 %).
+const TOTAL_AO_CAP: i32 = 176;
+/// Height of the wall-foot band on a wall face with open floor below it, in
+/// world pixels (45 % of [`AO_REACH_PX`], comfortably under one 16 px tile).
+const WALL_FOOT_PX: f32 = AO_REACH_PX * 0.45;
+/// Peak wall-foot darkness at the floor line (`0..=255`, before strength).
+const WALL_FOOT_PEAK: f32 = 62.0;
 /// Flat quantisation step for AO darkness (`0..=255`) to preserve SGR runs.
 const AO_QUANT_STEP: i32 = 6;
 
 /// Crevice Laplacian noise floor (unlit luminance levels, `0..=255`).
 const CREVICE_NOISE: i32 = 7;
-/// Maximum crevice AO on mortar seams and recessed wall/prop joints (`~22 %`).
-const CREVICE_MAX: u8 = 56;
+/// Maximum crevice AO on mortar seams and recessed wall/prop joints (`~48 %`).
+const CREVICE_MAX: u8 = ((56 * AO_STRENGTH_Q8) >> 8) as u8;
 
 /// Grounded bodies considered for foot-contact AO per frame (nearest rat first).
 const MAX_CONTACT_BODIES: usize = 64;
-/// Peak floor contact AO on an exposed foot edge (`~16 %`).
-const BODY_FLOOR_AO_MAX: i32 = 40;
+/// Peak floor contact AO on an exposed foot edge (`~34 %`).
+const BODY_FLOOR_AO_MAX: i32 = (40 * AO_STRENGTH_Q8) >> 8;
 /// Subtle underside contact self-occlusion on the bottom 1–2 rows of grounded
-/// creature sprites (`~12 %`).
-const BODY_SPRITE_TUCK: i32 = 30;
+/// creature sprites (`~26 %`).
+const BODY_SPRITE_TUCK: i32 = (30 * AO_STRENGTH_Q8) >> 8;
+/// Extra floor-contact reach beyond a body's footprint, in world pixels.
+const BODY_REACH_PX: i32 = (AO_REACH_PX * 0.25) as i32;
 
 /// Padding around the visible 4 px light grid (in 4 px samples = `24 px`) so
 /// lit walls and pools just outside the viewport bounce smoothly into view.
 const GI_PAD: usize = 6;
 /// Coarse (`step = 2` samples = 8 px, midpoint-checked) flood iterations.
-const GI_COARSE_ITERS: usize = 2;
-/// Fine (`step = 1` sample = 4 px, corner-checked) flood iterations.
-const GI_FINE_ITERS: usize = 5;
-/// Per-step energy retention (`Q8`: `214 / 256 ≈ 0.836`).
-const GI_DECAY_Q8: i32 = 214;
-/// Master indirect gain applied to `Sample::mul` (`Q8`).
-const GI_MUL_GAIN_Q8: i32 = 124;
+const GI_COARSE_ITERS: usize = 1;
+/// Fine (`step = 1` sample = 4 px, corner-checked) flood iterations, derived
+/// so the outermost hop lands at about [`GI_REACH_PX`] (keep `GI_REACH_PX`
+/// above `8.0` so this stays positive).
+const GI_FINE_ITERS: usize = ((GI_REACH_PX / 4.0) as usize) - GI_COARSE_ITERS * 2;
+/// Per-hop energy retention (`Q8`: `200 / 256 ≈ 0.78`). Lower keeps the spill
+/// closer to the lit patch, higher spreads it further before it fades.
+const GI_DECAY_Q8: i32 = 200;
+/// Master indirect gain applied to `Sample::mul` (`Q8`), before
+/// [`GI_STRENGTH`]. Raised from the 0.4.4 `124` together with the tighter
+/// diffusion so the bounce beside a lamp is roughly twice as loud while the
+/// far field is gone.
+const GI_MUL_GAIN_Q8: i32 = 200;
+/// Ceiling on a propagated cell's `mul` contribution before the composite
+/// (`Q8.8`). High enough that a lamp pool keeps its gradient instead of
+/// flattening into one saturated plateau.
+const GI_MUL_FIELD_MAX: i32 = 340;
+/// Incident brightness (`Q8.8`, the same units [`inject_surface_bounce`]'s
+/// `inc` uses: `256` = a full-brightness 255-level channel) where a lit surface
+/// starts to re-emit bounce. Surfaces dimmer than this — a lamp's far tail,
+/// ambient-lit stone, a dark floor — emit nothing, so the room average never
+/// lifts the whole frame.
+const GI_SEED_KNEE: i32 = 96;
+/// Incident brightness at which a surface re-emits at full weight; the gate
+/// ramps linearly from [`GI_SEED_KNEE`] to here.
+const GI_SEED_FULL: i32 = 200;
 /// Share of indirect bounce carried into `Sample::add` (`Q8` of `mul` add) so
 /// dark-base floors and walls visibly shift hue toward bounced colour without
 /// washing out texture contrast.
-const GI_ADD_SHARE_Q8: i32 = 44;
+const GI_ADD_SHARE_Q8: i32 = 34;
 /// Hard ceiling on GI's additive lift (`0..=255` scale) to prevent milky haze.
-const GI_ADD_MAX: i16 = 24;
+const GI_ADD_MAX: i16 = 30;
 /// Minimum quantised `mul` increment (`Q8.8`); smaller tails are dropped.
 const GI_MIN_MUL: i32 = 6;
 /// Minimum quantised `add` increment (`Q8.8`); smaller tails are dropped.
@@ -477,7 +556,7 @@ fn push_cell_wall_rects(
     cy: i32,
     maze_cells: &[u8],
     cols: i32,
-    out: &mut [Rectf; 32],
+    out: &mut [Rectf; 64],
     len: &mut usize,
 ) {
     if cx < 0 || cy < 0 || cx >= cols || cy >= level.tiles.rows() || *len >= out.len() {
@@ -590,7 +669,7 @@ impl LevelCache {
         self.ao.resize(self.ao_w * self.ao_h, 0);
 
         if self.ao_w > 0 && self.ao_h > 0 {
-            let mut rects = [Rectf::new(0.0, 0.0, 0.0, 0.0); 32];
+            let mut rects = [Rectf::new(0.0, 0.0, 0.0, 0.0); 64];
             for cy in 0..rows {
                 for cx in 0..cols {
                     let ti = (cy * cols + cx) as usize;
@@ -599,15 +678,18 @@ impl LevelCache {
                     }
                     let own_solid = wall_tile[ti] != 0
                         && matches!(level.tiles.get(cx, cy), TileKind::Wall(WallKind::Solid));
-                    // Check 3×3 neighbourhood for both wall presence and open floor.
+                    // Check a 5×5 neighbourhood for both wall presence and open
+                    // floor: `WALL_AO_RADIUS` reaches two tiles past a face, so
+                    // the band has to be wide enough that the fade never gets
+                    // clipped at a tile boundary.
                     let mut near_wall = false;
                     let mut near_open = !own_solid;
-                    for dy in -1..=1 {
+                    for dy in -2..=2 {
                         let ny = cy + dy;
                         if ny < 0 || ny >= rows {
                             continue;
                         }
-                        for dx in -1..=1 {
+                        for dx in -2..=2 {
                             let nx = cx + dx;
                             if nx < 0 || nx >= cols {
                                 continue;
@@ -683,13 +765,38 @@ impl LevelCache {
                                 }
                             }
                         }
+                        // Wall foot: the bottom rows of a face with open floor
+                        // below it follow that floor into shadow, so the wall /
+                        // floor junction reads as contact depth at a glance
+                        // instead of the shadow living only on the floor side.
+                        if south_open {
+                            for sy in 0..8usize {
+                                let d = 16.0 - (sy as f32 * 2.0 + 1.0);
+                                if d >= WALL_FOOT_PX {
+                                    continue;
+                                }
+                                let u = 1.0 - d / WALL_FOOT_PX;
+                                let v = (u * u * WALL_FOOT_PEAK * AO_STRENGTH)
+                                    .round()
+                                    .clamp(0.0, f32::from(STATIC_AO_CAP)) as u8;
+                                if v == 0 {
+                                    continue;
+                                }
+                                for sx in 0..8usize {
+                                    let idx = (cy as usize * 8 + sy) * self.ao_w
+                                        + (cx as usize * 8 + sx);
+                                    self.ao[idx] = self.ao[idx].max(v);
+                                }
+                            }
+                        }
                         continue;
                     }
 
-                    // Open floor (or partial wall cell): gather 3×3 wall rects.
+                    // Open floor (or partial wall cell): gather the 5×5 wall rects
+                    // a `WALL_AO_RADIUS` reach can touch.
                     let mut n_rects = 0usize;
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
+                    for dy in -2..=2 {
+                        for dx in -2..=2 {
                             push_cell_wall_rects(
                                 level,
                                 cx + dx,
@@ -714,6 +821,24 @@ impl LevelCache {
                             if slice.iter().any(|r| r.contains(p)) {
                                 continue;
                             }
+                            // Only occluders that can actually reach this
+                            // sub-sample enter the 8-ray integral, keeping the
+                            // wider 5×5 gather cheap.
+                            let mut near = [Rectf::new(0.0, 0.0, 0.0, 0.0); 16];
+                            let mut n_near = 0usize;
+                            for &r in slice {
+                                if n_near >= near.len() {
+                                    break;
+                                }
+                                if point_rect_dist(p, r) < WALL_AO_RADIUS {
+                                    near[n_near] = r;
+                                    n_near += 1;
+                                }
+                            }
+                            if n_near == 0 {
+                                continue;
+                            }
+                            let slice = &near[..n_near];
                             let mut occ = 0.0f32;
                             for &dir in &DIRS_8 {
                                 let mut best = WALL_AO_RADIUS;
@@ -740,7 +865,9 @@ impl LevelCache {
                                 // Quadratic synergy makes concave L-corners and narrow
                                 // alcoves ~1.8× deeper than straight wall faces.
                                 let shaped = occ * 0.96 + occ * occ * 1.05;
-                                let val = (shaped * 132.0).round().clamp(0.0, f32::from(STATIC_AO_CAP)) as u8;
+                                let val = (shaped * 132.0 * AO_STRENGTH)
+                                    .round()
+                                    .clamp(0.0, f32::from(STATIC_AO_CAP)) as u8;
                                 let idx = ay * self.ao_w + (cx as usize * 8 + sx);
                                 self.ao[idx] = self.ao[idx].max(val);
                             }
@@ -756,8 +883,14 @@ impl LevelCache {
                 }
                 let h_class = material::height(specular::prop_pen(prop.kind)).max(1);
                 let grate_scale: f32 = if prop.kind == PropKind::Grate { 0.35 } else { 1.0 };
-                let radius = (4.0 + f32::from(h_class) * 1.2) * grate_scale.max(0.6);
-                let peak = ((16.0 + f32::from(h_class) * 9.5) * grate_scale).round();
+                // Skirts follow `AO_REACH_PX` (the 0.4.4 radius was built for a
+                // 10.5 px reach) but stay under a tile: a crate reads as
+                // grounded, not haloed.
+                let reach_scale = (AO_REACH_PX / 10.5).min(1.9);
+                let radius = (4.0 + f32::from(h_class) * 1.2) * reach_scale * grate_scale.max(0.6);
+                let peak = ((16.0 + f32::from(h_class) * 9.5) * AO_STRENGTH * grate_scale)
+                    .round()
+                    .min(f32::from(STATIC_AO_CAP));
                 let ax0 = (((prop.rect.x - radius) * 0.5).floor() as i32).clamp(0, self.ao_w as i32 - 1) as usize;
                 let ay0 = (((prop.rect.y - radius) * 0.5).floor() as i32).clamp(0, self.ao_h as i32 - 1) as usize;
                 let ax1 = (((prop.rect.right() + radius) * 0.5).ceil() as i32).clamp(0, self.ao_w as i32 - 1) as usize;
@@ -1166,8 +1299,8 @@ pub(super) fn apply_ao(
         s.row_x1.resize(h, i32::MIN);
 
         for b in &s.bodies {
-            let rx = b.half + 3;
-            let ry = (b.half * 3 / 4 + 2).max(3);
+            let rx = b.half + 3 + BODY_REACH_PX;
+            let ry = (b.half * 3 / 4 + 2 + BODY_REACH_PX * 3 / 4).max(3);
             // Foot line sits slightly towards the bottom of the sprite.
             let cy = b.sy + (b.half / 3).max(1);
             let x0 = (b.sx - rx).max(0);
@@ -1269,11 +1402,11 @@ pub(super) fn apply_ao(
                     edge
                 } else {
                     let wx = cam.0 + x as i32;
-                    // Share horizontal pairs on open untagged floor so shallow
-                    // wall-distance ramps compress cleanly in the SGR encoder.
                     let prop_h = material::height(m);
-                    let sample_wx = if !is_wall && prop_h == 0 { wx & !1 } else { wx };
-                    let s_ao = lvl.sample_ao(sample_wx, wy);
+                    // Sample every pixel: with the wider reach the ramp is long
+                    // enough that sharing horizontal pairs would read as a
+                    // column of steps rather than a soft gradient.
+                    let s_ao = lvl.sample_ao(wx, wy);
 
                     let c_ao = if has_crevice { s.crevice[i] } else { 0 };
 
@@ -1306,7 +1439,8 @@ pub(super) fn apply_ao(
                             }
                         }
                         if max_h > 0 {
-                            p_skirt = (max_h * 7 + 8).min(56);
+                            p_skirt = (((i32::from(max_h) * 7 + 8) * AO_STRENGTH_Q8) >> 8)
+                                .min(84) as u8;
                         }
                     }
 
@@ -1328,7 +1462,10 @@ pub(super) fn apply_ao(
                 // fills micro/corner occlusion so lamps read crisp rather than
                 // muddy, while ambient shadow keeps full AO depth.
                 let dom = if has_info { i32::from(grid.info[si].dom) } else { 0 };
-                let relief_q8 = 256 - ((dom.min(320) * 100) / 320);
+                // Kept small (`18 %` max) so contact shadows stay visible under
+                // a lit lamp as well as in a dim room; the 0.4.4 pass relieved
+                // up to 39 %, which erased AO inside every pool.
+                let relief_q8 = 256 - ((dom.min(320) * 46) / 320);
                 let d = (((raw_ao * relief_q8) >> 8) / AO_QUANT_STEP) * AO_QUANT_STEP;
                 if d < AO_QUANT_STEP {
                     continue;
@@ -1385,11 +1522,19 @@ fn inject_surface_bounce(
     if alb == (0, 0, 0) {
         return;
     }
-    let bounced = [
-        (inc[0] * i32::from(alb.0)) >> 8,
-        (inc[1] * i32::from(alb.1)) >> 8,
-        (inc[2] * i32::from(alb.2)) >> 8,
-    ];
+    // Locality gate: bounce comes from surfaces that are *brightly lit*, not
+    // from dim albedo that merely catches a lamp's far tail or the room
+    // ambient. Weighting by incident brightness is what stops one floor colour
+    // from tinting the whole frame: below [`GI_SEED_KNEE`] a surface re-emits
+    // nothing, above [`GI_SEED_FULL`] it re-emits in full.
+    let peak = inc[0].max(inc[1]).max(inc[2]);
+    let gate_q8 = (((peak - GI_SEED_KNEE) * 256) / (GI_SEED_FULL - GI_SEED_KNEE))
+        .clamp(0, 256);
+    if gate_q8 == 0 {
+        return;
+    }
+    let gated = |c: i32, a: u8| -> i32 { (((c * i32::from(a)) >> 8) * gate_q8) >> 8 };
+    let bounced = [gated(inc[0], alb.0), gated(inc[1], alb.1), gated(inc[2], alb.2)];
     if (bounced[0] | bounced[1] | bounced[2]) == 0 {
         return;
     }
@@ -1701,9 +1846,9 @@ fn propagate_gi(
                     ind = [ind[0] >> 2, ind[1] >> 2, ind[2] >> 2];
                 }
                 let m = [
-                    ((ind[0] * GI_MUL_GAIN_Q8) >> 8).clamp(0, 260) as u16,
-                    ((ind[1] * GI_MUL_GAIN_Q8) >> 8).clamp(0, 260) as u16,
-                    ((ind[2] * GI_MUL_GAIN_Q8) >> 8).clamp(0, 260) as u16,
+                    ((ind[0] * GI_MUL_GAIN_Q8) >> 8).clamp(0, GI_MUL_FIELD_MAX) as u16,
+                    ((ind[1] * GI_MUL_GAIN_Q8) >> 8).clamp(0, GI_MUL_FIELD_MAX) as u16,
+                    ((ind[2] * GI_MUL_GAIN_Q8) >> 8).clamp(0, GI_MUL_FIELD_MAX) as u16,
                 ];
                 if (m[0] | m[1] | m[2]) != 0 {
                     out[i] = m;
@@ -1751,7 +1896,7 @@ fn propagate_gi(
                     let calc = |s: i32, a: u8| -> u16 {
                         let avg = s / wsum;
                         let tinted = (avg * (96 + ((i32::from(a) * 160) >> 8))) >> 8;
-                        ((tinted * wall_gain) >> 8).clamp(0, 260) as u16
+                        ((tinted * wall_gain) >> 8).clamp(0, GI_MUL_FIELD_MAX) as u16
                     };
                     let m = [calc(sum[0], alb.0), calc(sum[1], alb.1), calc(sum[2], alb.2)];
                     if (m[0] | m[1] | m[2]) != 0 {
@@ -2311,6 +2456,7 @@ pub(super) fn apply_indirect(
         } else {
             MUL_CLAMP
         };
+        let strength_q8 = (GI_STRENGTH * 256.0) as i32;
 
         let use_indoor = s.static_gi.any_indoor && indoor_power_q8 > 0;
         let use_sky = s.static_gi.any_sky && sky_power_q8 > 0;
@@ -2335,6 +2481,15 @@ pub(super) fn apply_indirect(
                     if any_dyn {
                         total += i32::from(s.dyn_out[pi][c]);
                     }
+                    // Strip the uniform lift first: a cell dimmer than
+                    // [`GI_AMBIENT_FLOOR`] is not local bounce, so it leaves
+                    // the pixel exactly as `AoOnly` drew it. Only what survives
+                    // is scaled by [`GI_STRENGTH`].
+                    let local = total - GI_AMBIENT_FLOOR;
+                    if local <= 0 {
+                        continue;
+                    }
+                    let total = (local * strength_q8) >> 8;
                     let mul_inc = total & !3;
                     if mul_inc >= GI_MIN_MUL {
                         sample.mul[c] = (i32::from(sample.mul[c]) + mul_inc).min(ceiling) as u16;
@@ -2457,6 +2612,81 @@ mod tests {
         assert!(
             corner_drop > wall_drop,
             "inside corner ({corner_drop}) must darken more than a straight wall ({wall_drop}) and open floor ({open_drop})"
+        );
+    }
+
+    /// Pins the two magnitudes the owner asked for: a wall-foot pixel that
+    /// reads dark at a glance even under a lit lamp, and a GI pass that is
+    /// local (a pixel far from any lit surface is untouched).
+    #[test]
+    fn ao_contact_shadows_are_deep_and_gi_stays_local() {
+        let mut w = World::new(Theme::Kitchen, 111);
+        w.clear_enemies();
+        w.level = Level::empty(Theme::Kitchen);
+        // Long solid wall along row 10 (`y = 160..176`) with open floor below.
+        w.level
+            .tiles
+            .fill_cells(10, 10, 14, 1, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        // One bright pendant, so the contact shadow is tested under a lit lamp.
+        w.level.objects.lights.push(LightFixture {
+            pos: Vec2::new(200.0, 210.0),
+            kind: LightFixtureKind::Pendant,
+            radius: 120.0,
+            seed: 3,
+        });
+        w.player.pos = Vec2::new(1200.0, 1200.0);
+        w.cam_focus = Some(Vec2::new(224.0, 224.0));
+        w.lighting = LightingMode::Full;
+        w.lighting_depth = ColorDepth::Truecolor;
+        w.lighting_fx = true;
+        w.smoke_enabled = false;
+
+        let off = render_with(&mut w, GlobalLight::Off, (160, 160));
+        let ao = render_with(&mut w, GlobalLight::AoOnly, (160, 160));
+        let gi = render_with(&mut w, GlobalLight::AoGi, (160, 160));
+        let cam = (w.cam.x.round() as i32, w.cam.y.round() as i32);
+        let at = |pb: &PixelBuffer, wx: i32, wy: i32| -> Rgb {
+            pb.pixel_at((wx - cam.0) as usize, (wy - cam.1) as usize)
+        };
+
+        // 6 px out onto the open floor beside the wall face, clear of the baked
+        // 4 px art contact shadow.
+        let floor_drop = i32::from(luminance(at(&off, 200, 182)))
+            - i32::from(luminance(at(&ao, 200, 182)));
+        assert!(
+            floor_drop >= 15,
+            "AO must darken the floor at the wall foot by at least 15 levels, got {floor_drop}"
+        );
+
+        // The wall face itself darkens into the junction too (the 0.4.4 pass
+        // only darkened the floor side), 2 px above the floor line.
+        let wall_drop = i32::from(luminance(at(&off, 200, 174)))
+            - i32::from(luminance(at(&ao, 200, 174)));
+        assert!(
+            wall_drop >= 10,
+            "the wall face must darken toward the floor line, got {wall_drop}"
+        );
+
+        // GI still lights the floor beside the lamp...
+        let gi_gain: i64 = ao
+            .pixels()
+            .iter()
+            .zip(gi.pixels().iter())
+            .map(|(a, g)| i64::from(luminance(*g)) - i64::from(luminance(*a)))
+            .sum();
+        assert!(gi_gain > 2000, "GI must still lift the lit floor ({gi_gain})");
+
+        // ...but a pixel beyond every light's reach is left almost exactly as
+        // `AoOnly` drew it: no frame-wide uniform lift.
+        let far_ao = at(&ao, 295, 295);
+        let far_gi = at(&gi, 295, 295);
+        let delta = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs();
+        assert!(
+            delta(far_ao.0, far_gi.0) <= 1
+                && delta(far_ao.1, far_gi.1) <= 1
+                && delta(far_ao.2, far_gi.2) <= 1,
+            "GI must leave a pixel far from any light alone: {far_ao:?} -> {far_gi:?}"
         );
     }
 
