@@ -24,9 +24,9 @@ the Rust sources before dispatching so results can be tied to a revision.
 The pilot times two campaigns per skill. The byte comparison normalizes the
 tuning path and two wall-clock statistics. The study records a pilot-based
 cost estimate before screening. The timeout estimate includes one retry, an
-optional second sampling round and final confirmation. Modal charges for
-startup and image building separately from the successful shard subprocesses
-recorded in the receipts.
+optional second sampling round and final confirmation. The receipts track
+successful subprocess time. Startup, idle time, image building and failed
+attempts are outside the receipt-based estimate.
 
 Screening uses 176 settings, eight common seeds and three skills. The study
 withholds whole settings for validation and solves the per-skill response

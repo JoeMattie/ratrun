@@ -72,7 +72,10 @@ def run_command(binary, job):
     max_containers=80, scaledown_window=5, block_network=True,
 )
 def shard(job):
-    return run_command("/usr/local/bin/ratrun", job)
+    try:
+        return run_command("/usr/local/bin/ratrun", job)
+    except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"{job['id']}: {error}") from error
 
 
 def atomic_write(path, data):
@@ -123,21 +126,21 @@ def main(manifest: str, output: str = str(OUTPUT)):
     for attempt in range(2):
         if not pending:
             break
-        failed = []
-        for job, result in zip(pending, shard.map(pending, return_exceptions=True), strict=True):
+        remaining = {job["id"]: job for job in pending}
+        for result in shard.map(pending, order_outputs=False, return_exceptions=True):
             if isinstance(result, Exception):
-                print(f"{job['id']} attempt {attempt + 1}: {result}")
-                failed.append(job)
+                print(f"Attempt {attempt + 1}: {result}")
                 continue
             key, raw, elapsed = result
-            if key != job["id"]:
-                raise RuntimeError(f"expected shard {job['id']}, received {key}")
+            if key not in remaining:
+                raise RuntimeError(f"unexpected or duplicate shard {key}")
             atomic_write(directory / f"{key}.json", raw)
             receipt = {
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "seconds": elapsed, "attempt": attempt + 1,
             }
             atomic_write(directory / f"{key}.receipt", json.dumps(receipt).encode())
-        pending = failed
+            del remaining[key]
+        pending = list(remaining.values())
     if pending:
         raise RuntimeError(f"{len(pending)} incomplete shards in {directory}")
