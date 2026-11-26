@@ -46,9 +46,8 @@
 //!
 //! The renderer **never** calls [`MinimapSource::cell_at`] for any cell where
 //! [`MinimapSource::seen`] returns `false`. Unseen space is tinted purely from
-//! screen/map coordinates (subtle 8×8 cartography grid + seen-adjacency
-//! frontier mist), so undiscovered rooms, maze aisles, exit directions, and
-//! prizes remain an inviting, spoiler-free blank.
+//! screen/map coordinates (a subtle 8×8 cartography grid), so undiscovered
+//! rooms, maze aisles, exit directions, and prizes stay hidden.
 
 #![allow(dead_code)]
 
@@ -113,9 +112,6 @@ const UNKNOWN_VEIL_GRID_RGB: Rgb = (42, 15, 17);
 /// The faint every-fourth-row weave inside the veil: darker than the veil by a
 /// single step, enough to read as cloth at a glance and never as a grid.
 const UNKNOWN_VEIL_SCANLINE_RGB: Rgb = (36, 13, 15);
-/// The dark rim on unseen pixels that touch seen ground. Kept *below* the veil
-/// so every unseen pixel stays darker than the coolest remembered floor.
-const UNKNOWN_VEIL_FRONTIER_RGB: Rgb = (30, 10, 12);
 
 /// The veil to paint for this terminal's colour depth.
 #[inline]
@@ -140,20 +136,16 @@ pub fn unknown_veil_rgb_for(depth: crate::term::ColorDepth) -> Rgb {
     }
 }
 
-/// The weave's three inks (dots, scanline, frontier rim) for a depth. Only
+/// The weave's two inks (dots and scanlines) for a depth. Only
 /// truecolor can show steps this small; on a folded palette they would land on
 /// grey or black and read as noise, so the veil stays flat there.
 #[inline]
-fn unknown_weave_rgb_for(depth: crate::term::ColorDepth) -> (Rgb, Rgb, Rgb) {
+fn unknown_weave_rgb_for(depth: crate::term::ColorDepth) -> (Rgb, Rgb) {
     match depth {
-        crate::term::ColorDepth::Truecolor => (
-            UNKNOWN_VEIL_GRID_RGB,
-            UNKNOWN_VEIL_SCANLINE_RGB,
-            UNKNOWN_VEIL_FRONTIER_RGB,
-        ),
+        crate::term::ColorDepth::Truecolor => (UNKNOWN_VEIL_GRID_RGB, UNKNOWN_VEIL_SCANLINE_RGB),
         _ => {
             let flat = unknown_veil_rgb_for(depth);
-            (flat, flat, flat)
+            (flat, flat)
         }
     }
 }
@@ -164,13 +156,8 @@ pub const REVEAL_WIPE_TICKS: u32 = 24;
 /// Maximum inner pixel capacity pre-allocated for compact mode (`42 × 32`).
 const COMPACT_PREALLOC_PIXELS: usize = 44 * 34;
 
-/// Pixel category tags stored in `MinimapScratch::kind` so post-passes
-/// (wall-rim catchlights & fog-frontier mist) stay O(W×H) without re-querying
-/// `MinimapSource::cell_at`.
-const KIND_UNSEEN: u8 = 0;
-const KIND_FLOOR: u8 = 1;
-const KIND_WALL: u8 = 2;
-const KIND_FEATURE: u8 = 3;
+const CARDINAL_NEIGHBOURS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+const DIAGONAL_NEIGHBOURS: [(i32, i32); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
 
 // ---- Public Interface Types (Simulation-Independent) -----------------------
 
@@ -700,8 +687,6 @@ pub struct MinimapScratch {
     pixels: Vec<Rgb>,
     /// Per-sub-pixel visibility & recency (`0` = unseen, `1..=255` = seen recency).
     vis: Vec<u8>,
-    /// Per-sub-pixel semantic class (`KIND_*`) for edge-highlight passes.
-    kind: Vec<u8>,
     /// Reusable text buffer for expanded map header / counters.
     text_buf: String,
     /// Reusable text buffer for secondary legend lines.
@@ -709,8 +694,6 @@ pub struct MinimapScratch {
     /// First-sight stamp per map cell (`0` = not sampled yet), driving the
     /// render-only red-to-real reveal wipe.
     reveal: Vec<u32>,
-    /// Per-sub-pixel reveal strength (`0` = settled, `255` = just seen).
-    reveal_px: Vec<u8>,
     /// Map dimensions the reveal buffers were sized for.
     reveal_cols: i32,
     reveal_rows: i32,
@@ -730,11 +713,9 @@ impl MinimapScratch {
         Self {
             pixels: Vec::with_capacity(COMPACT_PREALLOC_PIXELS),
             vis: Vec::with_capacity(COMPACT_PREALLOC_PIXELS),
-            kind: Vec::with_capacity(COMPACT_PREALLOC_PIXELS),
             text_buf: String::with_capacity(48),
             sub_buf: String::with_capacity(32),
             reveal: Vec::new(),
-            reveal_px: Vec::new(),
             reveal_cols: 0,
             reveal_rows: 0,
             reveal_clock: 0,
@@ -744,12 +725,8 @@ impl MinimapScratch {
     fn prepare(&mut self, len: usize) {
         self.pixels.clear();
         self.vis.clear();
-        self.kind.clear();
         self.pixels.resize(len, PLATE_RGB);
         self.vis.resize(len, 0);
-        self.kind.resize(len, KIND_UNSEEN);
-        self.reveal_px.clear();
-        self.reveal_px.resize(len, 0);
     }
 
     /// Size the per-cell reveal stamps for a `cols × rows` map and reset them
@@ -1059,7 +1036,7 @@ pub fn draw_compact(
         .clamp(0.0, max_oy)
         .floor() as i32;
 
-    // 1. Sample cells into pixel + visibility + kind buffers (strictly skipping unseen cell_at!).
+    // 1. Sample terrain and its edges, querying only seen cells.
     if !is_small {
         for py in 0..ph {
             let cy = origin_y + py as i32;
@@ -1068,7 +1045,6 @@ pub fn draw_compact(
                 let idx = py * pw + px;
                 if cx < 0 || cy < 0 || cx >= cols || cy >= rows || !source.seen(cx, cy) {
                     scratch.vis[idx] = 0;
-                    scratch.kind[idx] = KIND_UNSEEN;
                     // The weave is a screen-space pattern in every mode (never
                     // map coordinates), so the compact radar and the expanded
                     // map paint the same cloth at the same density.
@@ -1078,12 +1054,17 @@ pub fn draw_compact(
                 let rec = source.recency(cx, cy).clamp(0.0, 1.0);
                 scratch.vis[idx] = encode_vis(rec);
                 let reveal = scratch.reveal_at(cx, cy, true, rec, view.reveal_clock);
-                scratch.reveal_px[idx] = encode_reveal(reveal);
                 let cell = source.cell_at(cx, cy);
-                let (base_col, k) = classify_compact_cell(&theme, cell, cx, cy, source);
-                scratch.kind[idx] = k;
-                let col = apply_recency_shading(&theme, base_col, rec);
-                scratch.pixels[idx] = apply_reveal_shading(&theme, col, reveal);
+                let base_col = compact_cell_color(&theme, cell, cx, cy, source);
+                let frontier = matches!(cell, MinimapCell::Floor | MinimapCell::BossFloor)
+                    && floor_borders_fog(source, cx, cy);
+                scratch.pixels[idx] = shade_map_pixel(
+                    &theme,
+                    base_col,
+                    rec,
+                    reveal,
+                    frontier.then_some((cx, cy)),
+                );
             }
         }
     } else {
@@ -1099,6 +1080,8 @@ pub fn draw_compact(
                 let mut floor_n = 0u32;
                 let mut boss_floor_n = 0u32;
                 let mut wall_n = 0u32;
+                let mut wall_rim = false;
+                let mut frontier = false;
                 let mut maze_n = 0u32;
                 let mut door_n = 0u32;
                 let mut one_way_n = 0u32;
@@ -1129,9 +1112,18 @@ pub fn draw_compact(
                             // Traps drop out in Small so amber stays exclusive to the bearing.
                             MinimapCell::Floor
                             | MinimapCell::Trap
-                            | MinimapCell::TrapHair => floor_n += 1,
-                            MinimapCell::BossFloor => boss_floor_n += 1,
-                            MinimapCell::Wall => wall_n += 1,
+                            | MinimapCell::TrapHair => {
+                                floor_n += 1;
+                                frontier = frontier || floor_borders_fog(source, cx, cy);
+                            }
+                            MinimapCell::BossFloor => {
+                                boss_floor_n += 1;
+                                frontier = frontier || floor_borders_fog(source, cx, cy);
+                            }
+                            MinimapCell::Wall => {
+                                wall_n += 1;
+                                wall_rim = wall_rim || wall_borders_floor(source, cx, cy);
+                            }
                             MinimapCell::MazeWall => maze_n += 1,
                             MinimapCell::Doorway => door_n += 1,
                             MinimapCell::OneWayDoor(_) => one_way_n += 1,
@@ -1148,50 +1140,45 @@ pub fn draw_compact(
 
                 if seen_n == 0 {
                     scratch.vis[idx] = 0;
-                    scratch.kind[idx] = KIND_UNSEEN;
                     scratch.pixels[idx] = fog_void_color(&theme, px as i32, py as i32);
                     continue;
                 }
 
                 scratch.vis[idx] = encode_vis(max_rec);
-                scratch.reveal_px[idx] = encode_reveal(max_reveal);
                 let floor_col = if boss_floor_n > 0 && boss_floor_n >= floor_n {
                     theme.boss_floor
                 } else {
                     theme.floor_live
                 };
-                let (base_col, k) = if one_way_n > 0 {
-                    (ONE_WAY_EXIT_RGB, KIND_FEATURE)
+                let (base_col, frontier) = if one_way_n > 0 {
+                    (ONE_WAY_EXIT_RGB, false)
                 } else if hole_linked_n > 0 {
-                    (RAT_HOLE_LINKED_RGB, KIND_FEATURE)
+                    (RAT_HOLE_LINKED_RGB, false)
                 } else if hole_near_n > 0 {
-                    (RAT_HOLE_NEAR_RGB, KIND_FEATURE)
+                    (RAT_HOLE_NEAR_RGB, false)
                 } else if door_n > 0 {
-                    (theme.doorway, KIND_FLOOR)
-                } else if maze_n > 0 && (floor_n + boss_floor_n) > 0 {
-                    let t = (maze_n as f32 / (maze_n + floor_n + boss_floor_n) as f32)
-                        .clamp(0.45, 0.85);
-                    (palette::mix(floor_col, theme.maze_wall, t), KIND_FEATURE)
+                    (theme.doorway, false)
                 } else if maze_n > 0 {
-                    (theme.maze_wall, KIND_FEATURE)
-                } else if wall_n > 0 && (floor_n + boss_floor_n) > 0 {
-                    (theme.wall_rim, KIND_FEATURE)
-                } else if wall_n > 0 {
-                    (theme.wall_mass, KIND_WALL)
+                    (theme.maze_wall, false)
+                } else if wall_rim {
+                    (theme.wall_rim, false)
+                } else if wall_n > 0 && floor_n + boss_floor_n == 0 {
+                    (theme.wall_mass, false)
                 } else {
-                    (floor_col, KIND_FLOOR)
+                    (floor_col, frontier)
                 };
-                scratch.kind[idx] = k;
-                let col = apply_recency_shading(&theme, base_col, max_rec);
-                scratch.pixels[idx] = apply_reveal_shading(&theme, col, max_reveal);
+                scratch.pixels[idx] = shade_map_pixel(
+                    &theme,
+                    base_col,
+                    max_rec,
+                    max_reveal,
+                    frontier.then_some((cx0 / 2, cy0 / 2)),
+                );
             }
         }
     }
 
-    // 2. Architectural wall-rim elevation & fog-of-war frontier mist.
-    apply_wall_rims_and_fog_frontier(scratch, pw, ph, &theme);
-
-    // 3. Delicate corner-bracketed viewport frame (Normal only — in Small the
+    // 2. Delicate corner-bracketed viewport frame (Normal only — in Small the
     //    tight window itself is the immediate area around the rat).
     if !is_small {
         draw_viewport_brackets(
@@ -1208,7 +1195,7 @@ pub fn draw_compact(
         );
     }
 
-    // 4. Compact markers: found forks (seen maze entrances), live boss, seen
+    // 3. Compact markers: found forks (seen maze entrances), live boss, seen
     //    rewards, seen shops (in three spoon keys), every seen find in its own
     //    icon colour, and the fog-edge arena bearing. Small has no room for the
     //    multi-pixel spoon or the maze cache, so those degrade to a single
@@ -1353,7 +1340,7 @@ pub fn draw_compact(
         }
     }
 
-    // 5. Player position, with a directional facing pip in Normal.
+    // 4. Player position, with a directional facing pip in Normal.
     let plx = (view.player_cell.0 - origin_x as f32) * inv_step;
     let ply = (view.player_cell.1 - origin_y as f32) * inv_step;
     if !is_small {
@@ -1369,7 +1356,7 @@ pub fn draw_compact(
     let (player_col, halo) = player_pulse(view.player_clock, depth);
     let player_drawn = plot_pixel_in_window(&mut scratch.pixels, pw, ph, plx, ply, player_col);
 
-    // 6. Stamped-metal frame (matching `menu::panel` top-left catchlight).
+    // 5. Stamped-metal frame (matching `menu::panel` top-left catchlight).
     let accent_color = palette::marking(view.palette.wall_edge, view.palette.accent);
     let border_lit = if view.hovered { COAT } else { accent_color };
     draw_stamped_frame(buf, rect, border_lit, TRACK);
@@ -1429,7 +1416,7 @@ pub fn draw_compact(
         }
     }
 
-    // 7. Blit half-block pixel buffer into `inner`.
+    // 6. Blit half-block pixel buffer into `inner`.
     blit_half_blocks(buf, inner, &scratch.pixels, pw);
     if player_drawn {
         let x = inner.x + plx.floor() as u16;
@@ -1437,7 +1424,7 @@ pub fn draw_compact(
         draw_player_halo(buf, inner, (x, y), halo);
     }
 
-    // 8. Draw off-window 8-way directional bearing / boss chevron on the compact rim.
+    // 7. Draw off-window 8-way directional bearing / boss chevron on the compact rim.
     if let Some((dx, dy)) = edge_bearing {
         draw_rim_chevron(
             buf,
@@ -1598,6 +1585,8 @@ pub fn draw_expanded(
             let mut floor_n = 0u32;
             let mut boss_floor_n = 0u32;
             let mut wall_n = 0u32;
+            let mut wall_rim = false;
+            let mut frontier = false;
             let mut maze_n = 0u32;
             let mut door_n = 0u32;
             let mut one_way_n = 0u32;
@@ -1621,9 +1610,18 @@ pub fn draw_expanded(
                     }
                     match source.cell_at(cx, cy) {
                         MinimapCell::Unknown => {}
-                        MinimapCell::Floor => floor_n += 1,
-                        MinimapCell::BossFloor => boss_floor_n += 1,
-                        MinimapCell::Wall => wall_n += 1,
+                        MinimapCell::Floor => {
+                            floor_n += 1;
+                            frontier = frontier || floor_borders_fog(source, cx, cy);
+                        }
+                        MinimapCell::BossFloor => {
+                            boss_floor_n += 1;
+                            frontier = frontier || floor_borders_fog(source, cx, cy);
+                        }
+                        MinimapCell::Wall => {
+                            wall_n += 1;
+                            wall_rim = wall_rim || wall_borders_floor(source, cx, cy);
+                        }
                         MinimapCell::MazeWall => maze_n += 1,
                         MinimapCell::Doorway => door_n += 1,
                         MinimapCell::OneWayDoor(_) => one_way_n += 1,
@@ -1641,14 +1639,12 @@ pub fn draw_expanded(
 
             if seen_n == 0 {
                 scratch.vis[idx] = 0;
-                scratch.kind[idx] = KIND_UNSEEN;
                 scratch.pixels[idx] = fog_void_color(&theme, px as i32, py as i32);
                 continue;
             }
 
             total_seen_blocks += 1;
             scratch.vis[idx] = encode_vis(max_rec);
-            scratch.reveal_px[idx] = encode_reveal(max_reveal);
 
             let floor_col = if boss_floor_n > 0 && boss_floor_n >= floor_n {
                 theme.boss_floor
@@ -1656,43 +1652,37 @@ pub fn draw_expanded(
                 theme.floor_live
             };
 
-            let (base_col, k) = if one_way_n > 0 {
-                (ONE_WAY_EXIT_RGB, KIND_FEATURE)
+            let (base_col, frontier) = if one_way_n > 0 {
+                (ONE_WAY_EXIT_RGB, false)
             } else if hole_linked_n > 0 {
-                (RAT_HOLE_LINKED_RGB, KIND_FEATURE)
+                (RAT_HOLE_LINKED_RGB, false)
             } else if hole_near_n > 0 {
-                (RAT_HOLE_NEAR_RGB, KIND_FEATURE)
+                (RAT_HOLE_NEAR_RGB, false)
             } else if door_n > 0 {
-                (theme.doorway, KIND_FLOOR)
-            } else if maze_n > 0 && (floor_n + boss_floor_n) > 0 {
-                let t = (maze_n as f32 / (maze_n + floor_n + boss_floor_n) as f32).clamp(0.38, 0.85);
-                (palette::mix(floor_col, theme.maze_wall, t), KIND_FEATURE)
+                (theme.doorway, false)
             } else if maze_n > 0 {
-                (theme.maze_wall, KIND_FEATURE)
-            } else if wall_n > 0 && (floor_n + boss_floor_n) > 0 {
-                if wall_n * 2 >= seen_n {
-                    (theme.wall_rim, KIND_FEATURE)
-                } else {
-                    (palette::mix(floor_col, theme.wall_rim, 0.34), KIND_FLOOR)
-                }
-            } else if wall_n > 0 {
-                (theme.wall_mass, KIND_WALL)
+                (theme.maze_wall, false)
+            } else if wall_rim {
+                (theme.wall_rim, false)
+            } else if wall_n > 0 && floor_n + boss_floor_n + trap_n == 0 {
+                (theme.wall_mass, false)
             } else if trap_n > 0 {
-                (palette::mix(floor_col, WARN_AMBER_RGB, 0.42), KIND_FLOOR)
+                (palette::mix(floor_col, WARN_AMBER_RGB, 0.42), false)
             } else {
-                (floor_col, KIND_FLOOR)
+                (floor_col, frontier)
             };
 
-            scratch.kind[idx] = k;
-            let col = apply_recency_shading(&theme, base_col, max_rec);
-            scratch.pixels[idx] = apply_reveal_shading(&theme, col, max_reveal);
+            scratch.pixels[idx] = shade_map_pixel(
+                &theme,
+                base_col,
+                max_rec,
+                max_reveal,
+                frontier.then_some((px as i32, py as i32)),
+            );
         }
     }
 
-    // 2. Architectural wall-rim elevation & crisp fog-of-war frontier mist.
-    apply_wall_rims_and_fog_frontier(scratch, pw, ph, &theme);
-
-    // 3. Soft viewport brackets on the full map (skipped when collapsed to <=3 px).
+    // 2. Soft viewport brackets on the full map (skipped when collapsed to <=3 px).
     let pulse = 0.5 + 0.5 * (view.clock * 5.0).sin();
     draw_viewport_brackets(
         &mut scratch.pixels,
@@ -1743,10 +1733,10 @@ pub fn draw_expanded(
         }
     }
 
-    // 4. Blit half-block terrain canvas into `map_rect`.
+    // 3. Blit half-block terrain canvas into `map_rect`.
     blit_half_blocks(buf, map_rect, &scratch.pixels, pw);
 
-    // 5. Stamp crisp single-cell symbolic markers & discovered arena names.
+    // 4. Stamp crisp single-cell symbolic markers & discovered arena names.
     let cell_to_term = |cx: f32, cy: f32| -> Option<(u16, u16)> {
         let px = ((cx / sx).floor() as isize).clamp(0, pw as isize - 1) as u16;
         let py = ((cy / sy).floor() as isize).clamp(0, ph as isize - 1) as u16;
@@ -1959,7 +1949,7 @@ pub fn draw_expanded(
         stamp_glyph(buf, tx, ty, '●', palette::to_color(player_col), true);
     }
 
-    // 6. Exploration percentage & top frame header bar.
+    // 5. Exploration percentage & top frame header bar.
     let explored_pct = view.explored_pct.unwrap_or_else(|| {
         (total_seen_blocks * 100)
             .checked_div(total_blocks)
@@ -2011,7 +2001,7 @@ pub fn draw_expanded(
         );
     }
 
-    // 7. Right tactical sidebar OR compact bottom legend strip.
+    // 6. Right tactical sidebar OR compact bottom legend strip.
     if has_sidebar {
         let div_x = inner.right().saturating_sub(sidebar_w + 1);
         for y in inner.y..inner.bottom() {
@@ -2049,6 +2039,13 @@ pub fn draw_expanded(
             Style::default().fg(MUTED).bg(PLATE),
         );
     }
+    buf.set_stringn(
+        modal.x + 2,
+        modal.bottom() - 1,
+        " ▬ wall  ┄ unexplored ",
+        modal.width.saturating_sub(4) as usize,
+        Style::default().fg(MUTED).bg(PLATE),
+    );
 }
 
 // ---- Expanded Sidebar Renderer ---------------------------------------------
@@ -2357,7 +2354,6 @@ struct DerivedPalette {
     unknown: Rgb,
     unknown_grid: Rgb,
     unknown_scanline: Rgb,
-    unknown_frontier: Rgb,
     memory_sink: Rgb,
     floor_live: Rgb,
     boss_floor: Rgb,
@@ -2389,17 +2385,16 @@ impl DerivedPalette {
         let floor_live = palette::add(palette::mix(p.bg_alt, p.wall, 0.28), (11, 13, 13));
         let boss_floor = palette::mix(floor_live, (148, 44, 82), 0.42);
         let wall_mass = palette::mix(fog_base, p.wall, 0.26);
-        let wall_rim = palette::mix(p.wall_edge, COAT_RGB, 0.30);
+        let wall_rim = (176, 164, 148);
         let maze_wall = palette::mix(p.accent, COAT_RGB, 0.20);
         let doorway = palette::mix(floor_live, p.accent, 0.36);
 
-        let (unknown_grid, unknown_scanline, unknown_frontier) = unknown_weave_rgb_for(depth);
+        let (unknown_grid, unknown_scanline) = unknown_weave_rgb_for(depth);
         Self {
             fog_base,
             unknown: unknown_veil_rgb_for(depth),
             unknown_grid,
             unknown_scanline,
-            unknown_frontier,
             memory_sink,
             floor_live,
             boss_floor,
@@ -2415,25 +2410,6 @@ impl DerivedPalette {
 #[inline]
 fn encode_vis(recency: f32) -> u8 {
     (1.0 + recency.clamp(0.0, 1.0) * 254.0).round() as u8
-}
-
-#[inline]
-fn decode_recency(v: u8) -> f32 {
-    if v <= 1 {
-        0.0
-    } else {
-        f32::from(v - 1) / 254.0
-    }
-}
-
-#[inline]
-fn encode_reveal(reveal: f32) -> u8 {
-    (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-#[inline]
-fn decode_reveal(v: u8) -> f32 {
-    f32::from(v) / 255.0
 }
 
 /// The unseen void's weave: sparse 8×8 cartographic coordinate dots plus a
@@ -2474,90 +2450,80 @@ fn apply_recency_shading(theme: &DerivedPalette, live_col: Rgb, recency: f32) ->
 }
 
 #[inline]
-fn classify_compact_cell(
+fn compact_cell_color(
     theme: &DerivedPalette,
     cell: MinimapCell,
     cx: i32,
     cy: i32,
     source: &(impl MinimapSource + ?Sized),
-) -> (Rgb, u8) {
+) -> Rgb {
     match cell {
-        MinimapCell::Unknown => (theme.fog_base, KIND_UNSEEN),
-        MinimapCell::Floor => (theme.floor_live, KIND_FLOOR),
-        MinimapCell::BossFloor => (theme.boss_floor, KIND_FLOOR),
-        MinimapCell::Wall => (theme.wall_mass, KIND_WALL),
-        MinimapCell::MazeWall => (theme.maze_wall, KIND_FEATURE),
-        MinimapCell::Doorway => (theme.doorway, KIND_FLOOR),
-        MinimapCell::OneWayDoor(_) => (ONE_WAY_EXIT_RGB, KIND_FEATURE),
+        MinimapCell::Unknown => theme.fog_base,
+        MinimapCell::Floor => theme.floor_live,
+        MinimapCell::BossFloor => theme.boss_floor,
+        MinimapCell::Wall if wall_borders_floor(source, cx, cy) => theme.wall_rim,
+        MinimapCell::Wall => theme.wall_mass,
+        MinimapCell::MazeWall => theme.maze_wall,
+        MinimapCell::Doorway => theme.doorway,
+        MinimapCell::OneWayDoor(_) => ONE_WAY_EXIT_RGB,
         MinimapCell::RatHole(axis) => {
             if source.rat_hole_far_known(cx, cy, axis) {
-                (RAT_HOLE_LINKED_RGB, KIND_FEATURE)
+                RAT_HOLE_LINKED_RGB
             } else {
-                (RAT_HOLE_NEAR_RGB, KIND_FEATURE)
+                RAT_HOLE_NEAR_RGB
             }
         }
-        MinimapCell::Trap => (palette::mix(theme.floor_live, WARN_AMBER_RGB, 0.42), KIND_FLOOR),
-        MinimapCell::TrapHair => (palette::mix(theme.floor_live, (236, 66, 52), 0.50), KIND_FLOOR),
+        MinimapCell::Trap => palette::mix(theme.floor_live, WARN_AMBER_RGB, 0.42),
+        MinimapCell::TrapHair => palette::mix(theme.floor_live, (236, 66, 52), 0.50),
     }
 }
 
-/// Two-purpose O(W×H) post-pass using ONLY `scratch.vis` and `scratch.kind`:
-/// 1. Elevates any seen `KIND_WALL` pixel adjacent to a seen `KIND_FLOOR`
-///    pixel into a crisp `wall_rim` architectural outline (with subtle
-///    top-left highlight matching Rat Run's 3/4 lighting).
-/// 2. Adds an atmospheric frontier mist halo on unseen pixels touching seen
-///    space, without ever reading unseen map cells.
-fn apply_wall_rims_and_fog_frontier(
-    scratch: &mut MinimapScratch,
-    pw: usize,
-    ph: usize,
+/// Include diagonal corners in architectural outlines, as the sight flood does.
+fn wall_borders_floor(source: &(impl MinimapSource + ?Sized), cx: i32, cy: i32) -> bool {
+    CARDINAL_NEIGHBOURS
+        .into_iter()
+        .chain(DIAGONAL_NEIGHBOURS)
+        .any(|(dx, dy)| {
+            let (nx, ny) = (cx + dx, cy + dy);
+            in_bounds(source, nx, ny)
+                && source.seen(nx, ny)
+                && matches!(
+                    source.cell_at(nx, ny),
+                    MinimapCell::Floor
+                        | MinimapCell::BossFloor
+                        | MinimapCell::Doorway
+                        | MinimapCell::Trap
+                        | MinimapCell::TrapHair
+                )
+        })
+}
+
+/// Only shared tile edges count. A known wall closes the edge it occupies.
+fn floor_borders_fog(source: &(impl MinimapSource + ?Sized), cx: i32, cy: i32) -> bool {
+    CARDINAL_NEIGHBOURS.into_iter().any(|(dx, dy)| {
+        let (nx, ny) = (cx + dx, cy + dy);
+        in_bounds(source, nx, ny) && !source.seen(nx, ny)
+    })
+}
+
+fn shade_map_pixel(
     theme: &DerivedPalette,
-) {
-    for py in 0..ph {
-        for px in 0..pw {
-            let idx = py * pw + px;
-            let v = scratch.vis[idx];
-            if v == 0 {
-                let touches_seen = (px > 0 && scratch.vis[idx - 1] > 0)
-                    || (px + 1 < pw && scratch.vis[idx + 1] > 0)
-                    || (py > 0 && scratch.vis[idx - pw] > 0)
-                    || (py + 1 < ph && scratch.vis[idx + pw] > 0);
-                if touches_seen {
-                    scratch.pixels[idx] = theme.unknown_frontier;
-                }
-                continue;
-            }
-
-            if scratch.kind[idx] == KIND_WALL {
-                let floor_s = py + 1 < ph && scratch.kind[idx + pw] == KIND_FLOOR;
-                let floor_e = px + 1 < pw && scratch.kind[idx + 1] == KIND_FLOOR;
-                let floor_n = py > 0 && scratch.kind[idx - pw] == KIND_FLOOR;
-                let floor_w = px > 0 && scratch.kind[idx - 1] == KIND_FLOOR;
-                if floor_s || floor_e || floor_n || floor_w {
-                    let rec = decode_recency(v);
-                    let rim = if floor_s || floor_e {
-                        palette::mix(theme.wall_rim, COAT_RGB, 0.14)
-                    } else {
-                        theme.wall_rim
-                    };
-                    let rim = apply_recency_shading(theme, rim, rec);
-                    scratch.pixels[idx] =
-                        apply_reveal_shading(theme, rim, decode_reveal(scratch.reveal_px[idx]));
-                }
-            }
-
-            let touches_unseen = (px > 0 && scratch.vis[idx - 1] == 0)
-                || (px + 1 < pw && scratch.vis[idx + 1] == 0)
-                || (py > 0 && scratch.vis[idx - pw] == 0)
-                || (py + 1 < ph && scratch.vis[idx + pw] == 0);
-            if touches_unseen && scratch.kind[idx] != KIND_FEATURE {
-                // Fade the known edge into the *unknown* red rather than into the
-                // old cool fog, so the border reads as "here the map ends" and
-                // never dips darker than the veil itself.
-                scratch.pixels[idx] = palette::mix(scratch.pixels[idx], theme.unknown, 0.10);
-            }
-        }
+    base: Rgb,
+    recency: f32,
+    reveal: f32,
+    frontier: Option<(i32, i32)>,
+) -> Rgb {
+    let mut col = apply_recency_shading(theme, base, recency);
+    if let Some((x, y)) = frontier {
+        // Shift the half-block dither every second row to break up diagonal
+        // edges too. Blend the lit dots toward oxblood before palette folding.
+        col = if (x + y + y / 2) % 2 == 0 {
+            palette::mix(col, UNKNOWN_VEIL_RGB, 0.45)
+        } else {
+            theme.unknown
+        };
     }
+    apply_reveal_shading(theme, col, reveal)
 }
 
 /// Place a discovered-name tag on the expanded map.
@@ -3128,19 +3094,14 @@ mod tests {
         }
     }
 
-    /// The most common colour over the scratch's unseen pixels, leaving out
-    /// the `rim` ink (the frontier line where unseen touches seen: in a tight
-    /// corner radar around an explored room that rim can outnumber the field).
-    fn dominant_unseen_ink(scratch: &MinimapScratch, rim: Rgb) -> Rgb {
+    /// The most common colour over the scratch's unseen pixels.
+    fn dominant_unseen_ink(scratch: &MinimapScratch) -> Rgb {
         let mut counts: Vec<(Rgb, usize)> = Vec::new();
         for (i, &v) in scratch.vis.iter().enumerate() {
             if v != 0 {
                 continue;
             }
             let px = scratch.pixels[i];
-            if px == rim {
-                continue;
-            }
             match counts.iter_mut().find(|(c, _)| *c == px) {
                 Some((_, n)) => *n += 1,
                 None => counts.push((px, 1)),
@@ -3345,7 +3306,6 @@ mod tests {
         let mut scratch = MinimapScratch::new();
         let cap_pixels = scratch.pixels.capacity();
         let cap_vis = scratch.vis.capacity();
-        let cap_kind = scratch.kind.capacity();
         let cap_text = scratch.text_buf.capacity();
 
         for (w, h) in [(57, 20), (80, 24), (120, 40), (200, 60)] {
@@ -3375,7 +3335,6 @@ mod tests {
         }
         assert_eq!(scratch.pixels.capacity(), cap_pixels);
         assert_eq!(scratch.vis.capacity(), cap_vis);
-        assert_eq!(scratch.kind.capacity(), cap_kind);
         assert_eq!(scratch.text_buf.capacity(), cap_text);
     }
 
@@ -4228,7 +4187,6 @@ mod tests {
             let veil = fog_void_color(&theme, 3, 3);
             let dot = fog_void_color(&theme, 0, 0);
             let scan = fog_void_color(&theme, 3, 4);
-            let rim = theme.unknown_frontier;
             let memory = apply_recency_shading(&theme, theme.floor_live, 0.0);
             let live = theme.floor_live;
 
@@ -4243,7 +4201,6 @@ mod tests {
                 ("veil", veil),
                 ("grid dot", dot),
                 ("scanline", scan),
-                ("frontier rim", rim),
             ] {
                 assert!(
                     c.0 > c.1 && c.0 > c.2,
@@ -4268,6 +4225,84 @@ mod tests {
                 rel_luminance(memory) > rel_luminance(veil),
                 "{name}: explored memory must out-shine the unknown veil"
             );
+        }
+    }
+
+    #[test]
+    fn walls_and_exploration_edges_have_different_ink_at_every_map_size() {
+        let mut map = FakeMap::new(144, 128);
+        map.fill_rect(54, 54, 40, 26, MinimapCell::Floor);
+        map.reveal_rect(54, 53, 40, 20, 1.0);
+        // The seen wall is at y=53. Floor ends at y=72 with unseen floor
+        // beyond it, and the wall one tile behind the face is also unseen.
+        let theme = DerivedPalette::from_palette(MinimapPalette::SEWER);
+        let frontier_dot = palette::mix(theme.floor_live, UNKNOWN_VEIL_RGB, 0.45);
+
+        for (mode, size, width, step, (ox, oy)) in [
+            (MinimapMode::Compact, MinimapSize::Normal, 32, 1, (56, 52)),
+            (MinimapMode::Compact, MinimapSize::Small, 16, 2, (56, 50)),
+            (MinimapMode::Expanded, MinimapSize::Normal, 72, 2, (0, 0)),
+        ] {
+            let mut view = make_view(mode, MinimapPalette::SEWER, "SEWER", &[], &[], false, 120, 40);
+            view.compact_size = size;
+            view.player_cell = (72.5, 64.5);
+            view.player_facing = (0.0, 0.0);
+            view.viewport_cells = CellRect::default();
+            let mut scratch = MinimapScratch::new();
+            let _ = render_settled(&mut view, &map, 120, 40, &mut scratch);
+
+            let sample = |cx: i32, cy: i32| {
+                let x = ((cx - ox) / step) as usize;
+                let y = ((cy - oy) / step) as usize;
+                let i = y * width + x;
+                (scratch.pixels[i], scratch.vis[i], x as i32, y as i32)
+            };
+            let mut previous_frontier = None;
+            for cx in (66..78).step_by(step as usize) {
+                let (wall, _, _, _) = sample(cx, 53);
+                assert_eq!(wall, theme.wall_rim, "broken wall at {cx} in {mode:?}/{size:?}");
+                for cy in [54, 70] {
+                    let (interior, _, _, _) = sample(cx, cy);
+                    assert_eq!(interior, theme.floor_live, "floor inside the edge stays solid");
+                }
+
+                let (frontier, vis, _, _) = sample(cx, 72);
+                assert!(vis > 0, "dithering changed the visibility of seen floor");
+                assert!(frontier == frontier_dot || frontier == theme.unknown);
+                assert_ne!(frontier, wall);
+                assert_ne!(Some(frontier), previous_frontier, "the frontier must alternate");
+                previous_frontier = Some(frontier);
+
+                // The sample just before the wall's sample contains only unseen wall.
+                for cy in [53 - step, 74] {
+                    let (unseen, vis, x, y) = sample(cx, cy);
+                    assert_eq!(vis, 0);
+                    assert_eq!(unseen, fog_void_color(&theme, x, y));
+                }
+            }
+        }
+        assert_eq!(map.unseen_reads.get(), 0);
+    }
+
+    #[test]
+    fn frontier_dither_survives_terminal_color_folding() {
+        use crate::term::ColorDepth;
+        for (name, pal) in VEIL_THEMES {
+            for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
+                let theme = DerivedPalette::from_palette_at(pal, depth);
+                for recency in [0.0, 1.0] {
+                    let dot = shade_map_pixel(&theme, theme.floor_live, recency, 0.0, Some((0, 0)));
+                    let gap = shade_map_pixel(&theme, theme.floor_live, recency, 0.0, Some((1, 0)));
+                    let wall = shade_map_pixel(&theme, theme.wall_rim, recency, 0.0, None);
+                    let (dot, gap, wall) = (
+                        fold_rgb(dot, depth),
+                        fold_rgb(gap, depth),
+                        fold_rgb(wall, depth),
+                    );
+                    assert_ne!(dot, gap, "{name}/{depth:?}/{recency}");
+                    assert!(rel_luminance(wall) > rel_luminance(dot).max(rel_luminance(gap)));
+                }
+            }
         }
     }
 
@@ -4389,7 +4424,7 @@ mod tests {
             ColorDepth::Ansi256,
             ColorDepth::Ansi16,
         ] {
-            // One constructor, so both panels inherit the same five inks.
+            // One constructor gives both panels the same veil inks.
             let theme = DerivedPalette::from_palette_at(MinimapPalette::SEWER, depth);
             // The calm oxblood in truecolor; the maroon the cube can actually
             // draw below it (the fold lands that on the cube's one dark red).
@@ -4431,7 +4466,7 @@ mod tests {
                     // The dominant unseen ink is the veil itself — in both
                     // panels, at every depth and size. Bracket and beacon
                     // overlays blend *toward* the chrome, never past the veil.
-                    let ink = dominant_unseen_ink(&scratch, theme.unknown_frontier);
+                    let ink = dominant_unseen_ink(&scratch);
                     assert_eq!(
                         ink, theme.unknown,
                         "{depth:?} {mode:?} {w}x{h}: the unseen field is {ink:?}, not the veil"
@@ -4447,7 +4482,7 @@ mod tests {
     }
 
     #[test]
-    fn seen_pixels_never_show_the_veil_after_the_reveal_settles() {
+    fn unseen_pixels_stay_red_after_the_reveal_settles() {
         let map = FakeMap::showcase(false);
         let markers = sample_markers(false);
         let labels = sample_labels(false);
@@ -4464,7 +4499,6 @@ mod tests {
                 40,
             );
             let _ = render_settled(&mut view, &map, 120, 40, &mut scratch);
-            let theme = DerivedPalette::from_palette(pal);
             for (i, &v) in scratch.vis.iter().enumerate() {
                 let px = scratch.pixels[i];
                 if v == 0 {
@@ -4474,11 +4508,6 @@ mod tests {
                     assert!(
                         px.0 > px.1 && px.0 > px.2,
                         "{name}: unseen pixel {i} is not red-dominant: {px:?}"
-                    );
-                } else {
-                    assert!(
-                        px != theme.unknown && px != theme.unknown_grid,
-                        "{name}: seen pixel {i} still shows the veil"
                     );
                 }
             }

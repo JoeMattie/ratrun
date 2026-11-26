@@ -51,6 +51,7 @@ first time.
   floor, so the shop matters every time.
 - **Loot markers shrink when the view is zoomed out.**
 - **Your position pulses with a soft halo on the map and minimap.**
+- **Walls read as solid lines on the map and minimap.** Unexplored edges fade into the red veil in a dotted pattern.
 - **MIT licence.**
 - **Foreground layer, rebuilt.** The overhead things are few, huge and
   attached: pipes, ducts, rails and clotheslines run wall to wall, hoods and
