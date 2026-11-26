@@ -55,6 +55,31 @@ The boss cleanup pulses and budget use the shared cleanup settings.
 live_budget = [[0, 18], [60, 42], [180, 72], [255, 55], [360, 70], [540, 100], [900, 150]]
 ```
 
+## Pressure beats
+
+Set `pressure_beats = true` in `[director]` to try two surge and recovery
+windows per floor. The shipped setting is off. The warning leads each surge
+by `pressure_warning_lead` seconds. Set it to zero for silent starts.
+
+- Set the two times with `pressure_starts`, the surge lengths with
+  `pressure_lengths` and the following recovery lengths with
+  `pressure_recovery_lengths`. These use simulation seconds. The windows
+  include their warnings and must fit before boss arrival without overlap.
+- `pressure_sector_scale` scales the surge and recovery strengths by campaign
+  sector. A zero scale skips both beats for that sector.
+- `pressure_rate_bonus` borrows pulse cadence from the following recovery.
+  The director aims to preserve the ordinary body supply over the two windows.
+  The live cap, safe placements and appointment grace still govern actual
+  arrivals. Enemy kinds retain their existing XP values.
+- `pressure_budget_bonus`, `pressure_contact_bonus` and
+  `pressure_recovery_budget_cut` set the live cap uplift, contact damage
+  uplift and recovery live cap reduction as fractions of their normal values.
+  `pressure_recovery_heal` biases the existing rare finds toward Medkits
+  without changing the total chance of a rare find.
+- On the Sewer, `pressure_sewer_opening_secs` and
+  `pressure_sewer_opening_cut` give the rat a timed reprieve from ordinary
+  contact damage while it picks up its first cards.
+
 ## Boss hazards
 
 Every boss kind accepts `attack_damage_mult` for timed hazard damage and `tell_time_mult` for the warning portion of a queued hazard. Both default to 1.0. Body contact has its own `contact_damage_mult`. A hazard keeps its footprint and the length of its active window.

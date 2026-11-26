@@ -55,6 +55,13 @@
 //! flanking groups and fallbacks) asks it the same question with the same clock
 //! and the same live caps, so a floor can never spawn a kind it does not own and
 //! a per-floor content pass only ever edits one roster row.
+//!
+//! Optional pressure beats move ordinary pulse supply from each recovery into
+//! its preceding surge. The clock still gates the same roster, and every spawn
+//! uses the usual placement and kind draws. Live caps and appointment grace
+//! still apply, so the balance is on offered bodies, before those constraints.
+//! Sewer opening grace reduces contact damage while keeping the early XP feed.
+//! The default switch is off and preserves the original spawn timer and traces.
 
 use rand::Rng;
 
@@ -240,6 +247,7 @@ pub struct Director {
     /// until it comes into the unzoomed view and then put back on exactly the
     /// scale it spawned with. Never an rng draw, never a spawn, never a position.
     pub approach: Vec<(u64, f32)>,
+    pub(crate) pressure: PressureState,
 }
 
 impl Default for Director {
@@ -256,6 +264,85 @@ impl Default for Director {
             chamber_dwell: 0.0,
             chamber_room: -1,
             approach: Vec::new(),
+            pressure: PressureState::default(),
+        }
+    }
+}
+
+/// Per-tick modifiers shared with the contact, loot, and HUD passes.
+pub(crate) struct PressureState {
+    rates: Option<[(f32, f32); 2]>,
+    warned: [bool; 2],
+    pub(crate) warning: bool,
+    pub(crate) cadence: f32,
+    pub(crate) budget: f32,
+    pub(crate) contact: f32,
+    pub(crate) heal: f32,
+}
+
+impl Default for PressureState {
+    fn default() -> Self {
+        Self {
+            rates: None,
+            warned: [false; 2],
+            warning: false,
+            cadence: 1.0,
+            budget: 1.0,
+            contact: 1.0,
+            heal: 0.0,
+        }
+    }
+}
+
+impl PressureState {
+    pub(crate) fn tick(&mut self, tuning: &crate::tuning::Director, sector: usize, theme: Theme, elapsed: f32) {
+        if !tuning.pressure_beats {
+            return;
+        }
+        self.warning = false;
+        self.cadence = 1.0;
+        self.budget = 1.0;
+        self.contact = 1.0;
+        self.heal = 0.0;
+        if elapsed >= tuning.boss_time {
+            return;
+        }
+        if theme == Theme::Sewer && elapsed < tuning.pressure_sewer_opening_secs {
+            self.contact = 1.0 - tuning.pressure_sewer_opening_cut;
+        }
+        let scale = tuning.pressure_sector_scale[level_slot(sector)];
+        if scale == 0.0 {
+            return;
+        }
+        for i in 0..2 {
+            let start = tuning.pressure_starts[i];
+            let surge_end = start + tuning.pressure_lengths[i];
+            let recovery_end = surge_end + tuning.pressure_recovery_lengths[i];
+            if elapsed >= start - tuning.pressure_warning_lead && elapsed < start && !self.warned[i] {
+                self.warned[i] = true;
+                self.warning = true;
+            }
+            if elapsed >= start && elapsed < recovery_end {
+                let rates = self.rates.get_or_insert_with(|| tuning.pressure_rates(sector, scale));
+                if elapsed < surge_end {
+                    self.cadence = rates[i].0;
+                    self.budget = 1.0 + tuning.pressure_budget_bonus * scale;
+                    self.contact *= 1.0 + tuning.pressure_contact_bonus * scale;
+                } else {
+                    self.cadence = rates[i].1;
+                    self.budget = (1.0 - tuning.pressure_recovery_budget_cut * scale).max(0.0);
+                    self.heal = (tuning.pressure_recovery_heal * scale).min(1.0);
+                }
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn live_budget(&self, base: usize) -> usize {
+        if self.budget == 1.0 {
+            base
+        } else {
+            (base as f32 * self.budget).round() as usize
         }
     }
 }
@@ -922,6 +1009,31 @@ impl crate::tuning::Director {
             }
         }
         budget
+    }
+
+    /// Integrate the nominal offer over each window using the same pulse size
+    /// and interval as the spawn system. Fixed midpoint samples bound the work
+    /// for arbitrary tuning tables. Recovery always keeps at least 20% of its
+    /// usual cadence, so short recoveries bound the possible surge.
+    fn pressure_rates(&self, sector: usize, scale: f32) -> [(f32, f32); 2] {
+        const STEPS: usize = 128;
+        let offered = |start: f32, duration: f32| {
+            let step = duration / STEPS as f32;
+            let mut total = 0.0;
+            for i in 0..STEPS {
+                let t = start + (i as f32 + 0.5) * step;
+                total += self.horde_pulse(sector, t, false) as f32 / self.horde_interval(sector, t, false);
+            }
+            total * step
+        };
+        std::array::from_fn(|i| {
+            let start = self.pressure_starts[i];
+            let surge_len = self.pressure_lengths[i];
+            let surge = offered(start, surge_len);
+            let recovery = offered(start + surge_len, self.pressure_recovery_lengths[i]);
+            let moved = (surge * self.pressure_rate_bonus * scale).min(recovery * 0.8);
+            (1.0 + moved / surge, 1.0 - moved / recovery)
+        })
     }
 
     pub fn elite_start_for(&self, level: usize) -> f32 {
@@ -1759,5 +1871,69 @@ mod tests {
             d.note_chamber(None, dt);
         }
         assert!(!d.flank_ready(), "a corridor charged the dwell");
+    }
+
+    #[test]
+    fn pressure_changes_only_the_surge_and_recovery_windows() {
+        let tuning = crate::tuning::Tuning::parse("[director]\npressure_beats = true").unwrap().director;
+        let mut pressure = PressureState::default();
+        let start = tuning.pressure_starts[0];
+        let end = start + tuning.pressure_lengths[0];
+        let recovery_end = end + tuning.pressure_recovery_lengths[0];
+        pressure.tick(&tuning, 1, Theme::Kitchen, start - 0.01);
+        assert_eq!(pressure.live_budget(72), 72);
+        assert_eq!(pressure.cadence, 1.0);
+        pressure.tick(&tuning, 1, Theme::Kitchen, start);
+        assert!(pressure.live_budget(72) > 72 && pressure.cadence > 1.0);
+        assert!(pressure.contact > 1.0 && pressure.heal == 0.0);
+        pressure.tick(&tuning, 1, Theme::Kitchen, end);
+        assert!(pressure.live_budget(72) < 72 && pressure.cadence < 1.0);
+        assert!(pressure.heal > 0.0 && pressure.contact == 1.0);
+        for at in [recovery_end, tuning.boss_time] {
+            pressure.tick(&tuning, 1, Theme::Kitchen, at);
+            assert_eq!(pressure.live_budget(72), 72);
+            assert_eq!(pressure.cadence, 1.0);
+            assert_eq!(pressure.heal, 0.0);
+        }
+        pressure.tick(&tuning, 0, Theme::Sewer, 0.0);
+        assert!(pressure.contact < 1.0);
+        assert_eq!(pressure.cadence, 1.0, "preserve the first cards' XP feed");
+        pressure.tick(&tuning, 0, Theme::Sewer, tuning.pressure_sewer_opening_secs);
+        assert_eq!(pressure.contact, 1.0);
+    }
+
+    #[test]
+    fn pressure_conserves_the_scheduled_body_supply() {
+        let tuning = crate::tuning::Tuning::parse(
+            "[director]\npressure_beats = true\npressure_rate_bonus = 0.85\n\
+            [director.sectors.2]\nspawn_interval = [[0, 1.5], [60, 1.4], [180, 1.3], \
+            [360, 1.2], [540, 1.0], [720, 0.9], [900, 0.8]]",
+        ).unwrap().director;
+        for sector in 0..4 {
+            let mut pressure = PressureState::default();
+            let mut baseline = 0;
+            let mut tuned = 0;
+            let mut baseline_timer = 0.0;
+            let mut tuned_timer = 0.0;
+            let dt = 1.0 / 60.0;
+            for frame in 1..=54_000 {
+                let elapsed = frame as f32 * dt;
+                pressure.tick(&tuning, sector, Theme::Kitchen, elapsed);
+                let interval = tuning.horde_interval(sector, elapsed, false);
+                let pulse = tuning.horde_pulse(sector, elapsed, false);
+                baseline_timer -= dt;
+                if baseline_timer <= 0.0 {
+                    baseline += pulse;
+                    baseline_timer = interval;
+                }
+                tuned_timer -= dt * pressure.cadence;
+                if tuned_timer <= 0.0 {
+                    tuned += pulse;
+                    tuned_timer = interval;
+                }
+            }
+            assert!(baseline.abs_diff(tuned) as f32 <= baseline as f32 * 0.01,
+                "sector {sector}: offered {tuned} bodies against a baseline of {baseline}");
+        }
     }
 }

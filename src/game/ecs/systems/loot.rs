@@ -72,6 +72,7 @@ use crate::game::ecs::resources::{
     SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
 use crate::game::ecs::systems::boss::BossFight;
+use crate::game::director::Director;
 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossSchedule};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{
@@ -139,6 +140,23 @@ fn pickup_from_word(word: u32, weights: &[u32; 11]) -> PickupKind {
         bucket -= weight;
     }
     unreachable!("positive weights cover the bucket")
+}
+
+fn recovery_pickup(word: u32, weights: &[u32; 11], chance: f32) -> PickupKind {
+    if chance == 0.0 {
+        return pickup_from_word(word, weights);
+    }
+    // Reserve part of the existing draw for a Medkit, then stretch the
+    // remainder across the usual table. The drop chance and RNG count stay put.
+    const DOMAIN: u64 = 1 << 32;
+    let heal_end = (f64::from(chance) * DOMAIN as f64) as u64;
+    let word = u64::from(word);
+    if word < heal_end {
+        PickupKind::Heal
+    } else {
+        let remapped = (word - heal_end) * DOMAIN / (DOMAIN - heal_end);
+        pickup_from_word(remapped as u32, weights)
+    }
 }
 
 /// A persistent `SpawnId`-ordered list of drops.
@@ -220,6 +238,7 @@ fn reap_dead(
     dead: &mut Vec<(u64, Entity)>,
     luck: f32,
     tuning: &crate::tuning::Tuning,
+    recovery_heal: f32,
 ) {
     // Only the corpses matter, so collect and sort just those: the per-enemy
     // rng draws below (death burst, then the drop roll) depend on this order.
@@ -296,7 +315,8 @@ fn reap_dead(
             let drop_chance = tuning.loot.pickup_chances[bucket];
             let drop_chance = (drop_chance * luck).min(1.0);
             if rng.random::<f32>() < drop_chance {
-                let kind = pickup_from_word(rand::Rng::next_u32(rng), &tuning.loot.pickup_weights);
+                let chance = if e.named || e.kind == EnemyKind::Boss { 0.0 } else { recovery_heal };
+                let kind = recovery_pickup(rand::Rng::next_u32(rng), &tuning.loot.pickup_weights, chance);
                 let pickup = Pickup {
                     pos: e.pos,
                     kind,
@@ -343,7 +363,7 @@ fn reap_dead(
 
 pub fn reap_enemies_system(
     mut commands: Commands,
-    tuning: Res<crate::tuning::RunTuning>,
+    (tuning, director): (Res<crate::tuning::RunTuning>, Res<Director>),
     level: Res<Level>,
     mut counters: ResMut<RunCounters>,
     mut rng: ResMut<RngRes>,
@@ -395,6 +415,7 @@ pub fn reap_enemies_system(
             &mut dead,
             player.loadout.stats.luck_mult,
             &tuning,
+            director.pressure.heal,
         );
         for (entity, _, e) in enemies.iter() {
             if e.alive() {
@@ -418,6 +439,7 @@ pub fn reap_enemies_system(
         &mut dead,
         player.loadout.stats.luck_mult,
         &tuning,
+        director.pressure.heal,
     );
 }
 
@@ -428,7 +450,7 @@ pub fn reap_enemies_system(
 /// those kills count in the same tick.
 pub fn nuke_reap_system(
     mut commands: Commands,
-    tuning: Res<crate::tuning::RunTuning>,
+    (tuning, director): (Res<crate::tuning::RunTuning>, Res<Director>),
     mut nuke: ResMut<NukeTick>,
     level: Res<Level>,
     mut counters: ResMut<RunCounters>,
@@ -461,6 +483,7 @@ pub fn nuke_reap_system(
         &mut dead,
         player.loadout.stats.luck_mult,
         &tuning,
+        director.pressure.heal,
     );
     nuke.0 = false;
 }

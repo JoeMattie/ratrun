@@ -123,6 +123,7 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{self, SizeClass, SpatialGrid};
+use crate::game::director::Director;
 use crate::game::ecs::components::SpawnId;
 #[cfg(test)]
 use crate::game::ecs::constants::PLAYER_RADIUS;
@@ -329,6 +330,7 @@ fn contact_one(
     hit_kind: &mut Option<EnemyKind>,
     giant: bool,
     hurt_radius: f32,
+    pressure_contact: f32,
 ) {
     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
         return;
@@ -347,8 +349,13 @@ fn contact_one(
         return;
     }
     if e.contact_cd <= 0.0 && collision::circles_overlap(ppos, hurt_radius, e.pos, e.radius) {
-        if e.damage > *hit_dmg {
-            *hit_dmg = e.damage;
+        let damage = if e.named || e.summoned || e.kind == EnemyKind::Boss {
+            e.damage
+        } else {
+            e.damage * pressure_contact
+        };
+        if damage > *hit_dmg {
+            *hit_dmg = damage;
             *hit_kind = Some(e.kind);
         }
         e.contact_cd = 0.6;
@@ -373,6 +380,7 @@ fn contact_one(
 /// .
 pub fn contact_system(
     level: Res<Level>,
+    director: Res<Director>,
     mut player: ResMut<Player>,
     counters: Res<RunCounters>,
     level_index: Res<LevelIndex>,
@@ -421,6 +429,7 @@ pub fn contact_system(
                 &mut hit_kind,
                 giant,
                 hurt_radius,
+                director.pressure.contact,
             );
         }
     } else {
@@ -437,6 +446,7 @@ pub fn contact_system(
                 &mut hit_kind,
                 giant,
                 hurt_radius,
+                director.pressure.contact,
             );
         }
     }

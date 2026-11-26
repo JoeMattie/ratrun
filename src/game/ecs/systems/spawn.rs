@@ -98,7 +98,7 @@ use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{
     BossDue, Cvars, DebugFlags, DifficultyLevel, DrakeSpawner, LevelIndex, NextEnemyId, NextSpawnId,
-    RngRes, RunCounters, TickInput, Viewport,
+    RngRes, RunCounters, SfxQueue, TickInput, Viewport,
 };
 use crate::game::ecs::systems::approach::in_sim_view;
 use crate::game::ecs::systems::miniboss::MinibossSchedule;
@@ -328,7 +328,10 @@ pub fn director_system(
     level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
-    (schedule, opening, tuning): (Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>, Res<crate::tuning::RunTuning>),
+    (schedule, opening, tuning, mut sfx): (
+        Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>,
+        Res<crate::tuning::RunTuning>, ResMut<SfxQueue>,
+    ),
     // Console tunables: `set enemy_cap/spawn_rate`, `peace`. Neutral defaults.
     console: DirectorConsole,
     mut boss_due: ResMut<BossDue>,
@@ -347,6 +350,11 @@ pub fn director_system(
     // used to: give the ones still outside the 1.0 view their approach speed back (no
     // rng, no spawn, no position) before anything else this tick.
     boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
+    director.pressure.tick(&tuning.director, difficulty.0, level.theme, elapsed);
+    director.pressure.warning &= !console.debug.peace;
+    if director.pressure.warning {
+        sfx.0.push(crate::audio::Sfx::Warn);
+    }
     if counters.testbed && console.debug.peace {
         return;
     }
@@ -389,7 +397,10 @@ pub fn director_system(
     // one chamber, so leaving it has to reset the clock on the tick it happens.
     director.note_chamber(chamber_room_index(&level, player.pos), dt);
 
-    director.spawn_timer -= dt;
+    // Spend the existing timer at the current cadence, so the last surge
+    // pulse cannot leave a faster interval behind in the recovery.
+    let cadence = director.pressure.cadence;
+    director.spawn_timer -= dt * cadence;
     if director.spawn_timer <= 0.0 {
         // After the boss arrives the ordinary horde falls to the design's
         // cleanup pace (1 body/s, live budget 35); during the build-up it uses
@@ -416,8 +427,8 @@ pub fn director_system(
         } else {
             0
         };
-        let budget = tuning.director.horde_live_budget(difficulty.0, elapsed, boss_phase)
-            .saturating_sub(reserved);
+        let budget = tuning.director.horde_live_budget(difficulty.0, elapsed, boss_phase);
+        let budget = director.pressure.live_budget(budget).saturating_sub(reserved);
         let live = enemies.iter_mut().count();
         let guests = if level.theme == Theme::Outfall {
             enemies.iter_mut().filter(|(_, e)| e.kind == EnemyKind::ShoreCrab).count()

@@ -14,7 +14,8 @@ SECTORS = ("sewer", "kitchen", "lab", "flatbed")
 ROUTE_BOSSES = ("Cat", "HorseshoeCrab", "Broom", "MegaRat", "Mower", "Cobra", "Magpie", "Hawk")
 SCREEN_POINTS = 150
 CONFIRM_RUNS = 300
-CONFIRM_SEED = 6000
+SCREEN_SEED = 2000
+CONFIRM_SEED = 7000
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,21 @@ KNOBS = (
     Knob("boss_tell_time", .80, 1.35, "Default-route boss hazard warning duration relative to shipped."),
     Knob("jaguar_swipe_damage", .75, 1.25, "Jaguar swipe base damage before boss hazard scaling."),
     Knob("jaguar_swipe_windup", .80, 1.25, "Jaguar swipe windup before boss warning scaling."),
+    Knob("pressure_early_at", 185, 225, "First surge start.", " s", 205),
+    Knob("pressure_late_at", 660, 700, "Second surge start.", " s", 675),
+    Knob("pressure_early_len", 100, 135, "First surge length.", " s", 125),
+    Knob("pressure_late_len", 100, 130, "Second surge length.", " s", 125),
+    Knob("pressure_recover_early", 195, 270, "First recovery length.", " s", 220),
+    Knob("pressure_recover_late", 55, 70, "Second recovery length.", " s", 65),
+    Knob("pressure_rate_bonus", 0, 1.1, "Fractional cadence uplift, automatically balanced by recovery.", shipped=0),
+    Knob("pressure_budget_bonus", .15, .70, "Fractional live-budget uplift in a surge.", shipped=.35),
+    Knob("pressure_contact_bonus", .25, 1.25, "Fractional contact damage uplift in a surge.", shipped=.4),
+    Knob("pressure_recovery_budget_cut", .15, .65, "Fractional live-budget cut in recovery.", shipped=.25),
+    Knob("pressure_recovery_heal", .15, .75, "Fraction of other rare finds converted to Medkits in recovery.", shipped=.25),
+    Knob("pressure_sewer_scale", .30, .90, "Sewer beat strength.", shipped=.65),
+    Knob("pressure_carried_scale", .75, 1.45, "Beat strength for Kitchen, Lab and Flatbed, with later-floor weighting.", shipped=1.15),
+    Knob("pressure_sewer_opening_secs", 120, 215, "Time for Sewer opening contact grace.", " s", 150),
+    Knob("pressure_sewer_opening_cut", .25, .85, "Fractional contact damage cut in the Sewer opening.", shipped=.35),
 )
 BOUNDS = [(k.low, k.high) for k in KNOBS]
 
@@ -67,6 +83,25 @@ def overlay(values, defaults):
     specs = {knob.name: knob for knob in KNOBS}
     params = dict(zip(specs, values, strict=True))
     director = defaults["director"]
+    if params["pressure_rate_bonus"] > 0:
+        add("director", "pressure_beats", True, False, "Enable pressure beats.")
+        for key, names in (
+            ("pressure_starts", ("pressure_early_at", "pressure_late_at")),
+            ("pressure_lengths", ("pressure_early_len", "pressure_late_len")),
+            ("pressure_recovery_lengths", ("pressure_recover_early", "pressure_recover_late")),
+        ):
+            add("director", key, [round(params[name], 3) for name in names], director[key],
+                "Pair of buildup windows in simulation seconds.")
+        for key in (
+            "pressure_rate_bonus", "pressure_budget_bonus", "pressure_contact_bonus",
+            "pressure_recovery_budget_cut", "pressure_recovery_heal",
+            "pressure_sewer_opening_secs", "pressure_sewer_opening_cut",
+        ):
+            add("director", key, round(params[key], 8), director[key], specs[key].reason)
+        carried = params["pressure_carried_scale"]
+        scales = [params["pressure_sewer_scale"], carried * .85, carried, carried * 1.15]
+        add("director", "pressure_sector_scale", [round(x, 8) for x in scales],
+            director["pressure_sector_scale"], specs["pressure_carried_scale"].reason)
     hp_scales = [params[f"{floor}_enemy_hp"] for floor in SECTORS]
     damage_scales = [params[f"{floor}_contact_endpoint"] for floor in SECTORS]
     for key, scales, reason in (
@@ -135,7 +170,7 @@ def manifest(kind, defaults, solution=None):
         lower, upper = zip(*BOUNDS, strict=True)
         values = [[knob.shipped for knob in KNOBS], *qmc.scale(design.random(SCREEN_POINTS - 1), lower, upper).tolist()]
         points = {f"p{i:03}": point for i, point in enumerate(values)}
-        seed, n = 1000, 8
+        seed, n = SCREEN_SEED, 8
     elif kind == "confirm":
         points = {"candidate": solution["values"]}
         seed, n = CONFIRM_SEED, CONFIRM_RUNS

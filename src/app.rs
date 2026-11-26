@@ -8142,6 +8142,30 @@ mod tests {
         assert!(!text.contains("Enter equip"), "a stale Confirm key:\n{text}");
     }
 
+    fn capture_pressure_tuning() -> crate::tuning::RunTuning {
+        crate::tuning::RunTuning::new(crate::tuning::Tuning::parse(
+            "[director]\npressure_beats = true\npressure_sector_scale = [1.3, 1.0, 1.15, 1.25]",
+        ).unwrap())
+    }
+
+    #[test]
+    fn pressure_warning_uses_the_lead_time_and_fires_once_per_beat() {
+        let mut hh = Harness::new(120, 46);
+        hh.app.tuning = capture_pressure_tuning();
+        hh.enter_playing();
+        for i in 0..2 {
+            let world = hh.app.world.as_mut().unwrap();
+            let tuning = &world.tuning().director;
+            world.elapsed = tuning.pressure_starts[i] - tuning.pressure_warning_lead - 0.025;
+            hh.frame(&[]);
+            assert!(!hh.app.world.as_ref().unwrap().director.pressure.warning);
+            assert!(hh.frame(&[]).contains("MOVEMENT IN THE MAINS"));
+            assert!(hh.app.sfx_frame.contains(&Sfx::Warn));
+            hh.frame(&[]);
+            assert!(!hh.app.world.as_ref().unwrap().director.pressure.warning);
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::field_reassign_with_default)]
     #[test]
@@ -8182,6 +8206,27 @@ mod tests {
         hh.frame(&[]);
 
         match target.as_str() {
+            "pressure-warning" | "pressure-active" => {
+                hh.app.tuning = capture_pressure_tuning();
+                hh.enter_playing();
+                let world = hh.app.world.as_mut().unwrap();
+                world.configure_testbed();
+                world.peace = false;
+                let tuning = &world.tuning().director;
+                world.elapsed = tuning.pressure_starts[0] - tuning.pressure_warning_lead - 0.005;
+                let text = hh.frame(&[]);
+                assert!(text.contains("MOVEMENT IN THE MAINS"));
+                if target == "pressure-active" {
+                    for _ in 0..(30 * 60) {
+                        hh.app.input.begin_frame();
+                        hh.app.update(1.0 / 60.0);
+                    }
+                    let world = hh.app.world.as_ref().unwrap();
+                    assert!(world.director.pressure.cadence > 1.0);
+                    assert!(world.enemy_count() > 18);
+                    hh.frame(&[]);
+                }
+            }
             "testbed" | "testbed-boss" => {
                 hh.app.start_testbed(Theme::Sewer);
                 hh.frame(&[KeyCode::Char('4'), KeyCode::Char('6'), KeyCode::Char('7')]);

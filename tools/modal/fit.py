@@ -32,6 +32,10 @@ BINARY += [[f"clear_{b}", f"fall_{b}"] for b in BOSSES]
 PROBABILITY_GROUPS = [*BINARY, FLOOR_DEATH, WINDOW_DEATH]
 
 
+def sensitivity_step(knob):
+    return 10. if knob.unit in (" HP", " s") and knob.high - knob.low >= 10. else .10
+
+
 def load_stage(output, name):
     directory = output / "raw" / name
     spec = json.loads((directory / "manifest.json").read_bytes())
@@ -383,7 +387,7 @@ def fit(output, defaults):
     for i, knob in enumerate(KNOBS):
         before, after = x(train), x(train)
         low, high = bounds[i]
-        step = 10. if knob.unit == " HP" else .10
+        step = sensitivity_step(knob)
         before[:, i] = np.maximum(low, before[:, i] - step / 2)
         after[:, i] = np.minimum(high, after[:, i] + step / 2)
         for skill, model in zip(SKILLS, models, strict=True):

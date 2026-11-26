@@ -1228,6 +1228,20 @@ impl HudState {
             };
         }
 
+        if world.director.pressure.warning {
+            let message = match world.level.theme {
+                Theme::Sewer => "MOVEMENT IN THE MAINS",
+                Theme::Kitchen => "VERMIN AT THE HATCH",
+                Theme::Lab => "CONTAINMENT BREACH",
+                Theme::Laundry => "MOVEMENT IN THE CHUTES",
+                Theme::Printworks => "VERMIN ON THE LINE",
+                Theme::Trailer => "MOVEMENT ON THE BED",
+                Theme::Outfall => "MOVEMENT IN THE SILT",
+            };
+            let lead = world.tuning().director.pressure_warning_lead;
+            self.push_callout(CalloutKind::Escalation, "HORDE WARNING", message, lead.clamp(0.75, 5.0));
+        }
+
         // 8. Time-curve escalation callouts (fire once per threshold).
         //    Thresholds read the director's *curve* clock, so a later campaign
         //    level (whose curve opens further along) announces its own

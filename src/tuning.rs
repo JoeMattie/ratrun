@@ -88,6 +88,19 @@ section!(Director {
     cleanup_live_budget: usize = d::CLEANUP_LIVE_BUDGET; "Live ordinary body budget during the boss fight",
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     sectors: BTreeMap<String, DirectorSector> = BTreeMap::new(); "Optional overrides by campaign sector (1–4, practice uses 1)",
+    pressure_beats: bool = false; "Enable the buildup pressure beats and the Sewer opening grace",
+    pressure_starts: [f32; 2] = [205.0, 675.0]; "Surge start times in simulation seconds",
+    pressure_lengths: [f32; 2] = [125.0, 125.0]; "Surge lengths in seconds",
+    pressure_recovery_lengths: [f32; 2] = [220.0, 90.0]; "Recovery lengths in seconds, immediately after each surge",
+    pressure_warning_lead: f32 = 5.0; "Seconds between each warning and surge",
+    pressure_rate_bonus: f32 = 0.4; "Extra ordinary pulse frequency during a surge, balanced against its recovery",
+    pressure_budget_bonus: f32 = 0.35; "Extra live ordinary budget as a fraction during a surge",
+    pressure_contact_bonus: f32 = 0.4; "Extra ordinary contact damage as a fraction during a surge",
+    pressure_recovery_budget_cut: f32 = 0.25; "Fraction of the live ordinary budget removed during recovery",
+    pressure_recovery_heal: f32 = 0.25; "Fraction of non-heal rare finds converted to Medkits during recovery",
+    pressure_sector_scale: [f32; 4] = [0.65, 1.0, 1.15, 1.25]; "Beat strength by campaign sector. Zero skips beats and warnings",
+    pressure_sewer_opening_secs: f32 = 150.0; "Length of Sewer opening contact grace in seconds",
+    pressure_sewer_opening_cut: f32 = 0.35; "Fraction of ordinary contact damage removed during Sewer opening grace",
 });
 
 pub(crate) const SECTOR_KEYS: [&str; 4] = ["1", "2", "3", "4"];
@@ -376,6 +389,28 @@ impl Tuning {
             bail!("xp.gem_tier_min must be in ascending order");
         }
         let director = &self.director;
+        if director.pressure_recovery_budget_cut > 1.0
+            || director.pressure_recovery_heal > 1.0
+            || director.pressure_sewer_opening_cut >= 1.0
+        {
+            bail!("director pressure cuts and heal chance must be fractions (opening cut strictly below 1)");
+        }
+        if director.pressure_beats {
+            let lead = director.pressure_warning_lead;
+            let mut previous_end = 0.0_f32;
+            for i in 0..2 {
+                let start = director.pressure_starts[i];
+                let surge = director.pressure_lengths[i];
+                let recovery = director.pressure_recovery_lengths[i];
+                if start - lead < previous_end || surge <= 0.0 || recovery <= 0.0 {
+                    bail!("director pressure windows must have positive lengths and must not overlap, including their warnings");
+                }
+                previous_end = start + surge + recovery;
+            }
+            if previous_end > director.boss_time {
+                bail!("director pressure windows must end by director.boss_time");
+            }
+        }
         for (path, knots) in [
             ("director.build_hp", &director.build_hp[..]),
             ("director.level_bonus_hp", &director.level_bonus_hp[..]),
