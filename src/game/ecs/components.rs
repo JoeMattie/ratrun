@@ -40,6 +40,37 @@ pub use bevy_ecs::entity::Entity;
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SpawnId(pub u64);
 
+/// A ballistic lava glob's world-space footprint and out-of-plane height.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct LavaGlob {
+    pub ground: Vec2,
+    pub from: Vec2,
+    pub to: Vec2,
+    pub t: f32,
+    pub flight: f32,
+    pub apex: f32,
+    pub damage: f32,
+    pub seed: u32,
+}
+
+impl LavaGlob {
+    pub fn height(&self) -> f32 {
+        let u = (self.t / self.flight).clamp(0.0, 1.0);
+        4.0 * self.apex * u * (1.0 - u)
+    }
+}
+
+/// The floor residue from a landed glob or a Caldera volley.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct LavaPool {
+    pub pos: Vec2,
+    pub radius: f32,
+    pub age: f32,
+    pub life: f32,
+    pub dps: f32,
+    pub seed: u32,
+}
+
 /// Damaging ground pool left by an Acid Spit lob.
 ///
 /// Moved here from `world.rs` (it was never an entity outside the world

@@ -1314,6 +1314,10 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
              a small burst of spikes where it lands. Walls stop it. It is a tail, not a \
              bullet.",
         ),
+        WeaponKind::LavaBreath => (
+            "Level-up card · any floor",
+            "Subject R-47 spits molten globs upward and forward. Each landing +             splashes and leaves a glowing pool that burns anything standing in it. +             The core sample was swallowed.",
+        ),
     }
 }
 
@@ -1392,6 +1396,10 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
             "The lash hooks, and the recoil drags the catch home, bursting on every \
              body it crosses on the way. Heavy bodies stay where they are. Whatever it \
              catches comes home.",
+        ),
+        WeaponKind::LavaBreath => (
+            "Chest · Lava Breath L5 + Long Fuse",
+            "Each volley leaves a larger pool where you just stood. Touching pools +             join and combine their remaining burn time. Pressure release was logged.",
         ),
     }
 }
@@ -2089,6 +2097,14 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
     );
     f.push("DAMAGE 1→5", damage);
     f.push("CYCLE 1→5", format!("{cycle}s"));
+    if k == WeaponKind::LavaBreath {
+        use crate::game::weapon::{LAVA_DPS, LAVA_LANDINGS, LAVA_POOL_LIFE, LAVA_POOL_RADIUS};
+        let globs = LAVA_LANDINGS.map(|row| row.len().to_string()).join(" · ");
+        let dps = LAVA_DPS.map(|dps| format!("{dps:.0}")).join(" · ");
+        f.push("GLOBS 1→5", globs);
+        f.push("POOL DPS", dps);
+        f.push("POOL", format!("{LAVA_POOL_RADIUS}px radius · {LAVA_POOL_LIFE}s"));
+    }
     f.push(
         "AT MAX",
         if k.evolution().is_some() {
@@ -2134,6 +2150,10 @@ fn evolution_facts(k: WeaponKind, f: &mut Facts) {
     f.push("LOCKED IN", "yes — it cannot be undone");
     f.push("KEEPS", "the weapon's slot and timing");
     f.push("DAMAGE", "credited to the original weapon");
+    if k == WeaponKind::LavaBreath {
+        use crate::game::weapon::{CALDERA_LIFE, CALDERA_RADIUS};
+        f.push("EXTRA POOL", format!("{CALDERA_RADIUS}px radius · {CALDERA_LIFE}s"));
+    }
 }
 
 fn passive_facts(k: PassiveKind, f: &mut Facts) {

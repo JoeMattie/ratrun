@@ -162,7 +162,30 @@ pub const LASER_EYE_OFFSET: f32 = 3.4;
 /// indexed by [`WeaponKind::index`], so a new kind has to raise this and the
 /// arrays in one place. Wave 3 added Laser Eyes, Super Dash, Acid Rain,
 /// Hantavirus and the Spiked Tail.
-pub const WEAPON_SLOTS: usize = 13;
+pub const WEAPON_SLOTS: usize = 14;
+
+pub const LAVA_CYCLE: [f32; 5] = [2.2, 2.1, 2.0, 1.9, 1.7];
+pub const LAVA_SPLASH_DAMAGE: [f32; 5] = [10.0, 12.0, 14.0, 17.0, 20.0];
+pub const LAVA_DPS: [f32; 5] = [8.0, 9.0, 10.0, 12.0, 14.0];
+/// Distance from the mouth by rank, ordered from the left edge of the fan.
+pub const LAVA_LANDINGS: [&[f32]; 5] = [
+    &[48.0, 26.0, 48.0],
+    &[48.0, 26.0, 26.0, 48.0],
+    &[48.0, 37.0, 26.0, 37.0, 48.0],
+    &[48.0, 39.0, 26.0, 26.0, 39.0, 48.0],
+    &[48.0, 41.0, 34.0, 26.0, 34.0, 41.0, 48.0],
+];
+pub const LAVA_FAN_DEGREES: f32 = 70.0;
+pub const LAVA_FLIGHT: f32 = 0.55;
+pub const LAVA_APEX: f32 = 22.0;
+pub const LAVA_SPLASH_RADIUS: f32 = 9.0;
+pub const LAVA_POOL_RADIUS: f32 = 6.0;
+pub const LAVA_POOL_LIFE: f32 = 2.5;
+pub const LAVA_POOL_TICK: f32 = 0.25;
+pub const LAVA_MUZZLE_SECS: f32 = 0.25;
+pub const LAVA_MOUTH_OFFSET: f32 = 5.0;
+pub const CALDERA_RADIUS: f32 = 14.0;
+pub const CALDERA_LIFE: f32 = 4.0;
 
 // ---- Wave 3 weapons A: Acid Rain and Hantavirus --------------------------
 //
@@ -299,6 +322,7 @@ pub enum WeaponKind {
     AcidRain,    // marks floor spots, staggered drops, splash damage
     Hantavirus,  // leaves droppings; a body that steps in one is infected
     SpikedTail,  // single-target lash: spikes out, small burst at the hit
+    LavaBreath,  // throws airborne globs that splash and leave hot pools
 }
 
 impl WeaponKind {
@@ -317,6 +341,7 @@ impl WeaponKind {
             WeaponKind::AcidRain,
             WeaponKind::Hantavirus,
             WeaponKind::SpikedTail,
+            WeaponKind::LavaBreath,
         ]
     }
 
@@ -364,6 +389,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => 10,
             WeaponKind::Hantavirus => 11,
             WeaponKind::SpikedTail => 12,
+            WeaponKind::LavaBreath => 13,
         }
     }
 
@@ -382,6 +408,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => "Acid Rain",
             WeaponKind::Hantavirus => "Hantavirus",
             WeaponKind::SpikedTail => "Spiked Tail",
+            WeaponKind::LavaBreath => "Lava Breath",
         }
     }
 
@@ -405,6 +432,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => "Drops staggered acid splashes nearby.",
             WeaponKind::Hantavirus => "Leaves droppings. A step tags 3 hits, then jumps.",
             WeaponKind::SpikedTail => "Lashes one foe, then bursts at the hit.",
+            WeaponKind::LavaBreath => "Spits molten globs in an arc ahead.",
         }
     }
 
@@ -423,6 +451,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => "There was a ceiling here once.",
             WeaponKind::Hantavirus => "Somebody passed a note in Block C.",
             WeaponKind::SpikedTail => "The tail grew a point of view.",
+            WeaponKind::LavaBreath => "The core sample was swallowed.",
         }
     }
 
@@ -445,6 +474,7 @@ impl WeaponKind {
             // Steel: the one weapon colour in the game with no hue in it, so a
             // barbed tail reads apart from the two rose/orange tail weapons.
             WeaponKind::SpikedTail => (206, 214, 226),
+            WeaponKind::LavaBreath => (255, 140, 40),
         }
     }
 
@@ -474,6 +504,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => RAIN_CYCLE[0],
             WeaponKind::Hantavirus => VIRUS_CYCLE[0],
             WeaponKind::SpikedTail => LASH_CYCLE[0],
+            WeaponKind::LavaBreath => LAVA_CYCLE[0],
         }
     }
 
@@ -525,6 +556,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => RAIN_DAMAGE[0],
             WeaponKind::Hantavirus => VIRUS_DAMAGE[0],
             WeaponKind::SpikedTail => LASH_DAMAGE[0],
+            WeaponKind::LavaBreath => LAVA_SPLASH_DAMAGE[0],
         }
     }
 
@@ -538,6 +570,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => Some(RAIN_DAMAGE),
             WeaponKind::Hantavirus => Some(VIRUS_DAMAGE),
             WeaponKind::SpikedTail => Some(LASH_DAMAGE),
+            WeaponKind::LavaBreath => Some(LAVA_SPLASH_DAMAGE),
             _ => None,
         }
     }
@@ -550,6 +583,7 @@ impl WeaponKind {
             WeaponKind::AcidRain => Some(RAIN_CYCLE),
             WeaponKind::Hantavirus => Some(VIRUS_CYCLE),
             WeaponKind::SpikedTail => Some(LASH_CYCLE),
+            WeaponKind::LavaBreath => Some(LAVA_CYCLE),
             _ => None,
         }
     }
@@ -670,14 +704,20 @@ impl WeaponKind {
             ),
             // Barbed Wire — the lash hooks, and the recoil reels the catch in.
             // Partner: Counterweight, the passive that is literally a weight
-            // tied to the tip of a weapon. It is the one passive with **two**
-            // rows (Flywheel is the other), so one stack opens both; a chest
+            // tied to the tip of a weapon. One stack opens both of its rows
+            // (Flywheel is the other); a chest
             // still evolves one weapon at a time, earliest in rack order.
             WeaponKind::SpikedTail => e(
                 super::loadout::PassiveKind::Counterweight,
                 "Barbed Wire",
                 "Whatever it catches comes home.",
                 "The lash hooks; the recoil drags its catch home, bursting every body it crosses.",
+            ),
+            WeaponKind::LavaBreath => e(
+                super::loadout::PassiveKind::LongFuse,
+                "Caldera",
+                "Pressure release was logged.",
+                "Each volley leaves a larger pool where you just stood. Pools merge.",
             ),
         }
     }
@@ -917,6 +957,7 @@ impl Weapon {
             WeaponKind::CheeseSpray => 2 + self.level as i32,
             WeaponKind::SqueakNova => 6 + 2 * self.level as i32,
             WeaponKind::SporeOrbit => 2 + self.level as i32,
+            WeaponKind::LavaBreath => LAVA_LANDINGS[(self.level.clamp(1, 5) - 1) as usize].len() as i32,
             _ => self.level as i32,
         }
     }
@@ -1098,6 +1139,7 @@ mod tests {
             (WeaponKind::SuperDash, PassiveKind::SpringHeel, "Ripcord"),
             // The spiked tail hooks with Counterweight (the weight on the tip).
             (WeaponKind::SpikedTail, PassiveKind::Counterweight, "Barbed Wire"),
+            (WeaponKind::LavaBreath, PassiveKind::LongFuse, "Caldera"),
         ];
         assert_eq!(rows.len(), WeaponKind::all().len(), "every kind needs a row");
         for (kind, passive, name) in rows {
@@ -1185,7 +1227,7 @@ mod tests {
     /// from level 4.
     #[test]
     fn spiked_tail_matches_its_design_tables() {
-        assert_eq!(WEAPON_SLOTS, 13);
+        assert_eq!(WEAPON_SLOTS, 14);
         let expect = [
             (1u8, 22.0f32, 1.3f32, 80.0f32, 10.0f32, 0u8),
             (2, 27.0, 1.19, 90.0, 11.5, 0),

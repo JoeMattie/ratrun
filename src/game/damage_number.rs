@@ -54,6 +54,8 @@ pub enum DamageSource {
     Virus,
     /// The Spiked Tail's lash and its burst (steel-white).
     Lash,
+    /// Lava Breath's splash and floor burns (orange).
+    Lava,
 }
 
 impl DamageSource {
@@ -64,6 +66,7 @@ impl DamageSource {
             Some(WeaponKind::TailWhip) => DamageSource::TailWhip,
             // The lash and the spike shards it breaks off read as one weapon.
             Some(WeaponKind::SpikedTail) => DamageSource::Lash,
+            Some(WeaponKind::LavaBreath) => DamageSource::Lava,
             _ => DamageSource::Normal,
         }
     }
@@ -512,6 +515,9 @@ fn damage_color(it: &DamageNumber) -> Rgb {
         } else {
             (198, 212, 232)
         };
+    }
+    if it.source == DamageSource::Lava {
+        return (255, 169, 72);
     }
     if it.total_dmg >= 25.0 {
         (255, 152, 58)

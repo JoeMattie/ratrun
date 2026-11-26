@@ -35,6 +35,7 @@
 //! | 11b2 | `weapon_spiketail::spiked_tail_system` | the Spiked Tail's wind-up, crack and recoil (wave 3) |
 //! | 11c | `weapons_wave3b::{laser_eyes,super_dash,melee_nudge}_system` | wave 3's self-driving weapons (new) |
 //! | 11d | `weapons_wave3a::acid_rain_system` | Acid Rain's locked drops landing (wave 3) |
+//! | 11d1 | `weapon_lava::lava_system` | Lava globs land and splash, pools merge and burn |
 //! | 11d2 | `weapons_wave3a::droppings_system` | Hantavirus droppings age, expire and infect (`SpawnId` order; wave 3) |
 //! | 11e | `weapons_wave3a::hantavirus_system` | Hantavirus ticks + third-tick jumps (wave 3) |
 //! | 12 | `projectiles::bullets_system` | `update_bullets` |
@@ -102,6 +103,7 @@ use super::systems::{
     floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer, fog, fx, gates, hazards,
     loot, miniboss, player, powerups, projectiles, puddles, shop, spawn, trailer, traps,
     weapon_spiketail, weapons, weapons_wave3a, weapons_wave3b,
+    weapon_lava,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -228,6 +230,7 @@ pub fn build_tick_schedule() -> Schedule {
     schedule.add_systems(
         (
             weapons_wave3a::acid_rain_system,
+            weapon_lava::lava_system,
             weapons_wave3a::droppings_system,
             weapons_wave3a::hantavirus_system,
             projectiles::bullets_system,

@@ -11,6 +11,8 @@
   walls.** The thinner beams light their path and reflect brightly in puddles.
   Damage falls off with distance, and higher ranks deal full damage farther
   from the muzzle.
+- **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
+  glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
 
 ## 0.3.0 (2026-11-25)
 

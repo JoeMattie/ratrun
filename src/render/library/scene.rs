@@ -2039,6 +2039,14 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         script.lean = Vec2::ZERO;
         script.cue = Some(arsenal_lane_cue);
     }
+    if kind == WeaponKind::LavaBreath {
+        // Fit the lifted apex and both outer landing spots in the same frame.
+        // Keep the standard targets and let the lava light the plate.
+        script.shrink = 2;
+        script.zoom = 1.4;
+        script.lean = Vec2::new(20.0, -5.0);
+        world.flat_lit = false;
+    }
     script.input = match kind {
         // A thrash burst lasts a second, so its presses are 1.4 s apart (three
         // bursts a loop, each with its own sweep and hit flashes); a squeak ring

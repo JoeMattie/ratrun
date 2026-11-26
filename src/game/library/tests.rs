@@ -722,7 +722,7 @@ fn barbed_wire_is_the_thirteenth_evolution() {
         .iter()
         .filter(|r| matches!(r.key, Key::Evolution(_)))
         .collect();
-    assert_eq!(evolutions.len(), 13);
+    assert_eq!(evolutions.len(), crate::game::weapon::WEAPON_SLOTS);
     assert_eq!(
         evolutions.len(),
         WeaponKind::all()
@@ -752,6 +752,20 @@ fn barbed_wire_is_the_thirteenth_evolution() {
         .expect("an EVOLVES row");
     assert!(evolves.value.contains(WeaponKind::TailThrash.name()));
     assert!(evolves.value.contains(WeaponKind::SpikedTail.name()));
+}
+
+#[test]
+fn the_arsenal_lists_lava_breath_and_its_shared_evolution_partner() {
+    let kind = WeaponKind::LavaBreath;
+    let rows = all_rows();
+    assert!(rows.iter().any(|row| row.key == Key::Weapon(kind) && row.name == "Lava Breath"));
+    assert!(rows.iter().any(|row| row.key == Key::Evolution(kind) && row.name == "Caldera"));
+    let weapon = facts(Key::Weapon(kind));
+    assert!(weapon.rows().iter().any(|f| f.label == "GLOBS 1→5"));
+    let partner = facts(Key::Passive(PassiveKind::LongFuse));
+    let evolves = partner.rows().iter().find(|f| f.label == "EVOLVES").unwrap();
+    assert!(evolves.value.contains(WeaponKind::AcidRain.name()));
+    assert!(evolves.value.contains(kind.name()));
 }
 
 /// A boss card prints the pool the fight really has (the art base, the kind's

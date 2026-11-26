@@ -86,6 +86,8 @@ pub struct TickInput {
     /// path accumulates `Player::dash_charge` from `dash_held` instead, and
     /// every legacy caller passes `0.0`.
     pub charge: f32,
+    /// The rat's position at the start of this tick, before movement.
+    pub previous_pos: Vec2,
 }
 
 /// The dash button's live state for one tick, as the App reads it from

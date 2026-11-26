@@ -598,7 +598,7 @@ impl CommandSpec {
 }
 
 const ON_OFF: &[&str] = &["on", "off"];
-const GIVE_KINDS: &[&str] = &["weapon", "passive", "all"];
+const GIVE_KINDS: &[&str] = &["weapon", "passive", "all", "lava"];
 const REMOVE_KINDS: &[&str] = &["weapon", "passive"];
 const TP_KINDS: &[&str] = &["arena", "shop", "chest", "maze"];
 const LIGHTS_KINDS: &[&str] = &["full", "hard", "coarse", "compact"];
@@ -699,7 +699,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "give",
         aliases: &[],
-        usage: "give weapon|passive <name> [level|stacks] | give all",
+        usage: "give weapon|passive <name> [n] | give all | give lava [level]",
         summary: "Grant a weapon, passive, or everything.",
         args: &[ArgKind::Words(GIVE_KINDS), ArgKind::Text, ArgKind::Text],
         read_only: false,
@@ -1268,7 +1268,8 @@ pub fn candidates(kind: ArgKind) -> Vec<String> {
     match kind {
         ArgKind::Text | ArgKind::File => Vec::new(),
         ArgKind::Words(words) => words.iter().map(|s| s.to_string()).collect(),
-        ArgKind::Weapon => WeaponKind::all().iter().map(|w| slug(w.name())).collect(),
+        ArgKind::Weapon => WeaponKind::all().iter().map(|w| slug(w.name()))
+            .chain(std::iter::once("lava".to_string())).collect(),
         ArgKind::Passive => PassiveKind::all().iter().map(|p| slug(p.name())).collect(),
         // `spawn` answers to a named miniboss too (`spawn mudlark`): the body
         // is an ordinary enemy with a `Miniboss` component on it.
@@ -1710,10 +1711,14 @@ fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
             );
             app.console_line(msg, LineKind::Success);
         }
-        Some("weapon") => {
-            let name = args.get(1).ok_or("usage: give weapon <name> [level]")?;
+        Some(form @ ("weapon" | "lava")) => {
+            let (name, level_arg) = if form == "lava" {
+                ("lava", args.get(1))
+            } else {
+                (*args.get(1).ok_or("usage: give weapon <name> [level]")?, args.get(2))
+            };
             let w = find_weapon(name).ok_or_else(|| format!("unknown weapon `{name}`"))?;
-            let level = args.get(2).map(|s| parse_u32(s, "level")).transpose()?.unwrap_or(1);
+            let level = level_arg.map(|s| parse_u32(s, "level")).transpose()?.unwrap_or(1);
             let held = world.player.loadout.weapons.iter().any(|x| x.kind == w);
             if !held && world.player.loadout.weapons.len() >= max_w {
                 return Err(format!(
@@ -1739,7 +1744,7 @@ fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
             world.give_passive(p, stacks);
             app.console_line(format!("gave {} ×{}", p.name(), stacks), LineKind::Success);
         }
-        _ => return Err("usage: give weapon|passive <name> [n] | give all".into()),
+        _ => return Err("usage: give weapon|passive <name> [n] | give all | give lava [level]".into()),
     }
     Ok(())
 }
@@ -2555,6 +2560,9 @@ fn cmd_exec(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
 
 fn find_weapon(name: &str) -> Option<WeaponKind> {
     let s = slug(name);
+    if s == "lava" {
+        return Some(WeaponKind::LavaBreath);
+    }
     WeaponKind::all().into_iter().find(|w| slug(w.name()) == s)
 }
 
@@ -3192,6 +3200,22 @@ mod tests {
         assert_eq!(level(&app), Some(w.max_level()));
         run_command(&mut app, &format!("level {name} 0")).expect("level works");
         assert_eq!(level(&app), Some(1));
+    }
+
+    #[test]
+    fn give_lava_completes_and_grants_lava_breath() {
+        let mut console = Console::new();
+        console.input = "give la".into();
+        console.cursor = console.input.len();
+        assert_eq!(begin_completion(&mut console), 1);
+        assert_eq!(console.input, "give lava");
+
+        let mut app = fresh_app();
+        run_command(&mut app, "give lava 5").unwrap();
+        let world = app.world_ref().unwrap();
+        assert!(world.player.loadout.weapons.iter().any(|w| {
+            w.kind == WeaponKind::LavaBreath && w.level == 5
+        }));
     }
 
     #[test]

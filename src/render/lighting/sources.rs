@@ -9,7 +9,7 @@ use crate::game::art_traps::MazeRewardState;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::ecs::components::{
     AcidDrop, CheeseString, CorrosiveChannel, DeadLetterPacket, EchoSpoke, FairyRing, Infection,
-    MilkTooth, Pool, Dropping, SpawnId,
+    Dropping, LavaGlob, LavaPool, MilkTooth, Pool, SpawnId,
 };
 use crate::game::ecs::resources::{ActiveFx, DashTrack, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
@@ -131,6 +131,7 @@ fn laser_line_lights_cover_both_ends_with_bounded_samples() {
         }
     }
 }
+const MAX_LAVA_LIGHTS: usize = 24;
 
 impl LightMap {
     /// Gather all lights from world state; returns the active boss phase if any.
@@ -421,7 +422,31 @@ impl LightMap {
         // 5. ECS entities: pools, pickups, gems, bullets, enemies (bats/boss), bosses, boss projectiles.
         let mut boss_phase: Option<u8> = None;
         let mut dropping_lights = [None; MAX_DROPPING_LIGHTS];
+        let mut lava = Vec::new();
         for entity in scene.ecs.iter_entities() {
+            if let Some(id) = entity.get::<SpawnId>() {
+                let source = if let Some(glob) = entity.get::<LavaGlob>() {
+                    let height = glob.height();
+                    Some((glob.ground - Vec2::new(0.0, height), 18.0, height, false))
+                } else {
+                    entity.get::<LavaPool>().and_then(|pool| {
+                        let radius = 14.0 * (pool.life - pool.age).clamp(0.0, 1.0);
+                        (radius > 0.0).then_some((pool.pos, radius, 2.0, true))
+                    })
+                };
+                if let Some((pos, radius, height, ground_glow)) = source {
+                    let s = pos - cam;
+                    if in_range(s.x, s.y, radius) {
+                        let fade = if ground_glow { radius / 14.0 } else { 1.0 };
+                        let mut light = Light::radial(pos, radius, (255, 140, 40), 0.66 * fade);
+                        light.height = height;
+                        light.scatter = 0.16 * fade;
+                        light.falloff = Falloff::Small;
+                        light.casts_shadow = false;
+                        lava.push((ground_glow, id.0, light));
+                    }
+                }
+            }
             // Acid pools (glowing toxic green).
             if let Some(p) = entity.get::<Pool>() {
                 let sx = p.pos.x - cam.x;
@@ -1133,6 +1158,16 @@ impl LightMap {
 
         for (_, light) in dropping_lights.into_iter().flatten() {
             self.push_ground(light, 2);
+        }
+        // Keep airborne lights first, then the most recently spawned pools.
+        // This cap is independent of the lighting tier's overall budget.
+        lava.sort_unstable_by_key(|&(pool, id, _)| (pool, std::cmp::Reverse(id)));
+        for (pool, _, light) in lava.into_iter().take(MAX_LAVA_LIGHTS) {
+            if pool {
+                self.push_ground(light, 1);
+            } else {
+                self.push_shaped(light, 1);
+            }
         }
         boss_phase
     }

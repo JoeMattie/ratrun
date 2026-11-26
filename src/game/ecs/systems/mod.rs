@@ -48,3 +48,4 @@ pub mod approach;
 // Standing water: the rat's wet-floor footsteps and the ripples (right after
 // `player` in the schedule).
 pub mod puddles;
+pub mod weapon_lava;
