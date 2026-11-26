@@ -182,8 +182,9 @@ cargo clippy --all-targets
 ## Web build
 
 Build the browser edition with the pinned Rust toolchain and Node.js/npm.
-The script installs the matching `wasm-bindgen` CLI in `.tools/` and copies
-the pinned xterm.js assets into `web/dist/` with the compiled game.
+The script installs the matching `wasm-bindgen` CLI in `.tools/` and uses
+Binaryen to optimize the Wasm in `web/dist/`. The browser draws the game grid
+on canvas and uses fixed-width Wasm SIMD in current desktop browsers.
 
 ```sh
 rustup target add wasm32-unknown-unknown --toolchain 1.100.0

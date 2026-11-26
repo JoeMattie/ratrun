@@ -1,6 +1,5 @@
-import { Terminal } from "./vendor/xterm.mjs";
-import { FitAddon } from "./vendor/addon-fit.mjs";
-import init, { KeyPhase, PointerAction, WebGame } from "./ratrun.js";
+import { CanvasRenderer } from "./canvas.js";
+import init, { block_masks, KeyPhase, PointerAction, WebGame } from "./ratrun.js";
 
 const host = document.querySelector("#terminal");
 const status = document.querySelector("#status");
@@ -13,35 +12,19 @@ function modifiers(event) {
 }
 
 async function start() {
-  await init();
+  const { memory } = await init();
   await document.fonts.ready;
-  // Use the DOM renderer. The WebGL addon can move entries in its glyph
-  // atlas while assembling a frame of changing truecolor block glyphs.
-  const terminal = new Terminal({
-    fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
-    customGlyphs: true,
-    minimumContrastRatio: 1,
-    scrollback: 0,
-    disableStdin: true,
-    theme: { background: "#090a0d", foreground: "#e1d8cc" },
-  });
-  terminal.open(host);
-  const fit = new FitAddon();
-  terminal.loadAddon(fit);
+  const screen = document.querySelector("#text");
+  const canvas = new CanvasRenderer(document.querySelector("#picture"), screen, block_masks());
 
   function fitGrid() {
-    const fontSize = Math.min(20, Math.floor(host.clientWidth / 76), Math.floor(host.clientHeight / 54));
-    terminal.options.fontSize = Math.max(10, fontSize);
-    fit.fit();
+    return canvas.fit(host.clientWidth, host.clientHeight, devicePixelRatio);
   }
 
   fitGrid();
-  const game = new WebGame(terminal.cols, terminal.rows);
-  terminal.onResize(({ cols, rows }) => game.resize(cols, rows));
-  terminal.write("\x1b[?25l\x1b[?7l"); // Hide the text cursor and disable auto-wrap.
-  const screen = host.querySelector(".xterm-screen");
+  const game = new WebGame(canvas.cols, canvas.rows);
   status.hidden = true;
-  terminal.focus();
+  host.focus();
 
   let resizePending = false;
   const resizeObserver = new ResizeObserver(() => { resizePending = true; });
@@ -93,18 +76,18 @@ async function start() {
     if (stopped) return;
     const bounds = screen.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return;
-    const col = Math.floor((event.clientX - bounds.left) * terminal.cols / bounds.width);
-    const row = Math.floor((event.clientY - bounds.top) * terminal.rows / bounds.height);
-    if (action !== PointerAction.Up && (col < 0 || row < 0 || col >= terminal.cols || row >= terminal.rows)) return;
+    const col = Math.floor((event.clientX - bounds.left) * canvas.cols / bounds.width);
+    const row = Math.floor((event.clientY - bounds.top) * canvas.rows / bounds.height);
+    if (action !== PointerAction.Up && (col < 0 || row < 0 || col >= canvas.cols || row >= canvas.rows)) return;
     game.pointer(action, button,
-      Math.min(terminal.cols - 1, Math.max(0, col)),
-      Math.min(terminal.rows - 1, Math.max(0, row)),
+      Math.min(canvas.cols - 1, Math.max(0, col)),
+      Math.min(canvas.rows - 1, Math.max(0, row)),
       modifiers(event));
   }
 
   screen.addEventListener("pointerdown", (event) => {
     event.preventDefault();
-    terminal.focus();
+    host.focus();
     if (event.isTrusted) game.unlock_audio();
     screen.setPointerCapture(event.pointerId);
     pointer(event, PointerAction.Down, event.button);
@@ -124,65 +107,59 @@ async function start() {
   const params = new URLSearchParams(location.search);
   const profile = params.get("profile");
   const debugFrames = params.has("debug-frames");
-  const timings = { wasm: [], write: [], cadence: [] };
-  let skipped = 0;
+  const timings = { wasm: [], canvas: [], cadence: [] };
   if (profile !== null) {
     game.start_profile(profile === "full");
     window.ratrunProfile = () => {
       const stages = JSON.parse(game.profile());
-      const result = { ...stages, cols: terminal.cols, rows: terminal.rows, skipped };
+      const result = { ...stages, cols: canvas.cols, rows: canvas.rows };
       for (const [key, values] of Object.entries(timings)) result[key] = values.splice(0);
-      skipped = 0;
       return result;
     };
   }
 
-  function measure(name, end = performance.now()) {
+  function measure(name, start, end = performance.now()) {
     const samples = timings[name];
-    samples.push(performance.measure(name, { start: `ratrun-${name}`, end }).duration);
-    performance.clearMarks(`ratrun-${name}`);
-    performance.clearMeasures(name);
-    if (samples.length === 1200) samples.splice(0, 600);
+    const label = `ratrun-${name}`;
+    samples.push(performance.measure(label, { start, end }).duration);
+    performance.clearMeasures(label);
+    if (samples.length === 3600) samples.splice(0, 1800);
   }
 
-  let writing = false;
-  const decoder = new TextDecoder();
   let next = 0;
   let previous;
+  let crosshair = false;
   function frame(now) {
     if (now + 0.5 < next) {
       requestAnimationFrame(frame);
       return;
     }
     next = next ? Math.max(next + frameMs, now + 0.5) : now + frameMs;
-    if (!writing && resizePending) {
-      fitGrid();
+    if (resizePending || devicePixelRatio !== canvas.pixelRatio) {
+      if (fitGrid()) game.resize(canvas.cols, canvas.rows);
       resizePending = false;
     }
+    let started;
     if (profile !== null) {
-      if (previous !== undefined) {
-        performance.mark("ratrun-cadence", { startTime: previous });
-        measure("cadence", now);
-      }
+      if (previous !== undefined) measure("cadence", previous, now);
       previous = now;
-      if (writing) skipped++;
-      performance.mark("ratrun-wasm");
+      started = performance.now();
     }
-    const bytes = game.frame(!writing);
-    if (profile !== null) measure("wasm");
-    host.style.cursor = game.crosshair() ? "crosshair" : "default";
-    if (bytes.length) {
-      writing = true;
-      if (profile !== null) performance.mark("ratrun-write");
-      // Decode the complete frame before passing it to xterm. Its byte-input
-      // decoder can drop a glyph such as — across an internal chunk boundary.
-      terminal.write(decoder.decode(bytes), () => {
-        writing = false;
-        if (profile !== null) measure("write");
-        if (debugFrames && !stopped && window.ratrunDebugFrame) {
-          window.ratrunDebugFrame(terminal, JSON.parse(game.debug_frame()));
-        }
-      });
+    const length = game.frame();
+    if (profile !== null) measure("wasm", started);
+    const cursor = game.crosshair();
+    if (crosshair !== cursor) {
+      crosshair = cursor;
+      host.style.cursor = cursor ? "crosshair" : "default";
+    }
+    if (length) {
+      if (profile !== null) started = performance.now();
+      const cells = game.cells_ptr(), text = game.text_ptr();
+      canvas.paint(memory.buffer, cells, length, text);
+      if (profile !== null) measure("canvas", started);
+      if (debugFrames && window.ratrunDebugFrame) {
+        window.ratrunDebugFrame(canvas, JSON.parse(game.debug_frame()));
+      }
     }
     if (game.quit()) {
       stopped = true;

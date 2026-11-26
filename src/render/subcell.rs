@@ -65,6 +65,19 @@ use super::framebuffer::PixelBuffer;
 use super::palette::{self, Rgb};
 
 mod tables;
+
+/// Canonical coverage for the browser's cell rasterizer. Space is handled
+/// separately as text (an underlined space can still have ink).
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub fn canvas_masks() -> impl Iterator<Item = (char, u64)> {
+    use tables::*;
+    QUADRANTS.into_iter().zip(QUAD_MASKS)
+        .chain(SEXTANTS.into_iter().zip(SEXTANT_MASKS))
+        .chain(OCTANTS.into_iter().zip(OCTANT_MASKS))
+        .chain(EIGHTHS)
+        .chain(WEDGES)
+        .filter(|&(glyph, _)| glyph != ' ')
+}
 mod xbr;
 
 /// Above this eased zoom the view is zoomed out and the detail path may run

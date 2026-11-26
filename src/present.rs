@@ -379,7 +379,7 @@ const CLEAR_ALL: &[u8] = b"\x1b[2J";
 /// Symbols for Legacy Computing) is `F0 9F AC..AF xx` and
 /// `U+1CD00..=U+1CEBF` (octants, the Supplement) is `F0 9C B4..BA xx`.
 #[inline(always)]
-fn narrow_symbol(symbol: &str) -> bool {
+pub(crate) fn narrow_symbol(symbol: &str) -> bool {
     let b = symbol.as_bytes();
     b.len() == 1
         || (b.len() == 3 && b[0] == 0xE2 && (0x94..=0x97).contains(&b[1]))
@@ -813,16 +813,15 @@ impl FrameLoop {
         terminal: &mut Terminal<B>,
         app: &mut App,
         now: Instant,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
+        pack: impl FnOnce(&Buffer, &Buffer, bool) -> usize,
+    ) {
         if self.render_due(terminal, app, now) {
             let cur = self.presenter.take_frame(terminal, |f| render_app(app, f));
             let shown = self.presenter.show_with(cur, |presenter, cur, full| {
-                presenter.send_direct(out, cur, full)
-            })?;
+                Ok(Presented { cells: pack(&presenter.prev, cur, full) })
+            }).unwrap();
             self.pacer.rendered(now, shown.cells > 0);
         }
-        Ok(())
     }
 
     fn render_due<B: Backend>(
