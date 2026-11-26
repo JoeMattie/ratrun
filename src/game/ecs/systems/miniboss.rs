@@ -1249,9 +1249,8 @@ pub fn miniboss_system(
                 }
                 strike_rat(&mut mb, &mut player, &mut sfx, &mut particles, &mut rng.0);
                 if mb.timer >= mb.active_duration() {
-                    if mb.kind == MinibossKind::Corkscrew
-                        && level.objects.sewer_opening.is_some()
-                        && let Some(MinibossShape::Trench { a, b, half }) = mb.active_shape()
+                    if let (MinibossKind::Corkscrew, true, Some(MinibossShape::Trench { a, b, half })) =
+                        (mb.kind, level.objects.sewer_opening.is_some(), mb.active_shape())
                     {
                             // Overlapping patches draw and splash as one wet band.
                             let radius = half + 1.0;

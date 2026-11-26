@@ -524,7 +524,7 @@ mod tests {
         w.viewport = Vec2::new(40.0, 40.0);
         let cells = &w.level.objects.sewer_opening.as_ref().unwrap().pillbug_cells;
         let expected = [cells[0], cells[1]];
-        let next_rng = w.rng.clone().random::<u64>();
+        let next_rng = World::new(Theme::Sewer, 7).rng.random::<u64>();
         tick_opening(&mut w, 22.0 - DT);
         assert_eq!(w.enemy_count(), 0);
         tick_opening(&mut w, 22.0);
@@ -539,7 +539,7 @@ mod tests {
         }
         tick_opening(&mut w, 23.0);
         assert_eq!(w.enemy_count(), 2);
-        assert_eq!(w.rng.clone().random::<u64>(), next_rng);
+        assert_eq!(w.rng.random::<u64>(), next_rng);
     }
 
     #[test]
