@@ -2238,6 +2238,7 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         // the trail: one loop shows drop → step → infection → jump.
         script.cue = Some(arsenal_droppings_cue);
         script.loop_secs = 7.0;
+        world.flat_lit = false;
     }
     if kind == WeaponKind::SuperDash {
         // The dash leaves the fan of targets behind it. Its targets are laid

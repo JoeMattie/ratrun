@@ -1869,16 +1869,25 @@ mod dropping_light_tests {
     #[test]
     fn dropping_lights_scale_by_rank_arm_and_dry() {
         let cases = [
-            (1, DROPPING_ARM, 10.0, 0.45),
-            (2, DROPPING_ARM, 12.0, 0.6),
-            (3, DROPPING_ARM, 14.0, 0.75),
-            (4, DROPPING_ARM, 17.0, 0.9),
-            (5, DROPPING_ARM, 20.0, 1.1),
-            (5, 0.0, 20.0, 0.55),
-            (5, DROPPING_LIFE - 2.0, 20.0, 1.1),
-            (5, DROPPING_LIFE - 1.0, 20.0, 0.55),
-            (5, DROPPING_LIFE - 0.5, 20.0, 0.275),
+            (1, DROPPING_ARM, 18.0, 0.80),
+            (2, DROPPING_ARM, 22.0, 1.05),
+            (3, DROPPING_ARM, 26.0, 1.35),
+            (4, DROPPING_ARM, 31.0, 1.65),
+            (5, DROPPING_ARM, 36.0, 2.00),
+            (5, 0.0, 36.0, 1.00),
+            (5, DROPPING_LIFE - 2.0, 36.0, 2.00),
+            (5, DROPPING_LIFE - 1.0, 36.0, 1.00),
+            (5, DROPPING_LIFE - 0.5, 36.0, 0.50),
         ];
+        // Rank 1 and rank 5 are larger and brighter than the legacy [10..20] / [0.45..1.10] tables
+        // and grow strictly with rank.
+        assert!(cases[0].2 > 10.0 && cases[4].2 > 20.0);
+        assert!(cases[0].3 > 0.45 && cases[4].3 > 1.10);
+        for pair in cases[..5].windows(2) {
+            assert!(pair[1].2 > pair[0].2, "radius must grow with rank");
+            assert!(pair[1].3 > pair[0].3, "energy must grow with rank");
+        }
+        assert!(cases[5].3 < cases[4].3, "arming dropping must be dimmer than armed");
         let mut w = fx_world(Theme::Sewer);
         for (i, &(level, age, _, _)) in cases.iter().enumerate() {
             spawn_drop(&mut w, i as u64, Vec2::new(40.0, 40.0), level, age);
@@ -1958,6 +1967,35 @@ mod dropping_light_tests {
             .fx_lights
             .iter()
             .all(|light| light.tag != LightTag::Ground));
+    }
+
+    #[test]
+    fn dropping_lights_frozen_frame_is_identical_across_elapsed() {
+        let mut w = fx_world(Theme::Sewer);
+        // Move the rat out of the test frame so only the dropping's ground light
+        // shades the pixels (no rat-aura breath).
+        w.player.pos = Vec2::new(700.0, 700.0);
+        spawn_drop(&mut w, 1, Vec2::new(40.0, 40.0), 5, DROPPING_ARM);
+
+        let render_at = |elapsed: f32| {
+            let mut scene = fx_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+            scene.fx = false;
+            scene.elapsed = elapsed;
+            let mut pb = PixelBuffer::new(96, 64);
+            pb.clear((18, 28, 26));
+            let mut map = LightMap::new();
+            map.apply_scene(&mut pb, &scene);
+            pb.pixels().to_vec()
+        };
+
+        let base = render_at(0.0);
+        for elapsed in [0.1f32, 0.37, 1.25, 9.5, 42.0] {
+            assert_eq!(
+                base,
+                render_at(elapsed),
+                "frozen dropping light must render identically at elapsed={elapsed}"
+            );
+        }
     }
 
     #[test]

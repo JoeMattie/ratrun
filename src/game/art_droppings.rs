@@ -1,32 +1,38 @@
 //! Pixel art for Hantavirus rat droppings on the floor.
 //!
 //! Pure render-only drawing (zero rng, zero heap allocation). Each dropping is
-//! a small, deadpan cluster of 2–4 dark brown rice-grain pellets (2×1, 3×1,
-//! 1×2, or angled 2–3 px grains) within a ~5×4 px footprint — clearly smaller
-//! and looser than a floor gold coin — wrapped in a radioactive sickly-green
-//! glow whose intensity scales with `d.level` (rank 1 faint, rank 5 vivid):
-//! a 1-px green rim/halo around the cluster, 1–2 bright green core pixels
-//! embedded on the pellets, and 1–2 still green wisps floating above.
+//! a single distinct, solid rounded/oblong rat turd (a fat grain-of-rice /
+//! capsule, 3–4 px long with rounded ends) painted dark brown to near-black
+//! with a tiny dull upper-left highlight and a 1-px darker underside contact
+//! shadow so it reads cleanly on any floor (Sewer brick, Outfall sand, glazed
+//! tiles, wet puddles, dark corners) and survives 2× zoom-out.
 //!
-//! All glow pixels are marked emissive via [`mark_dropping_emissive`] so they
-//! stay bright under the lighting pass across all six floors (Sewer, Kitchen,
-//! Lab, Laundry, Printworks, Flatbed). Drawing is completely **still** (no time
-//! stepping on `elapsed`); visual changes happen only across the three age
-//! states matching the weapon and light contracts:
+//! The pellet itself is **never** tinted green, **never** marked emissive, and
+//! is stamped with the matte non-creature pen ([`crate::render::lighting::dropping_pen`])
+//! so the lighting effects (`surface`, `specular`, `softshadow`, `water`) never
+//! glaze or emboss it. Around and underneath the pellet sits a soft green floor
+//! halo/ground pool that grows in radius and brightness with `d.level` (ranks
+//! 1..=5), blending directly into the floor pixels without overwriting the
+//! underlying floor/puddle material byte. Only the strong inner/mid floor halo
+//! pixels outside the pellet and contact shadow are marked emissive via
+//! [`mark_dropping_emissive`].
 //!
-//! 1. **Fresh / unarmed (`age < 0.25`)**: slightly brighter, glossier wet
-//!    pellets with half-strength green glow and no floating wisps above.
-//! 2. **Live / armed (`0.25 <= age <= 12.0`)**: rich dark brown pellets with
-//!    full rank-scaled green core(s), 1-px green rim/halo, and 1–2 still green
-//!    wisps 2–3 px above the cluster.
-//! 3. **Drying (`age > 12.0`, final 2 s of `DROPPING_LIFE`)**: pellets lighten
-//!    toward chalky grey-brown, the green glow fades smoothly to zero, the
-//!    floating wisps stop, and emissive marking ceases.
+//! Drawing is completely **still** (no time stepping on `elapsed`); visual
+//! changes happen only across the three age states matching the weapon and
+//! ground-light contracts:
+//!
+//! 1. **Fresh / arming (`age < 0.25`)**: slightly glossier wet dark-brown
+//!    pellet with a dimmer (`0.45×`) green floor halo.
+//! 2. **Live / armed (`0.25 <= age <= 12.0`)**: dark brown/near-black pellet
+//!    framed by the full rank-scaled green floor halo.
+//! 3. **Drying (`age > 12.0`, final 2 s of `DROPPING_LIFE`)**: pellet dries
+//!    toward muted dark umber-charcoal, the green floor halo fades smoothly to
+//!    zero, and emissive marking ceases.
 
 use crate::game::ecs::components::Dropping;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
-use crate::render::lighting::LightMap;
+use crate::render::lighting::{self, LightMap};
 use crate::render::palette::{self, Rgb};
 
 /// Arming delay in seconds (contract: `weapon::DROPPING_ARM = 0.25`).
@@ -36,134 +42,156 @@ const DRYING_AGE: f32 = 12.0;
 /// Duration of the drying window in seconds (`14.0 - 12.0`).
 const DRYING_SPAN: f32 = 2.0;
 
-/// Sickly radioactive green palette matching the dropping point light
-/// (`(110, 255, 120)`), ramped from eerie dim green at rank 1 to vivid lime-white
-/// core and crisp green rim at rank 5.
-const GLOW_RIM_LOW: Rgb = (52, 178, 66);
-const GLOW_RIM_HIGH: Rgb = (88, 242, 98);
-const GLOW_CORE_LOW: Rgb = (118, 226, 114);
-const GLOW_CORE_HIGH: Rgb = (218, 255, 188);
-const GLOW_CORE2: Rgb = (128, 255, 126);
-const GLOW_WISP: Rgb = (104, 248, 116);
-/// Deep neutral-warm dark keyline blended along the lower-right of each pellet.
-const KEYLINE_DARK: Rgb = (8, 5, 5);
+/// Maximum screen-pixel offset painted around `w2s(d.pos, cam)` at rank 5
+/// (pellet half-width 2 px + max halo reach 6 px = 8 px, well inside
+/// `world.rs`'s `d.radius + 4.0 = 11.0` cull margin).
+const MAX_EXTENT: i32 = 8;
 
-/// Per-rank (L1 → L5) intensity curves keeping the brightness hierarchy intact:
-/// hot green core > warm dark brown pellets > translucent 1-px green rim.
-const RIM_ALPHA: [f32; 5] = [0.16, 0.24, 0.34, 0.44, 0.54];
-const CORE1_MIX: [f32; 5] = [0.58, 0.72, 0.84, 0.94, 1.00];
-const CORE2_MIX: [f32; 5] = [0.00, 0.28, 0.48, 0.70, 0.88];
-const WISP_ALPHA: [f32; 5] = [0.22, 0.32, 0.42, 0.52, 0.62];
+/// Soft radioactive green floor halo colours matching the dropping ground light
+/// (`(110, 255, 120)`), ramping from deep toxic green at the outer skirt to
+/// bright sickly lime right beneath the pellet.
+const HALO_OUTER: Rgb = (46, 186, 58);
+const HALO_INNER: Rgb = (116, 255, 124);
 
-/// Armed pellet palette: `(body, shaded_end)` pairs of warm dark browns.
-/// Warm enough to still read unmistakably brown next to the green glow and
-/// under the dropping's green point light, yet darker than Flatbed oak planks.
-const PAL_ARMED: [(Rgb, Rgb); 3] = [
-    ((108, 66, 38), (74, 44, 25)),
-    ((94, 58, 34), (64, 38, 22)),
-    ((116, 74, 44), (80, 50, 29)),
+/// Per-rank (L1 → L5) floor halo reach (world px measured from nearest pellet
+/// pixel) and peak floor blend alpha.
+const HALO_REACH: [f32; 5] = [3.2, 3.9, 4.6, 5.3, 6.0];
+const HALO_ALPHA: [f32; 5] = [0.48, 0.58, 0.68, 0.78, 0.88];
+/// Floor halo pixels at or above this blend alpha are marked emissive so the
+/// green under-glow stays bright even on dark unlit Sewer brick.
+const HALO_EMISSIVE_MIN: f32 = 0.16;
+
+/// Deep dark brown-black underside contact shadow colour.
+const SHADOW_COL: Rgb = (6, 4, 3);
+const SHADOW_UNDER_ALPHA: f32 = 0.82;
+const SHADOW_SIDE_ALPHA: f32 = 0.42;
+
+/// Armed pellet palette: `(mid_body, shaded_belly, deep_underside)` triples of
+/// rich dark umber / near-black brown. The high `R/G` ratio (~2.2–2.4) ensures
+/// every pellet pixel stays dark brown/black (`r >= g`) both unlit and under
+/// the dropping's own bright green ground light.
+const PAL_ARMED: [(Rgb, Rgb, Rgb); 3] = [
+    ((58, 25, 13), (36, 15, 8), (20, 8, 5)),
+    ((52, 22, 12), (32, 13, 7), (18, 7, 4)),
+    ((64, 28, 15), (40, 17, 9), (22, 9, 5)),
 ];
-const HI_ARMED: Rgb = (164, 122, 84);
+const HI_ARMED: Rgb = (96, 42, 22);
 
-/// Fresh / unarmed (`age < 0.25`): slightly brighter, wet-sheen browns.
-const PAL_WET: [(Rgb, Rgb); 3] = [
-    ((124, 80, 48), (88, 54, 32)),
-    ((108, 70, 42), (76, 46, 28)),
-    ((132, 88, 54), (92, 58, 36)),
+/// Fresh / arming (`age < 0.25`): slightly glossier wet dark browns.
+const PAL_WET: [(Rgb, Rgb, Rgb); 3] = [
+    ((66, 30, 16), (42, 18, 10), (24, 10, 6)),
+    ((60, 27, 14), (38, 16, 9), (22, 9, 5)),
+    ((72, 33, 18), (46, 20, 11), (26, 11, 6)),
 ];
-const HI_WET: Rgb = (206, 170, 134);
+const HI_WET: Rgb = (112, 50, 28);
 
-/// Drying (`age > 12.0`): lighter, desaturated chalky grey-browns.
-const PAL_DRY: [(Rgb, Rgb); 3] = [
-    ((124, 112, 100), (88, 79, 70)),
-    ((112, 102, 92), (78, 72, 65)),
-    ((132, 120, 108), (94, 85, 76)),
+/// Drying (`age > 12.0`): muted, drier dark umber-charcoal (still dark, `r >= g`).
+const PAL_DRY: [(Rgb, Rgb, Rgb); 3] = [
+    ((62, 46, 36), (42, 31, 24), (26, 19, 15)),
+    ((56, 42, 33), (38, 28, 22), (24, 17, 14)),
+    ((68, 50, 39), (46, 34, 27), (28, 21, 16)),
 ];
-const HI_DRY: Rgb = (168, 158, 146);
+const HI_DRY: Rgb = (88, 66, 52);
 
-/// Eight hand-crafted rice-grain cluster layouts (2–4 pellets each).
+/// Eight hand-crafted rounded/oblong rat-turd silhouettes (3–4 px long, fat
+/// rounded capsule, 7–9 solid pixels each).
 ///
-/// Every coordinate sits inside `dx in -2..=2, dy in -1..=2` (at most 5×4 px),
-/// with clean 1-px floor gaps between pellets so clusters never collapse into a
-/// solid coin-sized disc. Combined with horizontal mirroring and brown-tone
-/// permutation from `d.seed`, these yield varied deadpan scatters while staying
-/// strictly inside a 9×9 box (`-4..=4` in both axes) including keyline, 1-px
-/// green rim and still green wisps.
-const LAYOUTS: &[&[&[(i8, i8)]]] = &[
-    // 0: 3 pellets — loose trio (3×1 upper-left, 2×1 mid-right, 2-px slant lower-left)
+/// Every coordinate sits inside `dx in -2..=2, dy in -1..=1` and every shape
+/// is asymmetric around `dx = 0`, so horizontal flipping (`flip_x`) yields 16
+/// distinct solid rat-dropping orientations without ever breaking into loose
+/// specks.
+const SHAPES: &[&[(i8, i8)]] = &[
+    // 0: horizontal plump rat turd (4×3, 8 px)
     &[
-        &[(-2, -1), (-1, -1), (0, -1)],
-        &[(1, 1), (2, 1)],
-        &[(-2, 1), (-1, 2)],
+        (-1, -1),
+        (0, -1),
+        (-2, 0),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
     ],
-    // 1: 2 pellets — sparse angled pair (3-px slant + 2×1)
+    // 1: gently curved oblong capsule (4×3, 8 px)
     &[
-        &[(-2, 0), (-1, -1), (0, -1)],
-        &[(0, 1), (1, 1)],
+        (-1, -1),
+        (0, -1),
+        (-2, 0),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (1, 1),
     ],
-    // 2: 4 pellets — airy 4-grain scatter
+    // 2: plump rounded oblong pellet (4×3, 9 px)
     &[
-        &[(-2, -1), (-1, -1)],
-        &[(1, -1), (2, -1)],
-        &[(-2, 1), (-1, 1)],
-        &[(1, 2), (2, 1)],
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-2, 0),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
     ],
-    // 3: 3 pellets — angled fan (2-px slant, 3×1 mid, 2×1 lower)
+    // 3: slightly angled blunt capsule (4×3, 8 px)
     &[
-        &[(-2, 0), (-1, -1)],
-        &[(0, 0), (1, 0), (2, 0)],
-        &[(-1, 2), (0, 2)],
+        (-2, -1),
+        (-1, -1),
+        (-2, 0),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
     ],
-    // 4: 3 pellets — 1×2 vertical + 2×1 upper-right + 3-px gentle bend lower
+    // 4: compact 4-px fat grain-of-rice (4×3, 7 px)
     &[
-        &[(-2, -1), (-2, 0)],
-        &[(0, -1), (1, -1)],
-        &[(-1, 2), (0, 1), (1, 1)],
+        (-1, -1),
+        (0, -1),
+        (-2, 0),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
     ],
-    // 5: 2 pellets — compact asymmetric pair (3×1 + 2-px slant)
+    // 5: short plump rounded nugget (3×3, 7 px)
     &[
-        &[(-1, -1), (0, -1), (1, -1)],
-        &[(-2, 1), (-1, 2)],
+        (-1, -1),
+        (0, -1),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
     ],
-    // 6: 4 pellets — staggered 4-grain cluster (4-disconnected 2×1 grains)
+    // 6: slightly tilted oval turd (4×3, 8 px)
     &[
-        &[(0, -1), (1, -1)],
-        &[(-2, 0), (-1, 0)],
-        &[(1, 1), (2, 1)],
-        &[(-1, 2), (0, 2)],
+        (0, -1),
+        (1, -1),
+        (-2, 0),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
     ],
-    // 7: 3 pellets — oblique trio (2×1 top, 1×2 right, 3-px curved bottom-left)
+    // 7: plump 3×3 angled pellet (3×3, 7 px)
     &[
-        &[(-1, -1), (0, -1)],
-        &[(2, 0), (2, 1)],
-        &[(-2, 1), (-1, 1), (0, 2)],
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (0, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
     ],
 ];
 
 #[inline]
 fn w2s(p: Vec2, cam: Vec2) -> (i32, i32) {
     ((p.x - cam.x).round() as i32, (p.y - cam.y).round() as i32)
-}
-
-#[inline]
-fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
-    if x < 0 || y < 0 || x as usize >= pb.w || y as usize >= pb.h {
-        return;
-    }
-    let bg = pb.pixel_at(x as usize, y as usize);
-    pb.plot(x, y, palette::mix(bg, c, a));
-}
-
-/// Blend a green glow pixel over a half-grounded background sample so emissive
-/// restoration preserves a pure green hue on cool/warm floors (e.g. Laundry
-/// indigo tiles) without freezing bright unlit floor blue into the halo.
-#[inline]
-fn blend_glow(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
-    if x < 0 || y < 0 || x as usize >= pb.w || y as usize >= pb.h {
-        return;
-    }
-    let bg = palette::scale(pb.pixel_at(x as usize, y as usize), 0.50);
-    pb.plot(x, y, palette::mix(bg, c, a));
 }
 
 #[inline]
@@ -186,40 +214,51 @@ fn has_bit(mask: u64, dx: i32, dy: i32) -> bool {
     (-4..=3).contains(&dx) && (-4..=3).contains(&dy) && (mask & mask_bit(dx, dy)) != 0
 }
 
-/// Shared stack-only layout and glow geometry computed once for both
-/// [`draw_dropping`] and [`mark_dropping_emissive`] so painted glow pixels and
-/// emissive marks can never drift apart.
+/// Blend a colour directly into `pb.pixels_mut()` without altering the pixel's
+/// material byte, so floor halo and contact shadow preserve underlying floor
+/// and puddle (`MaterialKind::Water`) tags right up to the pellet edge.
+#[inline]
+fn blend_floor_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
+    if x < 0 || y < 0 || x as usize >= pb.w || y as usize >= pb.h {
+        return;
+    }
+    let idx = y as usize * pb.w + x as usize;
+    let bg = pb.pixels()[idx];
+    pb.pixels_mut()[idx] = palette::mix(bg, c, a);
+}
+
+/// Shared stack-only pellet and floor-halo geometry computed once for both
+/// [`draw_dropping`] and [`mark_dropping_emissive`] so painted floor-halo
+/// pixels and emissive marks can never drift apart, and pellet pixels are
+/// guaranteed to stay strictly non-emissive.
 struct DroppingPlan {
-    layout: &'static [&'static [(i8, i8)]],
+    shape: &'static [(i8, i8)],
     h: u32,
     flip_x: bool,
     tier: usize,
     wet: bool,
     drying: bool,
-    glow_scale: f32,
     occupied: u64,
-    rim_mask: u64,
-    rim_inner: u64,
-    hi_pellet: usize,
-    second_pellet: usize,
-    core1_pos: (i32, i32),
-    core2_pos: Option<(i32, i32)>,
-    wisp1_pos: Option<(i32, i32)>,
-    wisp2_pos: Option<(i32, i32)>,
+    shadow_under: u64,
+    shadow_side: u64,
+    tl: (i32, i32),
+    br: (i32, i32),
+    halo_reach: f32,
+    halo_peak: f32,
 }
 
 impl DroppingPlan {
     fn build(d: &Dropping) -> Self {
         let h = mix_seed(d.seed);
-        let layout_idx = (d.seed.wrapping_add(d.seed >> 4) as usize) % LAYOUTS.len();
-        let flip_x = (((d.seed >> 3) ^ (h >> 5)) & 1) != 0;
-        let layout = LAYOUTS[layout_idx];
+        let shape_idx = (d.seed as usize) % SHAPES.len();
+        let flip_x = ((d.seed >> 3) & 1) != 0;
+        let shape = SHAPES[shape_idx];
         let tier = (d.level.clamp(1, 5) - 1) as usize;
 
         let wet = d.age < ARM_AGE;
         let drying = d.age > DRYING_AGE;
         let glow_scale = if wet {
-            0.50
+            0.45
         } else if drying {
             let dry_t = ((d.age - DRYING_AGE) / DRYING_SPAN).clamp(0.0, 1.0);
             let rem = 1.0 - dry_t;
@@ -229,263 +268,13 @@ impl DroppingPlan {
         };
 
         let mut occupied = 0u64;
-        let mut top_y = 2i32;
-        for pellet in layout {
-            for &(rx, ry) in *pellet {
-                let dx = if flip_x { -i32::from(rx) } else { i32::from(rx) };
-                let dy = i32::from(ry);
-                if dy < top_y {
-                    top_y = dy;
-                }
-                occupied |= mask_bit(dx, dy);
-            }
-        }
-
-        // 1-px 4-connected rim around the cluster; `rim_inner` tracks tight
-        // interior gaps touching >= 2 pellet pixels so grains stay separated.
-        let mut rim_mask = 0u64;
-        let mut rim_inner = 0u64;
-        if RIM_ALPHA[tier] * glow_scale > 0.03 {
-            for pellet in layout {
-                for &(rx, ry) in *pellet {
-                    let dx = if flip_x { -i32::from(rx) } else { i32::from(rx) };
-                    let dy = i32::from(ry);
-                    for &(ox, oy) in &[(0, -1), (0, 1), (-1, 0), (1, 0)] {
-                        let (nx, ny) = (dx + ox, dy + oy);
-                        let b = mask_bit(nx, ny);
-                        if occupied & b == 0 {
-                            if rim_mask & b != 0 {
-                                rim_inner |= b;
-                            } else {
-                                rim_mask |= b;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let hi_pellet = ((h >> 8) as usize) % layout.len();
-        let second_pellet = (hi_pellet + 1) % layout.len();
-        let pellet_tl = |pellet: &[(i8, i8)]| -> (i32, i32) {
-            let mut tl = (i32::MAX, i32::MAX);
-            for &(rx, ry) in pellet {
-                let dx = if flip_x { -i32::from(rx) } else { i32::from(rx) };
-                let dy = i32::from(ry);
-                if (dy, dx) < (tl.1, tl.0) {
-                    tl = (dx, dy);
-                }
-            }
-            tl
-        };
-
-        let core1_pos = pellet_tl(layout[hi_pellet]);
-        let core2_pos = if second_pellet != hi_pellet && CORE2_MIX[tier] * glow_scale > 0.12 {
-            Some(pellet_tl(layout[second_pellet]))
-        } else {
-            None
-        };
-
-        // Still all-green wisps above armed droppings (seeded from `d.seed`
-        // only — never `elapsed`). Prefer a detached row when the rim occupies
-        // the cell directly beneath `y_low`.
-        let (wisp1_pos, wisp2_pos) = if !wet && !drying {
-            let base_x = ((h >> 16) % 3) as i32 - 1;
-            let alt_x = if base_x >= 0 { -1 } else { 1 };
-            let y_low = (top_y - 2).clamp(-4, 4);
-            let y_hi = (top_y - 3).clamp(-4, 4);
-            let pattern = ((h >> 12) & 0x1f) % 4;
-            let (wx1, wy1, wx2, wy2) = if pattern == 0 || pattern == 2 {
-                let wy1 = if has_bit(rim_mask, base_x, top_y - 1) {
-                    y_hi
-                } else {
-                    y_low
-                };
-                let wy2 = if wy1 == y_hi { y_low } else { y_hi };
-                (base_x, wy1, alt_x, wy2)
-            } else {
-                let wy1 = if has_bit(rim_mask, alt_x, top_y - 1) {
-                    y_hi
-                } else {
-                    y_low
-                };
-                let wy2 = if wy1 == y_hi { y_low } else { y_hi };
-                (alt_x, wy1, base_x, wy2)
-            };
-            let second = if tier >= 2 || (tier == 1 && (pattern & 1) == 1) {
-                Some((wx2, wy2))
-            } else {
-                None
-            };
-            (Some((wx1, wy1)), second)
-        } else {
-            (None, None)
-        };
-
-        Self {
-            layout,
-            h,
-            flip_x,
-            tier,
-            wet,
-            drying,
-            glow_scale,
-            occupied,
-            rim_mask,
-            rim_inner,
-            hi_pellet,
-            second_pellet,
-            core1_pos,
-            core2_pos,
-            wisp1_pos,
-            wisp2_pos,
-        }
-    }
-}
-
-/// Draw one Hantavirus dropping on the floor at `d.pos`.
-///
-/// Every painted pixel (keyline, 1-px green rim, pellets with green core(s),
-/// and still green wisps) stays strictly within the 9×9 screen box centered on
-/// `w2s(d.pos, cam)`. Still with respect to `_elapsed`: only `d.age` and
-/// `d.level` change the appearance.
-pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f32) {
-    if pb.w == 0 || pb.h == 0 {
-        return;
-    }
-    let (sx, sy) = w2s(d.pos, cam);
-    if sx.saturating_add(4) < 0
-        || sy.saturating_add(4) < 0
-        || sx.saturating_sub(4) >= pb.w as i32
-        || sy.saturating_sub(4) >= pb.h as i32
-    {
-        return;
-    }
-
-    let plan = DroppingPlan::build(d);
-    let rank_t = plan.tier as f32 / 4.0;
-
-    let (pal, hi_col, under_alpha, right_alpha) = if plan.wet {
-        (PAL_WET, HI_WET, 0.72f32, 0.44f32)
-    } else if plan.drying {
-        let dry_t = ((d.age - DRYING_AGE) / DRYING_SPAN).clamp(0.0, 1.0);
-        let k = 0.58 + 0.42 * dry_t;
-        let p = [
-            (
-                palette::mix(PAL_ARMED[0].0, PAL_DRY[0].0, k),
-                palette::mix(PAL_ARMED[0].1, PAL_DRY[0].1, k),
-            ),
-            (
-                palette::mix(PAL_ARMED[1].0, PAL_DRY[1].0, k),
-                palette::mix(PAL_ARMED[1].1, PAL_DRY[1].1, k),
-            ),
-            (
-                palette::mix(PAL_ARMED[2].0, PAL_DRY[2].0, k),
-                palette::mix(PAL_ARMED[2].1, PAL_DRY[2].1, k),
-            ),
-        ];
-        (p, palette::mix(HI_ARMED, HI_DRY, k), 0.58, 0.34)
-    } else {
-        (PAL_ARMED, HI_ARMED, 0.74, 0.45)
-    };
-
-    // 1. Clean 1-px lower-right dark keyline directly under each pellet pixel
-    //    and off its rightmost tip, softened slightly as the green rim grows
-    //    vivid at higher ranks.
-    let key_scale = 1.0 - 0.45 * RIM_ALPHA[plan.tier] * plan.glow_scale;
-    let mut key_done = 0u64;
-    for pellet in plan.layout {
-        let mut max_x = i32::MIN;
-        for &(rx, _) in *pellet {
-            let dx = if plan.flip_x {
-                -i32::from(rx)
-            } else {
-                i32::from(rx)
-            };
-            if dx > max_x {
-                max_x = dx;
-            }
-        }
-        for &(rx, ry) in *pellet {
-            let dx = if plan.flip_x {
-                -i32::from(rx)
-            } else {
-                i32::from(rx)
-            };
-            let dy = i32::from(ry);
-
-            let ub = mask_bit(dx, dy + 1);
-            if (plan.occupied | key_done) & ub == 0 {
-                key_done |= ub;
-                blend_px(
-                    pb,
-                    sx + dx,
-                    sy + dy + 1,
-                    KEYLINE_DARK,
-                    under_alpha * key_scale,
-                );
-            }
-
-            if dx == max_x {
-                let rb = mask_bit(dx + 1, dy);
-                if (plan.occupied | key_done) & rb == 0 {
-                    key_done |= rb;
-                    blend_px(
-                        pb,
-                        sx + dx + 1,
-                        sy + dy,
-                        KEYLINE_DARK,
-                        right_alpha * key_scale,
-                    );
-                }
-            }
-        }
-    }
-
-    // 2. 1-px translucent green rim/halo hugging the cluster (rank 1 faint,
-    //    rank 5 vivid), gentler inside tight gaps and on the shaded underside
-    //    so individual brown grains stay clearly separated.
-    let rim_a = RIM_ALPHA[plan.tier] * plan.glow_scale;
-    if plan.rim_mask != 0 && rim_a > 0.03 {
-        let rim_col = palette::mix(GLOW_RIM_LOW, GLOW_RIM_HIGH, rank_t);
-        for dy in -2..=3i32 {
-            for dx in -3..=3i32 {
-                let b = mask_bit(dx, dy);
-                if plan.rim_mask & b != 0 {
-                    let mut local_a = if plan.rim_inner & b != 0 {
-                        rim_a * 0.68
-                    } else {
-                        rim_a
-                    };
-                    if key_done & b != 0 {
-                        local_a *= 0.78;
-                    }
-                    blend_glow(pb, sx + dx, sy + dy, rim_col, local_a);
-                }
-            }
-        }
-    }
-
-    // 3. Pellet bodies: warm dark brown grains shaded toward the lower-right
-    //    tip, with 1–2 bright green core pixels scaled by `d.level` and age.
-    let core1_col = palette::mix(GLOW_CORE_LOW, GLOW_CORE_HIGH, rank_t);
-    let core2_col = palette::mix(GLOW_RIM_LOW, GLOW_CORE2, rank_t);
-    let c1_t = CORE1_MIX[plan.tier] * plan.glow_scale;
-    let c2_t = CORE2_MIX[plan.tier] * plan.glow_scale;
-
-    for (pi, pellet) in plan.layout.iter().enumerate() {
-        let tone = pal[(pi + ((plan.h >> 2) as usize)) % pal.len()];
         let mut tl = (i32::MAX, i32::MAX);
         let mut br = (i32::MIN, i32::MIN);
         let mut br_key = i32::MIN;
-
-        for &(rx, ry) in *pellet {
-            let dx = if plan.flip_x {
-                -i32::from(rx)
-            } else {
-                i32::from(rx)
-            };
+        for &(rx, ry) in shape {
+            let dx = if flip_x { -i32::from(rx) } else { i32::from(rx) };
             let dy = i32::from(ry);
+            occupied |= mask_bit(dx, dy);
             if (dy, dx) < (tl.1, tl.0) {
                 tl = (dx, dy);
             }
@@ -496,103 +285,242 @@ pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f3
             }
         }
 
-        for &(rx, ry) in *pellet {
-            let dx = if plan.flip_x {
+        // 1-px darker underside / contact shadow immediately beneath the
+        // pellet's bottom contour and off its lower-right flank.
+        let mut shadow_under = 0u64;
+        let mut shadow_side = 0u64;
+        for &(rx, ry) in shape {
+            let dx = if flip_x { -i32::from(rx) } else { i32::from(rx) };
+            let dy = i32::from(ry);
+            let ub = mask_bit(dx, dy + 1);
+            if occupied & ub == 0 {
+                shadow_under |= ub;
+            }
+            if dy >= 0 {
+                let sb = mask_bit(dx + 1, dy);
+                if occupied & sb == 0 {
+                    shadow_side |= sb;
+                }
+            }
+        }
+        shadow_side &= !shadow_under;
+
+        let halo_reach = HALO_REACH[tier];
+        let halo_peak = HALO_ALPHA[tier] * glow_scale;
+
+        Self {
+            shape,
+            h,
+            flip_x,
+            tier,
+            wet,
+            drying,
+            occupied,
+            shadow_under,
+            shadow_side,
+            tl,
+            br,
+            halo_reach,
+            halo_peak,
+        }
+    }
+
+    /// Smooth floor-halo falloff `(fall, alpha)` at local pixel `(dx, dy)`
+    /// outside the pellet, measured from the nearest pellet edge with a mild
+    /// vertical squash (`1.15`) so the pool reads flat on the floor.
+    #[inline]
+    fn halo_sample(&self, dx: i32, dy: i32) -> Option<(f32, f32)> {
+        if self.halo_peak <= 0.03 || has_bit(self.occupied, dx, dy) {
+            return None;
+        }
+        let mut min_d2 = f32::MAX;
+        for &(rx, ry) in self.shape {
+            let px = if self.flip_x {
                 -i32::from(rx)
             } else {
                 i32::from(rx)
             };
-            let dy = i32::from(ry);
-            let col = if (dx, dy) == tl && pi == plan.hi_pellet {
-                if c1_t > 0.05 {
-                    palette::mix(hi_col, core1_col, c1_t)
-                } else {
-                    hi_col
-                }
-            } else if (dx, dy) == tl
-                && pi == plan.second_pellet
-                && plan.second_pellet != plan.hi_pellet
-            {
-                if plan.wet {
-                    let base_w = palette::mix(tone.0, hi_col, 0.58);
-                    if c2_t > 0.05 {
-                        palette::mix(base_w, core2_col, c2_t)
-                    } else {
-                        base_w
-                    }
-                } else if c2_t > 0.05 {
-                    palette::mix(tone.0, core2_col, c2_t)
-                } else {
-                    tone.0
-                }
-            } else if (dx, dy) == br {
-                tone.1
-            } else {
-                tone.0
-            };
-            pb.plot(sx + dx, sy + dy, col);
+            let py = i32::from(ry);
+            let ddx = (dx - px) as f32;
+            let ddy = (dy - py) as f32 * 1.15;
+            let d2 = ddx * ddx + ddy * ddy;
+            if d2 < min_d2 {
+                min_d2 = d2;
+            }
         }
-    }
-
-    // 4. Infectious tell (armed only: 0.25 <= age <= 12.0):
-    //    1–2 STILL all-green wisp pixels floating 2–3 px above the cluster.
-    let wisp_a = WISP_ALPHA[plan.tier];
-    if let Some((wx, wy)) = plan.wisp1_pos {
-        blend_glow(pb, sx + wx, sy + wy, GLOW_WISP, wisp_a);
-    }
-    if let Some((wx, wy)) = plan.wisp2_pos {
-        blend_glow(pb, sx + wx, sy + wy, GLOW_WISP, wisp_a * 0.60);
+        let reach = self.halo_reach;
+        if min_d2 >= reach * reach {
+            return None;
+        }
+        let dist = min_d2.sqrt();
+        let t = 1.0 - dist / reach;
+        let fall = t * t;
+        let a = self.halo_peak * fall;
+        (a > 0.02).then_some((fall, a))
     }
 }
 
-/// Mark the green glow pixels of one dropping as emissive on `lm` so they
-/// stay bright under the lighting pass at every rank (1..=5), regardless of
-/// the highlight luminance threshold.
+/// Draw one Hantavirus dropping on the floor at `d.pos`.
 ///
-/// Call right after [`draw_dropping`] with the same `pb`, `d` and `cam`.
-/// Drying droppings (`age > 12.0`) are skipped so they dim naturally alongside
-/// their fading point light.
-pub fn mark_dropping_emissive(lm: &mut LightMap, pb: &PixelBuffer, d: &Dropping, cam: Vec2) {
-    if pb.w == 0 || pb.h == 0 || d.age > DRYING_AGE {
+/// Layer order:
+/// 1. Soft rank-scaled green floor halo/ground pool around the pellet
+///    (preserves underlying floor/puddle material bytes).
+/// 2. 1-px darker underside / contact shadow right beneath the pellet.
+/// 3. Solid dark-brown/near-black rounded rat turd with a tiny dull highlight
+///    on its upper-left crown, stamped with the matte non-creature pen
+///    ([`lighting::dropping_pen`]).
+///
+/// Every painted pixel stays strictly inside `dx in -8..=8, dy in -7..=7`
+/// around `w2s(d.pos, cam)`. Still with respect to `_elapsed`: only `d.age` and
+/// `d.level` change the appearance.
+pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f32) {
+    if pb.w == 0 || pb.h == 0 {
         return;
     }
     let (sx, sy) = w2s(d.pos, cam);
-    if sx.saturating_add(4) < 0
-        || sy.saturating_add(4) < 0
-        || sx.saturating_sub(4) >= pb.w as i32
-        || sy.saturating_sub(4) >= pb.h as i32
+    if sx.saturating_add(MAX_EXTENT) < 0
+        || sy.saturating_add(MAX_EXTENT) < 0
+        || sx.saturating_sub(MAX_EXTENT) >= pb.w as i32
+        || sy.saturating_sub(MAX_EXTENT) >= pb.h as i32
     {
         return;
     }
 
     let plan = DroppingPlan::build(d);
+    let rank_t = plan.tier as f32 / 4.0;
 
-    if plan.rim_mask != 0 {
-        for dy in -2..=3i32 {
-            for dx in -3..=3i32 {
-                if plan.rim_mask & mask_bit(dx, dy) != 0 {
-                    lm.mark_emissive_rect(pb, sx + dx, sy + dy, 1, 1);
+    // 1. Soft green floor halo / ground pool radiating from under/around the
+    //    pellet onto the floor. No outer darkening ring: grounding scales with
+    //    `a`, so the outer edge fades cleanly into the floor.
+    if plan.halo_peak > 0.03 {
+        let ir = (plan.halo_reach.ceil() as i32 + 2).min(MAX_EXTENT);
+        let ir_y = ir.min(7);
+        for dy in -ir_y..=ir_y {
+            for dx in -ir..=ir {
+                let Some((fall, a)) = plan.halo_sample(dx, dy) else {
+                    continue;
+                };
+                let px = sx + dx;
+                let py = sy + dy;
+                if px < 0 || py < 0 || px as usize >= pb.w || py as usize >= pb.h {
+                    continue;
                 }
+                let idx = py as usize * pb.w + px as usize;
+                let bg = pb.pixels()[idx];
+                let grounded = palette::scale(bg, 1.0 - 0.35 * a);
+                let g_col = palette::mix(
+                    HALO_OUTER,
+                    HALO_INNER,
+                    (fall * 0.75 + rank_t * 0.35).clamp(0.0, 1.0),
+                );
+                pb.pixels_mut()[idx] = palette::mix(grounded, g_col, a);
             }
         }
     }
 
-    lm.mark_emissive_rect(pb, sx + plan.core1_pos.0, sy + plan.core1_pos.1, 1, 1);
-    if let Some((cx, cy)) = plan.core2_pos {
-        lm.mark_emissive_rect(pb, sx + cx, sy + cy, 1, 1);
+    // 2. 1-px darker underside / contact shadow right beneath the pellet so it
+    //    reads as a solid object sitting on top of the floor glow.
+    for dy in -1..=2i32 {
+        for dx in -2..=3i32 {
+            let b = mask_bit(dx, dy);
+            if plan.shadow_under & b != 0 {
+                blend_floor_px(pb, sx + dx, sy + dy, SHADOW_COL, SHADOW_UNDER_ALPHA);
+            } else if plan.shadow_side & b != 0 {
+                blend_floor_px(pb, sx + dx, sy + dy, SHADOW_COL, SHADOW_SIDE_ALPHA);
+            }
+        }
     }
 
-    if let Some((wx, wy)) = plan.wisp1_pos {
-        lm.mark_emissive_rect(pb, sx + wx, sy + wy, 1, 1);
+    // 3. Pellet body: solid dark-brown/near-black rounded rat turd stamped with
+    //    the matte non-creature pen so lighting effects never glaze it green.
+    let tone_idx = ((plan.h >> 2) as usize) % PAL_ARMED.len();
+    let (mid, shade, deep, hi) = if plan.wet {
+        let (m, s, dp) = PAL_WET[tone_idx];
+        (m, s, dp, HI_WET)
+    } else if plan.drying {
+        let dry_t = ((d.age - DRYING_AGE) / DRYING_SPAN).clamp(0.0, 1.0);
+        let k = 0.55 + 0.45 * dry_t;
+        let (am, as_, ad) = PAL_ARMED[tone_idx];
+        let (dm, ds_, dd) = PAL_DRY[tone_idx];
+        (
+            palette::mix(am, dm, k),
+            palette::mix(as_, ds_, k),
+            palette::mix(ad, dd, k),
+            palette::mix(HI_ARMED, HI_DRY, k),
+        )
+    } else {
+        let (m, s, dp) = PAL_ARMED[tone_idx];
+        (m, s, dp, HI_ARMED)
+    };
+
+    let prev_pen = pb.set_pen(lighting::dropping_pen());
+    for &(rx, ry) in plan.shape {
+        let dx = if plan.flip_x {
+            -i32::from(rx)
+        } else {
+            i32::from(rx)
+        };
+        let dy = i32::from(ry);
+        let col = if (dx, dy) == plan.tl {
+            hi
+        } else if (dx, dy) == plan.br || (dy > 0 && dx >= 0) {
+            deep
+        } else if dy > 0 || dx > 0 {
+            shade
+        } else {
+            mid
+        };
+        pb.plot(sx + dx, sy + dy, col);
     }
-    if let Some((wx, wy)) = plan.wisp2_pos {
-        lm.mark_emissive_rect(pb, sx + wx, sy + wy, 1, 1);
+    pb.set_pen(prev_pen);
+}
+
+/// Mark the strong floor-halo pixels surrounding one dropping as emissive on
+/// `lm` so the green under-glow stays bright under the lighting pass at every
+/// rank (1..=5).
+///
+/// The pellet itself and its underside contact shadow are **never** marked
+/// emissive so the rat turd stays dark brown/black rather than washing green.
+/// Drying droppings (`age > 12.0`) are skipped so they dim naturally alongside
+/// their fading ground light.
+pub fn mark_dropping_emissive(lm: &mut LightMap, pb: &PixelBuffer, d: &Dropping, cam: Vec2) {
+    if pb.w == 0 || pb.h == 0 || d.age > DRYING_AGE {
+        return;
+    }
+    let (sx, sy) = w2s(d.pos, cam);
+    if sx.saturating_add(MAX_EXTENT) < 0
+        || sy.saturating_add(MAX_EXTENT) < 0
+        || sx.saturating_sub(MAX_EXTENT) >= pb.w as i32
+        || sy.saturating_sub(MAX_EXTENT) >= pb.h as i32
+    {
+        return;
+    }
+
+    let plan = DroppingPlan::build(d);
+    if plan.halo_peak < HALO_EMISSIVE_MIN {
+        return;
+    }
+
+    let ir = (plan.halo_reach.ceil() as i32 + 2).min(MAX_EXTENT);
+    let ir_y = ir.min(7);
+    for dy in -ir_y..=ir_y {
+        for dx in -ir..=ir {
+            if has_bit(plan.occupied | plan.shadow_under, dx, dy) {
+                continue;
+            }
+            if let Some((_, a)) = plan.halo_sample(dx, dy) {
+                if a >= HALO_EMISSIVE_MIN {
+                    lm.mark_emissive_rect(pb, sx + dx, sy + dy, 1, 1);
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::ecs::components::SpawnId;
     use crate::game::level::{Level, Theme};
     use crate::game::world::World;
     use crate::render::lighting::{LightScene, LightingMode};
@@ -611,12 +539,17 @@ mod tests {
         }
     }
 
-    /// Sum of green dominance `g.saturating_sub(r.max(b))` over painted pixels
-    /// inside the 9×9 box centered at `(sx, sy)`.
+    #[inline]
+    fn luma((r, g, b): Rgb) -> u8 {
+        ((u32::from(r) * 77 + u32::from(g) * 150 + u32::from(b) * 29) >> 8) as u8
+    }
+
+    /// Sum of green dominance `g.saturating_sub(r.max(b))` over painted floor
+    /// halo pixels inside the dropping's bounding box centered at `(sx, sy)`.
     fn green_excess_in_box(pb: &PixelBuffer, sx: usize, sy: usize, bg: Rgb) -> u32 {
         let mut total = 0u32;
-        for y in (sy - 4)..=(sy + 4) {
-            for x in (sx - 4)..=(sx + 4) {
+        for y in (sy - 7)..=(sy + 7) {
+            for x in (sx - 8)..=(sx + 8) {
                 let c = pb.pixel_at(x, y);
                 if c != bg {
                     total += u32::from(c.1.saturating_sub(c.0.max(c.2)));
@@ -626,28 +559,33 @@ mod tests {
         total
     }
 
-    /// Peak green channel value inside the 9×9 box centered at `(sx, sy)`.
-    fn peak_green_in_box(pb: &PixelBuffer, sx: usize, sy: usize) -> u8 {
-        let mut peak = 0u8;
-        for y in (sy - 4)..=(sy + 4) {
-            for x in (sx - 4)..=(sx + 4) {
-                peak = peak.max(pb.pixel_at(x, y).1);
+    /// Maximum Chebyshev radius from `(sx, sy)` of any green-dominant floor
+    /// halo pixel (`g > r.max(b)`).
+    fn green_halo_radius(pb: &PixelBuffer, sx: usize, sy: usize) -> usize {
+        let mut max_r = 0usize;
+        for y in (sy - 7)..=(sy + 7) {
+            for x in (sx - 8)..=(sx + 8) {
+                let c = pb.pixel_at(x, y);
+                if c.1 > c.0.max(c.2) {
+                    let r = x.abs_diff(sx).max(y.abs_diff(sy));
+                    max_r = max_r.max(r);
+                }
             }
         }
-        peak
+        max_r
     }
 
     #[test]
-    fn draws_inside_nine_by_nine_box_and_nothing_outside() {
+    fn draws_inside_halo_box_and_nothing_outside() {
         const BG: Rgb = (28, 34, 32);
         let cam = Vec2::new(10.0, 5.0);
-        let pos = Vec2::new(26.0, 21.0); // screen (16, 16)
-        let (sx, sy) = (16i32, 16i32);
+        let pos = Vec2::new(34.0, 29.0); // screen (24, 24)
+        let (sx, sy) = (24i32, 24i32);
 
-        for seed in 0..24u32 {
+        for seed in 0..16u32 {
             for level in 1..=5u8 {
                 for &age in &[0.05f32, 0.24, 0.25, 3.5, 12.0, 12.1, 13.8] {
-                    let mut pb = PixelBuffer::new(33, 33);
+                    let mut pb = PixelBuffer::new(49, 49);
                     pb.clear(BG);
                     let d = sample_dropping(pos, age, seed, level);
                     draw_dropping(&mut pb, &d, cam, 0.0);
@@ -656,7 +594,8 @@ mod tests {
                     for y in 0..pb.h {
                         for x in 0..pb.w {
                             let changed = pb.pixel_at(x, y) != BG;
-                            let in_box = (x as i32 - sx).abs() <= 4 && (y as i32 - sy).abs() <= 4;
+                            let in_box = (x as i32 - sx).abs() <= MAX_EXTENT
+                                && (y as i32 - sy).abs() <= 7;
                             if in_box {
                                 if changed {
                                     inside += 1;
@@ -664,13 +603,13 @@ mod tests {
                             } else {
                                 assert!(
                                     !changed,
-                                    "seed={seed} level={level} age={age} painted outside 9x9 at ({x},{y})"
+                                    "seed={seed} level={level} age={age} painted outside halo box at ({x},{y})"
                                 );
                             }
                         }
                     }
                     assert!(
-                        inside >= 5,
+                        inside >= 7,
                         "seed={seed} level={level} age={age} drew too few pixels ({inside})"
                     );
                 }
@@ -679,12 +618,159 @@ mod tests {
     }
 
     #[test]
+    fn pellet_pixels_are_dark_and_not_green_at_every_rank_and_state() {
+        const BG: Rgb = (28, 36, 34);
+        let pos = Vec2::new(24.0, 24.0);
+
+        // 1. Raw albedo: every pellet pixel across every shape, rank, and age
+        //    state must be dark (luma < 90) and warm brown/black (r >= g).
+        for seed in 0..16u32 {
+            for level in 1..=5u8 {
+                for &age in &[0.05f32, 0.24, 0.25, 3.5, 12.0, 12.5, 13.8] {
+                    let d = sample_dropping(pos, age, seed, level);
+                    let plan = DroppingPlan::build(&d);
+                    let mut pb = PixelBuffer::new(49, 49);
+                    pb.clear(BG);
+                    draw_dropping(&mut pb, &d, Vec2::ZERO, 0.0);
+
+                    for &(rx, ry) in plan.shape {
+                        let dx = if plan.flip_x {
+                            -i32::from(rx)
+                        } else {
+                            i32::from(rx)
+                        };
+                        let dy = i32::from(ry);
+                        let c = pb.pixel_at((24 + dx) as usize, (24 + dy) as usize);
+                        assert!(
+                            luma(c) < 90,
+                            "seed={seed} level={level} age={age} pellet px ({dx},{dy}) too bright: {c:?}"
+                        );
+                        assert!(
+                            c.0 >= c.1,
+                            "seed={seed} level={level} age={age} pellet px ({dx},{dy}) tinted green: {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. Lit scene (Full lighting + fx on, within FOG_NEAR so distance fog
+        //    is zero and the dropping's own green ground light is active):
+        //    every pellet pixel stays dark and not green.
+        for level in [1u8, 3, 5] {
+            for &age in &[0.1f32, 3.0, 13.5] {
+                let mut w = World::new(Theme::Sewer, 80);
+                w.level = Level::empty(Theme::Sewer);
+                w.player.pos = Vec2::new(68.0, 32.0);
+                let d = sample_dropping(Vec2::new(32.0, 32.0), age, 0, level);
+                w.ecs.spawn((d, SpawnId(1)));
+                let plan = DroppingPlan::build(&d);
+
+                let mut pb = PixelBuffer::new(64, 64);
+                pb.set_materials(true);
+                pb.clear((18, 28, 26));
+                draw_dropping(&mut pb, &d, Vec2::ZERO, 0.0);
+                let mut lm = LightMap::new();
+                lm.begin_frame();
+                mark_dropping_emissive(&mut lm, &pb, &d, Vec2::ZERO);
+                let scene = LightScene {
+                    ecs: &w.ecs,
+                    level: &w.level,
+                    player: &w.player,
+                    particles: &w.particles,
+                    thrash: None,
+                    squeak: None,
+                    cam: Vec2::ZERO,
+                    elapsed: 0.0,
+                    mode: LightingMode::Full,
+                    depth: ColorDepth::Truecolor,
+                    fx: true,
+                    blackout: 0.0,
+                };
+                lm.apply_scene(&mut pb, &scene);
+
+                let mut sum_luma = 0u32;
+                let mut count = 0u32;
+                for &(rx, ry) in plan.shape {
+                    let dx = if plan.flip_x {
+                        -i32::from(rx)
+                    } else {
+                        i32::from(rx)
+                    };
+                    let dy = i32::from(ry);
+                    let c = pb.pixel_at((32 + dx) as usize, (32 + dy) as usize);
+                    let lum = luma(c);
+                    sum_luma += u32::from(lum);
+                    count += 1;
+                    assert!(
+                        lum < 110,
+                        "lit level={level} age={age} pellet px ({dx},{dy}) too bright: {c:?}"
+                    );
+                    if age <= DRYING_AGE {
+                        assert!(
+                            c.0 >= c.1,
+                            "lit level={level} age={age} pellet px ({dx},{dy}) washed green: {c:?}"
+                        );
+                    }
+                }
+                assert!(
+                    sum_luma / count < 55,
+                    "lit level={level} age={age} pellet mean luma too bright ({})",
+                    sum_luma / count
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pellet_uses_matte_pen_and_preserves_floor_material_under_halo() {
+        let water_pen = lighting::pool_pen();
+        let matte_pen = lighting::dropping_pen();
+        assert_ne!(water_pen, matte_pen);
+
+        let d = sample_dropping(Vec2::new(24.0, 24.0), 3.0, 0, 5);
+        let plan = DroppingPlan::build(&d);
+
+        let mut pb = PixelBuffer::new(49, 49);
+        pb.set_materials(true);
+        pb.set_pen(water_pen);
+        pb.clear((28, 72, 82));
+        draw_dropping(&mut pb, &d, Vec2::ZERO, 0.0);
+
+        // Every pellet pixel is stamped with the matte pen.
+        for &(rx, ry) in plan.shape {
+            let dx = if plan.flip_x {
+                -i32::from(rx)
+            } else {
+                i32::from(rx)
+            };
+            let dy = i32::from(ry);
+            let idx = (24 + dy) as usize * pb.w + (24 + dx) as usize;
+            assert_eq!(
+                pb.mat()[idx],
+                matte_pen,
+                "pellet pixel ({dx},{dy}) must wear the matte pen"
+            );
+        }
+
+        // Surrounding halo pixel keeps the puddle's Water material byte.
+        let halo_idx = (24 - 3) * pb.w + 24;
+        assert_eq!(
+            pb.mat()[halo_idx],
+            water_pen,
+            "floor halo must preserve underlying puddle material byte"
+        );
+        // Caller's pen is restored after draw_dropping returns.
+        assert_eq!(pb.pen(), water_pen);
+    }
+
+    #[test]
     fn different_seeds_differ() {
         const BG: Rgb = (24, 28, 26);
-        let pos = Vec2::new(12.0, 12.0);
+        let pos = Vec2::new(20.0, 20.0);
         for level in [1u8, 5] {
             let render = |seed: u32| -> Vec<Rgb> {
-                let mut pb = PixelBuffer::new(25, 25);
+                let mut pb = PixelBuffer::new(41, 41);
                 pb.clear(BG);
                 let d = sample_dropping(pos, 3.0, seed, level);
                 draw_dropping(&mut pb, &d, Vec2::ZERO, 0.0);
@@ -704,125 +790,86 @@ mod tests {
     }
 
     #[test]
-    fn age_past_twelve_fades_green_glow_and_stops_wisps() {
+    fn halo_grows_with_rank_and_exceeds_old_rim() {
         const BG: Rgb = (20, 24, 22);
-        let pos = Vec2::new(12.0, 12.0);
-
-        let mut live_pb = PixelBuffer::new(25, 25);
-        live_pb.clear(BG);
-        draw_dropping(&mut live_pb, &sample_dropping(pos, 4.0, 0, 3), Vec2::ZERO, 0.25);
-
-        let mut dry_pb = PixelBuffer::new(25, 25);
-        dry_pb.clear(BG);
-        draw_dropping(&mut dry_pb, &sample_dropping(pos, 13.5, 0, 3), Vec2::ZERO, 0.25);
-
-        assert_ne!(
-            live_pb.pixels(),
-            dry_pb.pixels(),
-            "drying dropping (age > 12) must differ from armed dropping"
-        );
-
-        assert!(
-            green_excess_in_box(&live_pb, 12, 12, BG)
-                > green_excess_in_box(&dry_pb, 12, 12, BG) * 4,
-            "drying dropping should fade its green glow sharply toward chalky grey-brown"
-        );
-
-        // Floating wisp zone (rows 8..=9, 2–3 px above the cluster): present when
-        // armed, completely stopped once drying (age > 12).
-        let wisp_pixels = |pb: &PixelBuffer| -> usize {
-            (8..=9usize)
-                .flat_map(|y| (8..=16usize).map(move |x| (x, y)))
-                .filter(|&(x, y)| pb.pixel_at(x, y) != BG)
-                .count()
-        };
-        assert!(
-            wisp_pixels(&live_pb) >= 1,
-            "live armed dropping should show 1–2 still green wisps above it"
-        );
-        assert_eq!(
-            wisp_pixels(&dry_pb),
-            0,
-            "drying dropping (age > 12) must stop its floating wisps"
-        );
-    }
-
-    #[test]
-    fn fresh_unarmed_dropping_has_softer_glow_and_no_wisps() {
-        const BG: Rgb = (20, 24, 22);
-        let pos = Vec2::new(12.0, 12.0);
-
-        let mut wet_pb = PixelBuffer::new(25, 25);
-        wet_pb.clear(BG);
-        draw_dropping(&mut wet_pb, &sample_dropping(pos, 0.1, 3, 3), Vec2::ZERO, 0.5);
-
-        let mut live_pb = PixelBuffer::new(25, 25);
-        live_pb.clear(BG);
-        draw_dropping(&mut live_pb, &sample_dropping(pos, 2.0, 3, 3), Vec2::ZERO, 0.5);
-
-        let wisp_wet = (8..=9usize)
-            .flat_map(|y| (8..=16usize).map(move |x| (x, y)))
-            .filter(|&(x, y)| wet_pb.pixel_at(x, y) != BG)
-            .count();
-        assert_eq!(wisp_wet, 0, "fresh dropping (age < 0.25) has no floating wisps");
-
-        assert!(
-            green_excess_in_box(&live_pb, 12, 12, BG) > green_excess_in_box(&wet_pb, 12, 12, BG),
-            "armed dropping should glow stronger green than a fresh unarmed dropping"
-        );
-        assert_ne!(
-            wet_pb.pixels(),
-            live_pb.pixels(),
-            "fresh wet dropping must read distinct from armed dropping"
-        );
-    }
-
-    #[test]
-    fn rank_five_paints_brighter_green_than_rank_one() {
-        const BG: Rgb = (20, 24, 22);
-        let pos = Vec2::new(12.0, 12.0);
+        let pos = Vec2::new(20.0, 20.0);
 
         for seed in 0..8u32 {
             let mut prev_green = 0u32;
-            let mut rank1_peak = 0u8;
-            let mut rank5_peak = 0u8;
+            let mut r1_radius = 0usize;
+            let mut r5_radius = 0usize;
 
             for level in 1..=5u8 {
-                let mut pb = PixelBuffer::new(25, 25);
+                let mut pb = PixelBuffer::new(41, 41);
                 pb.clear(BG);
                 draw_dropping(&mut pb, &sample_dropping(pos, 3.0, seed, level), Vec2::ZERO, 0.0);
 
-                let g = green_excess_in_box(&pb, 12, 12, BG);
-                let peak = peak_green_in_box(&pb, 12, 12);
+                let g = green_excess_in_box(&pb, 20, 20, BG);
+                let rad = green_halo_radius(&pb, 20, 20);
                 assert!(
                     g > prev_green,
-                    "seed={seed}: rank {level} green glow ({g}) should exceed rank {} ({prev_green})",
+                    "seed={seed}: rank {level} green halo ({g}) should exceed rank {} ({prev_green})",
                     level - 1
                 );
                 prev_green = g;
                 if level == 1 {
-                    rank1_peak = peak;
+                    r1_radius = rad;
                 } else if level == 5 {
-                    rank5_peak = peak;
+                    r5_radius = rad;
                 }
             }
 
             assert!(
-                rank5_peak > rank1_peak,
-                "seed={seed}: rank 5 peak green ({rank5_peak}) must exceed rank 1 ({rank1_peak})"
+                r1_radius >= 3,
+                "seed={seed}: rank 1 floor halo radius ({r1_radius}) should reach at least 3 px"
+            );
+            assert!(
+                r5_radius > r1_radius && r5_radius >= 6,
+                "seed={seed}: rank 5 floor halo radius ({r5_radius}) must exceed rank 1 ({r1_radius}) and reach >= 6 px"
             );
         }
     }
 
     #[test]
-    fn different_elapsed_values_with_same_age_state_paint_identically() {
+    fn arming_is_dimmer_than_armed_and_drying_fades() {
         const BG: Rgb = (20, 24, 22);
-        let pos = Vec2::new(12.0, 12.0);
+        let pos = Vec2::new(20.0, 20.0);
+
+        let mut arming_pb = PixelBuffer::new(41, 41);
+        arming_pb.clear(BG);
+        draw_dropping(&mut arming_pb, &sample_dropping(pos, 0.1, 3, 3), Vec2::ZERO, 0.5);
+
+        let mut armed_pb = PixelBuffer::new(41, 41);
+        armed_pb.clear(BG);
+        draw_dropping(&mut armed_pb, &sample_dropping(pos, 3.0, 3, 3), Vec2::ZERO, 0.5);
+
+        let mut dry_pb = PixelBuffer::new(41, 41);
+        dry_pb.clear(BG);
+        draw_dropping(&mut dry_pb, &sample_dropping(pos, 13.5, 3, 3), Vec2::ZERO, 0.5);
+
+        let g_arming = green_excess_in_box(&arming_pb, 20, 20, BG);
+        let g_armed = green_excess_in_box(&armed_pb, 20, 20, BG);
+        let g_dry = green_excess_in_box(&dry_pb, 20, 20, BG);
+
+        assert!(
+            g_armed > g_arming && g_arming > 0,
+            "arming ({g_arming}) must be dimmer than armed ({g_armed})"
+        );
+        assert!(
+            g_armed > g_dry * 4,
+            "drying ({g_dry}) must fade its green halo sharply from armed ({g_armed})"
+        );
+    }
+
+    #[test]
+    fn frozen_frame_is_identical_across_elapsed() {
+        const BG: Rgb = (20, 24, 22);
+        let pos = Vec2::new(20.0, 20.0);
 
         for &(age, level) in &[(0.1f32, 2u8), (4.0, 1), (4.0, 5), (13.0, 4)] {
             let d = sample_dropping(pos, age, 5, level);
             let render_at = |elapsed: f32| -> Vec<Rgb> {
-                let mut pb = PixelBuffer::new(25, 25);
+                let mut pb = PixelBuffer::new(41, 41);
                 pb.clear(BG);
                 draw_dropping(&mut pb, &d, Vec2::ZERO, elapsed);
                 pb.pixels().to_vec()
@@ -833,18 +880,17 @@ mod tests {
                 assert_eq!(
                     base,
                     render_at(elapsed),
-                    "age={age} level={level}: elapsed={elapsed} must paint identically (no time stepping)"
+                    "age={age} level={level}: elapsed={elapsed} must paint identically"
                 );
             }
         }
     }
 
     #[test]
-    fn mark_dropping_emissive_preserves_rank_one_glow_and_skips_drying() {
+    fn mark_dropping_emissive_preserves_floor_halo_not_pellet_and_skips_drying() {
         const FLOOR: Rgb = (14, 22, 20);
         let mut w = World::new(Theme::Sewer, 80);
         w.level = Level::empty(Theme::Sewer);
-        // Place the rat far away so only dark Sewer ambient touches (20, 20).
         w.player.pos = Vec2::new(700.0, 700.0);
         let scene = LightScene {
             ecs: &w.ecs,
@@ -861,27 +907,24 @@ mod tests {
             blackout: 0.0,
         };
 
-        // Rank 1 armed dropping: peak green is well under 232, yet explicit
-        // emissive marking preserves its glow core through the lighting pass.
-        let d_r1 = sample_dropping(Vec2::new(20.0, 20.0), 3.0, 0, 1);
+        let d_r1 = sample_dropping(Vec2::new(24.0, 24.0), 3.0, 0, 1);
         let plan = DroppingPlan::build(&d_r1);
-        let (cx, cy) = ((20 + plan.core1_pos.0) as usize, (20 + plan.core1_pos.1) as usize);
+        // Floor halo pixel just above the pellet crown (dx = 0, dy = -2).
+        let (hx, hy) = (24usize, 22usize);
+        // Pellet crown pixel (must NOT be marked emissive).
+        let (px, py) = ((24 + plan.tl.0) as usize, (24 + plan.tl.1) as usize);
 
-        let mut pb_marked = PixelBuffer::new(40, 40);
+        let mut pb_marked = PixelBuffer::new(48, 48);
         pb_marked.clear(FLOOR);
         draw_dropping(&mut pb_marked, &d_r1, Vec2::ZERO, 0.0);
-        let core_unlit = pb_marked.pixel_at(cx, cy);
-        assert!(
-            core_unlit.1 < 232,
-            "rank 1 core ({core_unlit:?}) should sit below the 232 highlight threshold"
-        );
+        let halo_unlit = pb_marked.pixel_at(hx, hy);
 
         let mut lm_marked = LightMap::new();
         lm_marked.begin_frame();
         mark_dropping_emissive(&mut lm_marked, &pb_marked, &d_r1, Vec2::ZERO);
         lm_marked.apply_scene(&mut pb_marked, &scene);
 
-        let mut pb_unmarked = PixelBuffer::new(40, 40);
+        let mut pb_unmarked = PixelBuffer::new(48, 48);
         pb_unmarked.clear(FLOOR);
         draw_dropping(&mut pb_unmarked, &d_r1, Vec2::ZERO, 0.0);
         let mut lm_unmarked = LightMap::new();
@@ -889,17 +932,22 @@ mod tests {
         lm_unmarked.apply_scene(&mut pb_unmarked, &scene);
 
         assert!(
-            pb_marked.pixel_at(cx, cy).1 >= core_unlit.1,
-            "emissive mark must keep rank 1 green core bright after lighting"
+            pb_marked.pixel_at(hx, hy).1 >= halo_unlit.1,
+            "emissive mark must keep floor halo green bright after lighting"
         );
         assert!(
-            pb_marked.pixel_at(cx, cy).1 > pb_unmarked.pixel_at(cx, cy).1 + 40,
-            "emissive rank 1 core must stay visibly brighter than an unmarked one"
+            pb_marked.pixel_at(hx, hy).1 > pb_unmarked.pixel_at(hx, hy).1 + 25,
+            "emissive floor halo must stay visibly brighter than an unmarked one"
+        );
+        assert_eq!(
+            pb_marked.pixel_at(px, py),
+            pb_unmarked.pixel_at(px, py),
+            "pellet pixel itself must never be marked emissive"
         );
 
         // Drying dropping: `mark_dropping_emissive` is a no-op so it dims with the floor.
-        let d_dry = sample_dropping(Vec2::new(20.0, 20.0), 13.5, 0, 5);
-        let mut pb_dry_marked = PixelBuffer::new(40, 40);
+        let d_dry = sample_dropping(Vec2::new(24.0, 24.0), 13.5, 0, 5);
+        let mut pb_dry_marked = PixelBuffer::new(48, 48);
         pb_dry_marked.clear(FLOOR);
         draw_dropping(&mut pb_dry_marked, &d_dry, Vec2::ZERO, 0.0);
         let mut lm_dry_marked = LightMap::new();
@@ -907,7 +955,7 @@ mod tests {
         mark_dropping_emissive(&mut lm_dry_marked, &pb_dry_marked, &d_dry, Vec2::ZERO);
         lm_dry_marked.apply_scene(&mut pb_dry_marked, &scene);
 
-        let mut pb_dry_unmarked = PixelBuffer::new(40, 40);
+        let mut pb_dry_unmarked = PixelBuffer::new(48, 48);
         pb_dry_unmarked.clear(FLOOR);
         draw_dropping(&mut pb_dry_unmarked, &d_dry, Vec2::ZERO, 0.0);
         let mut lm_dry_unmarked = LightMap::new();
