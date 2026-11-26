@@ -330,15 +330,16 @@ class MeasuredProfile:
                 for key, (value, n) in self.observed.items()}
 
 
-def confirmed_cohorts(campaigns):
-    sizes = {"candidate": CONFIRM_RUNS, "round3": CONFIRM_RUNS, "power-off": CONFIRM_RUNS,
-             "half-hp-double-enemy": EXPERIMENT_RUNS, "candidate-mid": META_RUNS, "candidate-max": META_RUNS}
+def confirmed_cohorts(campaigns, sizes=None, seed=CONFIRM_SEED):
+    if sizes is None:
+        sizes = {"candidate": CONFIRM_RUNS, "round3": CONFIRM_RUNS, "power-off": CONFIRM_RUNS,
+                 "half-hp-double-enemy": EXPERIMENT_RUNS, "candidate-mid": META_RUNS, "candidate-max": META_RUNS}
     cohorts = {}
     for point, size in sizes.items():
         cohorts[point] = {}
         for skill in SKILLS:
             runs = sorted((r for r in campaigns[point] if r["skill"] == skill), key=lambda r: r["seed"])
-            if [r["seed"] for r in runs] != list(range(CONFIRM_SEED, CONFIRM_SEED + size)):
+            if [r["seed"] for r in runs] != list(range(seed, seed + size)):
                 raise ValueError(f"confirmation cohort mismatch for {point}/{skill}")
             cohorts[point][skill] = runs
     return cohorts
@@ -354,7 +355,7 @@ def floor_clears(cohort):
     return counts
 
 
-def profile_comparison(lines, cohorts, profiles):
+def profile_comparison(lines, cohorts, profiles, baseline="round3"):
     lines += ["## Same-seed controls and Nest ladder", "",
               "The half-HP experiment, mid Nest, and max Nest use the first 96 seeds of the fresh cohort. "
               "Power-off keeps the candidate's other tuning settings. Deaths through 5:00 use the Sewer floor clock."]
@@ -389,20 +390,24 @@ def profile_comparison(lines, cohorts, profiles):
         for point, by_skill in clears.items() for skill, counts in by_skill.items()
     ])
     rows = []
-    for point, control in (("candidate", "round3"), ("candidate", "power-off"),
-                           ("half-hp-double-enemy", "round3"),
+    for point, control in (("candidate", baseline), ("candidate", "power-off"),
+                           ("half-hp-double-enemy", baseline),
                            ("candidate-mid", "candidate"), ("candidate-max", "candidate")):
         for skill in SKILLS:
-            cohort = cohorts[point][skill]
-            paired = list(zip(cohort, cohorts[control][skill][:len(cohort)], strict=True))
+            cohort, other = cohorts[point][skill], cohorts[control][skill]
+            pairs = min(len(cohort), len(other))
+            paired = list(zip(cohort[:pairs], other[:pairs], strict=True))
             gains = sum(c["won"] and not b["won"] for c, b in paired)
             losses = sum(b["won"] and not c["won"] for c, b in paired)
             rows.append((point, control, skill, len(paired), gains, losses,
                          f"{(gains - losses) * 100 / len(paired):+.1f}"))
     table(lines, ("Profile", "Control", "Skill", "Pairs", "Profile-only wins", "Control-only wins", "Win change (pp)"), rows)
     rows = []
-    for point in ("candidate", "power-off", "round3"):
-        models = [MeasuredProfile(profiles[point][skill]) for skill in SKILLS]
+    compared = ("candidate", "power-off", baseline)
+    paired_size = min(len(cohorts[point][skill]) for point in compared for skill in SKILLS)
+    lines += [f"Weighted loss uses the first {paired_size} exact seeds per skill for each profile."]
+    for point in compared:
+        models = [MeasuredProfile(observe(cohorts[point][skill][:paired_size])) for skill in SKILLS]
         scores = {name: float(loss[0]) for name, loss in objective(models, None).items()}
         rows.append((point, sum(scores.values()), scores))
     table(lines, ("Profile", "Weighted loss", *WEIGHTS), [

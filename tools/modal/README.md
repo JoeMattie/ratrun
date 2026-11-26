@@ -55,3 +55,22 @@ reach an outcome. The fit excludes a screening setting if any of its
 campaigns are still running at that cap. Confirmation requires every
 campaign to finish.
 Use a new output directory for a new simulator revision or design.
+
+## Fresh sector starts
+
+Run `fresh.py` with a dump from the no-carry build. The Sewer holds the same
+playtest anchor across fit points. The fit sweeps the five fresh tuning arrays
+and the three later-sector DPS references. The other feel controls use the
+shipped balance. Confirm the fitted point on 300 campaigns per skill, its
+power-off and shipped comparisons on 144, and the half-HP comparison and
+mid/max Nest on 96. Confirmation allows up to 14,400 simulation seconds.
+
+```sh
+.venv/bin/python tools/modal/fresh.py --pilot --defaults "$DEFAULTS" --output "$RESULTS"
+.venv/bin/modal run tools/modal/app.py --manifest "$RESULTS/pilot-manifest.json" --output "$RESULTS"
+.venv/bin/python tools/modal/verify.py --binary "$BINARY" --output "$RESULTS" --id power-expert-9000
+.venv/bin/python tools/modal/fresh.py --defaults "$DEFAULTS" --experiment "$EXPERIMENT" --output "$RESULTS" --spent-usd 0
+```
+
+Set `--spent-usd` to compute already incurred in a related round and any
+overhead reserve you want to keep inside the combined USD 20 ceiling.
