@@ -761,22 +761,6 @@ pub struct EnemyIndex(pub Vec<Entity>);
 #[derive(Resource, Default)]
 pub(crate) struct BeadHitClock(pub std::collections::BTreeMap<u64, f32>);
 
-#[derive(Clone, Copy, Default)]
-pub(crate) enum HoldPhase {
-    #[default]
-    Ready,
-    Charging(f32),
-    Cracked(f32),
-    Spent { age: f32, evolved: bool },
-}
-
-/// Hold Point's charge, failure tell, and fired circle.
-#[derive(Resource, Default)]
-pub(crate) struct HoldPointFx {
-    pub centre: Vec2,
-    pub phase: HoldPhase,
-}
-
 /// Debug-build guard for the [`EnemyIndex`] validity window.
 ///
 /// Every system that reads `EnemyIndex.0[j]` (a `SpatialGrid` bucket index) or

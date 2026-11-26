@@ -1,5 +1,5 @@
-//! Pixel art for the three wave-5 weapons:
-//! **Glass Bead**, **Plumb Bob**, and **Hold Point**.
+//! Pixel art for the wave-5 weapons:
+//! **Glass Bead** and **Plumb Bob**.
 //!
 //! Pure render-only drawing from continuous inputs — zero simulation state,
 //! zero rng and zero allocation. World-space
@@ -8,7 +8,7 @@
 
 #![allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::PI;
 
 use crate::game::art_wave3a::RingDedup;
 use crate::game::ecs::systems::weapons_wave5::{BOB_PASS, PlumbBob, SHED_PASS};
@@ -17,9 +17,6 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::LightMap;
 use crate::render::palette::{self, Rgb};
-
-/// Hit and drawn radius (px) of **Hold Point**'s floor circle.
-pub const HOLD_RADIUS: f32 = 28.0;
 
 // --- Glass Bead palette ----------------------------------------------------
 const BEAD_CORE: Rgb = (255, 255, 252);
@@ -42,28 +39,9 @@ const BRASS_SHADE: Rgb = (132, 94, 34);
 const BRASS_RIM_HI: Rgb = (158, 120, 48);
 const BRASS_RIM_LO: Rgb = (58, 40, 14);
 
-// --- Hold Point palette ----------------------------------------------------
-const HOLD_WHITE: Rgb = (238, 248, 255);
-const HOLD_ICE: Rgb = (168, 218, 250);
-const HOLD_TRAIL: Rgb = (136, 206, 252);
-const HOLD_STEEL: Rgb = (88, 132, 170);
-const HOLD_DARK: Rgb = (14, 22, 34);
-const CRACK_CORE: Rgb = (255, 252, 236);
-const CRACK_FAULT: Rgb = (255, 134, 58);
-const CRACK_BACK: Rgb = (16, 8, 10);
-
 #[inline]
 fn w2s(p: Vec2, cam: Vec2) -> (i32, i32) {
     ((p.x - cam.x).round() as i32, (p.y - cam.y).round() as i32)
-}
-
-#[inline]
-fn unit_clamp(v: f32) -> f32 {
-    if v.is_finite() {
-        v.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 #[inline]
@@ -82,33 +60,6 @@ fn shade_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
     }
     let cur = pb.pixel_at(x as usize, y as usize);
     pb.plot(x, y, palette::scale(cur, 1.0 - amount));
-}
-
-/// Walk a deduplicated arc of radius `rad` around `c` from `a0` to `a1`.
-fn walk_arc(
-    c: (i32, i32),
-    rad: f32,
-    a0: f32,
-    a1: f32,
-    steps: usize,
-    mut plot: impl FnMut(i32, i32),
-) {
-    if steps == 0 || rad <= 0.0 {
-        return;
-    }
-    let mut seen = RingDedup::new();
-    let denom = steps as f32;
-    for i in 0..=steps {
-        let t = i as f32 / denom;
-        let a = a0 + (a1 - a0) * t;
-        let (sa, ca) = a.sin_cos();
-        let px = c.0 + (ca * rad).round() as i32;
-        let py = c.1 + (sa * rad).round() as i32;
-        if seen.repeat((px, py)) {
-            continue;
-        }
-        plot(px, py);
-    }
 }
 
 /// Walk an integer 1-px Bresenham segment from `p0` to `p1`.
@@ -411,229 +362,9 @@ fn paint_bob(pb: &mut PixelBuffer, (cx, cy): (i32, i32), evolved: bool, turn: f3
     }
 }
 
-/// **Hold Point**: a 28-px cold-white floor circle centred on `centre`.
-///
-/// - Charging (`charge` in `0..1`, `!cracked`): the 28-px perimeter fills
-///   clockwise from top while an inner ring with four short lock ticks rises
-///   continuously to meet it.
-/// - Firing (`fired` in `0..1`): a bright cold-white expanding shock ring with
-///   a trailing harmonic and a brief ignition rim flash.
-/// - Cracked (`cracked == true`): a shattered, displaced 2-px broken outline
-///   with dark contrast keylines and jagged lightning cracks — deliberately
-///   louder than both the charging fill and the fire.
-pub fn draw_hold(
-    pb: &mut PixelBuffer,
-    centre: Vec2,
-    cam: Vec2,
-    charge: f32,
-    fired: f32,
-    cracked: bool,
-) {
-    if !centre.x.is_finite() || !centre.y.is_finite() || !cam.x.is_finite() || !cam.y.is_finite() {
-        return;
-    }
-    let charge = unit_clamp(charge);
-    let fired = unit_clamp(fired);
-    if charge <= 0.0 && fired <= 0.0 && !cracked {
-        return;
-    }
-
-    let c = w2s(centre, cam);
-    let r = HOLD_RADIUS;
-
-    // 1. Cracked / shattered 28-px outline — reads louder than the fill and fire.
-    if cracked {
-        const SHARDS: usize = 6;
-        let shard_span = TAU / SHARDS as f32;
-        let gap = 0.38f32;
-        let steps = 36usize;
-
-        for s_idx in 0..SHARDS {
-            let a0 = -FRAC_PI_2 + s_idx as f32 * shard_span + gap * 0.5;
-            let a1 = -FRAC_PI_2 + (s_idx + 1) as f32 * shard_span - gap * 0.5;
-            let sign = if s_idx.is_multiple_of(2) { 1.0f32 } else { -1.0f32 };
-            let r_off = 1.5 * sign;
-            let tilt = 1.2 * sign;
-
-            // Separate passes so dark backing never checkers the bright shard core.
-            let mut seen_b = RingDedup::new();
-            for i in 0..=steps {
-                let t = i as f32 / steps as f32;
-                let a = a0 + (a1 - a0) * t;
-                let sr = r + r_off + (t - 0.5) * tilt + 1.2;
-                let (sa, ca) = a.sin_cos();
-                let p = (c.0 + (ca * sr).round() as i32, c.1 + (sa * sr).round() as i32);
-                if !seen_b.repeat(p) {
-                    blend_px(pb, p.0, p.1, CRACK_BACK, 0.90);
-                }
-            }
-
-            let mut seen_f = RingDedup::new();
-            for i in 0..=steps {
-                let t = i as f32 / steps as f32;
-                let a = a0 + (a1 - a0) * t;
-                let sr = r + r_off + (t - 0.5) * tilt - 1.0;
-                let (sa, ca) = a.sin_cos();
-                let p = (c.0 + (ca * sr).round() as i32, c.1 + (sa * sr).round() as i32);
-                if !seen_f.repeat(p) {
-                    blend_px(pb, p.0, p.1, CRACK_FAULT, 0.95);
-                }
-            }
-
-            let mut seen_c = RingDedup::new();
-            for i in 0..=steps {
-                let t = i as f32 / steps as f32;
-                let a = a0 + (a1 - a0) * t;
-                let sr = r + r_off + (t - 0.5) * tilt;
-                let (sa, ca) = a.sin_cos();
-                let p = (c.0 + (ca * sr).round() as i32, c.1 + (sa * sr).round() as i32);
-                if !seen_c.repeat(p) {
-                    pb.plot(p.0, p.1, CRACK_CORE);
-                }
-            }
-
-            // Sharp 1-px Bresenham lightning-crack fork shooting inward at each break.
-            let ba = -FRAC_PI_2 + s_idx as f32 * shard_span;
-            let (bs, bc) = ba.sin_cos();
-            let bdir = Vec2::new(bc, bs);
-            let bperp = bdir.perp();
-            let jag_local: [(f32, f32); 4] = [
-                (r + 1.5, 0.0),
-                (r - 1.2, 1.6),
-                (r - 3.8, -1.5),
-                (r - 6.6, 0.9),
-            ];
-            let mut jag_px = [(0i32, 0i32); 4];
-            for (slot, &(rr, po)) in jag_px.iter_mut().zip(&jag_local) {
-                let off = bdir * rr + bperp * po;
-                *slot = (c.0 + off.x.round() as i32, c.1 + off.y.round() as i32);
-            }
-            for seg in jag_px.windows(2) {
-                walk_line(seg[0], seg[1], |_, fx, fy| {
-                    blend_px(pb, fx + 1, fy + 1, CRACK_BACK, 0.78);
-                });
-            }
-            for (j, seg) in jag_px.windows(2).enumerate() {
-                let col = if j == 0 { CRACK_CORE } else { CRACK_FAULT };
-                walk_line(seg[0], seg[1], |_, fx, fy| {
-                    pb.plot(fx, fy, col);
-                });
-            }
-        }
-    } else if charge > 0.0 {
-        // 2. Charging 28-px cold-white circle filling continuously as charge rises.
-        let fill_col = palette::mix(HOLD_ICE, HOLD_WHITE, charge);
-        let fill_alpha = 0.50 + 0.42 * charge;
-        let a_start = -FRAC_PI_2;
-        let a_fill = a_start + charge * TAU;
-        let fill_steps = (200.0 * charge).round().clamp(4.0, 210.0) as usize;
-
-        // Pass A: subtle dark keyline outside the filled arc.
-        let back_alpha = 0.30 + 0.22 * charge;
-        walk_arc(c, r + 1.0, a_start, a_fill, fill_steps, |x, y| {
-            blend_px(pb, x, y, HOLD_DARK, back_alpha);
-        });
-
-        // Pass B: quiet dotted guide along the unfilled remainder of the 28-px rim.
-        if charge < 0.995 {
-            let rem_steps = (200.0 * (1.0 - charge)).round().clamp(4.0, 200.0) as usize;
-            let rem_span = (1.0 - charge) * TAU;
-            let guide_alpha = 0.26 + 0.14 * charge;
-            let mut seen_g = RingDedup::new();
-            for i in 0..rem_steps {
-                if !i.is_multiple_of(6) {
-                    continue;
-                }
-                let a = a_fill + (i as f32 / rem_steps as f32) * rem_span;
-                let (sa, ca) = a.sin_cos();
-                let p = (c.0 + (ca * r).round() as i32, c.1 + (sa * r).round() as i32);
-                if !seen_g.repeat(p) {
-                    blend_px(pb, p.0, p.1, HOLD_STEEL, guide_alpha);
-                }
-            }
-        }
-
-        // Pass C: soft inner cold-ice glow as charge approaches full.
-        let inner_glow = ((charge - 0.40) / 0.60).clamp(0.0, 1.0) * 0.34;
-        if inner_glow > 0.02 {
-            let glow_col = palette::scale(HOLD_ICE, inner_glow);
-            walk_arc(c, r - 1.0, a_start, a_fill, fill_steps, |x, y| {
-                pb.plot_add(x, y, glow_col);
-            });
-        }
-
-        // Pass D: crisp solid cold-white filled arc drawn last.
-        walk_arc(c, r, a_start, a_fill, fill_steps, |x, y| {
-            blend_px(pb, x, y, fill_col, fill_alpha);
-        });
-
-        // Pass E: rising inner concentric ring (glides 5.0 -> 26.5 px smoothly).
-        let r_in = 5.0 + 21.5 * charge;
-        let in_steps = (r_in * 6.8).round().clamp(24.0, 190.0) as usize;
-        let in_col = palette::scale(
-            palette::mix(HOLD_STEEL, HOLD_ICE, charge),
-            0.26 + 0.42 * charge,
-        );
-        walk_arc(c, r_in, 0.0, TAU, in_steps, |x, y| {
-            pb.plot_add(x, y, in_col);
-        });
-
-        // Pass F: four short inward cardinal lock ticks riding on the inner ring.
-        let tick_len = (1.0 + 3.0 * charge).round() as i32;
-        let tick_col = palette::scale(HOLD_ICE, 0.35 + 0.45 * charge);
-        let r_in_i = r_in.round() as i32;
-        for k in 1..=tick_len {
-            let d = r_in_i - k;
-            if d >= 5 {
-                pb.plot_add(c.0, c.1 - d, tick_col);
-                pb.plot_add(c.0, c.1 + d, tick_col);
-                pb.plot_add(c.0 - d, c.1, tick_col);
-                pb.plot_add(c.0 + d, c.1, tick_col);
-            }
-        }
-    }
-
-    // 3. Fired shock ring (bright expanding cold-white shockwave for fired 0..1).
-    if fired > 0.0 {
-        let ease = 1.0 - (1.0 - fired) * (1.0 - fired);
-        let r_lead = 5.0 + (r - 5.0) * ease;
-        let fade = (1.0 - fired * 0.72).clamp(0.24, 1.0);
-        let lead_steps = (r_lead * 6.8).round().clamp(24.0, 210.0) as usize;
-
-        // Trailing harmonic ring.
-        let r_trail = r_lead * 0.70;
-        if r_trail >= 4.0 {
-            let t_steps = (r_trail * 6.5).round().clamp(20.0, 160.0) as usize;
-            let t_col = palette::scale(HOLD_TRAIL, 0.46 * fade);
-            walk_arc(c, r_trail, 0.0, TAU, t_steps, |x, y| {
-                pb.plot_add(x, y, t_col);
-            });
-        }
-
-        // Inner ice band first, crisp pure-white lead shock ring last.
-        if r_lead >= 6.0 {
-            let band_col = palette::scale(HOLD_ICE, 0.72 * fade);
-            walk_arc(c, r_lead - 1.0, 0.0, TAU, lead_steps, |x, y| {
-                pb.plot_add(x, y, band_col);
-            });
-        }
-        walk_arc(c, r_lead, 0.0, TAU, lead_steps, |x, y| {
-            blend_px(pb, x, y, (255, 255, 255), 0.96 * fade);
-        });
-
-        // Brief crisp ignition rim flash on the 28-px boundary.
-        if fired < 0.45 {
-            let rim_k = (1.0 - fired / 0.45) * 0.50;
-            let rim_col = palette::scale(HOLD_WHITE, rim_k);
-            walk_arc(c, r, 0.0, TAU, 190, |x, y| {
-                pb.plot_add(x, y, rim_col);
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
     use super::*;
 
     fn painted_pixels(pb: &PixelBuffer, bg: Rgb) -> Vec<(i32, i32, Rgb)> {
@@ -708,111 +439,15 @@ mod tests {
     }
 
     #[test]
-    fn hold_paints_inside_expected_box_grows_with_charge_and_cracks_distinctly() {
-        let bg = (16, 20, 22);
-        let cam = Vec2::new(200.0, 100.0);
-        let centre = Vec2::new(240.0, 140.0); // screen (40, 40)
-
-        // Idle draws nothing.
-        let mut idle = PixelBuffer::new(80, 80);
-        idle.clear(bg);
-        draw_hold(&mut idle, centre, cam, 0.0, 0.0, false);
-        assert!(painted_pixels(&idle, bg).is_empty(), "idle hold paints nothing");
-
-        // Charge 0.2 vs charge 1.0: both stay inside ±30 px, and 1.0 paints more.
-        let mut lo = PixelBuffer::new(80, 80);
-        lo.clear(bg);
-        draw_hold(&mut lo, centre, cam, 0.2, 0.0, false);
-        let lo_pts = painted_pixels(&lo, bg);
-        assert!(!lo_pts.is_empty());
-        for &(x, y, _) in &lo_pts {
-            assert!(
-                (x - 40).abs() <= 30 && (y - 40).abs() <= 30,
-                "hold charge=0.2 pixel ({x}, {y}) escaped ±30 box"
-            );
-        }
-
-        let mut hi = PixelBuffer::new(80, 80);
-        hi.clear(bg);
-        draw_hold(&mut hi, centre, cam, 1.0, 0.0, false);
-        let hi_pts = painted_pixels(&hi, bg);
-        for &(x, y, _) in &hi_pts {
-            assert!(
-                (x - 40).abs() <= 30 && (y - 40).abs() <= 30,
-                "hold charge=1.0 pixel ({x}, {y}) escaped ±30 box"
-            );
-        }
-        assert!(
-            hi_pts.len() > lo_pts.len(),
-            "charge 1.0 ({}) must paint more pixels than charge 0.2 ({})",
-            hi_pts.len(),
-            lo_pts.len()
-        );
-
-        // Fired shock ring expands inside ±30 px.
-        let mut f_early = PixelBuffer::new(80, 80);
-        f_early.clear(bg);
-        draw_hold(&mut f_early, centre, cam, 0.0, 0.2, false);
-        let mut f_late = PixelBuffer::new(80, 80);
-        f_late.clear(bg);
-        draw_hold(&mut f_late, centre, cam, 0.0, 0.75, false);
-        let early_pts = painted_pixels(&f_early, bg);
-        let late_pts = painted_pixels(&f_late, bg);
-        assert!(!early_pts.is_empty() && !late_pts.is_empty());
-        for &(x, y, _) in early_pts.iter().chain(&late_pts) {
-            assert!(
-                (x - 40).abs() <= 30 && (y - 40).abs() <= 30,
-                "hold fired pixel ({x}, {y}) escaped ±30 box"
-            );
-        }
-        assert_ne!(f_early.pixels(), f_late.pixels(), "fired shock ring must expand over 0..1");
-
-        // Cracked differs clearly from uncracked and stays inside ±33 px.
-        let mut uncracked = PixelBuffer::new(80, 80);
-        uncracked.clear(bg);
-        draw_hold(&mut uncracked, centre, cam, 0.5, 0.0, false);
-
-        let mut cracked = PixelBuffer::new(80, 80);
-        cracked.clear(bg);
-        draw_hold(&mut cracked, centre, cam, 0.5, 0.0, true);
-        let cracked_pts = painted_pixels(&cracked, bg);
-        assert!(!cracked_pts.is_empty());
-        for &(x, y, _) in &cracked_pts {
-            assert!(
-                (x - 40).abs() <= 33 && (y - 40).abs() <= 33,
-                "cracked hold pixel ({x}, {y}) escaped ±33 box"
-            );
-        }
-        assert_ne!(
-            cracked.pixels(),
-            uncracked.pixels(),
-            "cracked hold must differ from uncracked hold"
-        );
-
-        // Cracked still draws loudly even when charge is 0.0.
-        let mut cracked_zero = PixelBuffer::new(80, 80);
-        cracked_zero.clear(bg);
-        draw_hold(&mut cracked_zero, centre, cam, 0.0, 0.0, true);
-        assert!(
-            painted_pixels(&cracked_zero, bg).len() >= 200,
-            "cracked hold at charge 0 must still draw the full shattered outline"
-        );
-    }
-
-    #[test]
     fn wave5_draw_functions_survive_degenerate_buffers_and_inputs() {
         let mut zero = PixelBuffer::new(0, 0);
         draw_bead(&mut zero, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, 0);
         draw_bead(&mut zero, Vec2::new(5.0, 5.0), Vec2::new(1.0, 0.0), Vec2::ZERO, 4);
         paint_bob(&mut zero, (0, 0), false, 0.0);
         paint_bob(&mut zero, (34, 0), true, 0.0);
-        draw_hold(&mut zero, Vec2::ZERO, Vec2::ZERO, 0.5, 0.5, false);
-        draw_hold(&mut zero, Vec2::ZERO, Vec2::ZERO, f32::NAN, f32::INFINITY, true);
 
         let mut pb = PixelBuffer::new(16, 16);
         draw_bead(&mut pb, Vec2::new(8.0, 8.0), Vec2::ZERO, Vec2::ZERO, 2);
         paint_bob(&mut pb, (8, 8), true, 0.0);
-        draw_hold(&mut pb, Vec2::new(8.0, 8.0), Vec2::ZERO, -1.0, 2.0, false);
-        draw_hold(&mut pb, Vec2::new(f32::NAN, 8.0), Vec2::ZERO, 1.0, 0.0, true);
     }
 }

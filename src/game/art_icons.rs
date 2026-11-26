@@ -1637,36 +1637,6 @@ const SHED_BOB: Icon = wave5_icon(
     (255, 228, 137),
 );
 
-const HOLD_POINT: Icon = wave5_icon(
-    [
-        b"..XXXX..",
-        b".X....X.",
-        b"X......X",
-        b"X......X",
-        b"X......X",
-        b"X......X",
-        b".X....X.",
-        b"..XXXX..",
-    ],
-    [b".XX.", b"X..X", b"X..X", b".XX."],
-    (215, 236, 255),
-);
-
-const CLAMP: Icon = wave5_icon(
-    [
-        b"...XX...",
-        b".XX..XX.",
-        b"XX....XX",
-        b"X.X..X.X",
-        b"X.X..X.X",
-        b"XX....XX",
-        b".XX..XX.",
-        b"...XX...",
-    ],
-    [b"XXXX", b"XX.X", b"X.XX", b"XXXX"],
-    (188, 228, 255),
-);
-
 // ============================================================================
 // Lookup API
 // ============================================================================
@@ -1693,7 +1663,6 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
         WeaponKind::LavaBreath => &LAVA_BREATH,
         WeaponKind::GlassBead => &GLASS_BEAD,
         WeaponKind::PlumbBob => &PLUMB_BOB,
-        WeaponKind::HoldPoint => &HOLD_POINT,
     }
 }
 
@@ -1718,7 +1687,6 @@ pub fn evolution(kind: WeaponKind) -> Option<&'static Icon> {
         WeaponKind::LavaBreath => &CALDERA,
         WeaponKind::GlassBead => &LAST_BOUNCE,
         WeaponKind::PlumbBob => &SHED_BOB,
-        WeaponKind::HoldPoint => &CLAMP,
     })
 }
 
@@ -1822,8 +1790,6 @@ pub fn by_name(name: &str) -> &'static Icon {
         "Last Bounce" => &LAST_BOUNCE,
         "Plumb Bob" => &PLUMB_BOB,
         "Shed Bob" => &SHED_BOB,
-        "Hold Point" => &HOLD_POINT,
-        "Clamp" => &CLAMP,
         _ => &PLACEHOLDER,
     }
 }

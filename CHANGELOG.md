@@ -19,6 +19,7 @@
 - **The Sweeper.** Keep your distance and it may sprint at you. Watch
   the marked lane and strike when it stops for breath.
 - **Build number.** Shown in the top-left corner of every screen.
+- Removed Hold Point and its Clamp evolution.
 
 ## 0.4.2 (2026-11-26)
 

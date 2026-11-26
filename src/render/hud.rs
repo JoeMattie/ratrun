@@ -159,7 +159,6 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         WeaponKind::LavaBreath => '◆',
         WeaponKind::GlassBead => '◇',
         WeaponKind::PlumbBob => '↓',
-        WeaponKind::HoldPoint => '○',
     }
 }
 
@@ -191,7 +190,6 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
             WeaponKind::LavaBreath => "CLDR",
             WeaponKind::GlassBead => "LB",
             WeaponKind::PlumbBob => "SH",
-            WeaponKind::HoldPoint => "CP",
         };
     }
     match kind {
@@ -213,7 +211,6 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
         WeaponKind::LavaBreath => "LAVA",
         WeaponKind::GlassBead => "GL",
         WeaponKind::PlumbBob => "PL",
-        WeaponKind::HoldPoint => "HO",
     }
 }
 

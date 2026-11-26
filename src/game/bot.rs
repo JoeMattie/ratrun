@@ -3081,7 +3081,6 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         WeaponKind::LavaBreath => 8.0,
         WeaponKind::GlassBead => 5.0,
         WeaponKind::PlumbBob => 5.0,
-        WeaponKind::HoldPoint => 0.0,
     }
 }
 
@@ -3106,7 +3105,6 @@ pub fn upgrade_value(lo: &Loadout, up: &Upgrade, hp_frac: f32) -> f32 {
         + lo.weapons.len().saturating_sub(1) as u32;
     let early = progression < 8;
     match up {
-        Upgrade::NewWeapon(WeaponKind::HoldPoint) => 0.0,
         Upgrade::NewWeapon(k) => {
             let base = weapon_tier(*k);
             if lo.weapons.len() < 3 {
