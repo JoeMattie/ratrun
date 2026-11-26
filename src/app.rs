@@ -8490,8 +8490,10 @@ mod tests {
                         captured = match scene {
                             "feint" => view.state == LanternState::FeintTell && view.progress >= 0.7,
                             "dark" => view.state == LanternState::DarkTell && view.progress >= 0.55,
-                            "decoy" => view.decoy.is_some() && view.real_bulb.is_some(),
-                            "snuffed" => w.level.objects.outfall_boss_snuff.is_some(),
+                            "decoy" => view.real_bulb.is_some()
+                                && view.decoy.is_some_and(|bulb| bulb.pos.dist(view.pos) <= 45.0),
+                            "snuffed" => w.level.objects.outfall_boss_snuff.is_some()
+                                && view.decoy.is_none(),
                             "gape" => view.state == LanternState::GapePull && view.progress >= 0.25,
                             "stamp" => view.state == LanternState::GapeStamp,
                             "death" => body.dead && body.elapsed >= 0.25,
