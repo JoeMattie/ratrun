@@ -26,7 +26,7 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{rat_helmet_pen, rat_visor_pen};
 use crate::render::palette::{mix, scale as scale_rgb, Rgb};
 
-use super::art_rat::{bubble_hash, tail_charge, RatOutfit, TailCharge};
+use super::art_rat::{bubble_hash, tail_charge, RatOutfit, TailCharge, DIVER_LIFT};
 use super::ecs::systems::powerups::{GIANT_STOMP_INTERVAL, GROWTH_SECS};
 use super::player::Player;
 
@@ -252,7 +252,9 @@ struct GiantPose {
     light_u: f32,
     light_v: f32,
     diver: bool,
-    bob_y: f32,
+    ground: Vec2,
+    lift: f32,
+    base_lift: f32,
     swim_phase: f32,
     hover_phase: f32,
 }
@@ -301,10 +303,13 @@ impl GiantPose {
             let hover_phase = elapsed * 2.5;
             let swim_phase = elapsed * 8.5;
             let bob_scale = scale.clamp(0.45, 2.6);
+            let base_lift = DIVER_LIFT * scale.clamp(0.45, 3.2);
             let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash) * bob_scale;
             let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash) * bob_scale;
             let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash) * bob_scale;
-            let center = (player.pos - cam) + Vec2::new(bob_x, bob_y) + raw_face * surge;
+            let lift = base_lift - bob_y;
+            let ground = player.pos - cam;
+            let center = ground + Vec2::new(bob_x, -lift) + raw_face * surge;
 
             let turn_lean = if player.vel.len_sq() > 4.0 {
                 let vd = player.vel.normalized();
@@ -340,7 +345,9 @@ impl GiantPose {
                 light_u: face.dot(LIGHT),
                 light_v: perp.dot(LIGHT),
                 diver: true,
-                bob_y,
+                ground,
+                lift,
+                base_lift,
                 swim_phase,
                 hover_phase,
             };
@@ -352,9 +359,10 @@ impl GiantPose {
         let breathe = 0.16 * (1.0 - moving) * (elapsed * 3.2).sin();
         let hip_shift = 0.22 * moving * phase.sin() * (1.0 - dash);
         let sh_shift = -0.18 * moving * phase.sin() * (1.0 - dash);
+        let ground = player.pos - cam;
 
         Self {
-            center: player.pos - cam,
+            center: ground,
             face: raw_face,
             perp,
             scale,
@@ -371,7 +379,9 @@ impl GiantPose {
             light_u: raw_face.dot(LIGHT),
             light_v: perp.dot(LIGHT),
             diver: false,
-            bob_y: 0.0,
+            ground,
+            lift: 0.0,
+            base_lift: 1.0,
             swim_phase: 0.0,
             hover_phase: 0.0,
         }
@@ -496,12 +506,6 @@ impl GiantPose {
         );
         let d_collar = sd_ellipse(u, vs, 1.38, 0.0, 0.72, 1.88);
         smin(smin(d_haunch, d_mid, 0.65), d_collar, 0.42)
-    }
-
-    /// Round brass diving helmet SDF in normalised rat units.
-    #[inline]
-    fn helmet_sdf(&self, u: f32, v: f32) -> f32 {
-        (u - HELMET_U).hypot(v) - HELMET_R
     }
 }
 
@@ -783,8 +787,9 @@ fn draw_tail(
     let sh_ox = (0.55 * pose.scale).round().max(1.0);
     let sh_oy = (0.75 * pose.scale).round().max(1.0);
 
-    // Tail drop shadow pass (with floor pen `0`).
-    if !tint.ghost {
+    // Tail drop shadow pass (with floor pen `0`). Floating diver tails skip
+    // close-attached mid-water shadows; the seabed shadow sits under `pose.ground`.
+    if !tint.ghost && !pose.diver {
         let prev_pen = pb.set_pen(0);
         let sx0 = ((min_x + sh_ox).floor() as i32 - pad).max(0);
         let sx1 = ((max_x + sh_ox).ceil() as i32 + pad).min(pb.w as i32 - 1);
@@ -1406,34 +1411,40 @@ fn draw_charge_ring(
 // Outfall diving suit & swimming (0.35× Shrink Draught through 5× Growth Serum)
 // ---------------------------------------------------------------------------
 
-/// Soft buoyant seabed drop shadow under the diving suit and helmet.
+/// Soft detached seabed drop shadow anchored under the rat's TRUE ground
+/// position (`pose.ground`), shrinking and fading as `pose.lift` rises.
 fn draw_diver_shadow(pb: &mut PixelBuffer, pose: &GiantPose) {
-    let sh_offset = Vec2::new(
-        1.35 * pose.scale + 0.6,
-        1.85 * pose.scale + 0.8 - pose.bob_y * 0.45,
-    );
-    let reach = (6.8 * pose.scale * (1.0 + 0.34 * pose.dash)).ceil() as i32 + 5;
-    let cx = pose.center.x.round() as i32;
-    let cy = pose.center.y.round() as i32;
-    let x0 = (cx - reach).max(0);
-    let x1 = (cx + reach).min(pb.w as i32 - 1);
-    let y0 = (cy - reach).max(0);
-    let y1 = (cy + reach).min(pb.h as i32 - 1);
+    let h_frac = (pose.lift / pose.base_lift.max(0.5)).clamp(0.70, 1.35);
+    let r_scale = 1.0 / (0.80 + 0.20 * h_frac);
+    let rx = (3.8 * pose.scale * r_scale).max(1.4);
+    let ry = (2.4 * pose.scale * r_scale).max(1.0);
+    let core = (0.30 / (0.70 + 0.30 * h_frac)).clamp(0.14, 0.34);
+
+    let cx = pose.ground.x.round() as i32;
+    let cy = pose.ground.y.round() as i32;
+    let px_r = rx.ceil() as i32 + 1;
+    let py_r = ry.ceil() as i32 + 1;
+    let x0 = (cx - px_r).max(0);
+    let x1 = (cx + px_r).min(pb.w as i32 - 1);
+    let y0 = (cy - py_r).max(0);
+    let y1 = (cy + py_r).min(pb.h as i32 - 1);
     if x0 > x1 || y0 > y1 {
         return;
     }
-    let feather = 2.2 + 0.55 * pose.scale;
+    let inv_rx = 1.0 / rx;
+    let inv_ry = 1.0 / ry;
     for y in y0..=y1 {
+        let dy = (y as f32 - pose.ground.y) * inv_ry;
+        let dy2 = dy * dy;
+        if dy2 >= 1.0 {
+            continue;
+        }
         for x in x0..=x1 {
-            let d = Vec2::new(x as f32, y as f32) - pose.center - sh_offset;
-            let (u, v) = pose.to_local(d);
-            if u < -4.8 || u > 6.4 || v.abs() > 3.8 {
-                continue;
-            }
-            let dist = pose.diver_torso_sdf(u, v).min(pose.helmet_sdf(u, v)) * pose.scale;
-            if dist < 1.5 {
-                let soft = ((1.5 - dist) / feather).clamp(0.0, 1.0);
-                darken(pb, x, y, 0.26 * soft);
+            let dx = (x as f32 - pose.ground.x) * inv_rx;
+            let r2 = dx * dx + dy2;
+            if r2 < 1.0 {
+                let fall = 1.0 - r2;
+                darken(pb, x, y, core * (0.35 + 0.65 * fall));
             }
         }
     }
@@ -2320,5 +2331,35 @@ mod tests {
         draw_giant_rat_with_outfit(&mut f1, &p, 0.65, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
         assert_eq!(p.pos, orig_pos);
         assert_ne!(f0.pixels(), f1.pixels(), "giant diver swim bob must animate over time");
+
+        // Detached seabed shadow sits at the true ground position while the helmet floats above.
+        let mut mat_pb = PixelBuffer::new(220, 140);
+        mat_pb.set_materials(true);
+        mat_pb.clear(BG);
+        mat_pb.set_pen(crate::render::lighting::giant_rat_pen());
+        draw_giant_rat_with_outfit(&mut mat_pb, &p, 0.0, Vec2::ZERO, 5.0, 0.0, RatOutfit::Diver);
+        let gx = p.pos.x as usize;
+        let gy = p.pos.y as usize;
+        assert!(
+            mat_pb.pixel_at(gx, gy).0 < BG.0,
+            "detached shadow must darken true ground position"
+        );
+        assert_eq!(mat_pb.mat()[gy * mat_pb.w + gx], 0, "seabed shadow uses pen 0");
+        let hpen = crate::render::lighting::rat_helmet_pen(true);
+        let (mut sum_y, mut cnt) = (0.0f32, 0usize);
+        for y in 0..mat_pb.h {
+            for x in 0..mat_pb.w {
+                if mat_pb.mat()[y * mat_pb.w + x] == hpen {
+                    sum_y += y as f32;
+                    cnt += 1;
+                }
+            }
+        }
+        assert!(cnt > 20);
+        assert!(
+            sum_y / cnt as f32 <= p.pos.y - 10.0,
+            "5x giant diver helmet should float cleanly above ground y={}",
+            p.pos.y
+        );
     }
 }

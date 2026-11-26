@@ -190,6 +190,12 @@ impl Local {
         }
     }
 
+    fn of_lifted(e: &Enemy, cam: Vec2, lift: f32) -> Local {
+        let mut lf = Self::of(e, cam);
+        lf.pos.y -= lift;
+        lf
+    }
+
     #[inline]
     fn px(&self, u: f32, v: f32) -> (i32, i32) {
         (
@@ -503,6 +509,98 @@ fn turn_lag(lf: &Local, vel: Vec2) -> f32 {
     cross.atan2(dot).clamp(-1.0, 1.0)
 }
 
+// ---- Pelagic swimmer float & detached seabed shadow -----------------------
+
+/// Whether `kind` is an Outfall pelagic swimmer drawn floating above the seabed.
+/// Bottom dwellers (`SandHopper`, `PistolShrimp`, `Skater`, crabs) stay grounded.
+#[inline]
+pub(crate) fn is_swimmer(kind: EnemyKind) -> bool {
+    matches!(
+        kind,
+        EnemyKind::GlassShrimp
+            | EnemyKind::Conger
+            | EnemyKind::Lampfish
+            | EnemyKind::Grouper
+            | EnemyKind::FrySchool
+    )
+}
+
+/// Deterministic phase offset in `[0, TAU)` derived from an enemy's ID so a
+/// group of swimmers bobs smoothly out of phase with one another.
+#[inline]
+fn float_phase(id: u32) -> f32 {
+    let mut n = id.wrapping_mul(2_654_435_761);
+    n = (n ^ (n >> 13)).wrapping_mul(1_274_126_177);
+    n ^= n >> 16;
+    (n & 0xFFFF) as f32 * (TAU / 65536.0)
+}
+
+/// Base float height and current screen-upward lift (world px) of an Outfall
+/// swimmer above its true ground position `e.pos`. Render-only.
+#[inline]
+pub(crate) fn swimmer_lift(e: &Enemy) -> f32 {
+    let (base, amp, freq) = match e.kind {
+        EnemyKind::GlassShrimp => (4.0, 0.75, 0.72),
+        EnemyKind::Conger => (4.8, 0.85, 0.62),
+        EnemyKind::Lampfish => (4.8, 0.85, 0.65),
+        EnemyKind::Grouper => (5.2, 0.90, 0.48),
+        EnemyKind::FrySchool => (4.5, 0.75, 0.68),
+        _ => return 0.0,
+    };
+    base + amp * (e.anim * freq + float_phase(e.id)).sin()
+}
+
+/// Soft detached seabed shadow left under a floating swimmer's TRUE ground
+/// position (`e.pos - cam`), shrinking and fading slightly as `lift` rises.
+/// Stamped with pen `0` so the lighting pass treats it as seabed floor.
+fn draw_floating_shadow(
+    pb: &mut PixelBuffer,
+    ground: Vec2,
+    rx: f32,
+    ry: f32,
+    lift: f32,
+    base_lift: f32,
+) {
+    if pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let prev_pen = pb.set_pen(0);
+    let h_frac = (lift / base_lift.max(1.0)).clamp(0.75, 1.30);
+    let r_scale = 1.0 / (0.82 + 0.18 * h_frac);
+    let rx_e = (rx * r_scale).max(1.2);
+    let ry_e = (ry * r_scale).max(0.9);
+    let core = (0.30 / (0.72 + 0.28 * h_frac)).clamp(0.14, 0.34);
+
+    let cx = ground.x.round() as i32;
+    let cy = ground.y.round() as i32;
+    let px_r = rx_e.ceil() as i32 + 1;
+    let py_r = ry_e.ceil() as i32 + 1;
+    let x0 = (cx - px_r).max(0);
+    let x1 = (cx + px_r).min(pb.w as i32 - 1);
+    let y0 = (cy - py_r).max(0);
+    let y1 = (cy + py_r).min(pb.h as i32 - 1);
+    if x0 <= x1 && y0 <= y1 {
+        let inv_rx = 1.0 / rx_e;
+        let inv_ry = 1.0 / ry_e;
+        for y in y0..=y1 {
+            let dy = (y as f32 - ground.y) * inv_ry;
+            let dy2 = dy * dy;
+            if dy2 >= 1.0 {
+                continue;
+            }
+            for x in x0..=x1 {
+                let dx = (x as f32 - ground.x) * inv_rx;
+                let r2 = dx * dx + dy2;
+                if r2 < 1.0 {
+                    let fall = 1.0 - r2;
+                    darken(pb, x, y, core * (0.35 + 0.65 * fall));
+                }
+            }
+        }
+    }
+    pb.set_pen(prev_pen);
+}
+
 // ---- Simulation tell contract adapter (single seam with `floor_outfall`) ---
 
 /// Normalized internal rendering view of an active Outfall ordinary enemy tell.
@@ -711,8 +809,10 @@ pub(crate) fn draw_glass_shrimp(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * 0.5;
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 2.8 * s, 1.7 * s, lift, 4.0);
+    let lf = Local::of_lifted(e, cam, lift);
     let wag = (e.anim * 1.8).sin();
     let wag2 = (e.anim * 1.8).cos();
 
@@ -745,7 +845,7 @@ pub(crate) fn draw_glass_shrimp(
         &lf,
         (-5.0 * s, 3.8 * s, -2.5 * s, 2.5 * s),
         0.65 * s,
-        (1, 1),
+        (0, 0),
         (150, 225, 240),
         0.72,
         |u, v| {
@@ -773,7 +873,6 @@ pub(crate) fn draw_glass_shrimp(
     let glint = scale_rgb(GLASS_EYE_GLINT, 0.42);
     for side in [-1.0f32, 1.0] {
         let ep = lf.px(2.35 * s, side * 1.15 * s);
-        darken(pb, ep.0 + 1, ep.1 + 1, 0.45);
         pb.plot(ep.0, ep.1, eye_c);
         let gl = lf.px(2.65 * s, side * 1.35 * s);
         pb.plot_add(gl.0, gl.1, glint);
@@ -787,8 +886,10 @@ pub(crate) fn draw_glass_shrimp_lod(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * 0.5;
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 2.4 * s, 1.5 * s, lift, 4.0);
+    let lf = Local::of_lifted(e, cam, lift);
     let wag = (e.anim * 1.8).sin() * 0.7 * s;
     line(pb, lf.px(-3.4 * s, wag), lf.px(2.0 * s, 0.0), lf.flash(GLASS_CORE), 0.78);
     let hi_c = lf.flash(GLASS_HI);
@@ -812,8 +913,10 @@ pub(crate) fn draw_conger(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * 0.25;
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 5.6 * s, 2.2 * s, lift, 4.8);
+    let lf = Local::of_lifted(e, cam, lift);
     let phase = e.anim * 1.2;
     let lag = turn_lag(&lf, e.vel);
     let bite = ((e.contact_cd - 0.15) * 2.6).clamp(0.0, 1.0);
@@ -852,7 +955,7 @@ pub(crate) fn draw_conger(
         &lf,
         (-11.6 * s, 7.2 * s, -v_ext, v_ext),
         0.9 * s,
-        (1, 1),
+        (0, 0),
         (130, 182, 200),
         |u, v| {
             let s0 = sd_taper(u, v, p0, p1, 2.15 * s, 2.05 * s);
@@ -918,8 +1021,10 @@ pub(crate) fn draw_conger_lod(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * 0.25;
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 5.2 * s, 2.0 * s, lift, 4.8);
+    let lf = Local::of_lifted(e, cam, lift);
     let w1 = (e.anim * 1.2).sin() * 1.2 * s;
     let w2 = (e.anim * 1.2 - 1.8).sin() * 1.8 * s;
     thick_line(
@@ -1372,13 +1477,14 @@ pub fn draw_bubble_pellet(pb: &mut PixelBuffer, b: &Bullet, cam: Vec2) {
 
 // ---- 6. Lampfish (Slot II, r=3.0) -----------------------------------------
 
-/// Screen-space bulb position from the simulation view (`floor_outfall::lampfish_bulb`)
-/// with a deterministic forward fallback (`e.pos + facing * 16`) for uninitialized
-/// test/portrait bodies.
+/// Screen-space bulb position from the simulation view (`floor_outfall::lampfish_bulb`),
+/// lifted with the fish's body float (`draw_tell` keeps its warning ring on the ground).
 #[inline]
-fn lampfish_bulb_screen(lf: &Local, e: &Enemy, cam: Vec2) -> Vec2 {
+fn lampfish_bulb_screen(lf: &Local, e: &Enemy, cam: Vec2, lift: f32) -> Vec2 {
     if let Some(world_pos) = floor_outfall::lampfish_bulb(e) {
-        world_pos - cam
+        let mut p = world_pos - cam;
+        p.y -= lift;
+        p
     } else {
         lf.pos + lf.f * LAMPFISH_STALK_REACH
     }
@@ -1394,8 +1500,10 @@ pub(crate) fn draw_lampfish(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * (1.0 / 3.0);
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 3.6 * s, 2.2 * s, lift, 4.8);
+    let lf = Local::of_lifted(e, cam, lift);
     let wag = (e.anim * 1.45).sin();
     let (lunge_flare, flicker_hi) = match tell_view(e) {
         Some(TellView::LampfishLunge {
@@ -1410,7 +1518,7 @@ pub(crate) fn draw_lampfish(
         _ => (0.0, true),
     };
 
-    let bulb_s = lampfish_bulb_screen(&lf, e, cam);
+    let bulb_s = lampfish_bulb_screen(&lf, e, cam, lift);
     let (bu, bv) = lf.local_vec(bulb_s);
 
     // 1) Forked tail + fluttering pectoral fins.
@@ -1439,7 +1547,6 @@ pub(crate) fn draw_lampfish(
         *slot = lf.px(cu, cv);
     }
     for (i, w) in stalk_pts.windows(2).enumerate() {
-        darken(pb, w[0].0 + 1, w[0].1 + 1, 0.28);
         let frac = i as f32 * (1.0 / 8.0);
         let scol = mix(LAMP_STALK, LAMP_BULB_GLOW, frac * frac * 0.55);
         line(pb, w[0], w[1], lf.flash(scol), 0.88);
@@ -1453,7 +1560,7 @@ pub(crate) fn draw_lampfish(
         &lf,
         (-4.6 * s, 4.8 * s, -3.2 * s, 3.2 * s),
         0.9 * s,
-        (1, 1),
+        (0, 0),
         (120, 180, 210),
         |u, v| {
             let body = sd_ellipse(u, v, -0.2 * s, 0.0, 3.35 * s, 2.55 * s);
@@ -1534,9 +1641,11 @@ pub(crate) fn draw_lampfish_lod(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * (1.0 / 3.0);
-    let bulb_s = lampfish_bulb_screen(&lf, e, cam);
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 3.2 * s, 2.0 * s, lift, 4.8);
+    let lf = Local::of_lifted(e, cam, lift);
+    let bulb_s = lampfish_bulb_screen(&lf, e, cam, lift);
     let (bpx, bpy) = (bulb_s.x.round() as i32, bulb_s.y.round() as i32);
     let (bu, bv) = lf.local_vec(bulb_s);
 
@@ -1580,8 +1689,10 @@ pub(crate) fn draw_grouper(
     cam: Vec2,
     elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * (1.0 / 6.5);
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 6.0 * s, 3.8 * s, lift, 5.2);
+    let lf = Local::of_lifted(e, cam, lift);
     let elite = elite || e.elite;
     let row = (e.anim * 0.8).sin();
     let chomp = ((e.contact_cd - 0.15) * 2.5).clamp(0.0, 1.0);
@@ -1617,7 +1728,7 @@ pub(crate) fn draw_grouper(
         &lf,
         (-7.8 * s, u_max, -6.4 * s, 6.4 * s),
         0.95 * s,
-        (1, 2),
+        (0, 0),
         (146, 186, 182),
         |u, v| {
             let av = v.abs();
@@ -1750,8 +1861,10 @@ pub(crate) fn draw_grouper_lod(
     cam: Vec2,
     elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let s = e.radius.max(1.0) * (1.0 / 6.5);
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, 5.4 * s, 3.4 * s, lift, 5.2);
+    let lf = Local::of_lifted(e, cam, lift);
     let elite = elite || e.elite;
     let row = (e.anim * 0.8).sin();
     let fin_c = lf.flash(GROUPER_FIN);
@@ -1767,7 +1880,7 @@ pub(crate) fn draw_grouper_lod(
         &lf,
         (-7.0 * s, 7.6 * s, -6.0 * s, 6.0 * s),
         0.85 * s,
-        (1, 1),
+        (0, 0),
         (146, 186, 182),
         |u, v| {
             let hull = sd_ellipse(u, v, -0.4 * s, 0.0, 6.0 * s, 5.2 * s);
@@ -1848,38 +1961,42 @@ pub(crate) fn draw_fry_school(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let r = e.radius.max(3.0);
     let bunched = r <= FRY_BUNCHED_RADIUS;
     let spread = r * if bunched { 0.82 } else { 0.88 };
+    let lift = swimmer_lift(e);
+    let ground = e.pos - cam;
 
-    // 1) Subtle shadow eddy under the school so it reads as one unified body.
-    let cx = lf.pos.x.round() as i32;
-    let cy = lf.pos.y.round() as i32;
-    let rad_i = (r * 0.92).round().max(3.0) as i32;
-    let inv_rad = 1.0 / (rad_i as f32).max(1.0);
-    for dy in -rad_i..=rad_i {
-        for dx in -rad_i..=rad_i {
-            let d2 = dx * dx + dy * dy;
-            if d2 <= rad_i * rad_i {
-                let dist = (d2 as f32).sqrt() * inv_rad;
-                if bunched && dist > 0.78 {
-                    blend(
-                        pb,
-                        cx + dx,
-                        cy + dy,
-                        lf.flash(FRY_VULN_RING),
-                        0.42 * (1.0 - (dist - 0.78) * (1.0 / 0.22)),
-                    );
-                } else {
-                    let amt = if bunched { 0.34 } else { 0.22 } * (1.0 - dist * 0.75);
-                    darken(pb, cx + dx, cy + dy, amt);
+    // 1) Detached soft shadow eddy on the seabed under the TRUE ground position (pen 0).
+    draw_floating_shadow(pb, ground, r * 0.78, r * 0.52, lift, 4.5);
+
+    let lf = Local::of_lifted(e, cam, lift);
+    // Bunched vulnerability halo stays around the lifted swirling baitball.
+    if bunched {
+        let cx = lf.pos.x.round() as i32;
+        let cy = lf.pos.y.round() as i32;
+        let rad_i = (r * 0.92).round().max(3.0) as i32;
+        let inv_rad = 1.0 / (rad_i as f32).max(1.0);
+        for dy in -rad_i..=rad_i {
+            for dx in -rad_i..=rad_i {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= rad_i * rad_i {
+                    let dist = (d2 as f32).sqrt() * inv_rad;
+                    if dist > 0.78 {
+                        blend(
+                            pb,
+                            cx + dx,
+                            cy + dy,
+                            lf.flash(FRY_VULN_RING),
+                            0.42 * (1.0 - (dist - 0.78) * (1.0 / 0.22)),
+                        );
+                    }
                 }
             }
         }
     }
 
-    // 2) Individual minnows with waving tails and shimmering scales.
+    // 2) Individual minnows with waving tails and shimmering scales, floating above the shadow.
     for (idx, &(su, sv, ph)) in FRY_SLOTS.iter().enumerate() {
         let (fu, fv, hu, hv) = if bunched {
             let base_ang = sv.atan2(su) + e.anim * 2.4 + ph * 0.25;
@@ -1898,9 +2015,6 @@ pub(crate) fn draw_fry_school(
         let p_head = lf.px(fu + hu * 1.25, fv + hv * 1.25);
         let p_mid = lf.px(fu, fv);
         let p_tail = lf.px(fu - hu * 1.55 - hv * tail_w, fv - hv * 1.55 + hu * tail_w);
-
-        darken(pb, p_mid.0 + 1, p_mid.1 + 1, 0.42);
-        darken(pb, p_head.0 + 1, p_head.1 + 1, 0.35);
 
         let shimmer = (e.anim * if bunched { 4.2 } else { 2.2 } + ph * 2.0).sin() > 0.35;
         let (head_c, mid_c, tail_c) = if bunched {
@@ -1930,23 +2044,25 @@ pub(crate) fn draw_fry_school_lod(
     cam: Vec2,
     _elite: bool,
 ) {
-    let lf = Local::of(e, cam);
     let r = e.radius.max(3.0);
     let bunched = r <= FRY_BUNCHED_RADIUS;
     let spread = r * 0.80;
-    let cx = lf.pos.x.round() as i32;
-    let cy = lf.pos.y.round() as i32;
-    let rad_i = (r * 0.82).round().max(2.0) as i32;
-    let inv_rad = 1.0 / (rad_i as f32).max(1.0);
-    for dy in -rad_i..=rad_i {
-        for dx in -rad_i..=rad_i {
-            let d2 = dx * dx + dy * dy;
-            if d2 <= rad_i * rad_i {
-                let dist = (d2 as f32).sqrt() * inv_rad;
-                if bunched && dist > 0.76 {
-                    blend(pb, cx + dx, cy + dy, lf.flash(FRY_VULN_RING), 0.38);
-                } else {
-                    darken(pb, cx + dx, cy + dy, 0.20 * (1.0 - dist * 0.7));
+    let lift = swimmer_lift(e);
+    draw_floating_shadow(pb, e.pos - cam, r * 0.72, r * 0.48, lift, 4.5);
+    let lf = Local::of_lifted(e, cam, lift);
+    if bunched {
+        let cx = lf.pos.x.round() as i32;
+        let cy = lf.pos.y.round() as i32;
+        let rad_i = (r * 0.82).round().max(2.0) as i32;
+        let inv_rad = 1.0 / (rad_i as f32).max(1.0);
+        for dy in -rad_i..=rad_i {
+            for dx in -rad_i..=rad_i {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= rad_i * rad_i {
+                    let dist = (d2 as f32).sqrt() * inv_rad;
+                    if dist > 0.76 {
+                        blend(pb, cx + dx, cy + dy, lf.flash(FRY_VULN_RING), 0.38);
+                    }
                 }
             }
         }
@@ -2516,6 +2632,97 @@ mod tests {
                 ps.len() >= 4 && ps.len() <= 48,
                 "{kind:?} death burst should be visible and bounded ({})",
                 ps.len()
+            );
+        }
+    }
+
+    #[test]
+    fn outfall_swimmers_float_above_detached_shadows_and_bottom_dwellers_stay_grounded() {
+        let swimmers = [
+            EnemyKind::GlassShrimp,
+            EnemyKind::Conger,
+            EnemyKind::Lampfish,
+            EnemyKind::Grouper,
+            EnemyKind::FrySchool,
+        ];
+        for kind in swimmers {
+            let mut e = body(kind);
+            e.id = 17;
+            let mut pb = buffer();
+            pb.set_materials(true);
+            pb.clear(BG);
+            let pen = crate::render::lighting::enemy_pen(kind, None);
+            pb.set_pen(pen);
+            crate::game::art_enemy::draw_enemy(&mut pb, &e, Vec2::ZERO, ACCENT);
+            pb.set_pen(0);
+
+            // Detached seabed shadow sits at the TRUE ground position with floor pen 0.
+            let gx = e.pos.x as usize;
+            let gy = e.pos.y as usize;
+            let mut shadow_near_ground = 0usize;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let x = (gx as i32 + dx) as usize;
+                    let y = (gy as i32 + dy) as usize;
+                    let c = pb.pixel_at(x, y);
+                    if pb.mat()[y * pb.w + x] == 0 && lum(c) < lum(BG) {
+                        shadow_near_ground += 1;
+                    }
+                }
+            }
+            assert!(
+                shadow_near_ground >= 3,
+                "{kind:?} must cast a detached seabed shadow (pen 0) at its true ground position"
+            );
+
+            // Creature sprite pixels sit clearly ABOVE the ground shadow.
+            let mut sum_y = 0.0f32;
+            let mut body_px = 0usize;
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    if pb.mat()[y * pb.w + x] == pen {
+                        sum_y += y as f32;
+                        body_px += 1;
+                    }
+                }
+            }
+            assert!(body_px >= 10, "{kind:?} should draw creature pixels ({body_px})");
+            let mean_y = sum_y / body_px as f32;
+            assert!(
+                mean_y <= e.pos.y - 2.0,
+                "{kind:?} sprite should float above ground y={} (mean_y={mean_y:.2})",
+                e.pos.y
+            );
+
+            // Different enemy IDs bob out of phase with one another.
+            let mut peer = e.clone();
+            peer.id = 42;
+            assert_ne!(
+                swimmer_lift(&e),
+                swimmer_lift(&peer),
+                "{kind:?} per-body ID hash should desync float phase"
+            );
+        }
+
+        // Bottom dwellers stay grounded with zero lift.
+        for grounded in [
+            EnemyKind::SandHopper,
+            EnemyKind::PistolShrimp,
+            EnemyKind::Skater,
+        ] {
+            let e = body(grounded);
+            assert_eq!(swimmer_lift(&e), 0.0, "{grounded:?} must stay grounded");
+            let mut pb = buffer();
+            pb.set_materials(true);
+            pb.clear(BG);
+            let pen = crate::render::lighting::enemy_pen(grounded, None);
+            pb.set_pen(pen);
+            crate::game::art_enemy::draw_enemy(&mut pb, &e, Vec2::ZERO, ACCENT);
+            pb.set_pen(0);
+            assert_eq!(
+                pb.mat()[e.pos.y as usize * pb.w + e.pos.x as usize],
+                pen,
+                "{grounded:?} body should stay centred on its true ground position"
             );
         }
     }

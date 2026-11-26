@@ -3865,7 +3865,15 @@ impl World {
                 BossArtView::Cobra(v) => {
                     art_boss_cobra::draw_ground(pb, &v, cam, accent);
                 }
-                BossArtView::Lantern(v) => art_boss_lantern::draw_ground(pb, &v, cam, accent),
+                BossArtView::Lantern(v) => {
+                    if !boss.dead {
+                        let lift = lantern_float_lift(v.anim);
+                        let prev_pen = pb.set_pen(0);
+                        draw_detached_boss_shadow(pb, self.w2s(boss.pos, cam), lift);
+                        pb.set_pen(prev_pen);
+                    }
+                    art_boss_lantern::draw_ground(pb, &v, cam, accent);
+                }
             }
         }
     }
@@ -3916,7 +3924,18 @@ impl World {
                 BossArtView::MegaRat(v) => art_boss_megarat::draw_megarat(pb, &v, cam, accent),
                 BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
                 BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
-                BossArtView::Lantern(v) => art_boss_lantern::draw(pb, &v, cam, accent),
+                BossArtView::Lantern(v) => {
+                    // Lift The Lantern above its seabed shadow via a render-only
+                    // camera Y shift so `art_boss_lantern.rs` stays untouched and
+                    // ground tells / hitboxes remain on the true seabed.
+                    let lift = if boss.dead {
+                        0.0
+                    } else {
+                        lantern_float_lift(v.anim)
+                    };
+                    let lifted_cam = Vec2::new(cam.x, cam.y + lift);
+                    art_boss_lantern::draw(pb, &v, lifted_cam, accent);
+                }
             }
             pb.set_pen(pen);
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
@@ -4354,6 +4373,55 @@ const PUDDLES_IN_VIEW: usize = 48;
 /// for the last [`powerups::GIANT_BLINK_SECS`] while it shrinks back over
 /// [`powerups::GIANT_SHRINK_SECS`]. Never below 1x, so the first and last frames
 /// of the find are exactly the rat the player always has.
+/// Smooth upward float lift (world px) of **The Lantern** above its seabed
+/// ground position (`boss.pos`). Render-only; uses `DetF32::dsin`.
+const LANTERN_BASE_LIFT: f32 = 7.0;
+
+#[inline]
+fn lantern_float_lift(anim: f32) -> f32 {
+    LANTERN_BASE_LIFT + 1.4 * (anim * 1.4).dsin()
+}
+
+/// Soft detached seabed shadow directly under a floating boss's TRUE ground
+/// position, shrinking and fading slightly as `lift` rises. Caller sets pen `0`.
+fn draw_detached_boss_shadow(pb: &mut PixelBuffer, ground: (i32, i32), lift: f32) {
+    if pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let h_frac = (lift / LANTERN_BASE_LIFT).clamp(0.75, 1.30);
+    let r_scale = 1.0 / (0.82 + 0.18 * h_frac);
+    let rx = 14.5 * r_scale;
+    let ry = 8.5 * r_scale;
+    let core = (0.28 / (0.72 + 0.28 * h_frac)).clamp(0.12, 0.32);
+    let px_r = rx.ceil() as i32 + 1;
+    let py_r = ry.ceil() as i32 + 1;
+    let x0 = (ground.0 - px_r).max(0);
+    let x1 = (ground.0 + px_r).min(pb.w as i32 - 1);
+    let y0 = (ground.1 - py_r).max(0);
+    let y1 = (ground.1 + py_r).min(pb.h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let inv_rx = 1.0 / rx;
+    let inv_ry = 1.0 / ry;
+    for y in y0..=y1 {
+        let dy = (y - ground.1) as f32 * inv_ry;
+        let dy2 = dy * dy;
+        if dy2 >= 1.0 {
+            continue;
+        }
+        for x in x0..=x1 {
+            let dx = (x - ground.0) as f32 * inv_rx;
+            let r2 = dx * dx + dy2;
+            if r2 < 1.0 {
+                let fall = 1.0 - r2;
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, palette::scale(bg, 1.0 - core * (0.35 + 0.65 * fall)));
+            }
+        }
+    }
+}
+
 pub fn giant_draw_scale(buff_left: f32) -> Option<f32> {
     use crate::game::ecs::systems::powerups as p;
     if buff_left <= 0.0 {
@@ -6190,5 +6258,88 @@ mod outfall_diver_tests {
         let tiny_outfall = draw_rat_on_theme(&mut w, Theme::Outfall, (64, 64), 0.35, 0.0, 8.0);
         assert_ne!(tiny_sewer.pixels(), tiny_outfall.pixels());
         assert!(count_brass(&tiny_outfall) >= 2, "0.35x tiny Outfall rat must wear the brass helmet");
+    }
+
+    #[test]
+    fn outfall_rat_and_fish_float_above_true_position_shadows_while_sewer_body_stays_grounded() {
+        let mut w = World::new(Theme::Outfall, 7);
+        w.player.pos = Vec2::new(60.0, 44.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.vel = Vec2::ZERO;
+
+        // 1. Outfall diver rat: detached shadow at true ground pos (pen 0), helmet lifted above.
+        let rat_pb = draw_rat_on_theme(&mut w, Theme::Outfall, (120, 88), 0.0, 0.0, 0.0);
+        let gx = w.player.pos.x as usize;
+        let gy = w.player.pos.y as usize;
+        assert!(
+            rat_pb.pixel_at(gx, gy).0 < BG.0,
+            "rat detached shadow must darken true ground position"
+        );
+        assert_eq!(rat_pb.mat()[gy * rat_pb.w + gx], 0, "rat seabed shadow uses pen 0");
+        let hpen = crate::render::lighting::rat_helmet_pen(false);
+        let (mut sum_y, mut cnt) = (0.0f32, 0usize);
+        for y in 0..rat_pb.h {
+            for x in 0..rat_pb.w {
+                if rat_pb.mat()[y * rat_pb.w + x] == hpen {
+                    sum_y += y as f32;
+                    cnt += 1;
+                }
+            }
+        }
+        assert!(cnt >= 4 && sum_y / cnt as f32 <= w.player.pos.y - 3.0);
+
+        // 2. Outfall swimmer fish (Conger): detached shadow at true e.pos, sprite lifted above.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(19);
+        let mut fish = Enemy::spawn(EnemyKind::Conger, Vec2::new(60.0, 44.0), 1.0, &mut rng);
+        fish.id = 9;
+        fish.facing = Vec2::new(1.0, 0.0);
+        fish.anim = 0.5;
+        let fish_pen = crate::render::lighting::enemy_pen(EnemyKind::Conger, None);
+        let mut fish_pb = PixelBuffer::new(120, 88);
+        fish_pb.set_materials(true);
+        fish_pb.clear(BG);
+        fish_pb.set_pen(fish_pen);
+        art_enemy::draw_enemy(
+            &mut fish_pb,
+            &fish,
+            Vec2::ZERO,
+            crate::game::level::Palette::for_theme(Theme::Outfall).accent,
+        );
+        fish_pb.set_pen(0);
+        assert!(
+            fish_pb.pixel_at(60, 44).0 < BG.0 && fish_pb.mat()[44 * fish_pb.w + 60] == 0,
+            "Outfall fish shadow must sit at true ground position with pen 0"
+        );
+        let (mut fy_sum, mut fn_cnt) = (0.0f32, 0usize);
+        for y in 0..fish_pb.h {
+            for x in 0..fish_pb.w {
+                if fish_pb.mat()[y * fish_pb.w + x] == fish_pen {
+                    fy_sum += y as f32;
+                    fn_cnt += 1;
+                }
+            }
+        }
+        assert!(fn_cnt >= 15 && fy_sum / fn_cnt as f32 <= 44.0 - 2.5);
+
+        // 3. Sewer body (Brute) stays centred on its true ground position (unchanged).
+        let mut sewer_e = Enemy::spawn(EnemyKind::Brute, Vec2::new(60.0, 44.0), 1.0, &mut rng);
+        sewer_e.facing = Vec2::new(1.0, 0.0);
+        let brute_pen = crate::render::lighting::enemy_pen(EnemyKind::Brute, None);
+        let mut brute_pb = PixelBuffer::new(120, 88);
+        brute_pb.set_materials(true);
+        brute_pb.clear(BG);
+        brute_pb.set_pen(brute_pen);
+        art_enemy::draw_enemy(
+            &mut brute_pb,
+            &sewer_e,
+            Vec2::ZERO,
+            crate::game::level::Palette::for_theme(Theme::Sewer).accent,
+        );
+        brute_pb.set_pen(0);
+        assert_eq!(
+            brute_pb.mat()[44 * brute_pb.w + 60],
+            brute_pen,
+            "Sewer body must stay grounded at its true position"
+        );
     }
 }

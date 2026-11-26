@@ -104,6 +104,10 @@ const BUBBLE_SPEC: Rgb = (236, 252, 255);
 const HELMET_U: f32 = 3.2;
 const HELMET_R: f32 = 2.30;
 
+/// Base upward float altitude (world px at 1×) of the diving rat above its
+/// true ground position on the Outfall seabed. Render-only.
+pub const DIVER_LIFT: f32 = 5.0;
+
 /// Direction *toward* the light in screen space (up-left), matching the
 /// down-right drop shadow.
 const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
@@ -217,8 +221,11 @@ struct Pose {
     dash: f32,
     /// True on the Outfall (`RatOutfit::Diver`): underwater swimming kinematics.
     diver: bool,
-    /// Render-only vertical buoyancy bob (px), used to offset the seabed shadow.
-    bob_y: f32,
+    /// True ground/hitbox world position (`player.pos`), where the detached
+    /// seabed shadow stays anchored while the diver floats above it.
+    ground: Vec2,
+    /// Current screen-upward float altitude above `ground` (world px).
+    lift: f32,
     /// Continuous analytic swim stroke clock (radians).
     swim_phase: f32,
     /// Continuous analytic idle hover clock (radians).
@@ -1119,13 +1126,17 @@ pub fn draw_rat_with_outfit(
     if let Some(t) = tail.as_mut() {
         t.flash = tail_flash.clamp(0.0, 1.0);
     }
-    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
     if pose.diver {
+        if !tint.ghost {
+            draw_diver_shadow(pb, &pose, tint, cam);
+        }
+        draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
         draw_diver_limbs(pb, &pose, tint, cam);
         draw_diver_body(pb, &pose, tint, cam);
         draw_diver_face(pb, &pose, elapsed, tint, cam);
         draw_diver_bubbles(pb, &pose, player.vel, elapsed, tint, cam);
     } else {
+        draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash, whip);
         draw_feet(pb, &pose, tint, cam);
         draw_body(pb, &pose, tint, cam);
         draw_face(pb, &pose, elapsed, tint, cam);
@@ -1186,12 +1197,13 @@ fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose
     if outfit == RatOutfit::Diver {
         let hover_phase = elapsed * 2.5;
         let swim_phase = elapsed * 8.5;
-        // Smooth analytic buoyancy bob and stroke surge (render-only: never
-        // alters `player.pos` or the hitbox).
+        // Smooth analytic float lift + buoyancy bob and stroke surge
+        // (render-only: never alters `player.pos` or the hitbox).
         let bob_y = hover_phase.sin() * (0.95 - 0.35 * moving) * (1.0 - 0.65 * dash);
         let bob_x = (elapsed * 1.3 + 0.7).sin() * 0.25 * (1.0 - moving) * (1.0 - dash);
         let surge = swim_phase.sin() * 0.35 * moving * (1.0 - dash);
-        let pos = player.pos + Vec2::new(bob_x, bob_y) + raw_face * surge;
+        let lift = DIVER_LIFT - bob_y;
+        let pos = player.pos + Vec2::new(bob_x, -lift) + raw_face * surge;
 
         // Slight continuous tilt into the direction of travel plus gentle
         // swim-kick yaw.
@@ -1218,7 +1230,8 @@ fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose
             moving,
             dash,
             diver: true,
-            bob_y,
+            ground: player.pos,
+            lift,
             swim_phase,
             hover_phase,
         };
@@ -1238,7 +1251,8 @@ fn pose_of_with_outfit(player: &Player, elapsed: f32, outfit: RatOutfit) -> Pose
         moving,
         dash,
         diver: false,
-        bob_y: 0.0,
+        ground: player.pos,
+        lift: 0.0,
         swim_phase: 0.0,
         hover_phase: 0.0,
     }
@@ -1883,24 +1897,14 @@ fn draw_tail(
     let a = tint.alpha();
 
     // Shadow pass first so it never lands on the tail itself.
-    if !tint.ghost {
-        if pose.diver {
-            let prev_pen = pb.set_pen(0);
-            let mut last = (i32::MIN, i32::MIN);
-            for &(x, y) in pts.iter() {
-                if (x, y) != last {
-                    darken(pb, x + 1, y + 2, 0.24);
-                    last = (x, y);
-                }
-            }
-            pb.set_pen(prev_pen);
-        } else {
-            let mut last = (i32::MIN, i32::MIN);
-            for &(x, y) in pts.iter() {
-                if (x, y) != last {
-                    darken(pb, x + 1, y + 1, 0.3);
-                    last = (x, y);
-                }
+    // On the Outfall the diver floats above the seabed and casts one detached
+    // ground shadow under `player.pos`, so the floating tail skips a mid-water shadow.
+    if !tint.ghost && !pose.diver {
+        let mut last = (i32::MIN, i32::MIN);
+        for &(x, y) in pts.iter() {
+            if (x, y) != last {
+                darken(pb, x + 1, y + 1, 0.3);
+                last = (x, y);
             }
         }
     }
@@ -2580,9 +2584,50 @@ pub(super) fn bubble_hash(slot: u32, cycle: u32, salt: u32) -> f32 {
     (n & 0xFFFF) as f32 / 65535.0
 }
 
+/// Soft detached seabed shadow left on the floor under the rat's TRUE ground
+/// position (`pose.ground`), shrinking and fading as the rat floats higher.
+/// Stamped with pen `0` so the lighting pass treats it as seabed floor.
+fn draw_diver_shadow(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
+    let prev_pen = pb.set_pen(0);
+    let g = pose.ground - cam;
+    let h_frac = (pose.lift / DIVER_LIFT).clamp(0.70, 1.35);
+    let r_scale = 1.0 / (0.80 + 0.20 * h_frac);
+    let rx = 3.6 * r_scale;
+    let ry = 2.2 * r_scale;
+    let core = (0.32 / (0.70 + 0.30 * h_frac)).clamp(0.14, 0.36) * tint.alpha();
+
+    let cx = g.x.round() as i32;
+    let cy = g.y.round() as i32;
+    let px_r = rx.ceil() as i32 + 1;
+    let py_r = ry.ceil() as i32 + 1;
+    let x0 = (cx - px_r).max(0);
+    let x1 = (cx + px_r).min(pb.w as i32 - 1);
+    let y0 = (cy - py_r).max(0);
+    let y1 = (cy + py_r).min(pb.h as i32 - 1);
+    if x0 <= x1 && y0 <= y1 {
+        let inv_rx = 1.0 / rx.max(0.5);
+        let inv_ry = 1.0 / ry.max(0.5);
+        for y in y0..=y1 {
+            let dy = (y as f32 - g.y) * inv_ry;
+            let dy2 = dy * dy;
+            if dy2 >= 1.0 {
+                continue;
+            }
+            for x in x0..=x1 {
+                let dx = (x as f32 - g.x) * inv_rx;
+                let r2 = dx * dx + dy2;
+                if r2 < 1.0 {
+                    let fall = 1.0 - r2;
+                    darken(pb, x, y, core * (0.35 + 0.65 * fall));
+                }
+            }
+        }
+    }
+    pb.set_pen(prev_pen);
+}
+
 /// Paddling rubber front mitts and kicking brass-trimmed diving flippers.
 fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
-    let body_pen = pb.pen();
     let a = tint.alpha();
     let m = pose.moving;
     let g = pose.dash;
@@ -2600,11 +2645,6 @@ fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
         let v = (v_idle * (1.0 - m) + v_swim * m) * (1.0 - g) + (side * 2.05) * g;
         let s = w2s(pose.place(u, v), cam);
         let root = w2s(pose.place(u * 0.5 + 0.3, v * 0.72), cam);
-        if !tint.ghost {
-            pb.set_pen(0);
-            darken(pb, s.0 + 1, s.1 + 2, 0.22);
-            pb.set_pen(body_pen);
-        }
         blend(pb, root.0, root.1, tint.apply(SUIT_SHADOW), a);
         blend(pb, s.0, s.1, tint.apply(FLIPPER_BASE), a);
     }
@@ -2627,14 +2667,6 @@ fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
         let p2 = pose.place(u_tip, v_tip);
         let p2_edge = pose.place(u_tip + 0.25, v_tip - side * 0.55);
 
-        if !tint.ghost {
-            pb.set_pen(0);
-            for pt in [p0, p1, p2] {
-                let s = w2s(pt, cam);
-                darken(pb, s.0 + 1, s.1 + 2, 0.22);
-            }
-            pb.set_pen(body_pen);
-        }
         let s0 = w2s(p0, cam);
         let s1 = w2s(p1, cam);
         let s2 = w2s(p2, cam);
@@ -2644,7 +2676,6 @@ fn draw_diver_limbs(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
         blend(pb, s2e.0, s2e.1, tint.apply(FLIPPER_BASE), a);
         blend(pb, s2.0, s2.1, tint.apply(FLIPPER_TIP), a);
     }
-    pb.set_pen(body_pen);
 }
 
 /// Diving suit body, dorsal air tank + hose, brass neck corselet, round brass
@@ -2667,7 +2698,6 @@ fn draw_diver_body(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
     let rim_colour: Rgb = if tint.hurt > 0.0 { (90, 0, 10) } else { (8, 14, 22) };
     let light_u = pose.face.dot(LIGHT);
     let light_v = pose.perp.dot(LIGHT);
-    let shadow_shift = Vec2::new(1.6, 2.2 - pose.bob_y * 0.5);
 
     for y in y0..=y1 {
         for x in x0..=x1 {
@@ -2694,17 +2724,13 @@ fn draw_diver_body(pb: &mut PixelBuffer, pose: &Pose, tint: Tint, cam: Vec2) {
             let total = body + helmet;
             let cover = ((total as f32 / 9.0 - 0.18) / 0.5).clamp(0.0, 1.0);
 
-            let mut dark = 0.0f32;
-            if cover < 1.0 {
-                if pose.in_body(u, v, 0.95) || pose.in_helmet(u, v, 0.90) {
-                    dark = 0.64;
-                } else {
-                    let (hu, hv) = pose.local(d - shadow_shift);
-                    if pose.in_body(hu, hv, 0.45) || pose.in_helmet(hu, hv, 0.45) {
-                        dark = 0.28;
-                    }
-                }
-            }
+            // Crisp dark silhouette rim only: the seabed ground shadow is drawn
+            // detached under `pose.ground` (`draw_diver_shadow`).
+            let dark = if cover < 1.0 && (pose.in_body(u, v, 0.95) || pose.in_helmet(u, v, 0.90)) {
+                0.64
+            } else {
+                0.0
+            };
             if cover <= 0.0 && dark <= 0.0 {
                 continue;
             }
@@ -4028,5 +4054,60 @@ mod tests {
 
         let mut zero = PixelBuffer::new(0, 0);
         draw_rat_with_outfit(&mut zero, &swimmer, 0.35, Vec2::ZERO, 0.0, None, None, RatOutfit::Diver);
+    }
+
+    #[test]
+    fn diver_rat_floats_above_detached_ground_shadow_at_true_position() {
+        let p = rat(rig_pos(), 0.0);
+        let base_pen = crate::render::lighting::rat_pen();
+        let helmet_pen = crate::render::lighting::rat_helmet_pen(false);
+
+        let render = |t: f32| {
+            let mut pb = PixelBuffer::new(RIG_W, RIG_H);
+            pb.set_materials(true);
+            pb.clear(RIG_BG);
+            pb.set_pen(base_pen);
+            draw_rat_with_outfit(&mut pb, &p, t, Vec2::ZERO, 0.0, None, None, RatOutfit::Diver);
+            pb
+        };
+        let pb = render(0.0);
+        // True ground point is darkened by the detached seabed shadow (pen 0).
+        let gx = p.pos.x as usize;
+        let gy = p.pos.y as usize;
+        let ground_px = pb.pixel_at(gx, gy);
+        assert!(
+            ground_px.0 < RIG_BG.0 && ground_px.1 < RIG_BG.1 && ground_px.2 < RIG_BG.2,
+            "true ground position should carry the detached shadow, got {ground_px:?} vs {RIG_BG:?}"
+        );
+        assert_eq!(pb.mat()[gy * pb.w + gx], 0, "detached seabed shadow must use floor pen 0");
+
+        // Helmet pixels sit clearly above `player.pos.y`.
+        let mut sum_y = 0.0f32;
+        let mut n = 0usize;
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                if pb.mat()[y * pb.w + x] == helmet_pen {
+                    sum_y += y as f32;
+                    n += 1;
+                }
+            }
+        }
+        assert!(n >= 4, "expected helmet pixels");
+        let mean_y = sum_y / n as f32;
+        assert!(
+            mean_y <= p.pos.y - 3.0,
+            "lifted diver helmet should sit well above ground y={} (mean_y={mean_y:.2})",
+            p.pos.y
+        );
+
+        // Higher bob (`sin(2.5*t) < 0` -> larger lift) casts a fainter shadow than lower dip.
+        let high = render(std::f32::consts::PI * 1.5 / 2.5);
+        let low = render(std::f32::consts::FRAC_PI_2 / 2.5);
+        assert!(
+            high.pixel_at(gx, gy).0 > low.pixel_at(gx, gy).0,
+            "higher bob should cast a fainter seabed shadow ({:?} vs {:?})",
+            high.pixel_at(gx, gy),
+            low.pixel_at(gx, gy)
+        );
     }
 }
