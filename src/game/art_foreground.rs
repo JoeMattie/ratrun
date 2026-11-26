@@ -764,7 +764,7 @@ fn paint_kind(kind: ForeKind, tile: &mut BandTile, c: &BandCtx) {
 // ---- Floor 1: Sewer --------------------------------------------------------
 
 /// 1. Fat riveted sewer main with bolted flanges every ~38*s art px and an
-///   intermittent spoked rust valve wheel.
+///    intermittent spoked rust valve wheel.
 fn paint_main_pipe(tile: &mut BandTile, c: &BandCtx) {
     let sr = c.ht * 0.78;
     let fr = c.ht;
@@ -888,7 +888,7 @@ fn paint_main_pipe(tile: &mut BandTile, c: &BandCtx) {
 }
 
 /// 2. Open industrial steel catwalk grating with side handrails, structural
-///   ribs, and real see-through rectangular holes.
+///    ribs, and real see-through rectangular holes.
 fn paint_catwalk_grating(tile: &mut BandTile, c: &BandCtx) {
     let rail_w = (1.8 * c.s).max(1.8);
     let bar_pitch = 4.6 * c.s;
@@ -1176,7 +1176,7 @@ fn paint_chain_run(tile: &mut BandTile, c: &BandCtx) {
 // ---- Floor 2: Kitchen ------------------------------------------------------
 
 /// 4. Wide brushed-stainless kitchen extractor canopy duct with standing seams
-///   and recessed metallic grease-filter cassettes.
+///    and recessed metallic grease-filter cassettes.
 fn paint_extractor_duct(tile: &mut BandTile, c: &BandCtx) {
     let seam_pitch = 24.0 * c.s;
     let seam_hw = 1.7 * c.s;
@@ -1258,7 +1258,7 @@ fn paint_extractor_duct(tile: &mut BandTile, c: &BandCtx) {
 }
 
 /// 5. Wrought-iron kitchen pot rail with swinging cast-iron skillets, twin-handle
-///   copper stockpots, and ladles separated by real open gaps.
+///    copper stockpots, and ladles separated by real open gaps.
 fn paint_pot_rail(tile: &mut BandTile, c: &BandCtx) {
     let rail_v = -c.ht + 2.0 * c.s;
     let rail_hr = 1.45 * c.s;
@@ -1519,7 +1519,7 @@ fn paint_pot_rail(tile: &mut BandTile, c: &BandCtx) {
 }
 
 /// 6. Strung conduit + festooned sagging cable with wide swinging enamel lamp
-///   shades and warm glowing inner rims.
+///    shades and warm glowing inner rims.
 fn paint_cable_run(tile: &mut BandTile, c: &BandCtx) {
     let lamp_pitch = 23.0 * c.s;
     let top_v = -c.ht + 1.8 * c.s;
@@ -1649,7 +1649,7 @@ fn paint_cable_run(tile: &mut BandTile, c: &BandCtx) {
 // ---- Floor 3: Lab ----------------------------------------------------------
 
 /// 7. Open ladder cable tray carrying three colour-coded weaving cable bundles
-///   and zip-tie collars, with real open gaps between rungs.
+///    and zip-tie collars, with real open gaps between rungs.
 fn paint_cable_tray(tile: &mut BandTile, c: &BandCtx) {
     let rail_w = (1.8 * c.s).max(1.9);
     let rung_pitch = 6.8 * c.s;
@@ -1734,7 +1734,7 @@ fn paint_cable_tray(tile: &mut BandTile, c: &BandCtx) {
 }
 
 /// 8. Riveted galvanized square ventilation duct with bolted seam flanges
-///   alternating slatted air-intake louvres and embossed X-creased sheet metal.
+///    alternating slatted air-intake louvres and embossed X-creased sheet metal.
 fn paint_vent_duct(tile: &mut BandTile, c: &BandCtx) {
     let body_hw = c.ht * 0.84;
     let seam_pitch = 24.0 * c.s;
@@ -1824,7 +1824,7 @@ fn paint_vent_duct(tile: &mut BandTile, c: &BandCtx) {
 }
 
 /// 9. Rolled-steel laboratory I-beam gantry with electrified cyan busbar and a
-///   4-wheeled sliding trolley carriage.
+///    4-wheeled sliding trolley carriage.
 fn paint_gantry(tile: &mut BandTile, c: &BandCtx) {
     let beam_hw = c.ht * 0.72;
     let flange_w = (2.0 * c.s).max(2.1);

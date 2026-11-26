@@ -7,10 +7,11 @@
   to Off. Older saves retain their other graphics settings.
 - **Still water.** Puddle glints and reflections stay still at rest. Passing
   splash ripples brighten the water and bend reflections as they spread.
-- **Laser Eyes reaches across the widest view and stops at walls.** The thinner beams light their path and reflect brightly in puddles.
-  Damage falls off with distance, and higher ranks deal full damage farther
-  from the muzzle.
-- **Hantavirus droppings cast green light.** Higher ranks shine brighter, and the glow fades as they dry.
+- **Laser Eyes sweeps across the widest view.** Thin beams stop at walls,
+  light their path and reflect in puddles. Damage falls off with distance.
+  Higher ranks deal full damage farther from the muzzle.
+- **Hantavirus droppings cast green light.** Higher ranks shine brighter,
+  and the glow fades as they dry.
 - **Lava Breath.** Spit molten globs in an arc. They splash on landing and leave
   glowing pools that burn foes. Pair it with Long Fuse to evolve it into Caldera.
 - **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin

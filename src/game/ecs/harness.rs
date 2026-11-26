@@ -303,13 +303,19 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// nothing: with the roster files reverted and every other batch-four change
 /// in place, all six rows still matched (`update` passes `DashHold::NONE` and
 /// charge 0, where each new multiplier is exactly x1).
+///
+/// **Regenerated for Lava Breath and distant gem consolidation.** Adding
+/// Lava Breath to the shuffled upgrade candidates moved all six traces.
+/// After that change, the periodic merge of far-off XP drops moved three:
+/// Wander Lab, Evade Sewer and Evade Lab. The intermediate Laser Eyes build
+/// matched all six original rows. No trace hit the 400-gem soft cap.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 1768730785502271223),
-    (Script::Wander, Theme::Kitchen, 29, 4150135606520838820),
-    (Script::Wander, Theme::Lab, 1234, 4027607409685003064),
-    (Script::Evade, Theme::Sewer, 11, 6504620649538191378),
-    (Script::Evade, Theme::Kitchen, 29, 10214728360354825656),
-    (Script::Evade, Theme::Lab, 1234, 2416122020903115581),
+    (Script::Wander, Theme::Sewer, 11, 14071238226389716584),
+    (Script::Wander, Theme::Kitchen, 29, 13015160923412023885),
+    (Script::Wander, Theme::Lab, 1234, 16918701785369181030),
+    (Script::Evade, Theme::Sewer, 11, 7342831774770444570),
+    (Script::Evade, Theme::Kitchen, 29, 12530574095535972836),
+    (Script::Evade, Theme::Lab, 1234, 6726454117980282561),
 ];
 
 #[test]

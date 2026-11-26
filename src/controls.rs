@@ -2576,7 +2576,7 @@ mod tests {
             assert!(b.pad_of(Action::Graphics).is_none());
             assert_eq!(ACTIONS.iter().filter(|&&a| b.kbm_slots(a).contains(&key)).count(), 1);
         }
-        assert!(loaded.pause_legend_lines(false).join(" ").contains("G graphics"));
+        assert!(loaded.pause_legend_lines(true).join(" ").contains("G graphics"));
 
         // An existing assignment in a pre-Graphics save keeps its key.
         let classic = saved.schemes[0].as_mut().unwrap();
