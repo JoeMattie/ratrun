@@ -58,13 +58,19 @@ Outfall and Flatbed, sliding cargo).
 `separation_after_walls` (true) tune how hard a crowd is pushed apart. Each
 pass nudges every overlapping pair apart by half the overlap, clamps one
 body's total nudge to `separation_max_push_px` (world px) and reads the
-positions the previous pass left, over the tick's one spatial grid. The wall
-step then runs, and with `separation_after_walls` one more pass follows, after
-which only the bodies that pass moved are pushed back out of walls, so a body
-never ends a tick inside one. `separation_passes = 1`,
-`separation_max_push_px = 6.0` and `separation_after_walls = false` is the old
-single-pass crowd, exactly. The pass count is capped at 8: each pass costs one
-broadphase query per live body (600 at the cap).
+positions the previous pass left, over the tick's one spatial grid. Each pass
+also anchors a body's shove at its own start position and refuses it if the
+straight path would cross a wall face, so a crowd can press a body at a wall
+and the body cannot be pushed through it; that sweep only runs when the crowd
+is pushed harder than the legacy pass did (`separation_passes` above 1 or the
+clamp above 6 px), which keeps the legacy line below bit-for-bit the old
+crowd. The wall step then runs, and with `separation_after_walls` one more
+swept pass follows, after which only the bodies that pass moved are pressed
+back out of walls, so a body never ends a tick inside one or on the far side of
+a thin one. `separation_passes = 1`, `separation_max_push_px = 6.0` and
+`separation_after_walls = false` is the old single-pass crowd, exactly. The
+pass count is capped at 8: each pass costs one broadphase query per live body
+(600 at the cap) plus a few cell lookups per body that moved.
 
 ```toml
 [enemies]

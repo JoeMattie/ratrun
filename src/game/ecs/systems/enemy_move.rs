@@ -110,7 +110,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::game::bullet::{Bullet, Faction};
-use crate::game::collision::{SizeClass, SpatialGrid};
+use crate::game::collision::{cell_of, segment_rect_hit, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::resources::{
@@ -474,12 +474,62 @@ pub fn grid_build_system(
     scratch.max_radius = cache.iter().map(|entry| entry.3).fold(0.0, f32::max);
 }
 
-/// One body's soft-separation state: `(pos, radius, planted, buried)`.
+/// One body's soft-separation state (the snapshot a pass works on).
 ///
 /// `planted` is `position_locked || crab_pot_held`: the body does not move this
 /// tick, but it still pushes its neighbours (a glued or locked body holds its
 /// crowd on the board). A `buried` body is invisible in both directions.
-type SepEntry = (Vec2, f32, bool, bool);
+/// `class` is the wall/ejection size class the wall step uses —
+/// `SizeClass::of_enemy(kind)`, **not** `of_radius(radius)`: a miniboss's and a
+/// bunched Fry School's radius is retuned after spawn, their class is not.
+#[derive(Clone, Copy)]
+struct SepBody {
+    pos: Vec2,
+    radius: f32,
+    class: SizeClass,
+    planted: bool,
+    buried: bool,
+}
+
+impl SepBody {
+    fn of(e: &Enemy) -> SepBody {
+        SepBody {
+            pos: e.pos,
+            radius: e.radius,
+            class: SizeClass::of_enemy(e.kind),
+            planted: e.position_locked || e.crab_pot_held,
+            buried: e.buried,
+        }
+    }
+}
+
+/// Would the straight shove `from -> to` carry a body's centre through a cell
+/// that is a wall for its size class?
+///
+/// A wall is a tile (`Level::tiles` is the only wall geometry), so "the centre
+/// stays in passable cells" is exactly "the shove did not cross a wall face".
+/// The shove is at most `separation_max_push_px` long, so the cells in its
+/// bounding box are at most a 2 × 2 block: this is a handful of lookups and,
+/// for a solid cell, one zero-radius segment test — never a walk over the
+/// level. The body's own radius is not part of the test: a shove that only
+/// grazes a face is allowed and the wall step clears that graze.
+fn shove_crosses_wall(level: &Level, from: Vec2, to: Vec2, class: SizeClass) -> bool {
+    let lo = Vec2::new(from.x.min(to.x), from.y.min(to.y));
+    let hi = Vec2::new(from.x.max(to.x), from.y.max(to.y));
+    let (x0, y0) = cell_of(lo);
+    let (x1, y1) = cell_of(hi);
+    for cy in y0..=y1 {
+        for cx in x0..=x1 {
+            if level.tiles.passable(cx, cy, class) {
+                continue;
+            }
+            if segment_rect_hit(from, to, 0.0, &TileMap::tile_rect(cx, cy)).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Play one separation pass over `state`, in `EnemyIndex` order.
 ///
@@ -488,25 +538,36 @@ type SepEntry = (Vec2, f32, bool, bool);
 /// semantics, repeated pass after pass. One body's nudge is clamped to
 /// `max_push` (world px) **per pass**.
 ///
+/// With `swept` set, every shove is anchored at the body's own pre-pass position
+/// and swept: a shove whose straight path would take the centre across a wall
+/// face is refused for that pass (the body keeps the position the previous pass
+/// left), so no pass can move a body through a wall. `swept` is off only for the
+/// legacy triple, which must stay bit-for-bit the old crowd.
+///
 /// Cost at the 600-body cap (`constants::ENEMY_CAP`): one `neighbors_within`
 /// per mobile body — a 5 × 5 bucket scan on the 16 px grid, reach
 /// `2 * max_radius` — plus one cheap pair test per candidate. A crowded cluster
 /// returns a handful of candidates per query, so a pass is a few thousand float
-/// compares: tens of microseconds, and the shipped four passes (three plus the
-/// post-wall one) stay well under a millisecond a tick. Nothing is allocated:
-/// `state` and `neigh` are the systems' reused scratch.
+/// compares: tens of microseconds. The sweep adds, for each body that actually
+/// moved, at most four cell lookups and one rect test — a few hundred cheap
+/// tests over a full cap — so the shipped four sweeps (three plus the post-wall
+/// one) stay well under a millisecond a tick. Nothing is allocated: `state` and
+/// `neigh` are the systems' reused scratch.
 fn separation_pass(
+    level: &Level,
     grid: &SpatialGrid,
-    state: &mut [SepEntry],
+    state: &mut [SepBody],
     neigh: &mut Vec<u32>,
     reach: f32,
     max_push: f32,
+    swept: bool,
 ) {
     for i in 0..state.len() {
-        let (pi, ri, planted, buried) = state[i];
-        if planted || buried {
+        let body = state[i];
+        if body.planted || body.buried {
             continue;
         }
+        let pi = body.pos;
         grid.neighbors_within(pi, reach, &mut *neigh);
         let mut push = Vec2::ZERO;
         for &j in neigh.iter() {
@@ -514,16 +575,16 @@ fn separation_pass(
             if j == i {
                 continue;
             }
-            let (pj, rj, _, buried) = state[j];
-            if buried {
+            let other = state[j];
+            if other.buried {
                 continue;
             }
-            let sum = ri + rj;
-            let d2 = pi.dist_sq(pj);
+            let sum = body.radius + other.radius;
+            let d2 = pi.dist_sq(other.pos);
             if d2 < sum * sum {
                 if d2 > 1e-6 {
                     let d = d2.sqrt();
-                    push += (pi - pj) * ((sum - d) / d) * 0.5;
+                    push += (pi - other.pos) * ((sum - d) / d) * 0.5;
                 } else {
                     // Perfectly stacked: nudge apart deterministically by
                     // index order so they never stay glued together.
@@ -532,9 +593,20 @@ fn separation_pass(
                 }
             }
         }
+        let step = push.clamp_len(max_push);
+        if step == Vec2::ZERO {
+            continue;
+        }
+        let to = pi + step;
         // Legacy wrote `self.enemies[i].pos += push`, so a later neighbour read
-        // must see this push: update the array in place, not a copy.
-        state[i].0 += push.clamp_len(max_push);
+        // must see this push: update the array in place, not a copy. With the
+        // sweep on, a shove that would cross a wall face is refused, so the body
+        // holds the position this pass started from instead of tunnelling.
+        state[i].pos = if swept && shove_crosses_wall(level, pi, to, body.class) {
+            pi
+        } else {
+            to
+        };
     }
 }
 
@@ -554,16 +626,23 @@ fn separation_pass(
 /// more, so the same buckets return the same neighbour set. The one thing
 /// reused buckets can miss is a *pair* that only drifts into reach mid-tick;
 /// the next tick's `grid_build_system` sees it, and it was out of reach at
-/// build time, so that is a marginal touch, not a deep overlap. Why this is enough to matter: the old single pass left the crowd
-/// pressed together because the clamp, the steering and the wall step pulled it
-/// back in every tick.
+/// build time, so that is a marginal touch, not a deep overlap. Why this is
+/// enough to matter: the old single pass left the crowd pressed together because
+/// the clamp, the steering and the wall step pulled it back in every tick.
+///
+/// Every pass is swept against the tile map ([`shove_crosses_wall`]) once the
+/// crowd is pushed harder than the legacy pass allowed, so no pass can carry a
+/// body through a wall. The legacy triple (`passes = 1`, the 6 px clamp) keeps
+/// the old arithmetic exactly and pays nothing extra.
+#[allow(clippy::too_many_arguments)]
 pub fn separation_system(
     tuning: Res<crate::tuning::RunTuning>,
+    level: Res<Level>,
     grid: Res<SpatialGrid>,
     index: Res<EnemyIndex>,
     scratch: Res<GridScratch>,
     mut neigh: ResMut<NeighborScratch>,
-    mut state: Local<Vec<SepEntry>>,
+    mut state: Local<Vec<SepBody>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
 ) {
     // Debug builds (i.e. every `cargo test`): prove the cached order is still
@@ -583,7 +662,7 @@ pub fn separation_system(
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
-        state.push((e.pos, e.radius, e.position_locked || e.crab_pot_held, e.buried));
+        state.push(SepBody::of(e));
     }
 
     let reach = scratch.max_radius * 2.0;
@@ -591,8 +670,21 @@ pub fn separation_system(
     // `Tuning::validate` keeps a parsed file in 1..=8; the clamp also bounds a
     // hand-built `Tuning` (tests, a host that skips validation) so a tick can
     // never repeat the pass an unbounded number of times.
-    for _ in 0..tuning.enemies.separation_passes.clamp(1, 8) {
-        separation_pass(&grid, state.as_mut_slice(), &mut neigh.0, reach, max_push);
+    let passes = tuning.enemies.separation_passes.clamp(1, 8);
+    // The sweep only runs once the crowd is pushed harder than the legacy pass
+    // did: `passes = 1` with the 6 px clamp must reproduce today's positions
+    // bit for bit, so that path keeps today's arithmetic and its cost.
+    let swept = passes > 1 || max_push > 6.0;
+    for _ in 0..passes {
+        separation_pass(
+            &level,
+            &grid,
+            state.as_mut_slice(),
+            &mut neigh.0,
+            reach,
+            max_push,
+            swept,
+        );
     }
 
     // Write the final positions back in the same order (no sort, no clone).
@@ -600,7 +692,7 @@ pub fn separation_system(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        e.pos = state[i].0;
+        e.pos = state[i].pos;
     }
 }
 
@@ -619,11 +711,10 @@ fn resolve_body_walls(level: &Level, e: &mut Enemy) {
 /// The post-wall pass's ejection for one body the pass moved.
 ///
 /// `before` is the position the body held when the pass started, which the wall
-/// step had just made legal. `resolve_circle_step` keeps that position when the
-/// pass shoved the circle into a wall face (a 16 px cell is less than two
-/// 10 px pushes wide, and the nearest-side ejection would otherwise drop the
-/// body on the far side of a thin wall); everywhere else it resolves the graze
-/// exactly like [`resolve_body_walls`] does.
+/// step had just made legal. The pass itself swept the shove, so it never
+/// crossed a wall face; `resolve_circle_step` then clears the graze such a shove
+/// can still leave (a shove that only brushes a face is allowed by the sweep),
+/// and keeps `before` if even that cannot be resolved.
 fn resolve_moved_body_walls(level: &Level, before: Vec2, e: &mut Enemy) {
     let class = SizeClass::of_enemy(e.kind);
     e.pos = level.tiles.resolve_circle_step(before, e.pos, e.radius, class);
@@ -662,13 +753,14 @@ pub fn wall_resolve_system(
 /// One more separation pass after the wall step, then only that body's wall
 /// ejection again (`enemies.separation_after_walls`, shipped true).
 ///
-/// Soft separation can shove a body into a wall face the wall step had just
+/// Soft separation can shove a body at a wall face the wall step had just
 /// cleared (a crowd pressed against a wall is the ordinary case), so the tick
-/// ends with one more pass and a second wall ejection
-/// ([`resolve_moved_body_walls`]) for **exactly the bodies that pass moved**:
-/// every other body is already clear, and re-resolving it would buy nothing but
-/// a tile query. With the knob off this system reads one bool and returns, so it
-/// costs nothing and the schedule order is unchanged.
+/// ends with one more pass — swept like every other, so it cannot cross a
+/// face — and a second wall ejection ([`resolve_moved_body_walls`]) for
+/// **exactly the bodies that pass moved**: every other body is already clear,
+/// and re-resolving it would buy nothing but a tile query. With the knob off
+/// this system reads one bool and returns, so it costs nothing and the schedule
+/// order is unchanged.
 ///
 /// It sits inside the same `EnemyIndex` window as `separation_system` and
 /// `wall_resolve_system` — nothing spawns or despawns here — and reuses the
@@ -683,7 +775,7 @@ pub fn separation_after_walls_system(
     index: Res<EnemyIndex>,
     scratch: Res<GridScratch>,
     mut neigh: ResMut<NeighborScratch>,
-    mut state: Local<Vec<SepEntry>>,
+    mut state: Local<Vec<SepBody>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
 ) {
     if !tuning.enemies.separation_after_walls {
@@ -699,21 +791,24 @@ pub fn separation_after_walls_system(
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
-        state.push((e.pos, e.radius, e.position_locked || e.crab_pot_held, e.buried));
+        state.push(SepBody::of(e));
     }
     let reach = scratch.max_radius * 2.0;
     separation_pass(
+        &level,
         &grid,
         state.as_mut_slice(),
         &mut neigh.0,
         reach,
         tuning.enemies.separation_max_push_px.max(0.0),
+        // This slot only exists on the non-legacy path, so it always sweeps.
+        true,
     );
     for (i, &entity) in index.0.iter().enumerate() {
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        let pos = state[i].0;
+        let pos = state[i].pos;
         if pos == e.pos {
             // Planted, buried or not overlapping: the wall step's answer still
             // stands.
@@ -1375,14 +1470,15 @@ mod tests {
         assert!(crowd_is_wall_clear(&mut w), "the post-wall pass left a body inside a wall");
     }
 
-    /// Why the post-wall pass exists. Two cats 0.5 px apart along a wall
+    /// Why the post-wall ejection exists. Two cats 0.5 px apart along a wall
     /// normal, the front one (spawned first, so index 0) 0.5 px clear of the
     /// face: the wall step leaves them clear, and the one extra pass — the shove
-    /// the post-wall slot makes — pushes the front body at the wall. The
-    /// re-eject in the same system is what keeps it on the near side, so the
-    /// tick can never end buried.
+    /// the post-wall slot makes — presses the front body into the face (its
+    /// centre stays in the open cell, so the sweep allows the graze). The
+    /// ejection in the same system is what clears it, so the tick cannot end
+    /// with a body overlapping a wall.
     #[test]
-    fn the_post_wall_pass_ejects_what_its_own_shove_buries() {
+    fn the_post_wall_pass_clears_the_graze_its_own_shove_makes() {
         let class = SizeClass::of_enemy(EnemyKind::Cat);
         let mut pair = World::with_tuning(Theme::Sewer, 91, separation_tuning(3, true));
         pair.clear_enemies();
@@ -1418,29 +1514,26 @@ mod tests {
         });
         assert!(crowd_is_wall_clear(&mut pair), "the wall step must clear the pair first");
 
-        // One more pass on its own — inside the system, before its re-eject —
-        // buries the front body in the face. This probe mutates only this
+        // One more pass on its own — inside the system, before its ejection —
+        // presses the front body into the face. This probe mutates only this
         // snapshot, so the components still hold the post-wall positions.
         let index = pair.ecs.resource::<EnemyIndex>().0.clone();
-        let mut state: Vec<SepEntry> = index
+        let mut state: Vec<SepBody> = index
             .iter()
-            .map(|&e| {
-                let b = pair.ecs.get::<Enemy>(e).unwrap();
-                (b.pos, b.radius, false, false)
-            })
+            .map(|&e| SepBody::of(pair.ecs.get::<Enemy>(e).unwrap()))
             .collect();
         let mut neigh = Vec::new();
-        let grid = SpatialGrid::build(state.iter().map(|s| s.0), pair.level.arena, GRID_CELL);
+        let grid = SpatialGrid::build(state.iter().map(|b| b.pos), pair.level.arena, GRID_CELL);
         // Reach is 2 × the cat's 4 px radius, the same rule `grid_build_system`
         // records in `GridScratch`; the 10 px clamp is the shipped one.
-        separation_pass(&grid, &mut state, &mut neigh, 8.0, 10.0);
+        separation_pass(&pair.level, &grid, &mut state, &mut neigh, 8.0, 10.0, true);
         assert!(
-            !pair.level.tiles.circle_clear(state[0].0, state[0].1, class),
-            "the probe did not push the front body into the wall: {:?}",
-            state[0].0
+            !pair.level.tiles.circle_clear(state[0].pos, state[0].radius, class),
+            "the probe did not press the front body into the wall: {:?}",
+            state[0].pos
         );
 
-        // The real system, from the same post-wall state: pass plus re-eject.
+        // The real system, from the same post-wall state: pass plus ejection.
         tick(&mut pair, |w| {
             w.ecs.run_system_cached(separation_after_walls_system).unwrap();
         });
@@ -1448,5 +1541,93 @@ mod tests {
             crowd_is_wall_clear(&mut pair),
             "the post-wall pass left a body inside a wall"
         );
+    }
+
+    /// The sweep rule itself: a shove whose centre path enters a wall cell is
+    /// refused, a shove away from or along the face is allowed (so a body still
+    /// slides off a wall), and a graze that keeps the centre in the open cell is
+    /// allowed too — the wall step clears that.
+    #[test]
+    fn the_shove_sweep_only_refuses_a_wall_cell() {
+        let class = SizeClass::of_enemy(EnemyKind::Cat);
+        let mut w = World::new(Theme::Sewer, 93);
+        w.clear_enemies();
+        let face = (1..w.level.tiles.cols() - 2)
+            .flat_map(|cx| (1..w.level.tiles.rows() - 1).map(move |cy| (cx, cy)))
+            .find_map(|(cx, cy)| {
+                // Open floor in front of the wall cell, one row above and below
+                // too, so a shove along the face cannot leave the test corridor.
+                if w.level.tiles.get(cx, cy) != TileKind::Wall(WallKind::Solid)
+                    || !w.level.tiles.passable(cx + 1, cy, class)
+                    || !w.level.tiles.passable(cx + 2, cy, class)
+                    || !w.level.tiles.passable(cx + 1, cy - 1, class)
+                    || !w.level.tiles.passable(cx + 1, cy + 1, class)
+                {
+                    return None;
+                }
+                let r = TileMap::tile_rect(cx + 1, cy);
+                let flush = Vec2::new(r.x + 4.0, r.center().y);
+                w.level.tiles.circle_clear(flush, 4.0, class).then_some(flush)
+            })
+            .expect("a 1-cell wall with open floor in front");
+        // Into the wall: refused.
+        assert!(shove_crosses_wall(&w.level, face, face - Vec2::new(10.0, 0.0), class));
+        // Away from it and along it: allowed.
+        assert!(!shove_crosses_wall(&w.level, face, face + Vec2::new(10.0, 0.0), class));
+        assert!(!shove_crosses_wall(&w.level, face, face + Vec2::new(0.0, 9.0), class));
+        // A graze that keeps the centre in the open cell: allowed.
+        assert!(!shove_crosses_wall(&w.level, face, face - Vec2::new(3.0, 0.0), class));
+    }
+
+    /// A body pressed against a 1-cell wall by a crowd behind it never ends up on
+    /// the far side of it across 60 ticks: every pass anchors its shove and
+    /// sweeps it, so the crowd can press the body at the face and the body
+    /// cannot cross it. The centre never enters the wall cell and no body ends
+    /// the run overlapping a wall.
+    #[test]
+    fn a_pressed_body_never_crosses_a_one_cell_wall() {
+        let class = SizeClass::of_enemy(EnemyKind::Cat);
+        let mut w = World::with_tuning(Theme::Sewer, 92, separation_tuning(3, true));
+        w.clear_enemies();
+        let face = (1..w.level.tiles.cols() - 2)
+            .flat_map(|cx| (1..w.level.tiles.rows() - 1).map(move |cy| (cx, cy)))
+            .find_map(|(cx, cy)| {
+                // One solid cell with open floor either side, so "the far side" is
+                // a real place: the pressed body's face is the left edge of the
+                // open cell to its right, and the crowd fits in that cell.
+                if w.level.tiles.get(cx, cy) != TileKind::Wall(WallKind::Solid)
+                    || !w.level.tiles.passable(cx - 1, cy, class)
+                    || !w.level.tiles.passable(cx + 1, cy, class)
+                    || !w.level.tiles.passable(cx + 2, cy, class)
+                {
+                    return None;
+                }
+                let r = TileMap::tile_rect(cx + 1, cy);
+                let flush = Vec2::new(r.x + 4.0, r.center().y);
+                (w.level.tiles.circle_clear(flush, 4.0, class)
+                    && w.level.tiles.circle_clear(flush + Vec2::new(11.5, 0.0), 4.0, class))
+                    .then_some(flush)
+            })
+            .expect("a 1-cell wall with open floor either side");
+        // Index 0 is the pressed body (flush on the near face); eight more are
+        // packed behind it in a column, so the first pass pushes it at the wall
+        // with the full 10 px clamp.
+        w.spawn_enemy(EnemyKind::Cat, face, 1.0);
+        for i in 0..8 {
+            w.spawn_enemy(EnemyKind::Cat, face + Vec2::new(1.0 + i as f32 * 1.5, 0.0), 1.0);
+        }
+
+        for _ in 0..60 {
+            settle_tick(&mut w);
+            let pressed = w.enemies()[0].pos;
+            // The far side starts at the wall cell's left edge, one cell to the
+            // left of the face; a body on the near side keeps its centre right
+            // of the face itself.
+            assert!(
+                pressed.x >= face.x - 1e-3,
+                "the pressed body crossed the wall face to {pressed:?}"
+            );
+        }
+        assert!(crowd_is_wall_clear(&mut w), "a pressed body ended inside a wall");
     }
 }

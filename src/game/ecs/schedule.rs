@@ -32,7 +32,7 @@
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
 //! | 6 | `enemy_move::enemy_fire_system` | `update_enemies` fire |
 //! | 7 | `enemy_move::grid_build_system` | first grid build + `max_radius` |
-//! | 8 | `enemy_move::separation_system` | `separate_enemies`, `enemies.separation_passes` times over the one grid |
+//! | 8 | `enemy_move::separation_system` | `separate_enemies`, `enemies.separation_passes` times over the one grid, each pass swept against the tile map |
 //! | 9 | `enemy_move::wall_resolve_system` | `resolve_enemy_walls` |
 //! | 9a | `enemy_move::separation_after_walls_system` | one more separation pass, then a second wall ejection for the bodies it moved (`enemies.separation_after_walls`; one bool read when off) |
 //! | 10 | `enemy_move::grid_refresh_system` | second grid build |
