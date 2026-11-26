@@ -768,7 +768,7 @@ pub struct GridScratch {
 ///
 /// | built by | valid for |
 /// | --- | --- |
-/// | `enemy_move::grid_build_system` (schedule 6) | `separation_system`, `wall_resolve_system`, `grid_refresh_system` |
+/// | `enemy_move::grid_build_system` (schedule 6) | `separation_system`, `wall_resolve_system`, `separation_after_walls_system`, `grid_refresh_system` |
 /// | `enemy_move::grid_refresh_system` (schedule 9) | `weapons::fire_weapons_system`, `projectiles::*`, `combat::*` — i.e. everything up to `loot::reap_enemies_system` |
 ///
 /// **Stale** (never read it there):

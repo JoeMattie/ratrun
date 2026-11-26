@@ -32,8 +32,9 @@
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
 //! | 6 | `enemy_move::enemy_fire_system` | `update_enemies` fire |
 //! | 7 | `enemy_move::grid_build_system` | first grid build + `max_radius` |
-//! | 8 | `enemy_move::separation_system` | `separate_enemies` |
+//! | 8 | `enemy_move::separation_system` | `separate_enemies`, `enemies.separation_passes` times over the one grid, each pass swept against the tile map |
 //! | 9 | `enemy_move::wall_resolve_system` | `resolve_enemy_walls` |
+//! | 9a | `enemy_move::separation_after_walls_system` | one more separation pass, then a second wall ejection for the bodies it moved (`enemies.separation_after_walls`; one bool read when off) |
 //! | 10 | `enemy_move::grid_refresh_system` | second grid build |
 //! | 11 | `weapons::fire_weapons_system` | `fire_weapons` |
 //! | 11b | `weapons::active_weapons_system` | the two Space-triggered weapons (new) |
@@ -209,6 +210,14 @@ pub fn build_tick_schedule() -> Schedule {
             enemy_move::grid_build_system,
             enemy_move::separation_system,
             enemy_move::wall_resolve_system,
+            // 9a: the post-wall pass. It reuses the grid built at 7 (no
+            // rebuild between passes, see `enemy_move`) and re-ejects only the
+            // bodies it moved, so a tick never ends with a body inside a wall.
+            // Nothing spawns or despawns here, so `EnemyIndex` is still valid
+            // and `grid_refresh_system` still runs last and sees the final
+            // positions. With `enemies.separation_after_walls` off it reads
+            // one bool and returns.
+            enemy_move::separation_after_walls_system,
             enemy_move::grid_refresh_system,
             weapons::fire_weapons_system,
             // 11b: the player-triggered weapons. Right after the auto-fire pass

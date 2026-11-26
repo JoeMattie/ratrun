@@ -207,6 +207,9 @@ section!(Enemies {
     kinds: BTreeMap<EnemyKind, Enemy> = enemy_defaults(); "Per-kind ordinary enemy stats",
     sector_hp_mult: [f32; 4] = [2.45, 0.86956522, 0.86956522, 0.86956522]; "Ordinary enemy HP multipliers by campaign sector, including scripted arrivals",
     sector_damage_mult: [f32; 4] = [1.0, 0.5, 0.5, 0.5]; "Multiplier on every enemy (and floor hazard) hit by campaign sector, applied where the hit is created, before the rat's armour",
+    separation_passes: u32 = 3; "Soft-separation passes over each tick's spatial grid (1, with separation_max_push_px = 6.0 and separation_after_walls = false, is the old single-pass crowd)",
+    separation_max_push_px: f32 = 10.0; "Clamp on one body's separation nudge per pass (world px; the old single-pass value was 6.0)",
+    separation_after_walls: bool = true; "Play one more separation pass after the wall step, then eject only the bodies that pass moved, so no body ends a tick inside a wall",
 });
 
 section!(Minibosses {
@@ -508,6 +511,16 @@ impl Tuning {
             || self.enemies.sector_hp_mult.contains(&0.0)
         {
             bail!("enemies.sector_damage_mult and enemies.sector_hp_mult must be positive");
+        }
+        // Each pass costs a broadphase query per live body (600 at the cap), so
+        // the ceiling keeps a tuning file from making a tick unbounded.
+        if !(1..=8).contains(&self.enemies.separation_passes) {
+            bail!("enemies.separation_passes must be in 1..=8");
+        }
+        if !self.enemies.separation_max_push_px.is_finite()
+            || self.enemies.separation_max_push_px <= 0.0
+        {
+            bail!("enemies.separation_max_push_px must be finite and positive");
         }
         if director.power_hp_floor <= 0.0 || director.power_hp_floor > 1.0
             || director.power_hp_ceiling < 1.0

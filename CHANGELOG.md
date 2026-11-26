@@ -24,6 +24,10 @@
   twice as strong but only beside the surface that emitted it, so a lamp,
   lava, water or the sconce wash tints what it faces and the rest of the
   frame stays as dark as before.
+- **Overlap.** A crowd of enemies spreads out instead of stacking on top of
+  itself. Bodies push each other apart harder, and a body pushed into a wall
+  is pushed back out before the tick ends. A balance file can restore the
+  looser crowd; see [TUNING.md](TUNING.md).
 
 ## 0.4.4 (2026-11-26, playtest build)
 
