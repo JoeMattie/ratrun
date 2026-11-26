@@ -835,9 +835,9 @@ impl LightMap {
             self.gather_lights(pb.w, pb.h, scene)
         };
         // Enemy rim glints: taken now, while the body pixels are final and the
-        // lighting has not yet covered them. (The effects' directional rim,
-        // `specular.rs`, may replace them.)
-        if !fx || specular::keep_glints(scene.mode) {
+        // lighting has not yet covered them. During an outage, keep the glints
+        // even at tiers where the fixture-driven rim would replace them.
+        if !fx || specular::keep_glints(scene.mode) || scene.blackout > 0.0 {
             for i in 0..self.rims.len() {
                 let (x, y, tint) = self.rims[i];
                 self.mark_glint(pb, x, y, tint);

@@ -36,6 +36,7 @@ fn test_scene(world: &World, mode: LightingMode, depth: ColorDepth, cam: Vec2) -
         squeak: None,
         cam,
         elapsed: world.elapsed,
+        blackout: world.blackout(),
         mode,
         depth,
         fx: false,
@@ -303,6 +304,62 @@ fn every_theme_reads_an_enemy_at_the_edge_of_a_blackout() {
             assert!(margin >= 35, "{theme:?} {depth:?}: only {margin} contrast");
         }
     }
+}
+
+#[test]
+fn blackout_keeps_the_rat_aura_at_its_normal_strength() {
+    let mut w = test_world(Theme::Lab);
+    w.player.pos = Vec2::new(48.0, 48.0);
+    w.elapsed = 458.0;
+    for fx in [false, true] {
+        let mut scene = test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        scene.fx = fx;
+        let draw = |scene: &LightScene<'_>| {
+            let mut pb = PixelBuffer::new(128, 96);
+            pb.clear((85, 71, 78));
+            LightMap::new().apply_scene(&mut pb, scene);
+            pb
+        };
+        assert_eq!(scene.blackout, 1.0);
+        let dark = draw(&scene);
+        scene.blackout = 0.0;
+        let normal = draw(&scene);
+        assert_eq!(dark.pixels(), normal.pixels());
+        assert!(lum(&dark, 52, 48) > lum(&dark, 124, 48) + 20);
+    }
+}
+
+#[test]
+fn drawing_a_blackout_does_not_change_simulation_or_fog() {
+    let mut drawn = World::new(Theme::Sewer, 827);
+    let mut headless = World::new(Theme::Sewer, 827);
+    let viewport = Vec2::new(120.0, 80.0);
+    drawn.viewport = viewport;
+    headless.viewport = viewport;
+    let mut pb = PixelBuffer::new(120, 80);
+    for elapsed in [299.95, 300.55, 308.55, 309.55] {
+        drawn.elapsed = elapsed;
+        headless.elapsed = elapsed;
+        for _ in 0..8 {
+            drawn.update(1.0 / 60.0, Vec2::ZERO, false);
+            headless.update(1.0 / 60.0, Vec2::ZERO, false);
+            drawn.draw(&mut pb);
+            assert_eq!(drawn.elapsed, headless.elapsed);
+            assert_eq!(drawn.player.pos, headless.player.pos);
+            assert_eq!(drawn.player.hp, headless.player.hp);
+            assert_eq!(drawn.fog.seen_count(), headless.fog.seen_count());
+            assert_eq!(drawn.sfx, headless.sfx);
+            let enemies = |world: &mut World| {
+                world
+                    .enemies()
+                    .iter()
+                    .map(|e| (e.id, e.pos, e.hp))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(enemies(&mut drawn), enemies(&mut headless));
+        }
+    }
+    assert_eq!(drawn.rng.random::<u64>(), headless.rng.random::<u64>());
 }
 
 #[test]

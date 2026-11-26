@@ -37,6 +37,7 @@ use crate::math::Vec2;
 use crate::meta;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::lighting::blackout;
 use crate::render::library as library_ui;
 use crate::render::nest as nest_ui;
 use crate::render::palette;
@@ -368,6 +369,8 @@ struct PictureKey {
     /// bits): the Graphics page's SCREEN SHAKE row can change it while the
     /// world is frozen under a plate, and the frozen picture carries the offset.
     shake: u32,
+    /// Scheduled fixture attenuation, in bits, derived from the floor clock.
+    blackout: u32,
 }
 
 impl PictureKey {
@@ -384,6 +387,7 @@ impl PictureKey {
             foreground: w.foreground,
             fx: w.lighting_fx,
             shake: w.shake_scale.to_bits(),
+            blackout: w.blackout().to_bits(),
         }
     }
 }
@@ -3529,6 +3533,7 @@ impl App {
         let aim = self.aim_point();
         if let Some(w) = self.world.as_mut() {
             let hp_before = w.player.hp;
+            let elapsed_before = w.elapsed;
             // Who is on the floor before the tick, so a death edge below can
             // name the kind in the Library (the nameplate is gone afterwards).
             let boss_before = w.boss_kind();
@@ -3610,6 +3615,18 @@ impl App {
             let enemy_count = w.enemy_count();
             self.hud.telemetry.set_enemy_count(enemy_count);
             self.hud.tick(dt, w, &self.sfx_frame, self.muted);
+            for cue in blackout::cues(
+                w.level.theme,
+                w.curve_clock_at(elapsed_before),
+                w.curve_clock_at(w.elapsed),
+            ) {
+                if cue == Sfx::NightBed {
+                    self.hud.push_callout(hud::CalloutKind::Blackout, "BLACKOUT", "LAMPS OUT", 3.0);
+                }
+                if !self.sfx_frame.contains(&cue) {
+                    self.sfx_frame.push(cue);
+                }
+            }
             // The synth's fourth tier is the boss fight itself (Boss
             // Overdrive adds the lead/boss layers): 3 while a boss is alive,
             // back to the horde rule (2 when the screen is dense, 1 otherwise)
@@ -8020,6 +8037,25 @@ mod tests {
         assert!(hh.app.world.as_ref().unwrap().elapsed > before, "play did not resume");
     }
 
+    #[test]
+    fn the_blackout_announces_and_sounds_once_at_each_edge() {
+        let mut h = Harness::new(57, 20);
+        h.enter_playing();
+        h.app.set_minimap_size(minimap::MinimapSize::Hidden);
+        h.app.world.as_mut().unwrap().elapsed = 299.99;
+        let text = h.frame(&[]);
+        assert!(text.contains("BLACKOUT") && text.contains("LAMPS OUT"), "{text}");
+        assert!(h.app.sfx_frame.contains(&Sfx::NightBed));
+        h.frame(&[]);
+        assert!(!h.app.sfx_frame.contains(&Sfx::NightBed));
+
+        h.app.world.as_mut().unwrap().elapsed = 308.59;
+        h.frame(&[]);
+        assert!(h.app.sfx_frame.contains(&Sfx::MowerDockHum));
+        h.frame(&[]);
+        assert!(!h.app.sfx_frame.contains(&Sfx::MowerDockHum));
+    }
+
     /// The map hints and the level-up legend name the live bindings, not the
     /// default keys.
     #[test]
@@ -9756,7 +9792,8 @@ mod tests {
             // ring under the nearest hanging lamp; `wet`: the same lamp with no
             // bodies (floor reflections); `corner`: the rat in the room farthest
             // from the map centre with bodies round it (the overhead offset).
-            // `RATRUN_DUMP_N=n` takes the n-th nearest lamp. The frame is frozen.
+            // `RATRUN_DUMP_N=n` takes the n-th nearest lamp and
+            // `RATRUN_DUMP_AT=seconds` sets the frozen scene clock.
             t if t.starts_with("lit-") => {
                 use crate::game::collision::SizeClass;
                 use crate::game::enemy::EnemyKind;
@@ -9904,6 +9941,13 @@ mod tests {
                     if at.dist(rat) > 10.0 && w.level.tiles.circle_clear(at, 6.0, SizeClass::Small) {
                         w.spawn_enemy(roster[i % roster.len()], at, 1.0);
                     }
+                }
+                if let Some(elapsed) = std::env::var("RATRUN_DUMP_AT")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|t| t.is_finite() && *t >= 0.0)
+                {
+                    w.elapsed = elapsed;
                 }
                 hh.app.picture_dirty = true;
                 hh.app.console_paused = true;
@@ -11010,6 +11054,15 @@ mod tests {
         assert_eq!(h.app.world_draws, drawn + 1, "a resize must redraw");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "and then settle again");
+
+        // A staged outage changes the fixture power even at the same tick.
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.app.world.as_mut().unwrap().elapsed = 304.0;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "the fixture power must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "the blackout stays frozen");
 
         // The zoom: every frame of the ease is a new picture, then it stops.
         let mut h = paused_harness();
