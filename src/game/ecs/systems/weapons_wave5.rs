@@ -329,6 +329,9 @@ pub(crate) fn plumb_bob_system(
     let fire_rate = player.loadout.stats.fire_rate_mult;
     let pos = player.pos;
     let face = player.face;
+    // Growth Serum: the swinging weight's chain reaches further with the giant
+    // so its swing reads outside the five-times body (and past the stomp disc).
+    let reach_scale = player.weapon_reach_scale();
     let Some(weapon) = player.loadout.weapons.iter_mut().find(|w| w.kind == BOB) else { return };
     weapon.timer -= input.dt;
     if weapon.timer > 0.0 {
@@ -339,7 +342,7 @@ pub(crate) fn plumb_bob_system(
         pos,
         evolved: weapon.evolved,
         facing: cast_dir(pos, face, input.aim).angle(),
-        reach: if weapon.level >= 4 { 42.0 } else { 34.0 },
+        reach: (if weapon.level >= 4 { 42.0 } else { 34.0 }) * reach_scale,
         age: 0.0,
         damage: weapon.damage() * damage_mult,
         hits: BTreeSet::new(),
@@ -666,5 +669,38 @@ mod tests {
         step_bob(&mut world, SHED_PASS);
         assert!(query.iter(&world.ecs).next().unwrap().pos.dist(tip) < 1e-3);
         assert_eq!(world.ecs.get::<Enemy>(body).unwrap().hp, hp - 19.0);
+    }
+
+    /// Growth Serum: the Plumb Bob still fires while giant and its chain
+    /// reaches `GIANT_WEAPON_SCALE` times as far, so the swing reads outside the
+    /// five-times body and past the stomp disc.
+    #[test]
+    fn bob_fires_and_reaches_further_while_giant() {
+        use crate::game::ecs::systems::powerups::{GIANT_WEAPON_SCALE, GROWTH_SECS};
+
+        let mut small = arena(BOB, 1, false);
+        step_bob(&mut small, 0.0);
+        let mut small_query = small.ecs.query::<&PlumbBob>();
+        let small_reach = small_query
+            .iter(&small.ecs)
+            .next()
+            .expect("an ordinary rat's bob")
+            .reach;
+
+        let mut giant = arena(BOB, 1, false);
+        // The hold window: the eased draw scale is at its full 5x.
+        giant.player.buffs.giant = GROWTH_SECS * 0.5;
+        assert!(giant.player.weapon_reach_scale() > 1.0, "the reach multiplier stayed 1");
+        step_bob(&mut giant, 0.0);
+        let mut giant_query = giant.ecs.query::<&PlumbBob>();
+        let bob = giant_query
+            .iter(&giant.ecs)
+            .next()
+            .expect("the giant's bob fired nothing");
+        assert!(
+            (bob.reach - small_reach * GIANT_WEAPON_SCALE).abs() < 1e-3,
+            "the giant's chain did not stretch: {small_reach} -> {}",
+            bob.reach
+        );
     }
 }

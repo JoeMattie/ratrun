@@ -191,6 +191,12 @@ pub fn fire_weapons_system(
     // of the stat block, so `fire_one` can read them while the loop still
     // mutates weapon timers.
     let stats = player.loadout.stats;
+    // Batch 13: the Growth Serum's two weapon multipliers, read once per tick.
+    // `pose_scale` follows the eased draw scale so a muzzle/eye/tail origin
+    // sits on the giant's pose; `reach_scale` is the tuning constant that
+    // stretches melee, cone, ring and orbit reach past the stomp disc.
+    let reach_scale = player.weapon_reach_scale();
+    let pose_scale = player.weapon_pose_scale();
     let n = if player.buffs.weapons_suspended() {
         0
     } else {
@@ -308,6 +314,9 @@ pub fn fire_weapons_system(
             // The unzoomed view, for the one weapon whose reach runs past it.
             scratch.viewport.0,
             &scratch.droppings,
+            // Growth Serum: reach/size and origin multipliers.
+            reach_scale,
+            pose_scale,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -850,6 +859,9 @@ pub fn active_weapons_system(
     // Wave 3: copy the passive hooks out before the loadout is borrowed mutably
     // (`Stats` is `Copy`).
     let stats = player.loadout.stats;
+    // Batch 13: the Growth Serum's reach/size multiplier for melee arcs and
+    // cones, read once per tick like `fire_weapons_system` does.
+    let reach_scale = player.weapon_reach_scale();
 
     // One stable enemy order for the tick, exactly like `fire_weapons_system`:
     // `EnemyIndex` is rebuilt immediately before that system and nothing has
@@ -911,11 +923,13 @@ pub fn active_weapons_system(
                     // Fuse's splash radius **and** Lens Cap's ring reach: the
                     // squeak is a ring, and leaving that hook out made the
                     // passive silently do nothing for this weapon).
+                    // Growth Serum: an active arc or cone reaches further with
+                    // the giant, so the stomp cannot empty the cone first.
                     match w.kind {
                         WeaponKind::SonicSqueak => {
-                            stats.melee_reach(stats.splash_radius(w.active_reach()))
+                            stats.melee_reach(stats.splash_radius(w.active_reach())) * reach_scale
                         }
-                        _ => stats.melee_reach(w.active_reach()),
+                        _ => stats.melee_reach(w.active_reach()) * reach_scale,
                     },
                     w.evolved,
                 )
@@ -1564,6 +1578,10 @@ fn fire_one(
     view: Vec2,
     // Hantavirus's live droppings (the cap evicts the oldest).
     droppings: &Query<(Entity, &SpawnId, &crate::game::ecs::components::Dropping)>,
+    // Growth Serum: `reach_scale` stretches melee/cone/ring/orbit reach,
+    // `pose_scale` moves the mouth/eye origins onto the giant's pose.
+    reach_scale: f32,
+    pose_scale: f32,
 ) -> bool {
     let aim = input.aim;
     let color = kind.color();
@@ -1577,7 +1595,9 @@ fn fire_one(
             // two darts' worth lands as one bite, so a body takes per cycle
             // what the darts dealt it.
             let i = (wlevel.clamp(1, 5) as usize) - 1;
-            let reach = stats.melee_reach(GNAW_BITE_REACH[i]);
+            // Growth Serum: the bite's reach stretches with the giant so the
+            // stomp disc cannot kill the target before the jaw closes.
+            let reach = stats.melee_reach(GNAW_BITE_REACH[i]) * reach_scale;
             // Aimed (reticle or pad stick): the jaw snaps inside its cone of
             // that direction. Auto-aim (Classic, no reticle): the rat turns its
             // head, so the bite takes the nearest body in reach whatever way it
@@ -1692,14 +1712,19 @@ fn fire_one(
                 }
             }
             if let Some(bit_at) = bit_at {
+                // The snap's anchor follows the giant's pose, so a giant bites
+                // from its own snout rather than its belly. Zero offset on an
+                // ordinary rat, so its geometry is unchanged.
+                let mouth = ppos + dir * crate::game::weapon::GNAW_MOUTH_OFFSET * pose_scale;
                 // A decoration, not a body: it carries no `SpawnId`, so the
                 // spawn-order sequence every other system orders by is not
                 // perturbed by a jaw snap.
                 commands.spawn(BiteSnap {
-                    pos: ppos + dir * 4.0,
+                    pos: mouth,
                     dir,
                     t: BITE_SECS,
                     total: BITE_SECS,
+                    scale: reach_scale,
                 });
                 // Each evolved bite lobs one tooth. Successive casts in a
                 // volley fan into a tight cluster around the same target.
@@ -1710,11 +1735,11 @@ fn fire_one(
                     let spread = to.normalized().perp() * SPREAD[evo.milk_slot];
                     evo.milk_slot = (evo.milk_slot + 1) % SPREAD.len();
                     let reach = stats.ranged_reach(evolutions::MILK_REACH);
-                    let target = ppos + (to + spread).clamp_len(reach);
-                    let landing = super::weapon_lava::landing_floor(level, ppos, target);
-                    commands.spawn((MilkTooth::new(ppos, landing, dmg), next_id.take()));
+                    let target = mouth + (to + spread).clamp_len(reach);
+                    let landing = super::weapon_lava::landing_floor(level, mouth, target);
+                    commands.spawn((MilkTooth::new(mouth, landing, dmg), next_id.take()));
                 }
-                vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, 0.0);
+                vfx::emit_weapon_fire(particles, &mut rng.0, kind, mouth, dir, 0.0);
                 fired = true;
             }
         }
@@ -1739,14 +1764,19 @@ fn fire_one(
             // wedges can cross).
             let fan_half = 0.5 * spread * (projs - 1) as f32 + crate::game::weapon::CHEESE_FAN_SLACK;
             // Lens Cap stretches the wedges' flight, so it stretches the fan.
-            let fan_reach = CHEESE_WEDGE_SPEED * stats.ranged_reach(CHEESE_WEDGE_LIFE);
+            // Growth Serum stretches the fan and its reach with the giant.
+            let fan_reach = CHEESE_WEDGE_SPEED * stats.ranged_reach(CHEESE_WEDGE_LIFE) * reach_scale;
+            // The fan leaves the rat's mouth. The offset is zero at ordinary
+            // size (so the small rat's geometry is unchanged) and grows with
+            // the giant pose, so the spray starts at the giant's snout.
+            let mouth = ppos + spray_dir * crate::game::weapon::GNAW_MOUTH_OFFSET * (pose_scale - 1.0);
             for &entity in order {
                 let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                     continue;
                 };
                 if !e.targetable()
-                    || !cone_hits_circle(ppos, spray_dir, fan_reach, fan_half, e.pos, e.radius)
-                    || !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS)
+                    || !cone_hits_circle(mouth, spray_dir, fan_reach, fan_half, e.pos, e.radius)
+                    || !los_clear(level, mouth, e.pos, MELEE_LOS_RADIUS)
                 {
                     continue;
                 }
@@ -1771,8 +1801,9 @@ fn fire_one(
                     let vel = Vec2::from_angle(angle) * evolutions::TINE_SPEED;
                     commands.spawn((
                         crate::game::ecs::components::FondueTine {
-                            pos: ppos,
-                            prev: ppos,
+                            // The tines leave the same mouth the wedges do.
+                            pos: mouth,
+                            prev: mouth,
                             vel,
                             damage: dmg,
                             reach,
@@ -1789,17 +1820,17 @@ fn fire_one(
                 }
                 let spread = (k as f32 - (projs - 1) as f32 / 2.0) * spread;
                 let v = Vec2::from_angle(base + spread) * CHEESE_WEDGE_SPEED;
-                let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
+                let mut b = Bullet::new(mouth, v, dmg, Faction::Player, color);
                 // Chunky wedges: a wide body on a short flight (`size 2` is
                 // the fat projectile art, the 3 px radius the hit reach).
                 b.size = 2;
                 b.radius = 3.0;
-                // Lens Cap.
-                b.life = stats.ranged_reach(CHEESE_WEDGE_LIFE);
+                // Lens Cap, and the Growth Serum's reach stretch.
+                b.life = stats.ranged_reach(CHEESE_WEDGE_LIFE) * reach_scale;
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
             }
-            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, spray_dir, 0.0);
+            vfx::emit_weapon_fire(particles, &mut rng.0, kind, mouth, spray_dir, 0.0);
             fired = true;
         }
         WeaponKind::SqueakNova => {
@@ -1808,7 +1839,10 @@ fn fire_one(
             // The front is stepped by [`nova_ring`] at the end of
             // `fire_weapons_system` (the cached `EnemyIndex` is live there and
             // the damage lands in the same tick as every other weapon's).
-            let reach = stats.ranged_reach(NOVA_REACH);
+            // Growth Serum: the ring's front starts at its ordinary reach and
+            // is stretched by the giant's own multiplier, so the burst is
+            // still read outside the five-times sprite.
+            let reach = stats.ranged_reach(NOVA_REACH) * reach_scale;
             // Echo Chamber adds the return leg to the ring's life.
             let passes: f32 = if evolved { 2.0 } else { 1.0 };
             let life = passes * NOVA_EXPAND;
@@ -1830,7 +1864,8 @@ fn fire_one(
         }
         WeaponKind::SporeOrbit => {
             // Lens Cap widens the ring, Long Fuse keeps it alive longer.
-            let radius = stats.melee_reach(evolutions::FAIRY_RADIUS);
+            // Growth Serum widens the orbit's radius with the giant.
+            let radius = stats.melee_reach(evolutions::FAIRY_RADIUS) * reach_scale;
             // Carry the ring's current angle forward, then drop the old ring
             // before spawning its replacement so two never stack. One pass:
             // remember the lowest-`SpawnId` orbit angle (legacy `find_map`
@@ -1906,7 +1941,9 @@ fn fire_one(
             // A 160° swipe centred opposite the aim or facing. The same
             // rear direction drives hits, the drawn crescent and its sparks.
             let i = (wlevel.clamp(1, 5) as usize) - 1;
-            let reach = stats.melee_reach(WHIP_REACH[i]);
+            // Growth Serum: the crescent's reach stretches with the giant so
+            // its outer tip stays clear of the stomp disc and the big sprite.
+            let reach = stats.melee_reach(WHIP_REACH[i]) * reach_scale;
             let dir = -cast_dir(ppos, pface, aim);
             let mut hook: Option<(Entity, f32)> = None;
             for &entity in order {
@@ -2073,9 +2110,16 @@ fn fire_one(
                 .unwrap_or(ppos + pface * 50.0),
             }
             .clamp_box(Vec2::splat(4.0), level.arena - Vec2::splat(4.0));
-            let to = target - ppos;
+            // Growth Serum: the lob leaves the giant's mouth, along the throw.
+            // The offset is zero on an ordinary rat, so its geometry is
+            // unchanged.
+            // `normalized` is zero on a degenerate throw, which leaves the
+            // mouth at the rat's centre exactly as before.
+            let throw_dir = (target - ppos).normalized();
+            let mouth = ppos + throw_dir * crate::game::weapon::GNAW_MOUTH_OFFSET * (pose_scale - 1.0);
+            let to = target - mouth;
             let speed = 110.0;
-            let mut b = Bullet::new(ppos, to.normalized() * speed, dmg, Faction::Player, color);
+            let mut b = Bullet::new(mouth, to.normalized() * speed, dmg, Faction::Player, color);
             b.size = 2;
             b.radius = 3.0;
             b.life = to.len() / speed + 0.5;
@@ -2104,7 +2148,7 @@ fn fire_one(
             } else {
                 commands.spawn((b, next_id.take()));
             }
-            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, to, 0.0);
+            vfx::emit_weapon_fire(particles, &mut rng.0, kind, mouth, to, 0.0);
             fired = true;
         }
         // Active weapons are player-triggered: `fire_weapons_system` skips
@@ -2158,8 +2202,11 @@ fn fire_one(
                 enemies,
                 boss_points,
                 ppos,
-                stats.melee_reach(crate::game::weapon::LASH_REACH[i]),
-                stats.splash_radius(crate::game::weapon::LASH_RADIUS[i]),
+                // Growth Serum: the lash's reach and its burst size stretch
+                // with the giant so the stomp disc cannot take the target
+                // before the crack, and the impact star reads at giant size.
+                stats.melee_reach(crate::game::weapon::LASH_REACH[i]) * reach_scale,
+                stats.splash_radius(crate::game::weapon::LASH_RADIUS[i]) * reach_scale,
                 dmg,
                 stats.shove(crate::game::weapon::LASH_SHOVE),
                 crate::game::weapon::LASH_SHARDS[i],
@@ -2192,12 +2239,17 @@ fn fire_one(
         WeaponKind::LavaBreath => {
             super::weapon_lava::fire_lava(
                 commands, next_id, level, input, stats, ppos, pface, wlevel, dmg, cd, evolved,
+                pose_scale,
             );
             fired = true;
         }
         WeaponKind::GlassBead => {
+            // Growth Serum: the beads leave the giant's mouth (zero offset at
+            // ordinary size, so the small rat's geometry is unchanged).
+            let bead_dir = cast_dir(ppos, pface, aim);
+            let mouth = ppos + bead_dir * crate::game::weapon::GNAW_MOUTH_OFFSET * (pose_scale - 1.0);
             super::weapons_wave5::fire_beads(
-                commands, next_id, ppos, cast_dir(ppos, pface, aim), dmg, projs, evolved,
+                commands, next_id, mouth, bead_dir, dmg, projs, evolved,
             );
             fired = true;
         }
@@ -3696,6 +3748,36 @@ mod tests {
         assert_eq!(reach_at(5, WeaponKind::SonicSqueak).0, 130.0);
     }
 
+    /// Growth Serum: the active weapons reach further while giant, so the
+    /// stomp cannot empty the arc or the cone before the swing lands.
+    #[test]
+    fn active_reach_scales_with_the_giant() {
+        use crate::game::ecs::systems::powerups::{GIANT_WEAPON_SCALE, GROWTH_SECS};
+        let reach_at = |kind: WeaponKind, giant: bool| -> f32 {
+            let mut w = World::new(Theme::Sewer, 28);
+            w.clear_enemies();
+            arm_active(&mut w, kind, 0.0);
+            if giant {
+                w.player.buffs.giant = GROWTH_SECS * 0.5;
+            }
+            tick_active(&mut w, true);
+            let fx = w.active_fx();
+            if kind == WeaponKind::TailThrash {
+                fx.thrash_reach
+            } else {
+                fx.squeak_max_r
+            }
+        };
+        for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
+            let small = reach_at(kind, false);
+            let giant = reach_at(kind, true);
+            assert!(
+                (giant - small * GIANT_WEAPON_SCALE).abs() < 1e-3,
+                "{kind:?} reach did not scale with the giant: {small} -> {giant}"
+            );
+        }
+    }
+
     /// **Sonic Squeak reads Lens Cap's ring reach as well as Long Fuse's
     /// radius.** It used to apply only the splash hook, so one of the two
     /// passives silently did nothing for the weapon it was listed against.
@@ -4564,4 +4646,181 @@ mod tests {
         }
     }
 
+    // ---- Growth Serum: the weapons while giant --------------------------
+    //
+    // The giant's stomp disc (`GIANT_STOMP_RADIUS`) crushes ordinary bodies
+    // every quarter second, and the five-times sprite sits over the effects
+    // that spawn on the rat. These tests pin the two halves of the answer:
+    // every weapon still fires while giant, and its reach and its origin grow
+    // with the giant so the stomp cannot pre-empt it.
+
+    /// Put the rat in the **hold** window of the Growth Serum: the eased draw
+    /// scale is at its full `GIANT_SCALE`, so the pose origins sit on the
+    /// giant's face rather than a shrunken first frame.
+    fn make_giant(w: &mut World) {
+        w.player.buffs.giant = crate::game::ecs::systems::powerups::GROWTH_SECS * 0.5;
+        assert!(w.player.weapon_reach_scale() > 1.0, "the reach multiplier stayed 1");
+        assert!(w.player.weapon_pose_scale() > 1.0, "the pose multiplier stayed 1");
+    }
+
+    /// The melee weapons clear the stomp disc while giant: a body just outside
+    /// the stomp's 30 px but inside the scaled reach takes the hit.
+    #[test]
+    fn giant_melee_reaches_past_the_stomp_ring() {
+        use crate::game::ecs::systems::powerups::{GIANT_STOMP_RADIUS, GIANT_WEAPON_SCALE};
+        use crate::game::weapon::{GNAW_BITE_REACH, WHIP_REACH};
+
+        // The tuning promise the const doc makes: scaling clears the stomp.
+        assert!(GIANT_WEAPON_SCALE * GNAW_BITE_REACH[0] > GIANT_STOMP_RADIUS);
+        assert!(GIANT_WEAPON_SCALE * WHIP_REACH[0] > GIANT_STOMP_RADIUS);
+
+        // Gnaw: a body 50 px out is past the ordinary bite and inside the
+        // giant's, and well outside the stomp's 30 px.
+        let mut w = World::new(Theme::Sewer, 7_001);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        make_giant(&mut w);
+        let p = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        let body = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(50.0, 0.0), 400.0);
+        arm(&mut w, WeaponKind::Gnaw);
+        w.player.loadout.weapons[0].level = 5;
+        let base = w.ecs.get::<Enemy>(body).unwrap().hp;
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert!(
+            w.ecs.get::<Enemy>(body).unwrap().hp < base,
+            "the giant's bite missed a body 50 px out"
+        );
+        assert!(
+            w.ecs.query::<&BiteSnap>().iter(&w.ecs).count() == 1,
+            "the giant's bite drew no jaw"
+        );
+
+        // Tail Whip: its crescent is opposite the facing, so the body goes
+        // behind. 50 px out clears the ordinary whip too.
+        let mut w = World::new(Theme::Sewer, 7_002);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        make_giant(&mut w);
+        let p = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        let behind = w.spawn_enemy(EnemyKind::Brute, p - Vec2::new(50.0, 0.0), 400.0);
+        arm(&mut w, WeaponKind::TailWhip);
+        w.player.loadout.weapons[0].level = 5;
+        let base = w.ecs.get::<Enemy>(behind).unwrap().hp;
+        run_weapons(&mut w, 1.0 / 60.0);
+        assert!(
+            w.ecs.get::<Enemy>(behind).unwrap().hp < base,
+            "the giant's whip missed a body 50 px behind"
+        );
+        assert!(
+            w.ecs.query::<&WhipCrack>().iter(&w.ecs).count() == 1,
+            "the giant's whip drew no crescent"
+        );
+    }
+
+    /// The mouth and eye origins follow the giant's pose: the bite's jaw and
+    /// the cheese wedges leave the giant's snout, not its belly.
+    #[test]
+    fn giant_mouth_origins_follow_the_pose() {
+        use crate::game::weapon::GNAW_MOUTH_OFFSET;
+
+        let mut w = World::new(Theme::Sewer, 7_003);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        make_giant(&mut w);
+        let p = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(20.0, 0.0), 400.0);
+        arm(&mut w, WeaponKind::Gnaw);
+        run_weapons(&mut w, 1.0 / 60.0);
+        let mut q = w.ecs.query::<&BiteSnap>();
+        let snap = q.iter(&w.ecs).next().expect("the giant's bite");
+        let pose = w.player.weapon_pose_scale();
+        let want = p + Vec2::new(1.0, 0.0) * GNAW_MOUTH_OFFSET * pose;
+        assert!(
+            (snap.pos - want).len() < 0.5,
+            "the snap anchor did not follow the giant's snout: {:?} vs {:?}",
+            snap.pos,
+            want
+        );
+        assert!((snap.scale - w.player.weapon_reach_scale()).abs() < 1e-4);
+
+        // Cheese Spray's wedges leave the same mouth.
+        let mut w = World::new(Theme::Sewer, 7_004);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        make_giant(&mut w);
+        let p = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        arm(&mut w, WeaponKind::CheeseSpray);
+        run_weapons(&mut w, 1.0 / 60.0);
+        let bullets = w.bullets();
+        let wedge = bullets
+            .iter()
+            .find(|b| b.weapon == Some(WeaponKind::CheeseSpray))
+            .expect("a giant's cheese wedge");
+        assert!(
+            (wedge.pos - p).len() > 1.0,
+            "the wedge spawned on the giant's centre, not its mouth: {:?}",
+            wedge.pos
+        );
+    }
+
+    /// Every weapon still fires while giant. One case per `WeaponKind`; the
+    /// active pair, the two wave-3 weapons and the Plumb Bob are driven by
+    /// their own systems and are covered by their own tests.
+    #[test]
+    fn every_auto_weapon_fires_while_giant() {
+        let mut fired = 0;
+        for kind in [
+            WeaponKind::Gnaw,
+            WeaponKind::CheeseSpray,
+            WeaponKind::SqueakNova,
+            WeaponKind::SporeOrbit,
+            WeaponKind::TailWhip,
+            WeaponKind::AcidSpit,
+            WeaponKind::AcidRain,
+            WeaponKind::Hantavirus,
+            WeaponKind::SpikedTail,
+            WeaponKind::LavaBreath,
+            WeaponKind::GlassBead,
+        ] {
+            let mut w = World::new(Theme::Sewer, 7_100);
+            open_map(&mut w);
+            w.clear_enemies();
+            w.clear_bullets();
+            make_giant(&mut w);
+            let p = w.player.pos;
+            w.player.face = Vec2::new(1.0, 0.0);
+            // A body in front gives the targeting weapons something to aim at
+            // (inside a level-1 Gnaw's reach, so the bite lands).
+            w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(20.0, 0.0), 400.0);
+            arm(&mut w, kind);
+            let before = w.bullets().len();
+            run_weapons(&mut w, 1.0 / 60.0);
+            let fx = w.active_fx();
+            let spawned = w.bullets().len() > before
+                || fx.nova_active()
+                || fx.thrash_active()
+                || w.ecs.query::<&BiteSnap>().iter(&w.ecs).count() > 0
+                || w.ecs.query::<&WhipCrack>().iter(&w.ecs).count() > 0
+                || w.ecs.query::<&crate::game::ecs::components::Lash>().iter(&w.ecs).count() > 0
+                || w.ecs.query::<&crate::game::ecs::components::LavaGlob>().iter(&w.ecs).count() > 0
+                || w.ecs
+                    .query::<&crate::game::ecs::systems::weapons_wave5::GlassBead>()
+                    .iter(&w.ecs)
+                    .count()
+                    > 0
+                || w.ecs.query::<&crate::game::ecs::components::Dropping>().iter(&w.ecs).count() > 0
+                || w.ecs.query::<&crate::game::ecs::components::AcidDrop>().iter(&w.ecs).count() > 0;
+            assert!(spawned, "{kind:?} produced nothing while giant");
+            fired += 1;
+        }
+        assert_eq!(fired, 11);
+    }
 }

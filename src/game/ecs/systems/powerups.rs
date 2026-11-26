@@ -152,6 +152,20 @@ pub const GIANT_MOVE_MULT: f32 = 0.9;
 /// scales every amplitude down by `world::SHAKE_SCALE` already).
 pub const GIANT_STOMP_SHAKE: f32 = 3.5;
 
+/// Growth Serum: how much a **melee, cone, ring or orbit** weapon's reach and
+/// drawn size grow while the rat is giant.
+///
+/// The view pulls back to twice the screen while the serum runs
+/// (`render::zoom::giant_target`), so an effect at its ordinary size is drawn
+/// at half size beside a five-times rat. Doubling it restores the read — and it
+/// is the reason the melee weapons still land at all: the stomp crushes
+/// everything inside [`GIANT_STOMP_RADIUS`] every [`GIANT_STOMP_INTERVAL`], so a
+/// bite or a whip that only reaches the ordinary 30-42 px would find its target
+/// already dead. The origins (mouth, eyes, tail) follow the drawn pose instead
+/// ([`crate::game::player::Player::weapon_pose_scale`]); this is only reach and
+/// size. Damage is untouched.
+pub const GIANT_WEAPON_SCALE: f32 = 2.0;
+
 pub const SHRINK_SECS: f32 = 12.0;
 pub const SHRINK_SCALE: f32 = 0.35;
 pub const SHRINK_RAMP_SECS: f32 = 0.3;
@@ -442,6 +456,11 @@ const _: () = {
     assert!(WINDUP_MOUSE_RADIUS >= 3.0 * 16.0);
     assert!(GIANT_SCALE > 1.0 && GIANT_STOMP_RADIUS > 16.0);
     assert!(GIANT_DAMAGE_TAKEN > 0.0 && GIANT_DAMAGE_TAKEN < 1.0);
+    assert!(GIANT_WEAPON_SCALE > 1.0);
+    // The melee weapons must reach past the stomp disc, or the stomp kills
+    // their target before the swing does.
+    assert!(GIANT_WEAPON_SCALE * crate::game::weapon::WHIP_REACH[0] > GIANT_STOMP_RADIUS);
+    assert!(GIANT_WEAPON_SCALE * crate::game::weapon::GNAW_BITE_REACH[0] > GIANT_STOMP_RADIUS);
 };
 
 /// Does one stomp beat crush this body outright?

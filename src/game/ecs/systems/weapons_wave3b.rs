@@ -396,11 +396,14 @@ pub fn laser_eyes_system(
     } else {
         Vec2::new(0.0, -1.0)
     };
-    let eye = player.pos + face * LASER_EYE_OFFSET;
+    // Growth Serum: the eyes sit on the giant's own face, so the origin follows
+    // the drawn pose (`weapon_pose_scale`); an ordinary rat's is unchanged.
+    let eye_off = LASER_EYE_OFFSET * player.weapon_pose_scale();
+    let eye = player.pos + face * eye_off;
     // Near a wall the decorative eyes can extend past the collision radius.
     // Keep the muzzle on the rat's side of that wall on every tick.
     let origin = match level.tiles.segment_hit(player.pos, eye, LASER_HALF_WIDTH) {
-        Some(t) => player.pos + face * (LASER_EYE_OFFSET * t - 0.01).max(0.0),
+        Some(t) => player.pos + face * (eye_off * t - 0.01).max(0.0),
         None => eye,
     };
 
@@ -1143,6 +1146,40 @@ mod tests {
                 sweep_pair(first.facing.angle(), first.half, first.span(), progress),
             );
         }
+    }
+
+    /// Growth Serum: the beam leaves the giant's own eyes. The origin follows
+    /// the eased draw scale, so the muzzle sits on the five-times head instead
+    /// of the small rat's face.
+    #[test]
+    fn laser_origin_follows_the_giant_eyes() {
+        let mut w = World::new(Theme::Sewer, 12_001);
+        w.clear_enemies();
+        open_map(&mut w);
+        arm(&mut w, WeaponKind::LaserEyes, 1);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.face = Vec2::new(1.0, 0.0);
+        // The hold window: the eased draw scale is at its full 5x.
+        w.player.buffs.giant = crate::game::ecs::systems::powerups::GROWTH_SECS * 0.5;
+        let pose = w.player.weapon_pose_scale();
+        assert!(pose > 1.0, "the giant pose did not scale");
+        let start = w.player.pos;
+        run_laser(&mut w, 1.0 / 60.0);
+        let fx = *w.ecs.resource::<LaserFx>();
+        assert!(
+            (fx.origin - (start + Vec2::new(LASER_EYE_OFFSET * pose, 0.0))).len() < 1e-3,
+            "the beam did not leave the giant's eyes: {:?}",
+            fx.origin
+        );
+    }
+
+    /// Growth Serum: Super Dash already scales its hit radius with the rat's
+    /// drawn size, so it needs no separate giant multiplier. This pins that.
+    #[test]
+    fn super_dash_radius_scales_with_the_giant() {
+        let base = super_dash_radius(12.0, 0.0, 1.0);
+        let giant = super_dash_radius(12.0, 0.0, 5.0);
+        assert!((giant - base * 5.0).abs() < 1e-4, "dash radius did not follow the giant");
     }
 
     /// Every exposed body on the ray takes the pulse once, and the beam pierces

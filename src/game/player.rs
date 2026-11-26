@@ -374,6 +374,35 @@ pub fn xp_to_reach(level: u32) -> u32 {
 }
 
 impl Player {
+    /// The multiplier a weapon's **origin** (mouth, eyes, tail) uses while the
+    /// rat is giant: the eased draw scale, so the muzzle sits on the giant's
+    /// snout and the laser leaves the giant's eyes. An ordinary rat is `1.0`.
+    ///
+    /// Reach and effect size use [`Player::weapon_reach_scale`] instead: the
+    /// origins follow the *picture* (`GIANT_SCALE`), the reach follows the
+    /// *tuning* ([`powerups::GIANT_WEAPON_SCALE`]).
+    #[inline]
+    pub fn weapon_pose_scale(&self) -> f32 {
+        if self.buffs.is_giant() {
+            self.buffs.draw_scale()
+        } else {
+            1.0
+        }
+    }
+
+    /// The multiplier a melee, cone, ring or orbit weapon's reach and size use
+    /// while the rat is giant ([`powerups::GIANT_WEAPON_SCALE`]), `1.0`
+    /// otherwise. Kept apart from [`Player::weapon_pose_scale`] so the drawn
+    /// origins land on the giant's head while the reach stays a tuning number.
+    #[inline]
+    pub fn weapon_reach_scale(&self) -> f32 {
+        if self.buffs.is_giant() {
+            powerups::GIANT_WEAPON_SCALE
+        } else {
+            1.0
+        }
+    }
+
     /// Hold growth at the widest circle supported by the current position.
     /// A rat already straddling a hole or gate can leave with ordinary
     /// clearance. The large class takes over once its minimum body fits.
