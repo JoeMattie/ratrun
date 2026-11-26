@@ -25,8 +25,7 @@ def cost_estimate(output, screen, confirm):
     active_seconds = {}
     for job in pilot["jobs"]:
         receipt = json.loads((pilot_path / f"{job['id']}.receipt").read_bytes())
-        skill = job["skill"]
-        active_seconds[skill] = max(active_seconds.get(skill, 0), receipt["seconds"] / job["runs"])
+        active_seconds[job["skill"]] = receipt["seconds"] / job["runs"]
     planned = [*pilot["jobs"], *screen["jobs"], *confirm["jobs"]]
     return {
         "seconds_per_campaign_by_skill": active_seconds,

@@ -357,7 +357,7 @@ def floor_clears(cohort):
 
 def profile_comparison(lines, cohorts, profiles, baseline="round3"):
     lines += ["## Same-seed controls and Nest ladder", "",
-              "The half-HP experiment, mid Nest, and max Nest use the first 96 seeds of the fresh cohort. "
+              "The half-HP experiment, mid Nest, and max Nest share the starting seeds of the fresh cohort. "
               "Power-off keeps the candidate's other tuning settings. Deaths through 5:00 use the Sewer floor clock."]
     rows = []
     for point, cohort in cohorts.items():

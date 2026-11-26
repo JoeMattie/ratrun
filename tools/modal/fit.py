@@ -15,7 +15,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from threadpoolctl import threadpool_limits
 
 from app import OUTPUT, SKILLS
-from design import KNOBS, overlay
+from design import BOUNDS, KNOBS, overlay
 
 FLOORS = ("Sewer", "Kitchen", "Lab", "Flatbed")
 BOSSES = ("jaguar", "horseshoe crab", "broom human", "subject r-01",
@@ -316,7 +316,7 @@ def validation(model, x, profiles, baseline):
     return results
 
 
-def boundary_tradeoffs(models, values, bounds, candidate_loss, knobs):
+def boundary_tradeoffs(models, values, bounds, candidate_loss):
     """Measure which targets change on moving each near-edge knob inward."""
     edges = {}
     for i, (value, (low, high)) in enumerate(zip(values, bounds, strict=True)):
@@ -329,7 +329,7 @@ def boundary_tradeoffs(models, values, bounds, candidate_loss, knobs):
             continue
         moved = values.copy()
         moved[i] = interior
-        edges[knobs[i].name] = {
+        edges[KNOBS[i].name] = {
             "side": side, "interior": interior,
             "loss_delta": {key: loss[0] - candidate_loss[key]
                            for key, loss in objective(models, moved).items()},
@@ -348,7 +348,7 @@ def clean(value):
     return value
 
 
-def fit(output, anchor, knobs=KNOBS, overlay_builder=overlay):
+def fit(output, anchor):
     screen, data, seconds = load_stage(output, "screen")
     data = {point: data[point] for point in screen["points"]}
     # Fit whole settings on the common cohort. A stall is neither a death nor
@@ -363,7 +363,7 @@ def fit(output, anchor, knobs=KNOBS, overlay_builder=overlay):
     ids = [point for point in screen["points"] if point not in excluded]
     train, test = train_test_split(ids, test_size=.20, random_state=23)
     values = screen["points"]
-    bounds = [(knob.low, knob.high) for knob in knobs]
+    bounds = BOUNDS
     if not np.array_equal(screen["bounds"], bounds):
         raise ValueError("screen manifest has different feel bounds")
 
@@ -391,11 +391,11 @@ def fit(output, anchor, knobs=KNOBS, overlay_builder=overlay):
         }
     candidate, loss = solve(models, bounds)
     target_loss = {key: value[0] for key, value in objective(models, candidate).items()}
-    edges = boundary_tradeoffs(models, candidate, bounds, target_loss, knobs)
+    edges = boundary_tradeoffs(models, candidate, bounds, target_loss)
     prediction = {s: {k: y[0] for k, y in m.predict(candidate).items()}
                   for s, m in zip(SKILLS, models, strict=True)}
     sensitivity = {}
-    for i, knob in enumerate(knobs):
+    for i, knob in enumerate(KNOBS):
         before, after = x(train), x(train)
         low, high = bounds[i]
         step = sensitivity_step(knob)
@@ -413,7 +413,7 @@ def fit(output, anchor, knobs=KNOBS, overlay_builder=overlay):
         "train": train, "holdout": test, "excluded": excluded, "validation": scores, "choices": choices,
         "heldout_wins": heldout_wins,
         "candidate": prediction, "sensitivity": sensitivity, "screen_seconds": seconds,
-        "training_profiles": profiles, "defaults_overlay": overlay_builder(candidate, anchor),
+        "training_profiles": profiles, "defaults_overlay": overlay(candidate, anchor),
     }
     return clean(result)
 
