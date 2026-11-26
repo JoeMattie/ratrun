@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Named minibosses move differently.** Corkscrew signals a lunge, Bobbin
+  circles, and Bell Diver leaves a crack where it will surface. All 24 have
+  two attacks, with their own pace and a Library entry for both.
+
 ## 0.3.0 (2026-11-25)
 
 Not signed or notarised on macOS: right-click the app and choose Open the

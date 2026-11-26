@@ -629,7 +629,7 @@ fn snap_window(
 
     hits.clear();
     for (entity, id, e) in enemies.iter() {
-        if !e.alive() || !is_ground(e.kind) || struck.contains(&entity) {
+        if !e.targetable() || !is_ground(e.kind) || struck.contains(&entity) {
             continue;
         }
         if in_kill_rect(pos, facing, e.pos) {
@@ -965,7 +965,7 @@ pub fn traps_system(
         // query's storage order never decides; the buffer is reused).
         scratch.cands.clear();
         for (entity, id, e) in enemies.iter() {
-            if !e.alive() || !is_ground(e.kind) {
+            if !e.targetable() || !is_ground(e.kind) {
                 continue;
             }
             // Cheap circle reject first (the pad's half-diagonal), then the

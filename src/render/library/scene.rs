@@ -125,7 +125,7 @@ use crate::game::collision::{SizeClass, TileKind, TileMap};
 use crate::game::ecs::resources::{spawn_with_id, DashHold};
 use crate::game::ecs::systems::boss::{Boss, BossArtView, BossHitShape, BossKind, BossState};
 use crate::game::ecs::systems::miniboss::{
-    Miniboss, MinibossKind, MinibossShape, SIGNATURE_GAP, TELL_TIME,
+    Miniboss, MinibossKind, MinibossShape, RECOVER_TIME, TELL_TIME,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Gold, Pickup, PickupKind};
@@ -1846,18 +1846,14 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
     let aim = world.player.pos;
-    // The body starts **at its mark**, a hair outside its own engage range: it
-    // no longer walks in from 34 px (which clipped its top on the first frames
-    // of every loop), and the hair means the loop's first frame is the idle
-    // approach pose before the tell opens on the next tick.
-    let mark = aim + Vec2::new(-(kind.engage_range() + 1.5), -2.0);
+    // Stage the primary attack on its own mark, with room for its footprint.
+    // The preview skips the movement interlude and loops after one recovery.
+    let primary = kind.signatures()[0];
+    let mark = aim + Vec2::new(-kind.engage_range_for(primary).min(40.0), 0.0);
     let e = world.spawn_miniboss(kind, 0, mark);
-    // A named body's whole encounter is tell → strike → recovery, so a loop
-    // exactly that long starts and ends in the same state. There is no walk-in
-    // leg any more; the 2.6 s gap to the *next* tell is cut (a plate that sat
-    // out the whole gap was still for more than a third of its loop).
-    let cycle = TELL_TIME + kind.active_duration() + SIGNATURE_GAP * 0.2;
-    let mut script = Script::new(cycle.clamp(3.4, 6.0), 2.0);
+    world.ecs.get_mut::<Miniboss>(e).expect("staged miniboss").preview = true;
+    let cycle = TELL_TIME + primary.active + RECOVER_TIME;
+    let mut script = Script::new(cycle, 2.0);
     script.framing = Framing::Pair;
     script.dummy = true;
     // The stage fits the body + the tell's own footprint (a cone, a sweep, the

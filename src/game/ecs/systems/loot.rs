@@ -235,6 +235,9 @@ fn reap_dead(
             continue;
         };
         commands.entity(entity).despawn();
+        if e.summoned {
+            continue;
+        }
         // A Wick Moth whose fuse was armed (`Enemy::note_damage`) but not yet
         // turned into a `Wick` — it died after `wave3_system` ran this tick: a
         // Nuke, a wave-4 hit, a flatbed fall — still leaves its burning wick.
@@ -705,6 +708,9 @@ pub fn pickups_system(
                     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                         continue;
                     };
+                    if e.buried {
+                        continue;
+                    }
                     if e.named {
                         // A named miniboss is not one-shot fodder: a Nuke
                         // deals one large fixed chunk of its max HP instead of

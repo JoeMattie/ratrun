@@ -1200,7 +1200,7 @@ pub fn drain_cleaner_system(
                 let Ok((_, _, mut e)) = enemies.get_mut(enemy) else {
                     continue;
                 };
-                if !e.alive() {
+                if !e.targetable() {
                     continue;
                 }
                 if in_stripe(ch.start, ch.dir, open, e.pos, e.radius) {

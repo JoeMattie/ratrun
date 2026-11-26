@@ -64,7 +64,7 @@ impl Pose {
             }
             MinibossState::Tell => Pose::Tell((mb.timer / TELL_TIME.max(0.05)).clamp(0.0, 1.0)),
             MinibossState::Active => {
-                Pose::Strike((mb.timer / mb.kind.active_duration().max(0.05)).clamp(0.0, 1.0))
+                Pose::Strike((mb.timer / mb.active_duration().max(0.05)).clamp(0.0, 1.0))
             }
             MinibossState::Recover => {
                 Pose::Recover((mb.timer / RECOVER_TIME.max(0.05)).clamp(0.0, 1.0))
@@ -7154,7 +7154,7 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
     let active_shape = mb.active_shape();
     let is_active = mb.state == MinibossState::Active;
     let progress = if is_active {
-        (mb.timer / mb.kind.active_duration().max(0.05)).clamp(0.0, 1.0)
+        (mb.timer / mb.active_duration().max(0.05)).clamp(0.0, 1.0)
     } else {
         (mb.timer / TELL_TIME.max(0.05)).clamp(0.0, 1.0)
     };
@@ -7162,7 +7162,7 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
     // A swinging cord's tell shape is the wedge it sweeps (a `Cone`), but it is
     // drawn as a cord: the stitched arc of the row's own sweep, both edges of
     // the sector, and the cord itself waiting on the edge the swing starts from.
-    if let SignatureShape::Cord { len, half, sweep } = mb.kind.signature().shape {
+    if let SignatureShape::Cord { len, half, sweep } = mb.signature().shape {
         let aim = safe_dir(mb.aim, Vec2::new(1.0, 0.0));
         draw_cord_telegraph(
             pb,
@@ -7217,7 +7217,7 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
             // A *closing* ring (the Late Plate) passes over everything inside
             // its rim, so the tell also washes the interior — all of it but
             // the wedge of the break, which is the one way out.
-            if let SignatureShape::Ring { from, to, .. } = mb.kind.signature().shape {
+            if let SignatureShape::Ring { from, to, .. } = mb.signature().shape {
                 if from > to && !is_active {
                     let o = origin - cam;
                     let g = safe_dir(gap_dir, Vec2::new(1.0, 0.0));

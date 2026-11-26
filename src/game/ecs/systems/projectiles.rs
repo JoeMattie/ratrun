@@ -447,7 +447,7 @@ pub fn pools_system(
             let Ok((_, _, mut e)) = enemies.get_mut(enemy) else {
                 continue;
             };
-            if !e.alive() {
+            if !e.targetable() {
                 continue;
             }
             if e.pos.dist(p.pos) <= p.radius + e.radius {

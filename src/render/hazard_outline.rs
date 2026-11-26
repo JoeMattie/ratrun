@@ -356,7 +356,7 @@ pub fn miniboss_footprint(
         }
     };
     // The sweep lives on the signature row, not on the per-instant shape.
-    if let SignatureShape::Cord { len, half, sweep } = mb.kind.signature().shape {
+    if let SignatureShape::Cord { len, half, sweep } = mb.signature().shape {
         let reach = len + half;
         // The cord is `2·half` thick, so its edge leads the centre line by
         // this much at the tip — the same widening `MinibossKind::telegraph`
@@ -775,7 +775,7 @@ mod tests {
         let origin = Vec2::new(80.0, 74.0);
         let mut cords = 0;
         for kind in MinibossKind::all() {
-            let sig = kind.signature();
+            let sig = kind.signatures()[0];
             let SignatureShape::Cord { len, .. } = sig.shape else {
                 continue;
             };

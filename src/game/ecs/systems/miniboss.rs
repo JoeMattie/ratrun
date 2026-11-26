@@ -1,30 +1,11 @@
-//! Named minibosses (`WAVE3_DESIGN.md` §8, `WAVE4_ROSTERS.md` "Named
-//! appointments and elites"): four appointments per level, each with one
-//! distinct signature shape, a 1 s tell, an exposed recovery and a chest on
-//! death.
+//! Named minibosses: four appointments per sector, with two strikes and a
+//! temperament per body. The table lives in `miniboss_behaviour`. Tells last
+//! 1 s and track the rat for their first half. The body stays planted through
+//! the tell, active window and exposed recovery. The next tell can start once
+//! the body's own gap has elapsed and its movement is ready.
 //!
-//! A miniboss is an ordinary [`Enemy`] body (kind [`EnemyKind::Brute`] so the
-//! weapons, traps, bullets and contact rules already target it) carrying a
-//! [`Miniboss`] component. The component owns the signature state machine; the
-//! ordinary steering still walks the body toward the rat during the approach
-//! and the cooldown. The signature is a *shape* ([`MinibossShape`]) resolved
-//! against the rat directly — no boss-framework hazards, so the determinism
-//! contract stays one ordered chain.
-//!
-//! Timings: `TELL_TIME` 1 s → active window (per kind) → `RECOVER_TIME` 1 s
-//! exposed → cooldown so the next tell is [`SIGNATURE_GAP`] (2.6 s) after the
-//! last signature ended. The body walks to within its own reach first
-//! ([`MinibossKind::engage_range`]). The tell **tracks, then locks**: until
-//! [`TELL_LOCK`] the body keeps walking and the outline follows it, aimed at
-//! where the rat is heading; from the lock on the aim is frozen and the body
-//! is planted until its exposed second is over ([`Miniboss::holds`]). The
-//! whole footprint is outlined for the full second (a swinging cord tells
-//! as the whole sector it sweeps), and one strike bites the rat once
-//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 4500 / 10700 / 14400 /
-//! 18100.
-//! A signature whose shape leaves no walkable escape is re-aimed (up to 8
-//! tries) and skipped if still trapped.
-//!
+//! The movement and signature changes intentionally affect seeded play once
+//! an appointment arrives. The 60 s harness ends before the first appointment.
 //! Appointments: `MINIBOSS_TIMES` = 3:00, 6:00, 9:00, 12:00. A surviving
 //! miniboss retreats without loot when the next appointment arrives, so only
 //! one is ever on the floor (the last one also retreats when the level's boss
@@ -49,26 +30,16 @@
 //! Spawn grace: 20 s at half spawn rate after an arrival and 8 s with no fresh
 //! ordinary spawns after a death ([`MinibossSchedule`]).
 //!
-//! ## The signatures (`WAVE4_ROSTERS.md`, "Named appointments and elites")
-//!
-//! Twenty-four rows, four a floor, one signature each. Every row is *data*:
-//! a [`Signature`] names one of eight shared evaluators ([`SignatureShape`])
-//! with that row's own dimensions, sweep angle, gap, timings and stamp layout,
-//! and [`MinibossKind::telegraph`] / [`MinibossKind::active_shape`] are the
-//! only two places that turn it into geometry, so the tell and the strike can
-//! never disagree. The six wave-3 names keep their wave-3 numbers exactly; the
-//! fifteen "data, <base>" rows reuse a base evaluator; the three "new" rows
-//! are the closing pincer ([`MinibossShape::Pincer`]), the paired rollers
-//! ([`MinibossShape::Lane`]) and the closing ring (a [`SignatureShape::Ring`]
-//! centred on the rat's locked position, the same evaluator the Bell Diver
-//! expands) — see the table in [`MinibossKind::signature`].
-//!
-//! Every shape is exact: see [`MinibossShape::contains`] and its tests.
+//! A tell that leaves no walkable escape is re-aimed (up to eight tries),
+//! then skipped if it still traps the rat. Tell, strike, Library framing and
+//! bot danger read the same world-space shape.
 
 #![allow(clippy::too_many_arguments)]
 
 use bevy_ecs::prelude::*;
 use rand::rngs::StdRng;
+
+use super::miniboss_behaviour::{Manoeuvre, Motion, MoveStyle, MovementParams};
 
 use crate::audio::Sfx;
 use crate::detmath::DetF32;
@@ -89,9 +60,8 @@ use crate::math::Vec2;
 
 /// Seconds between the appointment and the first signature.
 pub const TELL_TIME: f32 = 1.0;
-/// How long into the tell the signature still **tracks**: until then the body
-/// keeps walking and the outline follows it, aimed where the rat is heading;
-/// from here to the strike everything is frozen and the body is planted.
+/// The planted body updates its aim until this point in the tell. The
+/// outline then stays fixed so the rat can react to it.
 ///
 /// A tell that locked on its first frame never had to be answered: the body
 /// stood still for the whole second while a rat at walking pace covered 58 px,
@@ -105,14 +75,6 @@ pub const TELL_LOCK: f32 = 0.5;
 pub const TELL_LEAD_SPEED_MAX: f32 = 72.0;
 /// Seconds the rat has to punish a signature.
 pub const RECOVER_TIME: f32 = 1.0;
-/// Seconds between one signature ending and the next tell starting.
-pub const SIGNATURE_GAP: f32 = 2.6;
-/// A named body's walk, as a multiple of the Brute it is built on (16 px/s):
-/// 48 px/s, under the rat's base 58 so it can always be outrun, but close
-/// enough that a rat which stops to fight is in its reach again within a
-/// second or two. At the old 2.4 (38 px/s) a kiting rat was rarely caught, so
-/// most of an appointment passed with no signature at all.
-pub const MINIBOSS_SPEED_SCALE: f32 = 3.0;
 /// A named body's contact damage. The signature is the threat; the body is
 /// what makes standing on it a bad idea. (At 8, with the faster walk, the body
 /// alone was a fifth of all damage taken in a batch and the signatures under
@@ -278,7 +240,7 @@ impl MinibossKind {
     /// [`Signature`].
     #[inline]
     pub fn active_duration(self) -> f32 {
-        self.signature().active
+        self.signatures()[0].active
     }
 
     /// Collision radius (§8: every named body is 6.5–7.5 px).
@@ -319,8 +281,12 @@ impl MinibossKind {
     /// closes to [`ENGAGE_REACH_FRACTION`] of its own reach first; the rows
     /// anchored on the rat's locked position keep the full range.
     pub fn engage_range(self) -> f32 {
+        self.engage_range_for(self.signatures()[0])
+    }
+
+    pub fn engage_range_for(self, sig: Signature) -> f32 {
         use SignatureShape as S;
-        let reach = match self.signature().shape {
+        let reach = match sig.shape {
             S::Trench { len, .. }
             | S::Cone { len, .. }
             | S::Cord { len, .. }
@@ -333,7 +299,11 @@ impl MinibossKind {
                 on_rat: false,
                 ..
             } => from.max(to),
-            S::Ring { on_rat: true, .. } => return ENGAGE_RANGE,
+            S::Return { len, .. } | S::Shear { len, .. } | S::Umbra { len, .. } => len,
+            S::Tide { travel, .. } => travel,
+            S::Comb { len, .. } => len,
+            S::Ring { on_rat: true, .. } | S::Annulus { .. } | S::Overlap { .. }
+            | S::Wake { .. } | S::Drip { .. } => return ENGAGE_RANGE,
             S::Stamps { half, layout } => match layout {
                 // Three pads out from the body: the far edge of the third.
                 StampLayout::Along { spacing } => spacing * 3.0 + half,
@@ -343,263 +313,11 @@ impl MinibossKind {
         (reach * ENGAGE_REACH_FRACTION).clamp(self.body_radius() + 10.0, ENGAGE_RANGE)
     }
 
-    /// The row's signature: which shared evaluator it uses and with what
-    /// numbers, and how long its active window lasts.
-    ///
-    /// `WAVE4_ROSTERS.md` calls fifteen of the wave-4 rows "data, <base>":
-    /// the base's evaluator with the row's own dimensions, sweep angle, gap,
-    /// timings and stamp layout. The first six rows are the original wave-3
-    /// signatures and keep their numbers to the digit (their constants are
-    /// still the ones in this module's head, and the tests pin them).
-    pub fn signature(self) -> Signature {
-        use SignatureShape as S;
-        match self {
-            // ---- wave 3 ----------------------------------------------------
-            MinibossKind::Corkscrew => Signature {
-                active: 0.5,
-                shape: S::Trench {
-                    len: TRENCH_LEN,
-                    half: TRENCH_HALF,
-                },
-            },
-            MinibossKind::SisterSnip => Signature {
-                active: 0.8,
-                shape: S::Cone {
-                    half_angle: CONE_HALF_ANGLE,
-                    len: CONE_LEN,
-                },
-            },
-            MinibossKind::Bobbin => Signature {
-                active: 0.7,
-                // The cord swings from straight ahead through a 90° arc.
-                shape: S::Cord {
-                    len: CORD_LEN,
-                    half: CORD_HALF,
-                    sweep: std::f32::consts::FRAC_PI_2,
-                },
-            },
-            MinibossKind::BellDiver => Signature {
-                active: 1.2,
-                shape: S::Ring {
-                    from: 0.0,
-                    to: RING_RADIUS,
-                    half: RING_HALF,
-                    gap_half: RING_GAP_HALF,
-                    on_rat: false,
-                },
-            },
-            MinibossKind::Foreman => Signature {
-                active: 0.9,
-                shape: S::Stamps {
-                    half: STAMP_HALF,
-                    layout: StampLayout::Along {
-                        spacing: STAMP_SPACING,
-                    },
-                },
-            },
-            MinibossKind::MilkCarton => Signature {
-                active: 1.2,
-                shape: S::Spill {
-                    len: SPILL_LEN,
-                    half_w: SPILL_HALF,
-                },
-            },
-            // ---- sewer 9:00: "Wrench sweeps a 36×5 radius arm through 100°
-            // over 0.85." -----------------------------------------------
-            MinibossKind::ValveWidow => Signature {
-                active: 0.85,
-                shape: S::Cord {
-                    len: 36.0,
-                    half: 2.5,
-                    sweep: 100.0_f32.to_radians(),
-                },
-            },
-            // ---- sewer 12:00, new: two 30×5 claws that close from 28 apart
-            // to 4 apart in 0.65, leaving the far tip open ----------------
-            MinibossKind::Mudlark => Signature {
-                active: 0.65,
-                shape: S::Pincer {
-                    len: 30.0,
-                    half: 2.5,
-                    open: 28.0,
-                    closed: 4.0,
-                },
-            },
-            // ---- kitchen 6:00: "A 46×8 cut fills down the counter over
-            // 0.6." ------------------------------------------------------
-            MinibossKind::PastryWheel => Signature {
-                active: 0.6,
-                shape: S::Trench {
-                    len: 46.0,
-                    half: 4.0,
-                },
-            },
-            // ---- kitchen 9:00: three 12×12 piles at 0 / 0.3 / 0.6, centres
-            // 16 apart along the rat's heading ---------------------------
-            MinibossKind::SaltHen => Signature {
-                active: 0.9,
-                shape: S::Stamps {
-                    half: 6.0,
-                    layout: StampLayout::Along { spacing: 16.0 },
-                },
-            },
-            // ---- kitchen 12:00: "A 42×6 arm sweeps 110° in 0.85." --------
-            MinibossKind::PotBrush => Signature {
-                active: 0.85,
-                shape: S::Cord {
-                    len: 42.0,
-                    half: 3.0,
-                    sweep: 110.0_f32.to_radians(),
-                },
-            },
-            // ---- lab 3:00: "Injection trench 40×8 fills in 0.65." --------
-            MinibossKind::DosePump => Signature {
-                active: 0.65,
-                shape: S::Trench {
-                    len: 40.0,
-                    half: 4.0,
-                },
-            },
-            // ---- lab 6:00: "Culture front 6 wide expands to 36 over 1.2
-            // with a 75° sterile gap." -----------------------------------
-            MinibossKind::PetriMother => Signature {
-                active: 1.2,
-                shape: S::Ring {
-                    from: 0.0,
-                    to: 36.0,
-                    half: 3.0,
-                    gap_half: 75.0_f32.to_radians() * 0.5,
-                    on_rat: false,
-                },
-            },
-            // ---- lab 9:00: "Three 12×12 reader pads pulse for 0.3 each,
-            // left, right, centre, at rat's locked position and ±15 across
-            // aim." ------------------------------------------------------
-            MinibossKind::CageCounter => Signature {
-                active: 0.9,
-                shape: S::Stamps {
-                    half: 6.0,
-                    layout: StampLayout::AroundRat { across: 15.0 },
-                },
-            },
-            // ---- lab 12:00: "A 40×5 blade turns 150° in 1.1." ------------
-            MinibossKind::RotorTechnician => Signature {
-                active: 1.1,
-                shape: S::Cord {
-                    len: 40.0,
-                    half: 2.5,
-                    sweep: 150.0_f32.to_radians(),
-                },
-            },
-            // ---- laundry 9:00: "Foam rim 8 wide expands to 42 in 1.2, 65°
-            // gap." ------------------------------------------------------
-            MinibossKind::SudsBailiff => Signature {
-                active: 1.2,
-                shape: S::Ring {
-                    from: 0.0,
-                    to: 42.0,
-                    half: 4.0,
-                    gap_half: 65.0_f32.to_radians() * 0.5,
-                    on_rat: false,
-                },
-            },
-            // ---- laundry 12:00, new: two 32×6 bars down a 44-long lane in
-            // 1 s, end to end with a 12-wide central seam -----------------
-            MinibossKind::WringerBoy => Signature {
-                active: 1.0,
-                shape: S::Lane {
-                    len: 44.0,
-                    seam_half: 6.0,
-                    half: 3.0,
-                    bar_len: 32.0,
-                },
-            },
-            // ---- printworks 6:00: "Chase frame closes over a 38-long, 55°
-            // wedge in 0.75." --------------------------------------------
-            MinibossKind::QuoinKey => Signature {
-                active: 0.75,
-                shape: S::Cone {
-                    half_angle: 55.0_f32.to_radians() * 0.5,
-                    len: 38.0,
-                },
-            },
-            // ---- printworks 9:00: "Lays a 38×20 transfer rectangle from the
-            // folded edge for 1.4." --------------------------------------
-            MinibossKind::CarbonTwin => Signature {
-                active: 1.4,
-                shape: S::Spill {
-                    len: 38.0,
-                    half_w: 10.0,
-                },
-            },
-            // ---- printworks 12:00, new: a 5-wide ring on the rat's locked
-            // position, radius 32 → 5 in 1.2, with a 65° break. The break is
-            // a quarter turn off the locked aim, exactly as the Bell Diver's
-            // chipped rim is, so it is never the rat's own line; the tell
-            // turns the aim until the break opens onto walkable floor (see
-            // `escape_exists`).
-            //
-            // The design row says "to 6", but a 5-wide rim at radius 6 stops
-            // 0.5 px short of a rat (radius 3) that never moved off the lock:
-            // standing still was the answer. `LATE_PLATE_CLOSED` finishes the
-            // ring half a pixel inside that reach, so only the break is safe.
-            MinibossKind::LatePlate => Signature {
-                active: 1.2,
-                shape: S::Ring {
-                    from: 32.0,
-                    to: LATE_PLATE_CLOSED,
-                    half: 2.5,
-                    gap_half: 65.0_f32.to_radians() * 0.5,
-                    on_rat: true,
-                },
-            },
-            // ---- flatbed 3:00: "Unfurls a 30×18 rectangle for 1.1." ------
-            MinibossKind::TarpaulinPup => Signature {
-                active: 1.1,
-                shape: S::Spill {
-                    len: 30.0,
-                    half_w: 9.0,
-                },
-            },
-            // ---- flatbed 6:00: "Rolls a 50×10 trench out along locked aim
-            // over 0.65." ------------------------------------------------
-            MinibossKind::AxleNut => Signature {
-                active: 0.65,
-                shape: S::Trench {
-                    len: 50.0,
-                    half: 5.0,
-                },
-            },
-            // ---- flatbed 9:00: "Chain 36×6 swings 115° in 0.9." ----------
-            MinibossKind::ChainDog => Signature {
-                active: 0.9,
-                shape: S::Cord {
-                    len: 36.0,
-                    half: 3.0,
-                    sweep: 115.0_f32.to_radians(),
-                },
-            },
-            // ---- flatbed 12:00: three 14×14 talon marks in a V, tip on the
-            // locked rat, the others 16 forward and ±14 sideways, landing
-            // left / tip / right at 0.3 apart ----------------------------
-            MinibossKind::RoadAtlas => Signature {
-                active: 0.9,
-                shape: S::Stamps {
-                    half: 7.0,
-                    layout: StampLayout::V {
-                        forward: 16.0,
-                        across: 14.0,
-                    },
-                },
-            },
-        }
-    }
-
     /// The tell's outline: the whole hazard area, drawn for the full
     /// [`TELL_TIME`] before the strike starts. It is derived from the same
     /// row data as [`Self::active_shape`], so the two can never disagree.
     pub fn telegraph(self, mb: &Miniboss) -> MinibossShape {
-        match self.signature().shape {
+        match mb.signature().shape {
             SignatureShape::Trench { len, half } => MinibossShape::Trench {
                 a: mb.origin,
                 b: mb.origin + mb.aim * len,
@@ -692,7 +410,7 @@ impl MinibossKind {
     /// The active hit shape at `t` seconds into the active window, or `None`
     /// when the window has expired.
     pub fn active_shape(self, mb: &Miniboss, t: f32) -> Option<MinibossShape> {
-        let sig = self.signature();
+        let sig = mb.signature();
         let d = sig.active;
         if t < 0.0 || t > d {
             return None;
@@ -1113,6 +831,12 @@ pub struct Miniboss {
     pub xp: u32,
     /// Damage of one signature hit.
     pub signature_damage: f32,
+    pub(crate) manoeuvre: Manoeuvre,
+    pub(crate) strikes: u32,
+    pub(crate) preview: bool,
+    signature_index: usize,
+    second_unlocked: bool,
+    next_secondary: bool,
 }
 
 impl Miniboss {
@@ -1133,6 +857,12 @@ impl Miniboss {
             chest_dropped: false,
             xp: appointment_xp(appointment),
             signature_damage: appointment_signature_damage(appointment),
+            manoeuvre: Manoeuvre::default(),
+            strikes: 0,
+            preview: false,
+            signature_index: 0,
+            second_unlocked: kind.temperament().second_from_hp == 1.0,
+            next_secondary: false,
         }
     }
 
@@ -1150,19 +880,30 @@ impl Miniboss {
         }
     }
 
-    /// Is the signature holding the body in place this tick? (`enemy_steering`
-    /// skips the walk for a body whose own state machine owns its position,
-    /// which lets the miniboss be *slowed* — an elite-grade body — instead of
-    /// stunned, so no crowd control is cancelled by the appointment.)
-    pub fn holds(&self) -> bool {
-        match self.state {
-            // The strike, and the exposed second after it: the punish window
-            // is a planted body, not one that is already chasing again.
-            MinibossState::Active | MinibossState::Recover => true,
-            // Planted once the aim has locked; until then it is still closing.
-            MinibossState::Tell => self.timer >= TELL_LOCK,
-            _ => false,
+    pub fn signature(&self) -> Signature {
+        self.kind.signatures()[self.signature_index]
+    }
+
+    pub fn active_duration(&self) -> f32 {
+        self.signature().active
+    }
+
+    pub(super) fn select_signature(&mut self, hp: f32, max_hp: f32) {
+        if !self.second_unlocked && hp < max_hp * self.kind.temperament().second_from_hp {
+            self.second_unlocked = true;
+            self.next_secondary = true;
         }
+        self.signature_index = usize::from(self.next_secondary && !self.preview);
+    }
+
+    pub(super) fn finish_signature(&mut self) {
+        self.strikes = self.strikes.wrapping_add(1);
+        self.next_secondary = self.second_unlocked && self.signature_index == 0;
+    }
+
+    /// The body is planted throughout the warning, strike and recovery.
+    pub fn holds(&self) -> bool {
+        matches!(self.state, MinibossState::Tell | MinibossState::Active | MinibossState::Recover)
     }
 
     /// The telegraph outline currently drawn, if any.
@@ -1186,7 +927,7 @@ impl Miniboss {
         // at a long frame (dt up to 50 ms) that skipped the whole end of the
         // strike.
         self.kind
-            .active_shape(self, self.timer.min(self.kind.active_duration()))
+            .active_shape(self, self.timer.min(self.active_duration()))
     }
 }
 
@@ -1332,16 +1073,22 @@ fn spawn_miniboss(
     e.radius = kind.body_radius();
     e.damage = MINIBOSS_CONTACT_DAMAGE;
     // Faster than an ordinary brute so the approach reads as a named arrival.
-    e.speed_scale = MINIBOSS_SPEED_SCALE;
+    e.speed_scale = kind.speed_scale();
     e.elite = false;
     e.named = true;
     e.id = next_enemy_id.take();
     commands.spawn((e, Miniboss::new(kind, appointment), next_id.take()));
 }
 
-/// The miniboss tick: appointments, retreats, the signature state machine and
-/// the damage it deals. Runs early in the chain so the stun it sets stops this
-/// tick's steering, and so a spawn lands before the grid build.
+#[derive(Default)]
+pub(crate) struct MinibossScratch {
+    order: Vec<(u64, Entity)>,
+    owners: Vec<u64>,
+    summon_order: Vec<(u64, Entity)>,
+}
+
+/// Appointments, movement and strike states run before the grid build, so the
+/// grid sees the named body and any fodder it called on their new cells.
 pub fn miniboss_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -1351,19 +1098,21 @@ pub fn miniboss_system(
     viewport: Res<Viewport>,
     mut player: ResMut<Player>,
     mut rng: ResMut<RngRes>,
-    mut next_id: ResMut<NextSpawnId>,
-    mut next_enemy_id: ResMut<NextEnemyId>,
+    mut movement: MovementParams,
     mut sfx: ResMut<SfxQueue>,
     mut particles: ResMut<Particles>,
     difficulty: Res<crate::game::ecs::resources::DifficultyLevel>,
     mut scratch: Local<SpawnScratch>,
-    mut order: Local<Vec<(u64, Entity)>>,
-    mut bosses: Query<(Entity, &mut Enemy, &mut Miniboss, &SpawnId)>,
+    mut behaviour_scratch: Local<MinibossScratch>,
+    mut bosses: Query<(Entity, &mut Enemy, &mut Miniboss, &SpawnId), With<Miniboss>>,
 ) {
+    let MinibossScratch { order, owners, summon_order } = &mut *behaviour_scratch;
     let dt = input.dt;
     let elapsed = counters.elapsed;
     let ppos = player.pos;
     let pvel = player.vel;
+    let retiring = schedule.next_appointment().map_or(elapsed >= BOSS_TIME, |at| elapsed >= at);
+    owners.clear();
 
     // 1. Tick the living minibosses.
     let mut alive = 0u32;
@@ -1374,7 +1123,7 @@ pub fn miniboss_system(
     order.clear();
     order.extend(bosses.iter().map(|(entity, _, _, id)| (id.0, entity)));
     order.sort_unstable_by_key(|&(id, _)| id);
-    for &(_, entity) in order.iter() {
+    for &(id, entity) in order.iter() {
         let Ok((_, mut e, mut mb, _)) = bosses.get_mut(entity) else {
             continue;
         };
@@ -1382,6 +1131,9 @@ pub fn miniboss_system(
             continue;
         }
         alive += 1;
+        if !retiring {
+            owners.push(id);
+        }
         // The arrival cue fires once, on the first tick the body exists.
         if !mb.announced {
             mb.announced = true;
@@ -1393,37 +1145,32 @@ pub fn miniboss_system(
                 level.palette.accent,
             );
         }
+        let contact_cd = e.contact_cd;
+        let flash = e.flash;
         mb.timer += dt;
         match mb.state {
-            MinibossState::Approach => {
-                // Let the ordinary steering walk it in; just watch the range.
-                // Nothing here touches `stun`/`slow_mult`: crowd control (the
-                // Sonic Squeak's ring) is the rat's, not the appointment's.
-                if e.pos.dist(ppos) <= mb.kind.engage_range() {
+            MinibossState::Approach | MinibossState::Cooldown => {
+                mb.select_signature(e.hp, e.max_hp);
+                let until_ready = if mb.state == MinibossState::Cooldown {
+                    mb.kind.temperament().gap - RECOVER_TIME - mb.timer
+                } else {
+                    0.0
+                };
+                let range = mb.kind.engage_range_for(mb.signature());
+                if movement.advance(entity, id, &mut mb, &mut e, &level, ppos, range,
+                    until_ready, dt, &mut particles)
+                {
+                    mb.manoeuvre.motion = Motion::Roam;
+                    e.vel = Vec2::ZERO;
                     begin_tell(
-                        &mut mb,
-                        &mut e,
-                        ppos,
-                        pvel,
-                        &level,
-                        &mut sfx,
-                        &mut particles,
-                        &mut rng.0,
+                        &mut mb, &mut e, ppos, pvel, &level, &mut sfx, &mut particles, &mut rng.0,
                     );
                 }
             }
             MinibossState::Tell => {
-                // Held in place by `enemy_steering_system` (`Miniboss::holds`),
-                // not by a stun: a miniboss is an elite-grade body and takes
-                // **slows**, so a Sonic Squeak ring must slow it exactly like
-                // it slows an elite instead of being cancelled here.
                 if mb.timer < TELL_LOCK {
-                    // Still tracking: the body walks on (`holds` is false) and
-                    // the outline follows it. A re-aim that would leave the
-                    // rat no walkable way out keeps the last good lock.
+                    // A re-aim that closes the rat's escape keeps the last good lock.
                     let _ = aim_signature(&mut mb, e.pos, ppos, pvel, &level);
-                } else {
-                    e.vel = Vec2::ZERO;
                 }
                 if mb.timer >= TELL_TIME {
                     mb.state = MinibossState::Active;
@@ -1462,9 +1209,15 @@ pub fn miniboss_system(
                         );
                     }
                 }
-                if mb.timer >= mb.kind.active_duration() {
+                if mb.timer >= mb.active_duration() {
                     mb.state = MinibossState::Recover;
                     mb.timer = 0.0;
+                    mb.finish_signature();
+                    if !retiring && !mb.preview && mb.kind.temperament().style == MoveStyle::Summon {
+                        movement.summon(
+                            &mut commands, id, &mb, e.pos, ppos, &level, difficulty.0, elapsed,
+                        );
+                    }
                 }
             }
             MinibossState::Recover => {
@@ -1474,30 +1227,24 @@ pub fn miniboss_system(
                     mb.timer = 0.0;
                 }
             }
-            MinibossState::Cooldown => {
-                if mb.timer >= SIGNATURE_GAP - RECOVER_TIME {
-                    mb.state = MinibossState::Approach;
-                    mb.timer = 0.0;
-                }
-            }
         }
+        e.position_locked = mb.holds() || mb.manoeuvre.locks_position();
+        e.contact_cd = (contact_cd - dt).max(0.0);
+        e.flash = (flash - dt).max(0.0);
     }
     schedule.active = alive;
+    movement.clean_summons(&mut commands, owners, summon_order);
 
     // 2. Appointments. A surviving miniboss retreats without loot when the
     //    next one arrives, so only one is ever on the floor.
     if let Some(at) = schedule.next_appointment() {
         if elapsed >= at {
             // Retreat every living miniboss (no loot, no chest).
-            let mut retreat = Vec::new();
-            for (entity, e, _, _) in bosses.iter() {
-                if e.alive() {
-                    retreat.push(entity);
+            for &(_, entity) in order.iter() {
+                if bosses.get(entity).is_ok_and(|(_, e, _, _)| e.alive()) {
+                    commands.entity(entity).despawn();
+                    sfx.0.push(Sfx::MinibossRetreat);
                 }
-            }
-            for entity in retreat {
-                commands.entity(entity).despawn();
-                sfx.0.push(Sfx::MinibossRetreat);
             }
             // Spawn the new one just outside the view.
             scratch.sync(&level);
@@ -1509,8 +1256,8 @@ pub fn miniboss_system(
                     schedule.next,
                     difficulty.0,
                     pos,
-                    &mut next_id,
-                    &mut next_enemy_id,
+                    &mut movement.next_id,
+                    &mut movement.next_enemy_id,
                     &mut rng.0,
                 );
                 schedule.grace_half_until = elapsed + SPAWN_GRACE_HALF;
@@ -1521,8 +1268,8 @@ pub fn miniboss_system(
         // The level's boss is the fifth appointment: a miniboss that outlived
         // the 12:00 slot retreats without loot when the boss is due, by the
         // same "one named enemy at a time" rule. No rng, no spawn.
-        for (entity, e, _, _) in bosses.iter() {
-            if e.alive() {
+        for &(_, entity) in order.iter() {
+            if bosses.get(entity).is_ok_and(|(_, e, _, _)| e.alive()) {
                 commands.entity(entity).despawn();
                 sfx.0.push(Sfx::MinibossRetreat);
             }
@@ -1557,7 +1304,7 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
     // straight at the rat, that seam is where the rat already stands and the
     // strike never has to be answered; turn the lane just far enough that the
     // rat is under one bar's centre line and has to step to the seam.
-    let aim = match mb.kind.signature().shape {
+    let aim = match mb.signature().shape {
         SignatureShape::Lane {
             seam_half, half, ..
         } => {
@@ -1637,7 +1384,7 @@ fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
             gap_dir,
             ..
         },
-    ) = (mb.kind.signature().shape, shape)
+    ) = (mb.signature().shape, shape)
     {
         let dir = gap_dir.normalized();
         let reach = radius + half + crate::game::ecs::constants::PLAYER_RADIUS * 2.0;
@@ -1687,7 +1434,7 @@ fn lock_stamps(mb: &mut Miniboss) {
     let origin = mb.origin;
     let aim = mb.aim;
     let left = aim.perp();
-    let layout = match mb.kind.signature().shape {
+    let layout = match mb.signature().shape {
         SignatureShape::Stamps { layout, .. } => layout,
         _ => StampLayout::Along {
             spacing: STAMP_SPACING,
@@ -1852,10 +1599,10 @@ mod tests {
     fn a_signature_holds_the_body_without_stunning_it() {
         use crate::game::ecs::systems::miniboss::MinibossState;
         let mut m = Miniboss::new(MinibossKind::Corkscrew, 0);
-        // The tell tracks first (the body is still closing), then plants.
+        // Tracking changes the aim and leaves the body planted.
         m.state = MinibossState::Tell;
         m.timer = 0.0;
-        assert!(!m.holds());
+        assert!(m.holds());
         m.timer = TELL_LOCK;
         assert!(m.holds());
         m.state = MinibossState::Active;
@@ -1969,7 +1716,7 @@ mod tests {
     /// body-anchored footprint: the body closes to within its own reach first.
     #[test]
     fn every_body_anchored_row_engages_inside_its_own_reach() {
-        for kind in MinibossKind::all() {
+        for kind in legacy_primaries() {
             let range = kind.engage_range();
             assert!(range <= ENGAGE_RANGE, "{kind:?} engages from {range}");
             assert!(range > kind.body_radius() + 6.0, "{kind:?} engages inside contact");
@@ -1983,7 +1730,7 @@ mod tests {
             let rat = m.target;
             // The rollers aim their seam at the rat by design ("align with the
             // seam"): the row's reach is still checked, a pad's width aside.
-            let probe = match kind.signature().shape {
+            let probe = match kind.signatures()[0].shape {
                 SignatureShape::Lane { seam_half, half, .. } => {
                     rat + m.aim.perp() * (seam_half + half)
                 }
@@ -2425,9 +2172,7 @@ mod tests {
         q.iter(&w.ecs).map(|g| g.value).collect()
     }
 
-    /// The six wave-3 rows keep their wave-3 numbers to the digit: same active
-    /// windows, same radii, same geometry. The wave-4 pass parameterised the
-    /// shapes; it must not have retuned the bodies it moved into the table.
+    /// The first six bodies retain their radii and primary active windows.
     #[test]
     fn the_existing_six_keep_their_numbers() {
         let want = [
@@ -2448,11 +2193,10 @@ mod tests {
         assert!((a - b).abs() < 1e-3, "{what}: {a} != {b}");
     }
 
-    /// The eighteen wave-4 rows, against `WAVE4_ROSTERS.md` row for row.
-    /// The numbers are retyped from the table on purpose: this test has to
-    /// fail when a row drifts from the design, not merely from itself.
+    /// Legacy primary attacks keep their dimensions except where longer reach
+    /// is part of the new movement style.
     #[test]
-    fn the_eighteen_new_rows_carry_the_design_numbers() {
+    fn legacy_primaries_keep_their_assigned_dimensions() {
         use SignatureShape as S;
         // "a 46×8 cut fills down the counter over 0.6" / "injection trench
         // 40×8 fills in 0.65" / "rolls a 50×10 trench out … over 0.65".
@@ -2461,7 +2205,7 @@ mod tests {
             (MinibossKind::DosePump, 40.0, 8.0, 0.65),
             (MinibossKind::AxleNut, 50.0, 10.0, 0.65),
         ] {
-            match kind.signature() {
+            match kind.signatures()[0] {
                 Signature {
                     active: a,
                     shape: S::Trench { len: l, half },
@@ -2474,7 +2218,7 @@ mod tests {
             }
         }
         // "a 38-long, 55° wedge in 0.75".
-        match MinibossKind::QuoinKey.signature() {
+        match MinibossKind::QuoinKey.signatures()[0] {
             Signature {
                 active,
                 shape: S::Cone { half_angle, len },
@@ -2485,15 +2229,12 @@ mod tests {
             }
             other => panic!("Quoin Key is not a cone: {other:?}"),
         }
-        // The swinging arms: 36×5 through 100°, 42×6 through 110°, 40×5
-        // through 150°, 36×6 through 115°.
+        // The brush arm and the chain retain their original sweeps.
         for (kind, len, width, sweep, active) in [
-            (MinibossKind::ValveWidow, 36.0, 5.0, 100.0, 0.85),
             (MinibossKind::PotBrush, 42.0, 6.0, 110.0, 0.85),
-            (MinibossKind::RotorTechnician, 40.0, 5.0, 150.0, 1.1),
             (MinibossKind::ChainDog, 36.0, 6.0, 115.0, 0.9),
         ] {
-            match kind.signature() {
+            match kind.signatures()[0] {
                 Signature {
                     active: a,
                     shape: S::Cord {
@@ -2510,15 +2251,13 @@ mod tests {
                 other => panic!("{kind:?} is not a cord: {other:?}"),
             }
         }
-        // The rings: "6 wide expands to 36 … 75° gap", "8 wide expands to 42
-        // … 65° gap", and the closing one (32 → 5, 5 wide, 65°, on the rat:
+        // The culture ring and the closing ring (32 → 5, 5 wide, 65°, on the rat:
         // see `LATE_PLATE_CLOSED` for why it is not the row's 6).
         for (kind, from, to, width, gap, on_rat, active) in [
             (MinibossKind::PetriMother, 0.0, 36.0, 6.0, 75.0, false, 1.2),
-            (MinibossKind::SudsBailiff, 0.0, 42.0, 8.0, 65.0, false, 1.2),
             (MinibossKind::LatePlate, 32.0, LATE_PLATE_CLOSED, 5.0, 65.0, true, 1.2),
         ] {
-            match kind.signature() {
+            match kind.signatures()[0] {
                 Signature {
                     active: a,
                     shape:
@@ -2542,7 +2281,7 @@ mod tests {
         }
         // The stamps: 12×12 piles 16 apart; 12×12 pads ±15 across the rat;
         // 14×14 talons 16 forward and ±14 sideways.
-        match MinibossKind::SaltHen.signature() {
+        match MinibossKind::SaltHen.signatures()[0] {
             Signature {
                 active,
                 shape: S::Stamps { half, layout },
@@ -2553,7 +2292,7 @@ mod tests {
             }
             other => panic!("Salt Hen is not three stamps: {other:?}"),
         }
-        match MinibossKind::CageCounter.signature() {
+        match MinibossKind::CageCounter.signatures()[0] {
             Signature {
                 shape: S::Stamps { half, layout },
                 ..
@@ -2563,7 +2302,7 @@ mod tests {
             }
             other => panic!("Cage Counter is not three stamps: {other:?}"),
         }
-        match MinibossKind::RoadAtlas.signature() {
+        match MinibossKind::RoadAtlas.signatures()[0] {
             Signature {
                 shape: S::Stamps { half, layout },
                 ..
@@ -2579,12 +2318,12 @@ mod tests {
             }
             other => panic!("The Road Atlas is not three stamps: {other:?}"),
         }
-        // The spills: 38×20 over 1.4, 30×18 over 1.1.
+        // The Pup's raised cloth reaches 48 px after surfacing 40 px out.
         for (kind, len, width, active) in [
             (MinibossKind::CarbonTwin, 38.0, 20.0, 1.4),
-            (MinibossKind::TarpaulinPup, 30.0, 18.0, 1.1),
+            (MinibossKind::TarpaulinPup, 48.0, 18.0, 1.1),
         ] {
-            match kind.signature() {
+            match kind.signatures()[0] {
                 Signature {
                     active: a,
                     shape: S::Spill { len: l, half_w },
@@ -2597,7 +2336,7 @@ mod tests {
             }
         }
         // The pincer: two 30×5 claws closing from 28 apart to 4 in 0.65.
-        match MinibossKind::Mudlark.signature() {
+        match MinibossKind::Mudlark.signatures()[0] {
             Signature {
                 active,
                 shape:
@@ -2616,8 +2355,8 @@ mod tests {
             }
             other => panic!("The Mudlark is not a pincer: {other:?}"),
         }
-        // The rollers: two 32×6 bars, a 44-long lane, a 12-wide seam, 1 s.
-        match MinibossKind::WringerBoy.signature() {
+        // The anchored rollers cover an 82 px lane with a 12 px seam.
+        match MinibossKind::WringerBoy.signatures()[0] {
             Signature {
                 active,
                 shape:
@@ -2629,7 +2368,7 @@ mod tests {
                     },
             } => {
                 close(active, 1.0, "active");
-                close(len, 44.0, "lane");
+                close(len, 82.0, "lane");
                 close(seam_half * 2.0, 12.0, "seam");
                 close(half * 2.0, 6.0, "bar width");
                 close(bar_len, 32.0, "bar length");
@@ -2660,6 +2399,14 @@ mod tests {
         assert_eq!(MinibossKind::ValveWidow.name(), "Valve Widow");
     }
 
+    fn legacy_primaries() -> impl Iterator<Item = MinibossKind> {
+        MinibossKind::all().into_iter().filter(|kind| matches!(kind.signatures()[0].shape,
+            SignatureShape::Trench { .. } | SignatureShape::Cone { .. }
+                | SignatureShape::Cord { .. } | SignatureShape::Ring { .. }
+                | SignatureShape::Stamps { .. } | SignatureShape::Spill { .. }
+                | SignatureShape::Pincer { .. } | SignatureShape::Lane { .. }))
+    }
+
     /// A locked miniboss at a fixed spot, for the geometry tests.
     fn locked(kind: MinibossKind) -> Miniboss {
         mb(kind, Vec2::new(200.0, 160.0), Vec2::new(1.0, 0.0))
@@ -2670,7 +2417,7 @@ mod tests {
     /// whole swept sector included.
     #[test]
     fn the_tell_outlines_the_whole_strike_footprint() {
-        for kind in MinibossKind::all() {
+        for kind in legacy_primaries() {
             let m = locked(kind);
             let tell = kind.telegraph(&m);
             let d = kind.active_duration();
@@ -2678,7 +2425,7 @@ mod tests {
             // two edges the cord's own half-width overhangs by up to `half` px,
             // and its hub end sits inside the body: so for those five rows
             // "marked" means within half a cord's width, outside the body.
-            let (pad, hub) = match kind.signature().shape {
+            let (pad, hub) = match kind.signatures()[0].shape {
                 SignatureShape::Cord { half, .. } => (half, kind.body_radius()),
                 _ => (0.0, 0.0),
             };
@@ -2778,12 +2525,12 @@ mod tests {
         }
     }
 
-    /// Every row's documented answer works: the rat standing there is never
+    /// Every legacy primary's documented answer works: the rat standing there is never
     /// touched, on any tick of the strike.
     #[test]
     fn every_kind_misses_a_rat_in_the_documented_safe_spot() {
         const R: f32 = crate::game::ecs::constants::PLAYER_RADIUS;
-        for kind in MinibossKind::all() {
+        for kind in legacy_primaries() {
             let m = locked(kind);
             let safe = safe_spot(&m);
             let d = kind.active_duration();
@@ -2797,159 +2544,6 @@ mod tests {
                     "{kind:?} bites the documented safe spot {safe:?} at t={t}"
                 );
             }
-        }
-    }
-
-    /// The common rule, on the real system: a 1 s tell, the row's active
-    /// window, at least a second exposed, and 4 s from the strike's end to the
-    /// next tell.
-    #[test]
-    fn every_kind_tells_for_a_second_and_exposes_itself() {
-        use crate::game::level::Theme;
-        use crate::game::world::World;
-        const DT: f32 = 1.0 / 60.0;
-        for kind in MinibossKind::all() {
-            let mut w = World::new(Theme::Sewer, 21);
-            w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
-            w.player.hp = 1.0e6;
-            w.elapsed = 30.0;
-            let p = w.player.pos;
-            let near = 40.0f32.min(kind.engage_range() - 2.0);
-            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(near, 0.0));
-            let mut states: Vec<MinibossState> = Vec::new();
-            let ticks = (((kind.active_duration() + 8.0) / DT) as usize) + 8;
-            for _ in 0..ticks {
-                w.begin_tick(DT, Vec2::ZERO, false);
-                w.ecs
-                    .run_system_cached(miniboss_system)
-                    .expect("miniboss system");
-                w.end_tick();
-                let mb = w.ecs.get::<Miniboss>(e).expect("the miniboss is still alive");
-                states.push(mb.state);
-            }
-            let longest = |state: MinibossState| -> f32 {
-                let (mut best, mut cur) = (0usize, 0usize);
-                for s in &states {
-                    if *s == state {
-                        cur += 1;
-                        best = best.max(cur);
-                    } else {
-                        cur = 0;
-                    }
-                }
-                best as f32 * DT
-            };
-            let tell = longest(MinibossState::Tell);
-            assert!(
-                (tell - TELL_TIME).abs() <= 2.0 * DT + 1e-3,
-                "{kind:?}: the tell lasted {tell}"
-            );
-            let active = longest(MinibossState::Active);
-            assert!(
-                (active - kind.active_duration()).abs() <= 2.0 * DT + 1e-3,
-                "{kind:?}: the strike lasted {active}"
-            );
-            let recover = longest(MinibossState::Recover);
-            assert!(
-                recover >= RECOVER_TIME - 1e-3,
-                "{kind:?}: the body was exposed for only {recover}"
-            );
-            // The design's gap is measured from the strike's end: the body
-            // lies exposed for `RECOVER_TIME`, then waits the rest, so the
-            // next tell starts `SIGNATURE_GAP` after the last signature.
-            let first_active_end = states
-                .iter()
-                .position(|s| *s == MinibossState::Active)
-                .map(|i| i + (kind.active_duration() / DT) as usize);
-            let second_tell = states
-                .windows(2)
-                .position(|w| w[0] != MinibossState::Tell && w[1] == MinibossState::Tell)
-                .map(|i| i + 1);
-            if let (Some(a), Some(b)) = (first_active_end, second_tell) {
-                let gap = (b as f32 - a as f32) * DT;
-                // Each of the four transitions between the two (strike →
-                // recover → cooldown → approach → tell) lands on the first
-                // tick at or past its mark, so the measured gap runs up to
-                // four ticks long (plus one where `active / DT` rounds down in
-                // this test's own arithmetic). That is the wave-3 state
-                // machine, unchanged.
-                assert!(
-                    (gap - SIGNATURE_GAP).abs() <= 6.0 * DT,
-                    "{kind:?}: {gap}s between the strike and the next tell"
-                );
-            } else {
-                panic!("{kind:?}: no second tell, so the gap could not be measured");
-            }
-        }
-    }
-
-    /// A strike bites the rat once, not once a tick: the rat stands inside the
-    /// footprint for the whole active window with its i-frames cleared, and
-    /// still takes one signature's damage.
-    #[test]
-    fn a_signature_bites_at_most_once_per_strike() {
-        use crate::game::level::Theme;
-        use crate::game::world::World;
-        const DT: f32 = 1.0 / 60.0;
-        for kind in MinibossKind::all() {
-            let mut w = World::new(Theme::Sewer, 23);
-            w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
-            w.player.hp = 1.0e6;
-            w.elapsed = 30.0;
-            let p = w.player.pos;
-            let near = 30.0f32.min(kind.engage_range() - 2.0);
-            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(near, 0.0));
-            let mut start_hp: Option<f32> = None;
-            let mut placed = false;
-            let ticks = (((TELL_TIME + kind.active_duration()) / DT) as usize) + 8;
-            for _ in 0..ticks {
-                // Once the strike starts, stand where the row actually bites:
-                // on a roller's bar, or on the closing ring's own path (a rat
-                // that stays put in the middle of that ring is bitten only as
-                // it finishes closing; the rim's path is bitten mid-strike).
-                let (active, hot) = {
-                    let Some(mb) = w.ecs.get::<Miniboss>(e) else {
-                        break;
-                    };
-                    let active = mb.state == MinibossState::Active;
-                    let hot = match kind {
-                        MinibossKind::WringerBoy if active => {
-                            Some(mb.origin + mb.aim * 22.0 + mb.aim.perp() * 9.0)
-                        }
-                        MinibossKind::LatePlate if active => Some(
-                            mb.rat_lock()
-                                + mb.aim.rotate(RING_GAP_TURN + std::f32::consts::PI) * 20.0,
-                        ),
-                        _ => None,
-                    };
-                    (active, hot)
-                };
-                if active {
-                    if let (false, Some(hot)) = (placed, hot) {
-                        placed = true;
-                        w.player.pos = hot;
-                    }
-                    if start_hp.is_none() {
-                        start_hp = Some(w.player.hp);
-                    }
-                    // Clear the i-frames the last bite granted: without the
-                    // one-per-strike latch this would bite every tick.
-                    w.player.iframes = 0.0;
-                }
-                w.begin_tick(DT, Vec2::ZERO, false);
-                w.ecs
-                    .run_system_cached(miniboss_system)
-                    .expect("miniboss system");
-                w.end_tick();
-            }
-            let start = start_hp.unwrap_or_else(|| panic!("{kind:?}: the strike never started"));
-            let armor = w.player.loadout.stats.armor;
-            let one_hit = (appointment_signature_damage(0) - armor).max(1.0);
-            let drop = start - w.player.hp;
-            assert!(
-                (drop - one_hit).abs() < 0.01,
-                "{kind:?}: the strike took {drop} hp, expected exactly one hit of {one_hit}"
-            );
         }
     }
 

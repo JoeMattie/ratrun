@@ -1088,10 +1088,27 @@ pub struct Enemy {
     pub w3: W3,
     /// Wave-4 behaviour state (all zero for the ten older kinds).
     pub w4: W4,
+    /// A named body underground, temporarily immune to hits and contact.
+    pub buried: bool,
+    /// A named body's movement or attack currently fixes its position.
+    pub position_locked: bool,
+    /// Appointment fodder carries no kill credit, drops or horde budget.
+    pub summoned: bool,
 }
 
 impl Enemy {
     pub fn spawn(kind: EnemyKind, pos: Vec2, hp_mult: f32, rng: &mut impl Rng) -> Self {
+        Self::spawn_with_phases(
+            kind, pos, hp_mult,
+            rng.random_range(1.0..2.5),
+            rng.random_range(0.0..std::f32::consts::TAU),
+            rng.random_range(0.0..std::f32::consts::TAU),
+        )
+    }
+
+    pub(crate) fn spawn_with_phases(
+        kind: EnemyKind, pos: Vec2, hp_mult: f32, fire_cd: f32, wander: f32, anim: f32,
+    ) -> Self {
         let hp = kind.base_hp() * hp_mult;
         Enemy {
             id: 0,
@@ -1105,11 +1122,11 @@ impl Enemy {
             radius: kind.radius(),
             damage: kind.damage(),
             flash: 0.0,
-            fire_cd: rng.random_range(1.0..2.5),
-            wander: rng.random_range(0.0..std::f32::consts::TAU),
+            fire_cd,
+            wander,
             contact_cd: 0.0,
             speed_scale: 1.0,
-            anim: rng.random_range(0.0..std::f32::consts::TAU),
+            anim,
             facing: Vec2::new(1.0, 0.0),
             // No extra rng draws: a freshly spawned body is neither stunned nor
             // slowed, so adding these fields cannot move the rng stream.
@@ -1123,6 +1140,9 @@ impl Enemy {
             // Same rule for wave 4 (the snake's trail is seeded from its spawn
             // point on the first simulated tick).
             w4: W4::default(),
+            buried: false,
+            position_locked: false,
+            summoned: false,
         }
     }
 
@@ -1312,6 +1332,9 @@ impl Enemy {
     /// side effects, so nothing about the older bodies changes.
     fn apply_damage(&mut self, dmg: f32) -> f32 {
         use crate::game::ecs::systems::enemy_wave4 as w4;
+        if self.buried {
+            return 0.0;
+        }
         let mut dmg = dmg.max(0.0);
         if self.kind.archetype() == EnemyKind::TermiteHorde {
             if self.hp > 0.0
@@ -1455,6 +1478,11 @@ impl Enemy {
             self.w4.phase = crate::game::ecs::systems::enemy_wave4::LILLI_PHASE_WALK;
             self.w4.t = 0.0;
         }
+    }
+
+    #[inline]
+    pub fn targetable(&self) -> bool {
+        self.alive() && !self.buried
     }
 
     pub fn alive(&self) -> bool {
