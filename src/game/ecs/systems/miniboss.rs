@@ -1257,18 +1257,18 @@ pub fn miniboss_system(
                     if let (MinibossKind::Corkscrew, true, Some(MinibossShape::Trench { a, b, half })) =
                         (mb.kind, level.objects.sewer_opening.is_some(), mb.active_shape())
                     {
-                            // Overlapping patches draw and splash as one wet band.
-                            let radius = half + 1.0;
-                            let patches = std::array::from_fn(|i| Puddle {
-                                pos: a + (b - a) * (i as f32 / 6.0),
-                                rx: radius,
-                                ry: radius,
-                                seed: e.id.wrapping_add(i as u32),
-                            });
-                            level.objects.trench_puddles.push(TrenchPuddle {
-                                patches,
-                                expires_at: elapsed + TRENCH_WET_SECS,
-                            });
+                        // Overlapping patches draw and splash as one wet band.
+                        let radius = half + 1.0;
+                        let patches = std::array::from_fn(|i| Puddle {
+                            pos: a + (b - a) * (i as f32 / 6.0),
+                            rx: radius,
+                            ry: radius,
+                            seed: e.id.wrapping_add(i as u32),
+                        });
+                        level.objects.trench_puddles.push(TrenchPuddle {
+                            patches,
+                            expires_at: elapsed + TRENCH_WET_SECS,
+                        });
                     }
                     mb.state = MinibossState::Recover;
                     mb.timer = 0.0;

@@ -551,7 +551,8 @@ mod tests {
         use crate::game::player::Buffs;
 
         let mut w = open_arena(719);
-        let cases: [(PickupKind, f32, fn(&Buffs) -> f32); 3] = [
+        type BuffTimer = fn(&Buffs) -> f32;
+        let cases: [(PickupKind, f32, BuffTimer); 3] = [
             (PickupKind::ShrinkDraught, SHRINK_SECS, |b| b.tiny),
             (PickupKind::WhiteCoat, WHITE_COAT_SECS, |b| b.white_coat),
             (PickupKind::TheCollar, COLLAR_SECS, |b| b.collar),

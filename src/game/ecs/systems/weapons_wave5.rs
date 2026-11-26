@@ -6,6 +6,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
 
 use crate::audio::Sfx;
+use crate::game::art_wave5::HOLD_RADIUS;
 use crate::game::collision::{segment_circle_hit, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::GRID_CELL;
@@ -44,7 +45,6 @@ const SHED_REACH: f32 = 48.0;
 const SHED_PASS: f32 = 0.30;
 
 const HOLD: WeaponKind = WeaponKind::HoldPoint;
-pub(crate) const HOLD_RADIUS: f32 = 28.0;
 const HOLD_SPEED: f32 = 10.0;
 const HOLD_CHARGE: f32 = 0.45;
 const HOLD_CRACK: f32 = 0.6;
@@ -158,7 +158,7 @@ impl Wave5Hits<'_, '_> {
         let order = enemy_order(&self.index, &self.enemies, &mut self.order);
         for &entity in order {
             let Ok((_, id, mut enemy)) = self.enemies.get_mut(entity) else { continue };
-            if !enemy.alive()
+            if !enemy.targetable()
                 || !segment_circle_hit(from, to, radius, enemy.pos, enemy.radius)
                 || !los_clear(&self.level, nearest_on_segment(from, to, enemy.pos), enemy.pos, 0.0)
                 || !can_hit(id.0)
@@ -206,6 +206,10 @@ pub(crate) fn glass_bead_system(
     for (entity, _, mut bead) in beads.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) {
         let mut dt = input.dt;
         if bead.delay > 0.0 {
+            if player.buffs.weapons_suspended() {
+                commands.entity(entity).despawn();
+                continue;
+            }
             let wait = bead.delay.min(dt);
             bead.delay -= wait;
             dt -= wait;
@@ -288,6 +292,7 @@ fn advance_bead(
     false
 }
 
+#[allow(clippy::too_many_arguments)] // Independent ECS queries and resources.
 pub(crate) fn plumb_bob_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -298,6 +303,12 @@ pub(crate) fn plumb_bob_system(
     mut sfx: ResMut<SfxQueue>,
     mut hits: Wave5Hits,
 ) {
+    if player.buffs.weapons_suspended() {
+        for (entity, _, _) in bobs.iter_mut() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
     if !bobs.is_empty() {
         for (entity, _, mut bob) in bobs.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) {
             if advance_bob(&mut bob, player.pos, input.dt, &mut hits) {
@@ -389,6 +400,7 @@ pub(crate) fn hold_point_system(
     let shove = player.loadout.stats.shove(HOLD_SHOVE);
     let centre = player.pos;
     let giant = player.buffs.is_giant();
+    let suspended = player.buffs.weapons_suspended();
     let step = HOLD_SPEED * input.dt;
     let moving = player.vel.len_sq() >= HOLD_SPEED * HOLD_SPEED
         || (input.dt > 0.0 && centre.dist_sq(input.previous_pos) >= step * step);
@@ -397,9 +409,11 @@ pub(crate) fn hold_point_system(
         return;
     };
     match &mut fx.phase {
-        HoldPhase::Spent { age, cooldown, .. } => {
+        HoldPhase::Spent { age, .. } => {
             *age += input.dt;
-            weapon.timer = (*cooldown - *age).max(0.0);
+            if !suspended {
+                weapon.timer = (weapon.timer - input.dt).max(0.0);
+            }
             if weapon.timer <= 1e-6 {
                 fx.phase = HoldPhase::Ready;
             }
@@ -407,13 +421,23 @@ pub(crate) fn hold_point_system(
         }
         HoldPhase::Cracked(remaining) => {
             *remaining -= input.dt;
-            weapon.timer = remaining.max(0.0);
+            if !suspended {
+                weapon.timer = (weapon.timer - input.dt).max(0.0);
+            }
             if *remaining <= 1e-6 || giant {
                 fx.phase = HoldPhase::Ready;
             }
             return;
         }
         _ => {}
+    }
+    if suspended {
+        fx.phase = HoldPhase::Ready;
+        return;
+    }
+    if weapon.timer > 1e-6 {
+        weapon.timer = (weapon.timer - input.dt).max(0.0);
+        return;
     }
     if giant {
         weapon.timer = 0.0;
@@ -444,7 +468,7 @@ pub(crate) fn hold_point_system(
     }
 
     weapon.timer = weapon.cooldown();
-    fx.phase = HoldPhase::Spent { age: 0.0, cooldown: weapon.timer, evolved: weapon.evolved };
+    fx.phase = HoldPhase::Spent { age: 0.0, evolved: weapon.evolved };
     sfx.0.push(Sfx::ShootNova);
     hold_pulse(centre, weapon.damage() * damage_mult, shove, &mut grid, &mut hits);
 }
@@ -457,7 +481,7 @@ fn hold_pulse(
     for &entity in order {
         let Ok((_, _, mut enemy)) = hits.enemies.get_mut(entity) else { continue };
         let pos = enemy.pos;
-        if !enemy.alive() || !segment_circle_hit(centre, centre, HOLD_RADIUS, pos, enemy.radius)
+        if !enemy.targetable() || !segment_circle_hit(centre, centre, HOLD_RADIUS, pos, enemy.radius)
             || !los_clear(&hits.level, centre, pos, 0.0)
         {
             continue;
@@ -565,7 +589,8 @@ mod tests {
         world.level.tiles.rebuild_masks();
         let body = world.spawn_enemy(EnemyKind::Skitterer, Vec2::new(248.0, 274.0), 10.0);
         let hp = world.ecs.get::<Enemy>(body).unwrap().hp;
-        let mut rng = world.rng.clone();
+        let mut reference = arena(BEAD, 1, true);
+        reference.spawn_enemy(EnemyKind::Skitterer, Vec2::new(248.0, 274.0), 10.0);
 
         fire(&mut world);
         step_bead(&mut world, 0.15);
@@ -580,7 +605,7 @@ mod tests {
         step_bead(&mut world, 0.20);
         assert_eq!(query.iter(&world.ecs).len(), 0);
         assert_eq!(world.ecs.get::<Enemy>(body).unwrap().hp, hp - 4.0);
-        assert_eq!(world.rng.random::<u64>(), rng.random::<u64>());
+        assert_eq!(world.rng.random::<u64>(), reference.rng.random::<u64>());
     }
 
     #[test]
@@ -612,6 +637,34 @@ mod tests {
         assert_eq!(bead.vel.x, -BEAD_SPEED);
         step_bead(&mut world, BEAD_LEG / BEAD_SPEED);
         assert_eq!(query.iter(&world.ecs).len(), 0);
+    }
+
+    #[test]
+    fn white_coat_stops_attached_wave5_attacks_and_leaves_launched_beads() {
+        let mut bob = arena(BOB, 1, false);
+        step_bob(&mut bob, 0.0);
+        let recovery = bob.player.loadout.weapons[0].timer;
+        bob.player.buffs.white_coat = 5.0;
+        step_bob(&mut bob, 0.2);
+        let mut bobs = bob.ecs.query::<&PlumbBob>();
+        assert_eq!(bobs.iter(&bob.ecs).len(), 0);
+        assert_eq!(bob.player.loadout.weapons[0].timer, recovery);
+
+        let mut hold = arena(HOLD, 1, false);
+        step_hold(&mut hold, 0.2);
+        hold.player.buffs.white_coat = 5.0;
+        step_hold(&mut hold, 0.4);
+        assert!(hold.ecs.resource::<HoldPointFx>().visual().is_none());
+
+        let mut bead = arena(BEAD, 3, false);
+        fire(&mut bead);
+        step_bead(&mut bead, 0.05);
+        bead.player.buffs.white_coat = 5.0;
+        step_bead(&mut bead, 0.10);
+        let mut beads = bead.ecs.query::<&GlassBead>();
+        let mut live = beads.iter(&bead.ecs);
+        assert!(live.next().is_some_and(|shot| shot.pos.dist(ORIGIN) > 16.0));
+        assert!(live.next().is_none());
     }
 
     #[test]

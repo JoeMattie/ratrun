@@ -328,7 +328,7 @@ pub fn director_system(
     level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
-    schedule: Res<MinibossSchedule>,
+    (schedule, opening): (Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>),
     // Console tunables: `set enemy_cap/spawn_rate`, `peace`. Neutral defaults.
     console: DirectorConsole,
     mut boss_due: ResMut<BossDue>,
@@ -407,7 +407,16 @@ pub fn director_system(
         };
         director.spawn_timer = director::horde_interval(elapsed, boss_phase) * grace / rate;
         let count = director::horde_pulse(elapsed, boss_phase);
-        let budget = director::horde_live_budget(elapsed, boss_phase);
+        // The fixed opening pair arrives after this pass and spends the same budget.
+        let reserved = if elapsed < director::BOSS_TIME
+            && level.objects.sewer_opening.is_some()
+            && !opening.pillbugs
+        {
+            super::floor_sewer::OPENING_PILLBUGS_COUNT
+        } else {
+            0
+        };
+        let budget = director::horde_live_budget(elapsed, boss_phase).saturating_sub(reserved);
         let live = enemies.iter_mut().count();
         if schedule.suppress(elapsed) || console.debug.peace {
             // Quiet after the death, or `peace on`: hold every fresh spawn,

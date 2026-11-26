@@ -8385,6 +8385,167 @@ mod tests {
                 hh.app.select_idx = floor.min(Theme::playable().len() - 1);
                 hh.frame(&[]);
             }
+            t if t.starts_with("opening-") => {
+                use crate::game::ecs::systems::{floor_sewer, hazards};
+                use crate::game::enemy::EnemyKind;
+                use crate::game::gem::PickupKind;
+                use crate::game::hazards::DripPhase;
+
+                hh.enter_playing();
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let world = hh.app.world.as_mut().unwrap();
+                world.clear_enemies();
+                world.player.god = true;
+                let opening = world.level.objects.sewer_opening.clone().unwrap();
+                let dt = 1.0 / 60.0;
+                match t {
+                    "opening-pillbugs" => {
+                        world.elapsed = 22.0;
+                        let viewport = world.viewport;
+                        world.viewport = Vec2::splat(40.0);
+                        world.begin_tick(dt, Vec2::ZERO, false);
+                        world.ecs.run_system_cached(floor_sewer::sewer_opening_system).unwrap();
+                        world.end_tick();
+                        world.viewport = viewport;
+                        let pair = world.enemies();
+                        assert_eq!(pair.len(), 2);
+                        assert!(pair.iter().all(|e| e.kind == EnemyKind::Pillbug && e.w3.opening_curl));
+                        let midpoint = (pair[0].pos + pair[1].pos) * 0.5;
+                        world.player.pos = world.level.tiles.nearest_open_center(
+                            midpoint + Vec2::new(-22.0, 20.0), SizeClass::Small, 3,
+                        ).unwrap_or(world.player.pos);
+                    }
+                    "opening-cap" => {
+                        world.elapsed = 90.0;
+                        world.peace = true;
+                        world.begin_tick(dt, Vec2::ZERO, false);
+                        world.ecs.run_system_cached(floor_sewer::sewer_opening_system).unwrap();
+                        world.end_tick();
+                        assert!(world.pickups().iter().any(|p| {
+                            p.kind == PickupKind::BottleCap && p.pos == opening.bottle_cap
+                        }));
+                        let toward_start = (world.player.pos - opening.bottle_cap).normalized();
+                        let approach = opening.bottle_cap + toward_start * 19.0;
+                        world.player.pos = world.level.tiles.nearest_open_center(approach, SizeClass::Small, 2)
+                            .expect("a walkable approach to the Bottle Cap");
+                        world.cam_focus = Some((world.player.pos + opening.bottle_cap) * 0.5);
+                    }
+                    "opening-shaft-warning" | "opening-shaft-splash" => {
+                        let at = opening.drip_shaft.pos;
+                        world.player.pos = world.level.tiles.nearest_open_center(
+                            at + Vec2::new(-17.0, 14.0), SizeClass::Small, 3,
+                        ).unwrap_or(at);
+                        let splash = t == "opening-shaft-splash";
+                        let ticks = if splash { 38 } else { 19 };
+                        for _ in 0..ticks {
+                            world.begin_tick(dt, Vec2::ZERO, false);
+                            world.ecs.run_system_cached(hazards::hazards_system).unwrap();
+                            world.end_tick();
+                        }
+                        let shaft = world.level.objects.sewer_opening.as_ref().unwrap().drip_shaft;
+                        assert_eq!(shaft.phase, if splash { DripPhase::Splash } else { DripPhase::Warning });
+                    }
+                    _ => panic!("unknown opening capture {t}"),
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            t if t.starts_with("finds3-") => {
+                use crate::game::gem::{Pickup, PickupKind};
+                hh.enter_playing();
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let world = hh.app.world.as_mut().unwrap();
+                world.configure_testbed();
+                world.clear_enemies();
+                let open = world.player.pos + Vec2::new(0.0, -26.0);
+                world.player.pos = world.level.tiles.nearest_open_center(open, SizeClass::Small, 3)
+                    .unwrap_or(world.player.pos);
+                let finds = [
+                    (PickupKind::ShrinkDraught, "shrink", Vec2::new(-24.0, -9.0)),
+                    (PickupKind::WhiteCoat, "coat", Vec2::new(0.0, -13.0)),
+                    (PickupKind::TheCollar, "collar", Vec2::new(24.0, -9.0)),
+                ];
+                let rat = world.player.pos;
+                for (kind, name, offset) in finds {
+                    if t == "finds3-floor" || t.strip_prefix("finds3-") == Some(name) {
+                        world.spawn_pickup(Pickup {
+                            pos: if t == "finds3-floor" { rat + offset } else { rat },
+                            kind,
+                            bob: 0.0,
+                        });
+                    }
+                }
+                if t != "finds3-floor" {
+                    hh.frame(&[]);
+                    assert_eq!(hh.app.world.as_ref().unwrap().last_pickups().len(), 1);
+                    for _ in 0..20 {
+                        hh.frame(&[]);
+                    }
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
+            "tail-whip" | "glass-bead" | "plumb-bob"
+            | "hold-charge" | "hold-fired" | "hold-cracked" => {
+                use crate::game::enemy::EnemyKind;
+                use crate::game::ecs::systems::weapons_wave5::GlassBead;
+                hh.enter_playing();
+                hh.app.scores.minimap_size = minimap::MinimapSize::Hidden;
+                let world = hh.app.world.as_mut().unwrap();
+                world.configure_testbed();
+                world.clear_enemies();
+                let (kind, ticks) = match target.as_str() {
+                    "tail-whip" => (WeaponKind::TailWhip, 5),
+                    "glass-bead" => (WeaponKind::GlassBead, 16),
+                    "plumb-bob" => (WeaponKind::PlumbBob, 11),
+                    "hold-fired" => (WeaponKind::HoldPoint, 35),
+                    "hold-cracked" => (WeaponKind::HoldPoint, 21),
+                    _ => (WeaponKind::HoldPoint, 17),
+                };
+                let mut facing = Vec2::new(1.0, 0.0);
+                if kind == WeaponKind::GlassBead {
+                    use crate::game::collision::TileMap;
+                    use crate::game::ecs::systems::projectiles::wall_hit;
+                    let hall = world.level.largest_hall().unwrap().rect;
+                    let directions = [facing, -facing, Vec2::new(0.0, -1.0), Vec2::new(0.0, 1.0)];
+                    let (at, direction) = hall.cells()
+                        .map(|(x, y)| TileMap::tile_rect(x, y).center())
+                        .filter(|&at| world.level.tiles.circle_clear(at, 4.0, SizeClass::Small))
+                        .find_map(|at| {
+                            directions.into_iter().find(|&dir| {
+                                wall_hit(&world.level, at, at + dir * 32.0, 2.0)
+                                    .is_some_and(|f| (0.65..=0.95).contains(&f))
+                                    && wall_hit(&world.level, at, at - dir * 22.0, 2.0).is_none()
+                            }).map(|dir| (at, dir))
+                        })
+                        .expect("clear ricochet lane near a hall wall");
+                    world.player.pos = at;
+                    facing = direction;
+                }
+                world.player.face = facing;
+                let rat = world.player.pos;
+                world.player.loadout.weapons.clear();
+                world.player.loadout.apply(&Upgrade::NewWeapon(kind));
+                world.player.loadout.weapons[0].level = if kind == WeaponKind::GlassBead { 1 } else { 5 };
+                world.player.loadout.weapons[0].timer = 0.0;
+                if kind == WeaponKind::TailWhip {
+                    for offset in [(-34.0, -17.0), (-27.0, 17.0), (-42.0, 1.0)] {
+                        world.spawn_enemy(
+                            EnemyKind::Pillbug, rat + Vec2::new(offset.0, offset.1), 10.0,
+                        );
+                    }
+                }
+                for tick in 0..ticks {
+                    let movement = if target == "hold-cracked" && tick > 14 { facing } else { Vec2::ZERO };
+                    world.update_with_aim(1.0 / 60.0, movement, false, false, Some(rat + facing * 100.0));
+                }
+                if kind == WeaponKind::GlassBead {
+                    let mut query = world.ecs.query::<&GlassBead>();
+                    assert!(query.iter(&world.ecs).any(|bead| bead.bounces > 0));
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             "gem-field" | "gem-flash" => {
                 use crate::game::ecs::resources::spawn_with_id;
                 use crate::game::gem::{Gem, GemTier, MERGE_EVERY};

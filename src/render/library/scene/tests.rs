@@ -547,9 +547,15 @@ fn the_arsenal_targets_stand_inside_the_plate() {
         }
         plate(&mut scene, &mut art);
         let (cam, view) = (scene.world.cam, scene.view);
-        for home in dummy_homes(scene.world.player.pos) {
-            let right = cam.x + view.x - home.x;
-            assert!(right >= 12.0, "{kind:?}: a target stands {right} px from the right edge");
+        let enemies = scene.world.enemies();
+        assert!(!enemies.is_empty(), "{kind:?}: no targets were staged");
+        for home in enemies.iter().map(|e| e.pos) {
+            let margin = if kind == WeaponKind::TailWhip {
+                home.x - cam.x
+            } else {
+                cam.x + view.x - home.x
+            };
+            assert!(margin >= 12.0, "{kind:?}: a target stands {margin} px from the edge");
             assert!(on_plate(&scene, home), "{kind:?}: a target is off the plate");
         }
     }

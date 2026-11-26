@@ -3160,7 +3160,9 @@ pub fn draw_campaign_victory_with(
 
     // Bottom buttons: Play Again & Menu.
     let mut play = StackBuf::<64>::new();
-    let _ = if inner.width >= 44 {
+    let _ = if view.daily_stamp.is_some() {
+        write!(play, " ▸ {}  replay Daily ", keys.confirm)
+    } else if inner.width >= 44 {
         write!(play, " ▸ {}  new campaign ", keys.confirm)
     } else {
         write!(play, " {} replay ", keys.confirm)

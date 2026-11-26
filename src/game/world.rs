@@ -487,6 +487,7 @@ impl World {
         // scratch, like `BossDue`; a fresh level starts with no Drake and no
         // gap running.
         ecs.insert_resource(DrakeSpawner::default());
+        ecs.insert_resource(super::ecs::systems::floor_sewer::OpeningSpawns::default());
         // The boss fight's own state (private rng stream, damage-number id,
         // reusable scratch). Permanent, like `BossDue`; a spawn re-seeds it.
         ecs.insert_resource(BossFight::default());

@@ -50,16 +50,18 @@ use crate::game::player::Player;
 use crate::math::Vec2;
 
 const OPENING_PILLBUGS_AT: f32 = 22.0;
+pub(super) const OPENING_PILLBUGS_COUNT: usize = 2;
 pub(super) const OPENING_BOTTLE_CAP_AT: f32 = 90.0;
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 pub struct OpeningSpawns {
-    pillbugs: bool,
+    pub(super) pillbugs: bool,
     bottle_cap: bool,
 }
 
 /// Fixed Sewer encounters, with no director roll and no run rng draws.
 /// If the room is on-screen at 0:22, hold the pair until both can enter unseen.
+#[allow(clippy::too_many_arguments)] // Independent ECS queries and resources.
 pub fn sewer_opening_system(
     mut commands: Commands,
     level: Res<Level>,
@@ -72,19 +74,22 @@ pub fn sewer_opening_system(
     enemies: Query<&Enemy>,
     mut next_id: ResMut<NextSpawnId>,
     mut next_enemy_id: ResMut<NextEnemyId>,
-    mut spawned: Local<OpeningSpawns>,
+    mut spawned: ResMut<OpeningSpawns>,
 ) {
     let Some(opening) = level.objects.sewer_opening.as_ref().filter(|_| level_index.0 == 0) else {
         return;
     };
     let elapsed = counters.elapsed;
-    if !spawned.pillbugs && elapsed >= OPENING_PILLBUGS_AT && !debug.peace {
+    if !spawned.pillbugs
+        && (OPENING_PILLBUGS_AT..crate::game::director::BOSS_TIME).contains(&elapsed)
+        && !debug.peace
+    {
         let cap = if cvars.enemy_cap == 0 {
             ENEMY_CAP
         } else {
             cvars.enemy_cap
         };
-        if enemies.iter().count() + 2 < cap {
+        if enemies.iter().count() + OPENING_PILLBUGS_COUNT < cap {
             let mut hidden = opening
                 .pillbug_cells
                 .iter()

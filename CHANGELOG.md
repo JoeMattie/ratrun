@@ -4,9 +4,9 @@
 
 - **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
   facing or aim. Ratchet Tail throws a struck foe forward into the crowd.
-- **Three new pickups.** Shrink Draught makes you smaller and quicker.
-  White Coat protects you from hits and suspends your weapons. The Collar
-  doubles gem XP while elites and the miniboss close in faster.
+- **Shrink Draught.** A short-lived dose makes you smaller and quicker.
+- **White Coat.** Blocks incoming damage and suspends your weapons for 5s.
+- **The Collar.** Doubles gem XP while elites and the miniboss close in faster.
 - **Daily run.** A dated title row opens a seeded campaign through the Sewer,
   Kitchen, Lab and Flatbed. It banks to the Nest and saves a local best for
   each UTC day. The incident report and victory plate carry the start date.

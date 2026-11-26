@@ -360,7 +360,11 @@ fn no_enemy_is_pinned_against_a_wall() {
                 let ppos = w.player.pos;
                 let current: Vec<(u64, Vec2)> = {
                     let mut q = w.ecs.query::<(Entity, &SpawnId, &Enemy)>();
-                    q.iter(&w.ecs).map(|(_, id, e)| (id.0, e.pos)).collect()
+                    // An opening Pillbug stays planted by design until the rat approaches.
+                    q.iter(&w.ecs)
+                        .filter(|(_, _, e)| !e.w3.opening_curl)
+                        .map(|(_, id, e)| (id.0, e.pos))
+                        .collect()
                 };
                 for (id, pos) in &current {
                     match track.iter_mut().find(|(i, _, _, _)| i == id) {

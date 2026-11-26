@@ -2747,18 +2747,24 @@ mod tests {
             .collect();
         let [expert, skilled, casual] = [&early[0], &early[1], &early[2]];
 
-        // Every run is alive for the whole window, so this is a clean rate.
+        // The authored Sewer opening can put the least evasive bot on a
+        // harder route. Most runs must still finish the sample, and the
+        // better drivers must survive on at least as many shared seeds.
+        let mut last_alive = EARLY_SEEDS;
         for (skill, runs) in skills.iter().zip(&early) {
             let alive = runs
                 .iter()
                 .filter(|r| r.death.is_none() && r.total_time >= EARLY_CAP - 1.0)
                 .count();
+            let allowed_deaths = if *skill == Skill::Casual { 2 } else { 1 };
             assert!(
-                alive * 6 >= EARLY_SEEDS * 5,
+                EARLY_SEEDS - alive <= allowed_deaths,
                 "{} died inside the calm {EARLY_CAP:.0} s window on {}/{EARLY_SEEDS} seeds",
                 skill.name(),
                 EARLY_SEEDS - alive
             );
+            assert!(alive <= last_alive, "{} reversed the survival ladder", skill.name());
+            last_alive = alive;
         }
 
         let (de, ds, dc) = (

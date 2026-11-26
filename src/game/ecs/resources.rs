@@ -764,7 +764,7 @@ pub(crate) enum HoldPhase {
     Ready,
     Charging(f32),
     Cracked(f32),
-    Spent { age: f32, cooldown: f32, evolved: bool },
+    Spent { age: f32, evolved: bool },
 }
 
 /// Hold Point's charge, failure tell, and fired circle.
