@@ -75,24 +75,12 @@ stages! {
 
 const N: usize = 64;
 static ON: AtomicBool = AtomicBool::new(false);
-/// `--prof-bench` tier sweeps pin the tier: the cost controller observes but
-/// never moves.
-static FREEZE: AtomicBool = AtomicBool::new(false);
 static SKIP_LIGHT: AtomicBool = AtomicBool::new(false);
 static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 static CNT: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 
 pub fn enable(on: bool) {
     ON.store(on, Ordering::Relaxed);
-}
-
-pub fn freeze_controller(on: bool) {
-    FREEZE.store(on, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn controller_frozen() -> bool {
-    FREEZE.load(Ordering::Relaxed)
 }
 
 pub fn skip_lighting(on: bool) {

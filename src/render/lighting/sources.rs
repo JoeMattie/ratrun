@@ -228,6 +228,7 @@ impl LightMap {
         // 1. Player rat soft personal aura (always present, priority 3).
         let px = scene.player.pos.x - cam.x;
         let py = scene.player.pos.y - cam.y;
+        self.lights.rat = Vec2::new(px, py);
         let rat_radius = match scene.level.theme {
             Theme::Lab => 58.0,
             Theme::Outfall => 54.0,
@@ -660,7 +661,7 @@ impl LightMap {
                             color: col,
                             intensity: if near_muzzle { 170 } else { 115 },
                             scatter: if near_muzzle { 38 } else { 22 },
-                            priority: if near_muzzle { 2 } else { 1 },
+                            priority: 1,
                             occlude: false,
                             hard: false,
                         });
@@ -1537,7 +1538,7 @@ impl LightMap {
                         color,
                         intensity,
                         scatter,
-                        priority: 1,
+                        priority: 2,
                         occlude,
                         hard: hard_pools,
                     });
@@ -1575,7 +1576,7 @@ impl LightMap {
                         color,
                         intensity,
                         scatter,
-                        priority: 1,
+                        priority: 2,
                         occlude: false,
                         hard: hard_pools,
                     });
@@ -1597,7 +1598,7 @@ impl LightMap {
                         color: (84, 218, 224),
                         intensity: (132.0 * blink) as u16,
                         scatter: (34.0 * blink) as u16,
-                        priority: 1,
+                        priority: 2,
                         occlude: false,
                         hard: true,
                     });
@@ -1728,7 +1729,7 @@ impl LightMap {
                     color: (100, 242, 215),
                     intensity: (195.0 * pulse) as u16,
                     scatter: (44.0 * pulse) as u16,
-                    priority: 1,
+                    priority: 2,
                     occlude: false,
                     hard: hard_pools,
                 });
@@ -1748,7 +1749,7 @@ impl LightMap {
                     color: (255, 196, 120),
                     intensity: 130,
                     scatter: 28,
-                    priority: 1,
+                    priority: 2,
                     occlude: false,
                     hard: false,
                 });
@@ -1772,7 +1773,7 @@ impl LightMap {
                     color: (255, 215, 92),
                     intensity: (190.0 * pulse) as u16,
                     scatter: (42.0 * pulse) as u16,
-                    priority: 1,
+                    priority: 2,
                     occlude: false,
                     hard: false,
                 });

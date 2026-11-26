@@ -3,8 +3,8 @@
 //!
 //! * [`LightingMode`] — the detail tiers (`LIVE = [Full, Hard, Coarse,
 //!   Compact]`). `default_for_depth` picks the starting tier from the
-//!   terminal's colour depth, and the cost-driven quality controller drops a
-//!   tier when a frame runs past its budget.
+//!   terminal's colour depth; the Graphics page and the `lights` console
+//!   command step it explicitly, and nothing changes it on its own at runtime.
 //! * [`Light`], [`LightShape`], [`Falloff`], [`Blend`], [`Flicker`],
 //!   [`LayerMask`], [`ShadowSoftness`], [`ShadowColor`] — what a light is.
 //!   Radii are world pixels, cone half-angles radians; receiver and occluder
@@ -58,7 +58,6 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::Rgb;
 use crate::term::ColorDepth;
-use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightingMode {
@@ -81,10 +80,6 @@ impl LightingMode {
         }
     }
 
-    const fn rank(self) -> usize {
-        self as usize
-    }
-
     const fn stride(self) -> usize {
         match self {
             Self::Full | Self::Hard => 4,
@@ -95,7 +90,7 @@ impl LightingMode {
     const fn budget(self) -> (usize, usize) {
         // (dynamic light count, shadowed dynamic light count)
         match self {
-            Self::Full | Self::Hard | Self::Coarse => (28, 3),
+            Self::Full | Self::Hard | Self::Coarse => (28, 4),
             _ => (14, 1),
         }
     }
@@ -384,14 +379,10 @@ const MAX_MARKS: usize = 12_288;
 const MAX_BODIES: usize = 8;
 /// Shaped lights kept per frame. A full list evicts its lowest priority.
 const MAX_SHAPED: usize = 64;
-/// Consecutive over-budget frames before the controller drops a tier.
-const SLOW_FRAMES: u8 = 8;
-/// Consecutive comfortably cheap frames before it climbs back one tier. The
-/// count doubles per relapse (see `QualityController::backoff`).
-const FAST_FRAMES: u16 = 180;
-/// A tier regained and lost again within this many frames is a relapse.
-const PROBATION_FRAMES: u16 = 600;
-const MAX_BACKOFF: u8 = 4;
+/// Overflow slots past the dynamic light budget, attenuated step by step so
+/// lights entering or leaving the ranked budget fade in and out by priority
+/// and proximity instead of popping on a single frame.
+const CAP_FADE: [f32; 4] = [0.80, 0.60, 0.40, 0.20];
 /// Share of the gap the ambient cap closes per frame (about 0.4 s at 60 FPS).
 const CAP_EASE: f32 = 0.12;
 
@@ -471,24 +462,34 @@ pub(super) struct Pass {
 pub(super) struct Candidates {
     points: Vec<PointLight>,
     weakest: usize,
+    pub(super) rat: Vec2,
 }
 
 impl Candidates {
+    #[inline]
+    fn key(point: &PointLight, rat: Vec2) -> (u8, std::cmp::Reverse<u32>) {
+        let d2 = Vec2::new(point.x, point.y).dist_sq(rat).to_bits();
+        (point.priority, std::cmp::Reverse(d2))
+    }
+
     pub(super) fn push(&mut self, point: PointLight) {
+        let rat = self.rat;
         if self.points.len() < CANDIDATES {
-            if self.points.is_empty() || point.priority < self.points[self.weakest].priority {
+            if self.points.is_empty()
+                || Self::key(&point, rat) < Self::key(&self.points[self.weakest], rat)
+            {
                 self.weakest = self.points.len();
             }
             self.points.push(point);
             return;
         }
-        if point.priority > self.points[self.weakest].priority {
+        if Self::key(&point, rat) > Self::key(&self.points[self.weakest], rat) {
             self.points[self.weakest] = point;
             self.weakest = self
                 .points
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, p)| p.priority)
+                .min_by_key(|(_, p)| Self::key(p, rat))
                 .map_or(0, |(i, _)| i);
         }
     }
@@ -547,25 +548,6 @@ impl Default for Grid {
     }
 }
 
-/// Cost-driven tier switching. `penalty` tiers are added to the base mode.
-///
-/// Dropping is quick (`SLOW_FRAMES` over budget in a row) and climbing is slow
-/// (`FAST_FRAMES` well under budget in a row). A cheap frame at the lower tier
-/// does not prove the tier above fits, so a climb that is lost again inside
-/// `PROBATION_FRAMES` doubles the next climb's wait: a scene that sits between
-/// two tiers settles on the cheaper one instead of flapping every few seconds.
-/// A climb that survives its probation earns one step of that wait back.
-#[derive(Default)]
-struct QualityController {
-    penalty: usize,
-    slow: u8,
-    fast: u16,
-    /// Frames left in which losing the regained tier counts as a relapse.
-    probation: u16,
-    /// Left shift on `FAST_FRAMES`, `0..=MAX_BACKOFF`.
-    backoff: u8,
-}
-
 #[derive(Clone, Copy)]
 struct ShapedEntry {
     light: Light,
@@ -589,9 +571,8 @@ pub struct LightMap {
     grid: Grid,
     geometry: Geometry,
     static_shadows: Vec<ShadowProfile>,
-    moving_shadows: [ShadowProfile; 3],
+    moving_shadows: [ShadowProfile; 4],
     bodies: Vec<Body>,
-    controller: QualityController,
     /// Reused coverage scratch for the ambient smoke plumes (`ambience.rs`).
     pub(super) plume: Vec<u8>,
     /// Eased ambient gain of the zone the rat stands in. Nothing on screen is
@@ -606,11 +587,9 @@ pub struct LightMap {
     /// Batch 13: `softshadow.rs`'s cache beside each static shadow profile
     /// and each moving shadow slot.
     static_soft: Vec<SoftProfile>,
-    moving_soft: [SoftProfile; 3],
+    moving_soft: [SoftProfile; 4],
     /// Batch 13: the frame's body list for `softshadow::entity_shadows`.
     body_shadows: softshadow::BodyShadows,
-    /// Whether the last pass ran the effects (widens the cost budget).
-    fx_active: bool,
 }
 
 impl Default for LightMap {
@@ -625,6 +604,7 @@ impl LightMap {
             lights: Candidates {
                 points: Vec::with_capacity(CANDIDATES),
                 weakest: 0,
+                rat: Vec2::ZERO,
             },
             shaped: Vec::with_capacity(MAX_SHAPED),
             marks: Vec::with_capacity(MAX_MARKS),
@@ -632,9 +612,8 @@ impl LightMap {
             grid: Grid::default(),
             geometry: Geometry::default(),
             static_shadows: Vec::new(),
-            moving_shadows: [ShadowProfile::default(); 3],
+            moving_shadows: [ShadowProfile::default(); 4],
             bodies: Vec::with_capacity(MAX_BODIES),
-            controller: QualityController::default(),
             plume: Vec::new(),
             ambient_cap: None,
             fx_lights: Vec::with_capacity(fx::MAX_FX_LIGHTS),
@@ -642,64 +621,6 @@ impl LightMap {
             static_soft: Vec::new(),
             moving_soft: Default::default(),
             body_shadows: softshadow::BodyShadows::new(),
-            fx_active: false,
-        }
-    }
-
-    pub fn quality(&self, base: LightingMode) -> LightingMode {
-        #[cfg(test)]
-        if base == LightingMode::Off {
-            return base;
-        }
-        LightingMode::LIVE[(base.rank() + self.controller.penalty).min(3)]
-    }
-
-    pub(crate) fn prof_reset_controller(&mut self) {
-        self.controller = QualityController::default();
-    }
-
-    pub fn observe_cost(&mut self, mode: LightingMode, elapsed: Duration, pixels: usize) {
-        if crate::prof::controller_frozen() {
-            return;
-        }
-        let mut budget = 160.0 + pixels as f64 * 0.035;
-        if self.fx_active {
-            budget += pixels as f64 * fx::FX_BUDGET_PER_PX;
-        }
-        let micros = elapsed.as_secs_f64() * 1e6;
-        let state = &mut self.controller;
-        if state.probation != 0 {
-            state.probation -= 1;
-            if state.probation == 0 {
-                // The regained tier held: forgive one relapse.
-                state.backoff = state.backoff.saturating_sub(1);
-            }
-        }
-        if micros > budget && mode.rank() < LightingMode::Compact.rank() {
-            state.fast = 0;
-            state.slow += 1;
-            if state.slow >= SLOW_FRAMES {
-                state.slow = 0;
-                // Never bank more tiers than exist, or a later, cheaper base
-                // mode would have to pay them all back before recovering.
-                state.penalty = (state.penalty + 1).min(LightingMode::LIVE.len() - 1);
-                if state.probation != 0 {
-                    state.probation = 0;
-                    state.backoff = (state.backoff + 1).min(MAX_BACKOFF);
-                }
-            }
-        } else {
-            state.slow = 0;
-            if micros < budget * 0.56 && state.penalty != 0 {
-                state.fast += 1;
-                if state.fast >= FAST_FRAMES << state.backoff {
-                    state.fast = 0;
-                    state.penalty -= 1;
-                    state.probation = PROBATION_FRAMES;
-                }
-            } else {
-                state.fast = 0;
-            }
         }
     }
 
@@ -836,7 +757,6 @@ impl LightMap {
         // The batch-13 effects (`fx.rs`, the stage files). With `fx` off
         // every line below is the batch-12 pass exactly.
         let fx = scene.fx;
-        self.fx_active = fx;
         self.fx_lights.clear();
         {
             let _p = crate::prof::scope(crate::prof::Stage::LSync);
@@ -965,6 +885,7 @@ impl LightMap {
         drop(_pstatic);
         let _prank = crate::prof::scope(crate::prof::Stage::LRank);
         let (cap, shadows) = scene.mode.budget();
+        let soft_limit = cap + CAP_FADE.len();
         let points = &mut self.lights.points;
         let rat = scene.player.pos - scene.cam;
         let rank = |a: &PointLight, b: &PointLight| {
@@ -978,9 +899,9 @@ impl LightMap {
                 .then_with(|| a.x.total_cmp(&b.x))
                 .then_with(|| a.y.total_cmp(&b.y))
         };
-        if points.len() > cap {
-            points.select_nth_unstable_by(cap, rank);
-            points.truncate(cap);
+        if points.len() > soft_limit {
+            points.select_nth_unstable_by(soft_limit, rank);
+            points.truncate(soft_limit);
         }
         points.sort_unstable_by(rank);
         for &p in points.iter() {
@@ -1012,22 +933,40 @@ impl LightMap {
                 },
             );
         }
-        // Prefer the rat, then the brighter lights and foreground flashes.
+        // Prefer the rat, then room/combat lights and nearby halos.
         self.shaped.sort_unstable_by(|a, b| {
-            b.priority.cmp(&a.priority).then_with(|| {
-                a.light
-                    .pos
-                    .dist_sq(scene.player.pos)
-                    .total_cmp(&b.light.pos.dist_sq(scene.player.pos))
-            })
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| {
+                    a.light
+                        .pos
+                        .dist_sq(scene.player.pos)
+                        .total_cmp(&b.light.pos.dist_sq(scene.player.pos))
+                })
+                .then_with(|| a.light.pos.x.total_cmp(&b.light.pos.x))
+                .then_with(|| a.light.pos.y.total_cmp(&b.light.pos.y))
         });
         drop(_prank);
         crate::prof::count(crate::prof::Stage::CShaped, self.shaped.len() as u64);
         let mut shadow_index = 0;
-        for &entry in self.shaped.iter().take(cap) {
+        let mut lit_count = 0usize;
+        for &entry in &self.shaped {
+            if lit_count >= soft_limit {
+                break;
+            }
             let mut light = entry.light;
             if !self.grid.overlaps(light) {
                 continue;
+            }
+            let fade = if lit_count < cap {
+                1.0
+            } else {
+                CAP_FADE[lit_count - cap]
+            };
+            lit_count += 1;
+            if fade < 1.0 {
+                light.energy *= fade;
+                light.scatter *= fade;
             }
             crate::prof::count(crate::prof::Stage::CShapedLit, 1);
             let directional = matches!(light.shape, LightShape::Directional { .. });
@@ -1038,7 +977,7 @@ impl LightMap {
                 let mut fx_light = FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed));
                 if let Some(steady_total) = entry.steady_total {
                     let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
-                    fx_light.steady = peak * steady_total.abs();
+                    fx_light.steady = peak * steady_total.abs() * fade;
                 }
                 fx::push_fx_light(&mut self.fx_lights, fx_light);
             }
@@ -1074,7 +1013,8 @@ impl LightMap {
                 (None, None)
             };
             let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
-            self.grid.splat(light, shadow, soft, tag, pass, entry.lure_air);
+            self.grid
+                .splat(light, shadow, soft, tag, pass, entry.lure_air * fade);
         }
         // Submit each bar's bounded samples together. Ranking them against
         // unrelated dynamic lights would trim a long bar at its far end.
@@ -1308,18 +1248,24 @@ impl LightMap {
 /// The body of [`LightMap::push_shaped`], on the list alone so it can run
 /// while another field of the map is borrowed.
 fn push_shaped(shaped: &mut Vec<ShapedEntry>, entry: ShapedEntry) {
+    #[inline]
+    fn key(e: &ShapedEntry) -> (u8, u32) {
+        let peak = f32::from(e.light.color.0.max(e.light.color.1).max(e.light.color.2));
+        let gain = peak * (e.light.energy.abs() + e.light.scatter.abs());
+        (e.priority, gain.max(0.0).to_bits())
+    }
     if shaped.len() < MAX_SHAPED {
         shaped.push(entry);
         return;
     }
-    // First of the lowest priority: deterministic, and only on overflow.
+    // Lowest priority and weakest gain first: deterministic, and only on overflow.
     let mut weakest = 0;
     for (i, existing) in shaped.iter().enumerate() {
-        if existing.priority < shaped[weakest].priority {
+        if key(existing) < key(&shaped[weakest]) {
             weakest = i;
         }
     }
-    if shaped[weakest].priority < entry.priority {
+    if key(&shaped[weakest]) < key(&entry) {
         shaped[weakest] = entry;
     }
 }

@@ -26,9 +26,6 @@ use crate::term::ColorDepth;
 pub(super) const DIR_ONE: i16 = 4096;
 /// The strongest lights kept per frame in [`FxFrame::lights`].
 pub(super) const MAX_FX_LIGHTS: usize = 16;
-/// The cost controller's extra budget while the effects run, in µs per world
-/// pixel (≈ 430 µs at 120×80). See the contract's §5 for the per-stage split.
-pub(super) const FX_BUDGET_PER_PX: f64 = 0.045;
 
 /// One tunable per technique. `1.0` is the concept plates' **bold** strength
 /// (`relight_core.py`, `strength = 1.0`); the owner chose restrained (0.5)
