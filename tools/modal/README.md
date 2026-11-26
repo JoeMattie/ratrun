@@ -46,6 +46,7 @@ get 300 campaigns per skill on fresh seeds 8000–8299. The candidate also
 gets 96 campaigns per skill at mid and max Nest. The owner experiment gets
 96 fresh campaigns per skill. Pass one `--baseline /path/to/confirmation.json`
 per earlier round in order to include historical measured results.
+The report writes the model's confirmed overlay to `fitted-candidate.toml`.
 
 Supply `--resume-screen` to the study only after the screen manifest already
 exists. Completed shards have a checksummed receipt and are skipped on

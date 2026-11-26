@@ -454,7 +454,7 @@ def report(output, baselines=()):
     }, indent=2))
     (output / "report.md").write_text("\n".join(lines))
     summary = ", ".join(f"{s} {actual[s]['win'][0]:.1%}" for s in SKILLS)
-    (output / "recommended.toml").write_text(
+    (output / "fitted-candidate.toml").write_text(
         "# Rat Run round 4 power-scaling candidate.\n"
         f"# Fresh seeds {CONFIRM_SEED}–{CONFIRM_SEED + CONFIRM_RUNS - 1}, measured campaign wins {summary}.\n"
         "# See report.md for target conformance, uncertainty and predictions.\n\n"
