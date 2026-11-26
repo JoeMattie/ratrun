@@ -1842,7 +1842,8 @@ fn paint_kelp_frond(c: &mut ReachCanvas, pal: &ReachPal, t: f32) {
         pen: FOLIAGE_PEN,
         sh_w: 185,
     };
-    let blades: [((f32, f32), (f32, f32), (f32, f32), f32); 4] = [
+    type KelpBlade = ((f32, f32), (f32, f32), (f32, f32), f32);
+    let blades: [KelpBlade; 4] = [
         ((4.0, -1.6), (9.5, -4.6), (14.5, -4.0), 1.9),
         ((7.5, 1.8), (13.5, 4.8), (19.0, 4.2), 1.9),
         ((13.0, -1.6), (19.0, -4.6), (25.0, -3.6), 1.8),

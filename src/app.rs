@@ -10801,26 +10801,43 @@ mod tests {
         // (`0,0` stands it directly under the item) and
         // `RATRUN_DUMP_FORE_HORDE=n` rings the rat with fodder.
         // `w8-shadow` isolates one band and frames its shadow's entry edge.
-        use crate::render::foreground::{self, ForeKind};
-        let kind_named = |name: &str| {
+        use crate::render::foreground::{
+            self, all_reach_kinds, ForeEntry, ForeKind, ForeShape, ReachKind,
+        };
+        let shape_named = |name: &str| {
             let name = name.trim().to_ascii_lowercase().replace(['-', '_'], "");
             match name.as_str() {
-                "branch" => Some(ForeKind::BranchCanopy),
-                "wires" => Some(ForeKind::PowerLines),
-                "cloud" => Some(ForeKind::CloudBand),
-                _ => ForeKind::all().into_iter()
-                    .find(|kind| format!("{kind:?}").to_ascii_lowercase() == name),
+                "branch" | "canopy" | "treebranch" => {
+                    Some(ForeShape::Reach { kind: ReachKind::TreeCanopy, tip_along: 0.0 })
+                }
+                "wires" => Some(ForeShape::Band(ForeKind::PowerLines)),
+                "cloud" => Some(ForeShape::Band(ForeKind::CloudBand)),
+                _ => ForeKind::all()
+                    .into_iter()
+                    .find(|kind| format!("{kind:?}").to_ascii_lowercase() == name)
+                    .map(ForeShape::Band)
+                    .or_else(|| {
+                        all_reach_kinds()
+                            .into_iter()
+                            .find(|kind| format!("{kind:?}").to_ascii_lowercase() == name)
+                            .map(|kind| ForeShape::Reach { kind, tip_along: 0.0 })
+                    }),
             }
         };
-        let mut sky_kind = std::env::var("RATRUN_DUMP_SKY").ok().as_deref().and_then(kind_named);
+        let mut sky_target = std::env::var("RATRUN_DUMP_SKY")
+            .ok()
+            .as_deref()
+            .and_then(shape_named);
         let shadow_only = target == "w8-shadow";
-        let fore_index = std::env::var("RATRUN_DUMP_FORE").ok()
-            .and_then(|v| v.parse::<usize>().ok()).or(shadow_only.then_some(0));
+        let fore_index = std::env::var("RATRUN_DUMP_FORE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .or(shadow_only.then_some(0));
         if let Some(n) = fore_index {
             let want = std::env::var("RATRUN_DUMP_FORE_KIND")
                 .unwrap_or_else(|_| if shadow_only { "CatwalkGrating".into() } else { String::new() })
                 .to_ascii_lowercase();
-            let kind_filter = kind_named(&want);
+            let shape_filter = shape_named(&want);
             let rat_off = std::env::var("RATRUN_DUMP_FORE_RAT")
                 .ok()
                 .and_then(|v| {
@@ -10836,21 +10853,42 @@ mod tests {
                 let p = w.player.pos;
                 let mut items: Vec<_> = w
                     .foreground_layer
-                    .capture_items()
-                    .filter(|(i, _, corridor)| match want.as_str() {
-                        "" | "band" | "span" => true,
-                        "horizontal" => i.axis.y == 0.0,
-                        "vertical" => i.axis.x == 0.0,
-                        "room-span" => !*corridor,
-                        "corridor-span" => *corridor,
-                        _ => kind_filter == Some(i.kind),
+                    .capture_entries()
+                    .filter(|(e, _, corridor)| match want.as_str() {
+                        "" => true,
+                        "band" | "span" => matches!(e.shape, ForeShape::Band(_)),
+                        "reach" => matches!(e.shape, ForeShape::Reach { .. }),
+                        "horizontal" => e.axis.y.abs() <= 1e-5,
+                        "vertical" => e.axis.x.abs() <= 1e-5,
+                        "room-span" => !*corridor && matches!(e.shape, ForeShape::Band(_)),
+                        "corridor-span" => *corridor && matches!(e.shape, ForeShape::Band(_)),
+                        _ => match (e.shape, shape_filter) {
+                            (ForeShape::Band(a), Some(ForeShape::Band(b))) => a == b,
+                            (ForeShape::Reach { kind: a, .. }, Some(ForeShape::Reach { kind: b, .. })) => a == b,
+                            _ => false,
+                        },
                     })
                     .collect();
+                // If an explicit ReachKind was requested for inspection on a seed
+                // whose 2–4 roll picked other items, stage it at the largest hall
+                // along one of its allowed sides.
+                if items.is_empty() && w.level.theme != Theme::Trailer {
+                    if let Some(ForeShape::Reach { kind, .. }) = shape_filter {
+                        let at = w
+                            .level
+                            .largest_hall()
+                            .map(|r| r.rect.center_world())
+                            .unwrap_or(w.player.pos);
+                        let entry = ForeEntry::stage_reach(kind, at, 0x57A6_ED01);
+                        w.foreground_layer.force_single_entry(&w.level, entry, at);
+                        items.push((entry, at, false));
+                    }
+                }
                 items.sort_by(|a, b| a.1.dist_sq(p).total_cmp(&b.1.dist_sq(p)));
-                if let Some((item, at, _)) = items.get(n).copied() {
-                    eprintln!("dump fore: {item:?}");
+                if let Some((entry, at, _)) = items.get(n).copied() {
+                    eprintln!("dump fore: {entry:?}");
                     w.clear_enemies();
-                    let rat_off = rat_off.unwrap_or(item.normal() * 50.0);
+                    let rat_off = rat_off.unwrap_or(entry.normal() * 50.0);
                     w.player.pos = w
                         .level
                         .tiles
@@ -10870,11 +10908,16 @@ mod tests {
                     }
                     w.cam_focus = Some(at);
                     if shadow_only {
-                        let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
-                            .and_then(|value| value.parse().ok()).map(crate::render::zoom::snap)
+                        let zoom = std::env::var("RATRUN_DUMP_ZOOM")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .map(crate::render::zoom::snap)
                             .unwrap_or(1.0);
                         let size = w.viewport * zoom;
-                        w.cam_focus = Some(w.foreground_layer.capture_shadow_only(item, at, size, zoom));
+                        w.cam_focus = Some(
+                            w.foreground_layer
+                                .capture_shadow_only(entry, at, size, zoom),
+                        );
                     }
                     hh.app.foreground = hh.app.foreground_env.unwrap_or(true);
                     hh.app.picture_dirty = true;
@@ -10885,9 +10928,15 @@ mod tests {
                         hh.frame(&[]);
                     }
                 } else if w.level.theme == Theme::Trailer {
-                    sky_kind = sky_kind.or(kind_filter).or_else(|| {
-                        [ForeKind::BranchCanopy, ForeKind::PowerLines, ForeKind::CloudBand]
-                            .get(n).copied().filter(|_| want.is_empty())
+                    sky_target = sky_target.or(shape_filter).or_else(|| {
+                        [
+                            ForeShape::Reach { kind: ReachKind::TreeCanopy, tip_along: 0.0 },
+                            ForeShape::Band(ForeKind::PowerLines),
+                            ForeShape::Band(ForeKind::CloudBand),
+                        ]
+                        .get(n)
+                        .copied()
+                        .filter(|_| want.is_empty())
                     });
                 } else {
                     assert!(!shadow_only, "shadow capture has no band matching {want:?} #{n}");
@@ -10895,17 +10944,21 @@ mod tests {
                 }
             }
         }
-        // `RATRUN_DUMP_SKY=branch|wires|cloud` advances the Flatbed clock
-        // to a frame with the requested band at the centre of its track.
-        if let Some(kind) = sky_kind {
+        // `RATRUN_DUMP_SKY=branch|lightpole|signarm|wires|cloud` advances the
+        // Flatbed clock to a frame with the requested item at track centre.
+        if let Some(target_shape) = sky_target {
             if let Some(w) = hh.app.world.as_mut() {
-                let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
-                    .and_then(|v| v.parse::<f32>().ok()).map(crate::render::zoom::snap)
+                let zoom = std::env::var("RATRUN_DUMP_ZOOM")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .map(crate::render::zoom::snap)
                     .unwrap_or(w.zoom_view);
                 let size = w.render_viewport * zoom;
                 let size = Vec2::new(size.x.round().max(1.0), size.y.round().max(1.0));
-                if let Some(t) = foreground::sky_capture_time(&w.level, w.cam, size, zoom, w.elapsed, kind) {
-                    eprintln!("dump sky: t={t:.2} {kind:?}");
+                if let Some(t) =
+                    foreground::sky_capture_time(&w.level, w.cam, size, zoom, w.elapsed, target_shape)
+                {
+                    eprintln!("dump sky: t={t:.2} {target_shape:?}");
                     w.elapsed = t;
                     w.clear_enemies();
                     if let Ok(n) = std::env::var("RATRUN_DUMP_FORE_HORDE") {
@@ -10923,7 +10976,7 @@ mod tests {
                     hh.app.console_paused = true;
                     hh.frame(&[]);
                 } else {
-                    eprintln!("dump sky: no staged frame for {kind:?}");
+                    eprintln!("dump sky: no staged frame for {target_shape:?}");
                 }
             }
         }

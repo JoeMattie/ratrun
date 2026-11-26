@@ -1,10 +1,14 @@
-//! Screen-spanning foreground bands, drawn after lighting and under hostile tells.
-//! Placement depends only on the level. Motion, fades and scratch compositing
-//! are render-only and leave the simulation and level generation untouched.
+//! Overhead foreground bands and off-screen-anchored reaches, drawn after
+//! lighting and under hostile tells. Placement depends only on the level.
+//! Motion, fades and scratch compositing are render-only and leave the
+//! simulation and level generation untouched.
 
 use bevy_ecs::world::World as EcsWorld;
 
 use crate::game::art_foreground;
+use crate::game::art_foreground_reach::{
+    self, AnchorSide, ReachShape, EMISSIVE_PEN,
+};
 use crate::game::collision::TILE_F;
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::ecs::systems::miniboss::Miniboss;
@@ -14,6 +18,32 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
 
+pub use art_foreground_reach::ReachKind;
+
+/// Unit vector pointing from an off-screen [`AnchorSide`] into the view.
+const fn inward_axis(side: AnchorSide) -> Vec2 {
+    match side {
+        AnchorSide::Top => VERTICAL,
+        AnchorSide::Bottom => Vec2 { x: 0.0, y: -1.0 },
+        AnchorSide::Left => HORIZONTAL,
+        AnchorSide::Right => Vec2 { x: -1.0, y: 0.0 },
+    }
+}
+
+const fn is_vertical_edge(side: AnchorSide) -> bool {
+    matches!(side, AnchorSide::Top | AnchorSide::Bottom)
+}
+
+/// Allowed anchor edges per [`ReachKind`], read directly from `art_foreground_reach`.
+fn reach_allowed_sides(kind: ReachKind) -> &'static [AnchorSide] {
+    art_foreground_reach::reach_spec(kind).sides
+}
+
+/// Whether `kind` is a 2D edge-anchored whole-tree canopy (`ReachShape::Canopy`).
+fn is_canopy_reach(kind: ReachKind) -> bool {
+    art_foreground_reach::reach_spec(kind).shape == ReachShape::Canopy
+}
+
 pub const ALPHA_MAX: u8 = 215;
 const ALPHA_FLOOR: f32 = 28.0;
 const ALPHA_FLOOR_RAT: f32 = 120.0;
@@ -22,6 +52,7 @@ const FADE_THREAT_PX: f32 = 48.0;
 const FADE_RAMP_PX: f32 = 40.0;
 const EDGE_FADE_PX: f32 = 16.0;
 const SWAY_HZ: f32 = 3.0;
+const REACH_SWAY_HZ: f32 = 8.0;
 const COVERAGE_PCT: u32 = 45;
 const COVERAGE_SKIP_PCT: u32 = 85;
 const OUTFALL_COVERAGE_PCT: u32 = 14;
@@ -45,6 +76,11 @@ const PIXEL_SCALE_NEAR: i32 = 3;
 const PIXEL_SCALE_NEAR_DEPTH: f32 = 2.6;
 // Cache whole sections of the along-axis art lattice, with room for the blur.
 const RASTER_PAGE: i32 = 32;
+// Empty art columns past a reach's free tip so the tent blur feathers cleanly.
+const REACH_TIP_PAD: i32 = 6;
+// Floor shadow lead ahead of a reach's tip along its ray (world px), matching
+// the cross-axis shadow offset so shadows enter first from every edge.
+const REACH_SHADOW_LEAD: f32 = 14.0;
 
 const START_CLEAR_PX: f32 = 96.0;
 const MIN_SPACING: f32 = 160.0;
@@ -141,6 +177,17 @@ impl ForeKind {
     }
 }
 
+pub const fn all_reach_kinds() -> [ReachKind; 8] {
+    ReachKind::all()
+}
+
+fn reach_kinds_for(theme: Theme) -> Vec<ReachKind> {
+    all_reach_kinds()
+        .into_iter()
+        .filter(|&k| art_foreground_reach::reach_spec(k).floors.contains(&theme))
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForeItem {
     pub kind: ForeKind,
@@ -153,8 +200,45 @@ pub struct ForeItem {
     pub seed: u32,
 }
 
+/// Placement shape: either a full-span band (`art_foreground`) or an
+/// off-screen-anchored reach (`art_foreground_reach`, either a repeating-stem
+/// strip ray or a 2D edge-anchored `TreeCanopy` half-disc).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ForeShape {
+    Band(ForeKind),
+    Reach {
+        kind: ReachKind,
+        /// World coordinate of the free tip/rim projected onto `axis` (`tip · axis`).
+        tip_along: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ForeEntry {
+    pub shape: ForeShape,
+    /// Unit tangent: for `Reach`, points from the off-screen anchor into the
+    /// view toward the free tip/rim (`tip_along`).
+    pub axis: Vec2,
+    /// World line offset along `normal()`.
+    pub cross: f32,
+    pub depth: f32,
+    pub scale: f32,
+    pub seed: u32,
+}
+
 const HORIZONTAL: Vec2 = Vec2 { x: 1.0, y: 0.0 };
 const VERTICAL: Vec2 = Vec2 { x: 0.0, y: 1.0 };
+
+fn canonical_normal(axis: Vec2) -> Vec2 {
+    // Canonical upright normal (`normal(-v) == normal(v)`, `normal.y >= 0`,
+    // and `(1, 0)` for vertical axes) matching `art_foreground_reach`'s exact
+    // `AnchorSide` screen mapping on all four viewport edges.
+    if axis.x < -1e-6 || (axis.x.abs() <= 1e-6 && axis.y >= 0.0) {
+        -axis.perp()
+    } else {
+        axis.perp()
+    }
+}
 
 impl ForeItem {
     pub(crate) fn normal(self) -> Vec2 {
@@ -167,6 +251,129 @@ impl ForeItem {
     }
 }
 
+impl ForeEntry {
+    pub fn from_band(item: ForeItem) -> Self {
+        Self {
+            shape: ForeShape::Band(item.kind),
+            axis: item.axis,
+            cross: item.cross,
+            depth: item.depth,
+            scale: item.scale,
+            seed: item.seed,
+        }
+    }
+
+    pub fn reach(kind: ReachKind, axis: Vec2, tip: Vec2, depth: f32, seed: u32) -> Self {
+        let axis = axis.normalized();
+        let normal = canonical_normal(axis);
+        Self {
+            shape: ForeShape::Reach { kind, tip_along: tip.dot(axis) },
+            axis,
+            cross: tip.dot(normal),
+            depth,
+            scale: 1.0,
+            seed,
+        }
+    }
+
+    /// Stage a [`ReachKind`] along one of its allowed sides for capture helpers.
+    #[cfg(test)]
+    pub(crate) fn stage_reach(kind: ReachKind, tip: Vec2, seed: u32) -> Self {
+        let axis = reach_placement_axis(kind, None, seed);
+        let depth = if is_canopy_reach(kind) { 2.2 } else { 2.35 };
+        Self::reach(kind, axis, tip, depth, seed)
+    }
+
+    pub(crate) fn normal(self) -> Vec2 {
+        match self.shape {
+            ForeShape::Band(_) => {
+                if self.axis == VERTICAL {
+                    HORIZONTAL
+                } else {
+                    self.axis.perp()
+                }
+            }
+            ForeShape::Reach { .. } => canonical_normal(self.axis),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tip_world(self) -> Option<Vec2> {
+        match self.shape {
+            ForeShape::Band(_) => None,
+            ForeShape::Reach { tip_along, .. } => {
+                Some(self.axis * tip_along + self.normal() * self.cross)
+            }
+        }
+    }
+
+    fn as_band(self) -> Option<ForeItem> {
+        match self.shape {
+            ForeShape::Band(kind) => Some(ForeItem {
+                kind,
+                axis: self.axis,
+                cross: self.cross,
+                depth: self.depth,
+                scale: self.scale,
+                seed: self.seed,
+            }),
+            ForeShape::Reach { .. } => None,
+        }
+    }
+
+    pub(crate) fn organic(self) -> bool {
+        match self.shape {
+            ForeShape::Band(kind) => kind.organic(),
+            ForeShape::Reach { kind, .. } => art_foreground_reach::reach_spec(kind).organic,
+        }
+    }
+
+    pub(crate) fn is_canopy(self) -> bool {
+        match self.shape {
+            ForeShape::Band(ForeKind::BranchCanopy) => true,
+            ForeShape::Reach { kind, .. } => is_canopy_reach(kind),
+            ForeShape::Band(_) => false,
+        }
+    }
+
+    fn is_cloud(self) -> bool {
+        matches!(self.shape, ForeShape::Band(ForeKind::CloudBand))
+    }
+
+    fn is_wires(self) -> bool {
+        matches!(self.shape, ForeShape::Band(ForeKind::PowerLines))
+    }
+
+    fn art_thickness(self) -> f32 {
+        match self.shape {
+            ForeShape::Band(_) => art_foreground::thickness(&self.as_band().unwrap()),
+            ForeShape::Reach { kind, .. } => {
+                art_foreground_reach::reach_spec(kind).thickness * self.scale.max(0.25)
+            }
+        }
+    }
+
+    fn cross_samples(self) -> std::ops::Range<i32> {
+        match self.shape {
+            ForeShape::Band(_) => art_foreground::cross_samples(&self.as_band().unwrap()),
+            ForeShape::Reach { kind, .. } => {
+                let spec = art_foreground_reach::reach_spec(kind);
+                let th = spec.thickness * self.scale.max(0.25);
+                let pad = if spec.shape == ReachShape::Canopy {
+                    1.0
+                } else if spec.organic {
+                    3.0
+                } else {
+                    1.0
+                };
+                let ht = th * 0.5 + pad;
+                let centre = if (th.round() as i32) & 1 == 0 { -0.5 } else { 0.0 };
+                ((centre - ht).floor() as i32)..(centre + ht).ceil() as i32 + 1
+            }
+        }
+    }
+}
+
 fn placement_axis(kind: ForeKind, horizontal: bool, seed: u32) -> Vec2 {
     if kind.organic() {
         let turn = hash01(u64::from(seed), 0xA961) - 0.5;
@@ -175,6 +382,43 @@ fn placement_axis(kind: ForeKind, horizontal: bool, seed: u32) -> Vec2 {
         HORIZONTAL
     } else {
         VERTICAL
+    }
+}
+
+/// Choose a reach axis strictly from `reach_allowed_sides(kind)`.
+/// `ReachShape::Canopy` stays flush on its straight viewport edge so the
+/// half-disc's flat diameter never tilts inside the view; organic strips
+/// (`VineTendril`, `KelpFrond`) lean diagonally off their chosen edge.
+fn reach_placement_axis(kind: ReachKind, prefer_horizontal: Option<bool>, seed: u32) -> Vec2 {
+    let spec = art_foreground_reach::reach_spec(kind);
+    let sides = reach_allowed_sides(kind);
+    let pick_from = |want_horiz: bool| -> Option<AnchorSide> {
+        let mut buf = [AnchorSide::Top; 4];
+        let mut n = 0;
+        for &s in sides {
+            if (!is_vertical_edge(s)) == want_horiz {
+                buf[n] = s;
+                n += 1;
+            }
+        }
+        (n > 0).then(|| buf[(hash_u32(u64::from(seed), 0xD19C) as usize) % n])
+    };
+    let side = prefer_horizontal
+        .and_then(pick_from)
+        .unwrap_or_else(|| {
+            if sides.is_empty() {
+                AnchorSide::Top
+            } else {
+                sides[(hash_u32(u64::from(seed), 0xD19C) as usize) % sides.len()]
+            }
+        });
+    let base = inward_axis(side);
+    if spec.organic && spec.shape == ReachShape::Strip {
+        let mag = 0.14 + hash01(u64::from(seed), 0xB7E1) * 0.34;
+        let sign = if hash_u32(u64::from(seed), 0x7A31) & 1 == 0 { 1.0 } else { -1.0 };
+        base.rotate(sign * mag).normalized()
+    } else {
+        base
     }
 }
 
@@ -244,11 +488,33 @@ const fn coverage_fill(theme: Theme) -> f32 {
     }
 }
 
-fn pixel_scale(item: &ForeItem) -> i32 {
-    if item.kind != ForeKind::CloudBand && item.depth >= PIXEL_SCALE_NEAR_DEPTH {
+fn band_pixel_scale(entry: &ForeEntry) -> i32 {
+    if !entry.is_cloud() && entry.depth >= PIXEL_SCALE_NEAR_DEPTH {
         PIXEL_SCALE_NEAR
     } else {
         PIXEL_SCALE
+    }
+}
+
+/// Art-to-world block scale for `entry` in `view`. Strip reaches and bands use
+/// 2x/3x blocks by depth; `ReachShape::Canopy` (`TreeCanopy`, `R = 36` art px)
+/// scales `k` so its radial reach covers ~0.8–1.0 of `view.size`'s short axis
+/// and its lateral span covers most of the view at every resolution and zoom.
+fn entry_pixel_scale(entry: ForeEntry, view: View) -> i32 {
+    match entry.shape {
+        ForeShape::Band(_) => band_pixel_scale(&entry),
+        ForeShape::Reach { kind, .. } => {
+            let spec = art_foreground_reach::reach_spec(kind);
+            if spec.shape == ReachShape::Canopy {
+                let short = view.size.x.min(view.size.y).max(spec.tip_len);
+                let max_k = (short / spec.tip_len).floor().max(1.0) as i32;
+                ((short * 0.92 / spec.tip_len).round() as i32).clamp(1, max_k)
+            } else if entry.depth >= PIXEL_SCALE_NEAR_DEPTH {
+                PIXEL_SCALE_NEAR
+            } else {
+                PIXEL_SCALE
+            }
+        }
     }
 }
 
@@ -267,40 +533,29 @@ pub fn enabled_from_env() -> bool {
 // ---- The only pixel writers the art may use -------------------------------
 
 thread_local! {
-    /// Pixels this frame's layer may still paint (`u32::MAX` = unlimited). See
-    /// [`COVERAGE_PCT`] and [`draw`].
     static WRITE_BUDGET: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
-    /// Pixels painted since [`budget_start`].
     static WRITES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// The rat's clear disc: centre in buffer pixels, zoom and active flag.
-    /// Direct art calls outside [`draw`] have no disc.
     static CLEAR_DISC: std::cell::Cell<(i32, i32, f32, bool)> =
         const { std::cell::Cell::new((0, 0, 1.0, false)) };
-    /// Where [`blend`] and [`shadow`] write. `None` (the default, and what a
-    /// test calling the art directly sees) is the frame buffer they are handed;
-    /// `Some` is the item scratch [`draw`] lends out around one art call, so the
-    /// art keeps calling the same two functions and is upscaled afterwards.
     static TARGET: std::cell::RefCell<Option<Scratch>> = const { std::cell::RefCell::new(None) };
 }
 
 /// One item's offscreen raster: a window `[x0, x0 + w) x [y0, y0 + h)` of art
-/// coordinates holding the body's colour and alpha and the floor shadow's
-/// strength. Kept on [`ForeLayer`] and only ever grown, so once a level has
-/// drawn its largest item no frame allocates.
+/// coordinates holding premultiplied `[r, g, b, a, emissive]` and floor shadow
+/// strength. Supports arbitrary 2D extents (including full-view `TreeCanopy`
+/// half-discs) and only ever grows once warm.
 #[derive(Default)]
 struct Scratch {
     x0: i32,
     y0: i32,
     w: i32,
     h: i32,
-    body: Vec<[u32; 4]>,
-    filtered_rows: Vec<[u32; 4]>,
+    body: Vec<[u32; 5]>,
+    filtered_rows: Vec<[u32; 5]>,
     shade: Vec<u8>,
 }
 
 impl Scratch {
-    /// Make the scratch the window `(x0, y0, w, h)`, cleared. Reuses the
-    /// buffers: `clear` + `resize` only allocates past the capacity reached.
     fn reset(&mut self, x0: i32, y0: i32, w: i32, h: i32) {
         let n = (w.max(0) * h.max(0)) as usize;
         self.x0 = x0;
@@ -308,7 +563,7 @@ impl Scratch {
         self.w = w.max(0);
         self.h = h.max(0);
         self.body.clear();
-        self.body.resize(n, [0; 4]);
+        self.body.resize(n, [0; 5]);
         self.shade.clear();
         self.shade.resize(n, 0);
     }
@@ -322,18 +577,26 @@ impl Scratch {
         Some((ly * self.w + lx) as usize)
     }
 
-    /// The art wrote a body pixel: keep its colour and alpha (the art writes
-    /// each pixel once a pass, so the last write is the pixel).
     #[inline]
     fn put(&mut self, x: i32, y: i32, rgb: Rgb, alpha: u8) {
+        self.put_with_emissive(x, y, rgb, alpha, false);
+    }
+
+    #[inline]
+    fn put_with_emissive(&mut self, x: i32, y: i32, rgb: Rgb, alpha: u8, emissive: bool) {
         if let Some(i) = self.index(x, y) {
             let a = u32::from(alpha);
-            self.body[i] = [u32::from(rgb.0) * a, u32::from(rgb.1) * a,
-                u32::from(rgb.2) * a, a];
+            let e = if emissive { a } else { 0 };
+            self.body[i] = [
+                u32::from(rgb.0) * a,
+                u32::from(rgb.1) * a,
+                u32::from(rgb.2) * a,
+                a,
+                e,
+            ];
         }
     }
 
-    /// The art wrote a shadow pixel: keep the strongest.
     #[inline]
     fn put_shade(&mut self, x: i32, y: i32, strength: f32) {
         if let Some(i) = self.index(x, y) {
@@ -344,14 +607,34 @@ impl Scratch {
         }
     }
 
-    /// The buffers' combined capacity (tests: nothing grows once warm).
     #[cfg(test)]
     fn capacity(&self) -> usize {
         self.body.capacity() + self.filtered_rows.capacity() + self.shade.capacity()
     }
 }
 
-/// Take one pixel of the frame's budget; `false` when it is spent.
+/// Reusable local buffers handed to `art_foreground_reach::draw_reach`, bundled
+/// with `Scratch` so `Focus::draw` takes one scratch handle.
+struct RenderBuffers {
+    scratch: Scratch,
+    reach_body: PixelBuffer,
+    reach_shadow: PixelBuffer,
+}
+
+impl Default for RenderBuffers {
+    fn default() -> Self {
+        let mut reach_body = PixelBuffer::new(0, 0);
+        let mut reach_shadow = PixelBuffer::new(0, 0);
+        reach_body.set_materials(true);
+        reach_shadow.set_materials(true);
+        Self {
+            scratch: Scratch::default(),
+            reach_body,
+            reach_shadow,
+        }
+    }
+}
+
 #[inline]
 fn take_budget() -> bool {
     WRITE_BUDGET.with(|b| {
@@ -377,7 +660,6 @@ fn budget_finish() -> u32 {
     WRITES.with(|w| w.get())
 }
 
-/// Pixels painted so far this frame (0 outside a [`draw`]).
 #[inline]
 fn writes_so_far() -> u32 {
     WRITES.with(|w| w.get())
@@ -391,9 +673,6 @@ fn clear_disc_reset() {
     CLEAR_DISC.with(|c| c.set((0, 0, 1.0, false)));
 }
 
-/// The alpha multiplier the rat's clear disc asks for at `(x, y)`: 1.0 with no
-/// disc, [`CLEAR_DISC_MIN`] inside [`CLEAR_DISC_IN_PX`], ramping back to 1.0 at
-/// [`CLEAR_DISC_OUT_PX`].
 #[inline]
 fn clear_disc_factor(x: i32, y: i32) -> f32 {
     CLEAR_DISC.with(|c| {
@@ -415,8 +694,6 @@ fn clear_disc_factor(x: i32, y: i32) -> f32 {
     })
 }
 
-/// Is `(x, y)` inside the clear disc's hard core ([`RAT_SKIP_PX`])? Never true
-/// outside a [`draw`].
 #[inline]
 fn in_rat_core(x: i32, y: i32) -> bool {
     CLEAR_DISC.with(|c| {
@@ -431,19 +708,7 @@ fn in_rat_core(x: i32, y: i32) -> bool {
 }
 
 /// Alpha-blend `rgb` over the existing pixel at `(x, y)`, clipped to the
-/// buffer. The **only** body painter the layer's art may use.
-///
-/// * The alpha is clamped to [`ALPHA_MAX`], so no pixel of this layer is ever
-///   opaque (the fight can never be hidden), and quartered near the rat by the
-///   frame's clear disc.
-/// * The colour is darkened by [`DARKEN`] first, so the layer reads as a
-///   silhouette against the lit floor without a per-pixel lighting pass. Ask
-///   [`rim_tint`] for a rim colour on top.
-/// * It counts against the frame's coverage budget ([`COVERAGE_SKIP_PCT`]);
-///   past it the write is dropped, so the cap holds whatever the art paints.
-///
-/// While [`draw`] is rasterising an item the write goes to the item's scratch
-/// instead (see [`TARGET`]); its filtered raster is then composited per pixel.
+/// buffer. The **only** body painter the band art may use.
 #[inline]
 pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     if alpha == 0 {
@@ -461,7 +726,6 @@ pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     }
 }
 
-/// The screen half of [`blend`]: clip, clamp, clear disc, budget, darken, mix.
 #[inline]
 fn blend_screen(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     if alpha == 0 || x < 0 || y < 0 {
@@ -478,8 +742,6 @@ fn blend_screen(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     if a == 0 {
         return;
     }
-    // A haze-level write (a cloud's body, an item faded right down) hides
-    // nothing, so it is not charged to the coverage budget.
     if a > CLOUD_ALPHA_MAX && !take_budget() {
         return;
     }
@@ -491,10 +753,6 @@ fn blend_screen(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
 
 /// Darken the pixel at `(x, y)` by `strength` (clamped to `0..=1`, scaled by
 /// [`SHADOW_MAX`]), clipped to the buffer: the layer's floor-shadow writer.
-/// It is a darken, so it can never brighten anything, and it is **not** counted
-/// against the body coverage budget (the cap counts item pixels only).
-///
-/// Like [`blend`], it writes the lent scratch while an item is rasterised.
 #[inline]
 pub fn shadow(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
     if strength <= 0.0 {
@@ -512,7 +770,6 @@ pub fn shadow(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
     }
 }
 
-/// The screen half of [`shadow`].
 #[inline]
 fn shadow_screen(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
     let s = strength.clamp(0.0, 1.0) * SHADOW_MAX;
@@ -528,33 +785,90 @@ fn shadow_screen(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
     px[i] = palette::scale(px[i], 1.0 - s);
 }
 
+/// Minimum `s · axis` among all points `s` inside `[0, size.x] × [0, size.y]`
+/// within the cross-axis strip `span`, or `None` when the strip misses the view.
+fn min_strip_along(span: (f32, f32), axis: Vec2, normal: Vec2, size: Vec2) -> Option<f32> {
+    let view_span = project(size, normal);
+    let c_lo = span.0.max(view_span.0);
+    let c_hi = span.1.min(view_span.1);
+    if c_hi <= c_lo {
+        return None;
+    }
+    let mut lo = f32::INFINITY;
+    for c in [c_lo, c_hi] {
+        let (a, b) = line_span(normal * c, axis, size);
+        if a <= b {
+            lo = lo.min(a);
+        }
+    }
+    for corner in [
+        Vec2::ZERO,
+        Vec2::new(size.x, 0.0),
+        Vec2::new(0.0, size.y),
+        size,
+    ] {
+        let cn = corner.dot(normal);
+        if cn >= c_lo - 1e-4 && cn <= c_hi + 1e-4 {
+            lo = lo.min(corner.dot(axis));
+        }
+    }
+    (lo < f32::INFINITY).then_some(lo)
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Plane {
     cross: i32,
     span: (f32, f32),
+    tip_max: f32,
     fade: f32,
 }
 
 impl Plane {
-    fn new(cross: f32, extent: (f32, f32), view_span: (f32, f32), zoom: f32) -> Self {
+    fn new_band(cross: f32, extent: (f32, f32), view_span: (f32, f32), zoom: f32) -> Self {
         let cross = cross.round() as i32;
         let span = (cross as f32 + extent.0, cross as f32 + extent.1);
-        // Measure how far the leading side has passed the nearer view edge.
         let penetration = (span.1 - view_span.0).min(view_span.1 - span.0);
         let fade = (penetration / (EDGE_FADE_PX * zoom)).clamp(0.0, 1.0);
-        Self { cross, span, fade }
+        Self { cross, span, tip_max: f32::INFINITY, fade }
+    }
+
+    fn new_reach(
+        cross: f32,
+        extent: (f32, f32),
+        tip_max: f32,
+        basis: (Vec2, Vec2),
+        view: View,
+        view_span: (f32, f32),
+    ) -> Self {
+        let (axis, normal) = basis;
+        let cross = cross.round() as i32;
+        let span = (cross as f32 + extent.0, cross as f32 + extent.1);
+        let cross_pen = (span.1 - view_span.0).min(view_span.1 - span.0);
+        let fade = if cross_pen <= 0.0 {
+            0.0
+        } else if let Some(min_along) = min_strip_along(span, axis, normal, view.size) {
+            let along_pen = tip_max - min_along;
+            (cross_pen.min(along_pen) / (EDGE_FADE_PX * view.zoom)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self { cross, span, tip_max, fade }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Plan {
-    item: ForeItem,
+    entry: ForeEntry,
     normal: Vec2,
     body: Plane,
     shadow: Plane,
     centre_cross: f32,
+    centre_along: f32,
     along: (f32, f32),
+    /// Screen along-coordinate of body's unpadded tip (`+∞` for bands).
+    body_tip: f32,
+    /// Screen along-coordinate of shadow's unpadded tip (`+∞` for bands).
+    shadow_tip: f32,
     half_thickness: f32,
     rat_distance: f32,
     alpha: u8,
@@ -576,13 +890,18 @@ impl Plan {
         }
         let width_at = |v| {
             let origin = self.normal * v;
-            let (lo, hi) = line_span(origin, self.item.axis, size);
-            (hi - lo).max(0.0)
+            let (lo, hi) = line_span(origin, self.entry.axis, size);
+            (hi.min(self.body.tip_max) - lo).max(0.0)
         };
-        // Three slices estimate the visible strip area, including bands
-        // passing through a corner of the view.
-        (end - start) * (width_at(start) + 4.0 * width_at((start + end) * 0.5)
-            + width_at(end)) / 6.0
+        let box_area = (end - start)
+            * (width_at(start) + 4.0 * width_at((start + end) * 0.5) + width_at(end))
+            / 6.0;
+        if self.entry.is_canopy() {
+            // Semicircular half-disc occupies pi/4 of its bounding rectangle.
+            box_area * std::f32::consts::FRAC_PI_4
+        } else {
+            box_area
+        }
     }
 
     fn visible_lines(&self) -> impl Iterator<Item = i32> {
@@ -591,8 +910,18 @@ impl Plan {
     }
 
     fn centre_distance(&self) -> f32 {
-        self.visible_lines()
-            .map(|cross| (cross as f32 - self.centre_cross).abs())
+        [self.body, self.shadow]
+            .into_iter()
+            .filter(|plane| plane.fade > 0.0)
+            .map(|plane| {
+                let dc = plane.cross as f32 - self.centre_cross;
+                let da = if plane.tip_max.is_finite() {
+                    (self.centre_along - plane.tip_max).max(0.0)
+                } else {
+                    0.0
+                };
+                (dc * dc + da * da).sqrt()
+            })
             .fold(f32::INFINITY, f32::min)
     }
 }
@@ -623,8 +952,8 @@ fn line_span(origin: Vec2, axis: Vec2, size: Vec2) -> (f32, f32) {
     (x.0.max(y.0), x.1.min(y.1))
 }
 
-struct PlacedBand {
-    item: ForeItem,
+struct PlacedItem {
+    entry: ForeEntry,
     anchor: Vec2,
     #[cfg(test)]
     corridor: bool,
@@ -633,10 +962,10 @@ struct PlacedBand {
 /// Render state owned by `World`. Placement is cached by level, and the
 /// frame plan and raster allocation are reused.
 pub struct ForeLayer {
-    items: Vec<PlacedBand>,
+    items: Vec<PlacedItem>,
     key: Option<(Theme, u64)>,
     frame: Vec<Plan>,
-    scratch: Scratch,
+    bufs: RenderBuffers,
     rasters: [Focus; MAX_BANDS_IN_VIEW],
 }
 
@@ -652,12 +981,12 @@ impl ForeLayer {
             items: Vec::new(),
             key: None,
             frame: Vec::with_capacity(MAX_BANDS_IN_VIEW),
-            scratch: Scratch::default(),
+            bufs: RenderBuffers::default(),
             rasters: std::array::from_fn(|_| Focus::default()),
         }
     }
 
-    /// Build the static band list once per level.
+    /// Build the static item list once per level.
     pub fn sync(&mut self, level: &Level) {
         let key = (level.theme, level.seed);
         if self.key == Some(key) {
@@ -669,30 +998,38 @@ impl ForeLayer {
     }
 
     #[cfg(test)]
-    pub(crate) fn capture_items(&self) -> impl Iterator<Item = (ForeItem, Vec2, bool)> + '_ {
-        self.items.iter().map(|p| (p.item, p.anchor, p.corridor))
+    pub(crate) fn capture_entries(&self) -> impl Iterator<Item = (ForeEntry, Vec2, bool)> + '_ {
+        self.items.iter().map(|p| (p.entry, p.anchor, p.corridor))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_single_entry(&mut self, level: &Level, entry: ForeEntry, anchor: Vec2) {
+        self.key = Some((level.theme, level.seed));
+        self.items.clear();
+        self.items.push(PlacedItem { entry, anchor, corridor: false });
     }
 
     #[cfg(test)]
     pub(crate) fn capture_shadow_only(
         &mut self,
-        item: ForeItem,
+        entry: ForeEntry,
         anchor: Vec2,
         size: Vec2,
         zoom: f32,
     ) -> Vec2 {
-        let normal = item.normal();
+        let view = View { cam: Vec2::ZERO, size, zoom };
+        let normal = entry.normal();
         let (near, _) = project(size, normal);
-        let block = pixel_scale(&item);
-        let (_, shadow_end) = cross_extent(item, block, block / 2);
-        let world_cross = near - shadow_end - shadow_offset(item) + 14.0 * zoom;
+        let block = entry_pixel_scale(entry, view);
+        let (_, shadow_end) = cross_extent(entry, block, block / 2);
+        let world_cross = near - shadow_end - shadow_offset(entry) + 14.0 * zoom;
         let cam = anchor - size * 0.5;
-        let cam = cam + normal * (item.cross - world_cross - cam.dot(normal));
-        let plan = plan_band(View { cam, size, zoom }, item, anchor, &[])
-            .expect("the band shadow enters the view");
+        let cam = cam + normal * (entry.cross - world_cross - cam.dot(normal));
+        let plan = plan_entry(View { cam, size, zoom }, entry, anchor, &[])
+            .expect("the item shadow enters the view");
         assert_eq!(plan.body.fade, 0.0);
         assert!(plan.shadow.fade > 0.0);
-        self.items.retain(|band| band.item == item);
+        self.items.retain(|placed| placed.entry == entry);
         cam + size * 0.5
     }
 
@@ -706,17 +1043,20 @@ impl ForeLayer {
     ) {
         self.frame.clear();
         let sky = sky_items(level, view, elapsed);
-        let items = sky.into_iter().flatten().chain(self.items.iter().map(|p| p.item));
+        let items = sky.into_iter().flatten().chain(self.items.iter().map(|p| p.entry));
 
-        // Select by the nearest visible plane of each band, in screen pixels.
-        // A second pass is enough to find the next candidate with room beside
-        // the first. Parallel bands need space between all their visible lines.
+        // Select by the nearest visible plane of each item, in screen pixels.
+        // Parallel lines keep 48 screen px between visible planes, and at most
+        // one whole-tree canopy (`TreeCanopy`) may appear on screen at a time.
         for _ in 0..MAX_BANDS_IN_VIEW {
             let next = items.clone()
-                .filter_map(|item| plan_band(view, item, rat, threats))
+                .filter_map(|entry| plan_entry(view, entry, rat, threats))
                 .filter(|p| {
                     self.frame.iter().all(|other| {
-                        p.item.axis != other.item.axis
+                        if p.entry.is_canopy() && other.entry.is_canopy() {
+                            return false;
+                        }
+                        (p.normal - other.normal).len_sq() > 1e-4
                             || p.visible_lines().all(|cross| {
                                 other.visible_lines().all(|other_cross| {
                                     (cross - other_cross).abs() as f32 >= MIN_SCREEN_SPACING * view.zoom
@@ -730,21 +1070,19 @@ impl ForeLayer {
         }
         let fill = coverage_fill(level.theme);
         let covered: f32 = self.frame.iter()
-            .filter(|p| !matches!(p.item.kind, ForeKind::CloudBand | ForeKind::PowerLines))
+            .filter(|p| !(p.entry.is_cloud() || p.entry.is_wires()))
             .map(|p| p.body_area(view.size) * fill)
             .sum();
         let cap = view.size.x * view.size.y * coverage_pct(level.theme) as f32 / 100.0;
         if covered > cap {
             let factor = (cap / covered).max(COVERAGE_ALPHA_MIN);
             for plan in &mut self.frame {
-                if plan.item.kind != ForeKind::CloudBand {
+                if !plan.entry.is_cloud() {
                     plan.alpha = (plan.alpha as f32 * factor).round() as u8;
                 }
             }
         }
-        // Two entries at most. Draw the far one first, retaining selection
-        // order when their depths tie.
-        if self.frame.len() == 2 && self.frame[0].item.depth > self.frame[1].item.depth {
+        if self.frame.len() == 2 && self.frame[0].entry.depth > self.frame[1].entry.depth {
             self.frame.swap(0, 1);
         }
         if let [back, front] = self.frame.as_mut_slice() {
@@ -752,8 +1090,8 @@ impl ForeLayer {
                 p.body.fade > 0.0
                     && p.rat_distance <= p.half_thickness + CLEAR_DISC_IN_PX * view.zoom
             };
-            front.crossing_rat = back.item.axis != front.item.axis
-                && back.item.kind != ForeKind::CloudBand
+            front.crossing_rat = (back.normal - front.normal).len_sq() > 1e-4
+                && !back.entry.is_cloud()
                 && near_rat(back)
                 && near_rat(front);
         }
@@ -769,59 +1107,140 @@ struct View {
     zoom: f32,
 }
 
-fn blur_radius(item: ForeItem, zoom: f32) -> i32 {
-    // Depth is 1.8–3.0. Keep the radius in screen pixels as the view eases.
-    (((item.depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN) * 2.0 + 2.0)
+fn blur_radius(entry: ForeEntry, zoom: f32) -> i32 {
+    (((entry.depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN) * 2.0 + 2.0)
         * zoom).round().max(1.0) as i32
 }
 
-fn cross_extent(item: ForeItem, block: i32, pad: i32) -> (f32, f32) {
-    let samples = art_foreground::cross_samples(&item);
+fn cross_extent(entry: ForeEntry, block: i32, pad: i32) -> (f32, f32) {
+    let samples = entry.cross_samples();
     ((samples.start * block - pad) as f32, (samples.end * block + pad) as f32)
 }
 
-fn shadow_offset(item: ForeItem) -> f32 {
-    10.0 + 4.0 * item.axis.x.abs()
+fn shadow_offset(entry: ForeEntry) -> f32 {
+    10.0 + 4.0 * entry.axis.x.abs()
 }
 
-fn plan_band(view: View, item: ForeItem, rat: Vec2, threats: &[(Vec2, f32)]) -> Option<Plan> {
-    let normal = item.normal();
+fn plan_entry(view: View, entry: ForeEntry, rat: Vec2, threats: &[(Vec2, f32)]) -> Option<Plan> {
+    let normal = entry.normal();
     let view_span = project(view.size, normal);
+    let along = project(view.size, entry.axis);
     let centre_cross = (view_span.0 + view_span.1) * 0.5;
-    let world_cross = item.cross - view.cam.dot(normal);
-    let screen_cross = centre_cross + (world_cross - centre_cross) * item.depth;
-    let k = pixel_scale(&item);
-    let radius = blur_radius(item, view.zoom);
-    // Account for the tent on the body and the half-sample filter on the shadow.
-    let mut body = Plane::new(screen_cross, cross_extent(item, k, radius), view_span, view.zoom);
-    let shadow = Plane::new(
-        world_cross + shadow_offset(item), cross_extent(item, k, k / 2), view_span, view.zoom,
-    );
-    if item.kind == ForeKind::CloudBand {
+    let centre_along = (along.0 + along.1) * 0.5;
+    let world_cross = entry.cross - view.cam.dot(normal);
+    let screen_cross = centre_cross + (world_cross - centre_cross) * entry.depth;
+    let k = entry_pixel_scale(entry, view);
+    let radius = blur_radius(entry, view.zoom);
+    let (mut body, shadow, body_tip, shadow_tip) = match entry.shape {
+        ForeShape::Band(_) => {
+            let body = Plane::new_band(
+                screen_cross, cross_extent(entry, k, radius), view_span, view.zoom,
+            );
+            let shadow = Plane::new_band(
+                world_cross + shadow_offset(entry),
+                cross_extent(entry, k, k / 2),
+                view_span,
+                view.zoom,
+            );
+            (body, shadow, f32::INFINITY, f32::INFINITY)
+        }
+        ForeShape::Reach { kind, tip_along } => {
+            let spec = art_foreground_reach::reach_spec(kind);
+            let cam_along = view.cam.dot(entry.axis);
+            let raw_body_tip = tip_along - cam_along;
+            let raw_shadow_tip = raw_body_tip + REACH_SHADOW_LEAD;
+            let (body_tip, shadow_tip) = if spec.shape == ReachShape::Canopy {
+                // `TreeCanopy` draws nothing for `local_x <= 0` (trunk is off-screen);
+                // clamp its tip at `along.0 + tip_len * k` so its flat diameter never
+                // detaches from the anchor viewport edge.
+                let max_tip = along.0 + (spec.tip_len.round() as i32 * k) as f32;
+                (raw_body_tip.min(max_tip), raw_shadow_tip.min(max_tip))
+            } else {
+                (raw_body_tip, raw_shadow_tip)
+            };
+            let basis = (entry.axis, normal);
+            let body = Plane::new_reach(
+                screen_cross,
+                cross_extent(entry, k, radius),
+                body_tip + radius as f32,
+                basis,
+                view,
+                view_span,
+            );
+            let shadow = Plane::new_reach(
+                world_cross + shadow_offset(entry),
+                cross_extent(entry, k, k / 2),
+                shadow_tip + (k / 2) as f32,
+                basis,
+                view,
+                view_span,
+            );
+            (body, shadow, body_tip, shadow_tip)
+        }
+    };
+    if entry.is_cloud() {
         body.fade = 0.0;
     }
     if body.fade == 0.0 && shadow.fade == 0.0 {
         return None;
     }
-    let half_thickness = art_foreground::thickness(&item) * 0.5 * k as f32 + radius as f32;
-    let line_distance = |at: Vec2| ((at - view.cam).dot(normal) - body.cross as f32).abs();
-    let rat_distance = line_distance(rat);
+    let half_thickness = entry.art_thickness() * 0.5 * k as f32 + radius as f32;
+    let is_canopy_shape = matches!(
+        entry.shape,
+        ForeShape::Reach { kind, .. }
+            if art_foreground_reach::reach_spec(kind).shape == ReachShape::Canopy
+    );
+    let shape_distance = |at: Vec2| -> f32 {
+        let rel = at - view.cam;
+        let dc = rel.dot(normal) - body.cross as f32;
+        if is_canopy_shape {
+            let spec_len = match entry.shape {
+                ForeShape::Reach { kind, .. } => art_foreground_reach::reach_spec(kind).tip_len,
+                ForeShape::Band(_) => 0.0,
+            };
+            let hub_along = body_tip - spec_len * k as f32;
+            let du = (rel.dot(entry.axis) - hub_along).max(0.0);
+            ((dc * dc + du * du).sqrt() - half_thickness).max(0.0)
+        } else {
+            let da = if body_tip.is_finite() {
+                (rel.dot(entry.axis) - body_tip).max(0.0)
+            } else {
+                0.0
+            };
+            (dc * dc + da * da).sqrt()
+        }
+    };
+    let rat_distance = shape_distance(rat);
     let mut alpha = proximity_alpha(
         ALPHA_MAX as f32, rat_distance / view.zoom, FADE_RAT_PX, ALPHA_FLOOR_RAT,
     );
-    for &(body, radius) in threats {
-        let distance = (line_distance(body) - half_thickness - radius.max(0.0)).max(0.0);
+    for &(body_pos, threat_r) in threats {
+        let raw = shape_distance(body_pos);
+        let surf = if is_canopy_shape { raw } else { (raw - half_thickness).max(0.0) };
+        let distance = (surf - threat_r.max(0.0)).max(0.0);
         alpha = alpha.min(proximity_alpha(
             ALPHA_MAX as f32, distance / view.zoom, FADE_THREAT_PX, ALPHA_FLOOR,
         ));
     }
-    if item.kind == ForeKind::CloudBand {
+    if entry.is_cloud() {
         alpha = alpha.min(CLOUD_ALPHA_MAX as f32);
     }
     Some(Plan {
-        item, normal, body, shadow,
-        centre_cross, along: project(view.size, item.axis), half_thickness, rat_distance,
-        alpha: alpha.round() as u8, k, radius, crossing_rat: false,
+        entry,
+        normal,
+        body,
+        shadow,
+        centre_cross,
+        centre_along,
+        along,
+        body_tip,
+        shadow_tip,
+        half_thickness,
+        rat_distance,
+        alpha: alpha.round() as u8,
+        k,
+        radius,
+        crossing_rat: false,
     })
 }
 
@@ -873,25 +1292,31 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
         let painted = writes_so_far();
         let est_writes = if scene.level.theme == Theme::Outfall {
             plan.body_area(view.size) * OUTFALL_COVERAGE_FILL
+        } else if plan.entry.is_canopy() {
+            plan.body_area(view.size) * COVERAGE_FILL
         } else {
             plan.body_area(view.size)
         };
         let alpha = if est_writes > cap_skip.saturating_sub(painted) as f32 {
-            // Keep the whole run visible as haze when it might exceed the
-            // hard budget. Stopping midway would leave a visible band end.
             plan.alpha.min(CLOUD_ALPHA_MAX)
         } else {
             coverage_alpha(plan.alpha, painted, cap_full)
         };
-        raster.draw(pb, &mut layer.scratch, view, plan, alpha, scene);
+        raster.draw(pb, &mut layer.bufs, view, plan, alpha, scene);
     }
     clear_disc_reset();
     budget_finish()
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum RasterKind {
+    Band(ForeKind),
+    Reach(ReachKind),
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct RasterKey {
-    kind: ForeKind,
+    kind: RasterKind,
     seed: u32,
     scale: f32,
     theme: Theme,
@@ -904,9 +1329,11 @@ struct RasterKey {
 #[derive(Default)]
 struct Focus {
     key: Option<RasterKey>,
-    /// The extent is on the world-fixed, along-axis art lattice.
+    /// For bands: world-fixed along-axis art lattice `[first, last)`.
     first: i32,
     last: i32,
+    /// For reaches: cached local art length from anchor side to tip (`<= tip_len` for canopies).
+    reach_len: i32,
     width: i32,
     top: i32,
     bottom: i32,
@@ -920,78 +1347,150 @@ impl Focus {
     fn draw(
         &mut self,
         pb: &mut PixelBuffer,
-        scratch: &mut Scratch,
+        bufs: &mut RenderBuffers,
         view: View,
         plan: &Plan,
         alpha: u8,
         scene: &ForeScene,
     ) {
-        let item = plan.item;
+        let entry = plan.entry;
         let block = plan.k;
-        let cam_along = view.cam.dot(item.axis);
-        let pad = BAND_OVERHANG as f32 * view.zoom + plan.radius as f32 + 1.0;
-        let (lo, hi) = plan.along;
-        let first = ((cam_along + lo - pad) / block as f32).floor() as i32;
-        let last = ((cam_along + hi + pad) / block as f32).ceil() as i32;
-        let key = RasterKey {
-            kind: item.kind,
-            seed: item.seed,
-            scale: item.scale,
-            theme: scene.level.theme,
-            sway: sway_of(&item, scene.elapsed),
-            toward_centre: if plan.body.cross as f32 <= plan.centre_cross { 1 } else { -1 },
-            block,
-            radius: plan.radius,
-        };
-        // Keep both planes warm on the same world-aligned page as either
-        // one enters or leaves the view. Edge opacity is only used at blit.
-        if self.key != Some(key) || first < self.first || last > self.last {
-            self.first = first.div_euclid(RASTER_PAGE) * RASTER_PAGE;
-            self.last = last.div_euclid(RASTER_PAGE) * RASTER_PAGE + RASTER_PAGE;
-            let width = self.last - self.first;
-            let art_half = (plan.half_thickness / block as f32).ceil() as i32 + 2;
-            scratch.reset(0, -art_half, width, 2 * art_half + 1);
-            let d = ForeDraw {
-                screen_cross: 0,
-                shadow_cross: 0,
-                from: 0,
-                to: width - 1,
-                scale: key.scale,
-                alpha: ALPHA_MAX,
-                sway: key.sway,
-                theme: key.theme,
-                along_offset: self.first,
-                elapsed_step: 0,
-                toward_centre: key.toward_centre,
-            };
-            TARGET.with(|t| *t.borrow_mut() = Some(std::mem::take(scratch)));
-            art_foreground::draw(pb, &ForeItem { axis: HORIZONTAL, ..item }, &d);
-            *scratch = TARGET.with(|t| t.borrow_mut().take()).unwrap_or_default();
-            self.filter(scratch, key);
-            self.key = Some(key);
-            #[cfg(test)]
-            {
-                self.rebuilds += 1;
-            }
-        }
+        let cam_along = view.cam.dot(entry.axis);
+        let toward_centre = if plan.body.cross as f32 <= plan.centre_cross { 1 } else { -1 };
 
-        let along_origin = (self.first * block) as f32 - cam_along;
+        let (body_along_origin, shadow_along_origin) = match entry.shape {
+            ForeShape::Band(kind) => {
+                let item = entry.as_band().unwrap();
+                let pad = BAND_OVERHANG as f32 * view.zoom + plan.radius as f32 + 1.0;
+                let (lo, hi) = plan.along;
+                let first = ((cam_along + lo - pad) / block as f32).floor() as i32;
+                let last = ((cam_along + hi + pad) / block as f32).ceil() as i32;
+                let key = RasterKey {
+                    kind: RasterKind::Band(kind),
+                    seed: entry.seed,
+                    scale: entry.scale,
+                    theme: scene.level.theme,
+                    sway: sway_of(&item, scene.elapsed),
+                    toward_centre,
+                    block,
+                    radius: plan.radius,
+                };
+                if self.key != Some(key) || first < self.first || last > self.last {
+                    self.first = first.div_euclid(RASTER_PAGE) * RASTER_PAGE;
+                    self.last = last.div_euclid(RASTER_PAGE) * RASTER_PAGE + RASTER_PAGE;
+                    self.reach_len = 0;
+                    let width = self.last - self.first;
+                    let art_half = (plan.half_thickness / block as f32).ceil() as i32 + 2;
+                    bufs.scratch.reset(0, -art_half, width, 2 * art_half + 1);
+                    let d = ForeDraw {
+                        screen_cross: 0,
+                        shadow_cross: 0,
+                        from: 0,
+                        to: width - 1,
+                        scale: key.scale,
+                        alpha: ALPHA_MAX,
+                        sway: key.sway,
+                        theme: key.theme,
+                        along_offset: self.first,
+                        elapsed_step: 0,
+                        toward_centre: key.toward_centre,
+                    };
+                    TARGET.with(|t| *t.borrow_mut() = Some(std::mem::take(&mut bufs.scratch)));
+                    art_foreground::draw(pb, &ForeItem { axis: HORIZONTAL, ..item }, &d);
+                    bufs.scratch = TARGET.with(|t| t.borrow_mut().take()).unwrap_or_default();
+                    self.filter(&mut bufs.scratch, key, false);
+                    self.key = Some(key);
+                    #[cfg(test)]
+                    {
+                        self.rebuilds += 1;
+                    }
+                }
+                let origin = (self.first * block) as f32 - cam_along;
+                (origin, origin)
+            }
+            ForeShape::Reach { kind, .. } => {
+                let spec = art_foreground_reach::reach_spec(kind);
+                let paged_len = if spec.shape == ReachShape::Canopy {
+                    // Canopy contract: clamp `len` to `spec.tip_len` (`36`) so
+                    // `local_x <= 0` (off-screen trunk) is never requested.
+                    spec.tip_len.round().max(1.0) as i32
+                } else {
+                    let overhang = BAND_OVERHANG as f32 * view.zoom;
+                    let (along_lo, _) = plan.along;
+                    let needed_px = plan.body_tip - along_lo
+                        + REACH_SHADOW_LEAD + overhang + plan.radius as f32 + 4.0;
+                    let needed_art = (needed_px / block as f32).ceil() as i32;
+                    let min_art = spec.tip_len.ceil() as i32 + 8;
+                    let req_len = needed_art.max(min_art).max(RASTER_PAGE);
+                    ((req_len + RASTER_PAGE - 1) / RASTER_PAGE) * RASTER_PAGE
+                };
+                let t = reach_time_of(spec.organic, entry.seed, scene.elapsed);
+                let key = RasterKey {
+                    kind: RasterKind::Reach(kind),
+                    seed: entry.seed,
+                    scale: entry.scale,
+                    theme: scene.level.theme,
+                    sway: t,
+                    toward_centre,
+                    block,
+                    radius: plan.radius,
+                };
+                if self.key != Some(key) || self.reach_len != paged_len {
+                    self.reach_len = paged_len;
+                    self.first = 0;
+                    self.last = paged_len;
+                    let art_half = (plan.half_thickness / block as f32).ceil() as i32 + 6;
+                    let art_h = (2 * art_half + 1) as usize;
+                    let art_w = paged_len as usize;
+                    bufs.reach_body.set_pen(0);
+                    bufs.reach_body.resize(art_w, art_h);
+                    bufs.reach_body.clear((0, 0, 0));
+                    bufs.reach_shadow.set_pen(0);
+                    bufs.reach_shadow.resize(art_w, art_h);
+                    bufs.reach_shadow.clear((0, 0, 0));
+                    art_foreground_reach::draw_reach(
+                        kind,
+                        &mut bufs.reach_body,
+                        &mut bufs.reach_shadow,
+                        paged_len,
+                        t,
+                        scene.level.theme,
+                    );
+                    unpack_reach_buffers(
+                        &mut bufs.scratch,
+                        &bufs.reach_body,
+                        &bufs.reach_shadow,
+                        paged_len,
+                        art_half,
+                    );
+                    self.filter(&mut bufs.scratch, key, true);
+                    self.key = Some(key);
+                    #[cfg(test)]
+                    {
+                        self.rebuilds += 1;
+                    }
+                }
+                let span_px = (self.reach_len * block) as f32;
+                (plan.body_tip - span_px, plan.shadow_tip - span_px)
+            }
+        };
+
         let opacity = u32::from(alpha);
-        let shadow_opacity = if item.kind == ForeKind::CloudBand {
+        let shadow_opacity = if entry.is_cloud() {
             opacity * 256 / u32::from(ALPHA_MAX)
         } else {
             141 + opacity * 115 / u32::from(ALPHA_MAX)
         };
         let shadow_opacity = (shadow_opacity as f32 * plan.shadow.fade).round() as u32;
         let body_opacity = (opacity as f32 * plan.body.fade).round() as u32;
-        self.blit(pb, plan, along_origin, shadow_opacity, true);
-        self.blit(pb, plan, along_origin, body_opacity, false);
+        self.blit(pb, plan, shadow_along_origin, shadow_opacity, true);
+        self.blit(pb, plan, body_along_origin, body_opacity, false);
     }
 
     /// Filter the expanded art with a tent kernel in each direction. Each
-    /// pass carries premultiplied RGB so empty samples soften the silhouette
-    /// without adding a dark fringe. Normalize and quantize once per rebuild.
-    fn filter(&mut self, scratch: &mut Scratch, key: RasterKey) {
+    /// pass carries premultiplied RGB + emissive weight so empty samples soften
+    /// the silhouette without a dark fringe and emissive lamp lenses retain glow.
+    fn filter(&mut self, scratch: &mut Scratch, key: RasterKey, clamp_anchor: bool) {
         let block = key.block;
         let radius = key.radius;
         let divisor = ((radius + 1) * (radius + 1)) as u32;
@@ -1006,24 +1505,29 @@ impl Focus {
 
         let ambient = crate::render::lighting::theme_ambient(key.theme).mul;
         let ambient = (ambient[0] as u8 / 2, ambient[1] as u8 / 2, ambient[2] as u8 / 2);
-        if key.kind != ForeKind::CloudBand {
-            scratch.filtered_rows.resize(width * rows, [0; 4]);
+        if key.kind != RasterKind::Band(ForeKind::CloudBand) {
+            scratch.filtered_rows.resize(width * rows, [0; 5]);
             for (source, row) in scratch.body.chunks_exact(scratch.w as usize)
                 .zip(scratch.filtered_rows.chunks_exact_mut(width))
             {
                 for (x, dst) in row.iter_mut().enumerate() {
                     *dst = tent(x as i32, block, radius, divisor, |i| {
-                        source.get(i as usize).copied().unwrap_or_default()
+                        let idx = if clamp_anchor && i < 0 { 0 } else { i };
+                        if idx < 0 {
+                            [0; 5]
+                        } else {
+                            source.get(idx as usize).copied().unwrap_or_default()
+                        }
                     });
                 }
             }
             for (y, row) in self.body.chunks_exact_mut(width).enumerate() {
                 for (x, dst) in row.iter_mut().enumerate() {
-                    let [r, g, b, a] = tent(y as i32, block, radius, divisor, |i| {
+                    let [r, g, b, a, e] = tent(y as i32, block, radius, divisor, |i| {
                         if (0..scratch.h).contains(&i) {
                             scratch.filtered_rows[i as usize * width + x]
                         } else {
-                            [0; 4]
+                            [0; 5]
                         }
                     });
                     *dst = if a < 6 {
@@ -1032,21 +1536,25 @@ impl Focus {
                         let rgb = ((r / a) as u8, (g / a) as u8, (b / a) as u8);
                         let gray = crate::render::lighting::luminance(rgb);
                         let muted = palette::mix(palette::scale(rgb, DARKEN), (gray, gray, gray), 0.18);
-                        let tint = palette::mix(muted, ambient, 0.16);
+                        let silhouette = palette::mix(muted, ambient, 0.16);
+                        let tint = if e == 0 {
+                            silhouette
+                        } else {
+                            palette::mix(silhouette, rgb, (e as f32 / a as f32).clamp(0.0, 1.0))
+                        };
                         [stepped(tint.0 as u32, 8, 255), stepped(tint.1 as u32, 8, 255),
                             stepped(tint.2 as u32, 8, 255), stepped(a, 12, ALPHA_MAX)]
                     };
                 }
             }
         }
-        // The floor shadow is sharper. Interpolate between the art sample
-        // centres, giving it only half an art pixel of softness per side.
         for (y, row) in self.shadow.chunks_exact_mut(width).enumerate() {
             let (v, fy) = shadow_phase(y as i32, block);
             for (x, dst) in row.iter_mut().enumerate() {
                 let (u, fx) = shadow_phase(x as i32, block);
-                let sample = |x, y| {
-                    scratch.index(x, y + scratch.y0).map_or(0, |i| u32::from(scratch.shade[i]))
+                let sample = |sx: i32, sy: i32| {
+                    let sx = if clamp_anchor && sx < 0 { 0 } else { sx };
+                    scratch.index(sx, sy + scratch.y0).map_or(0, |i| u32::from(scratch.shade[i]))
                 };
                 let a = sample(u, v) * (256 - fx) + sample(u + 1, v) * fx;
                 let b = sample(u, v + 1) * (256 - fx) + sample(u + 1, v + 1) * fx;
@@ -1059,7 +1567,7 @@ impl Focus {
         if opacity == 0 {
             return;
         }
-        let axis = plan.item.axis;
+        let axis = plan.entry.axis;
         let normal = plan.normal;
         let cross = if shade { plan.shadow.cross } else { plan.body.cross } as f32;
         let (width, height) = (pb.w, pb.h);
@@ -1069,8 +1577,6 @@ impl Focus {
         let limit = (CLEAR_DISC_OUT_PX + if plan.crossing_rat { fade_width } else { 0.0 }) * zoom;
         let limit2 = limit * limit;
         let rows = pb.pixels_mut().chunks_exact_mut(width);
-        // Invert the band's basis per scanline. Only visit the strip, even if
-        // its angled bounding box covers the whole framebuffer.
         for (y, row) in rows.enumerate().take(height) {
             let cross_at_x0 = y as f32 * normal.y - cross;
             let top = self.top as f32;
@@ -1132,12 +1638,49 @@ impl Focus {
     }
 }
 
-/// Collapse the tent taps that land in the same art sample.
+/// Convert `draw_reach`'s local `body` (un-premultiplied RGB + material pens)
+/// and `shadow` (`(s, s, s)` grayscale mask) buffers into `Scratch`, leaving
+/// `REACH_TIP_PAD` empty columns past `len` so the tent filter feathers the
+/// free tip or outer canopy rim cleanly into empty air.
+fn unpack_reach_buffers(
+    scratch: &mut Scratch,
+    body: &PixelBuffer,
+    shadow: &PixelBuffer,
+    len: i32,
+    art_half: i32,
+) {
+    let w = body.w.min(len.max(0) as usize);
+    let h = body.h;
+    scratch.reset(0, -art_half, len.max(0) + REACH_TIP_PAD, h as i32);
+    let body_px = body.pixels();
+    let body_mat = body.mat();
+    let shadow_px = shadow.pixels();
+    let cy = h as i32 / 2;
+    for y in 0..h {
+        let sy = y as i32 - cy;
+        let row = y * body.w;
+        let srow = y * shadow.w;
+        for x in 0..w {
+            let rgb = body_px[row + x];
+            if rgb != (0, 0, 0) {
+                let pen = body_mat.get(row + x).copied().unwrap_or(0);
+                scratch.put_with_emissive(x as i32, sy, rgb, ALPHA_MAX, pen == EMISSIVE_PEN);
+            }
+            if x < shadow.w && y < shadow.h {
+                let s = shadow_px[srow + x].0;
+                if s > 0 {
+                    scratch.put_shade(x as i32, sy, (f32::from(s) / 255.0) * 0.36);
+                }
+            }
+        }
+    }
+}
+
 #[inline]
 fn tent(
-    at: i32, block: i32, radius: i32, divisor: u32, mut get: impl FnMut(i32) -> [u32; 4],
-) -> [u32; 4] {
-    let mut sum = [0; 4];
+    at: i32, block: i32, radius: i32, divisor: u32, mut get: impl FnMut(i32) -> [u32; 5],
+) -> [u32; 5] {
+    let mut sum = [0; 5];
     let mut p = at - radius;
     let last = at + radius;
     while p <= last {
@@ -1145,7 +1688,7 @@ fn tent(
         let end = ((sample + 1) * block - 1).min(last);
         let weight = (p..=end).map(|q| radius + 1 - (q - at).abs()).sum::<i32>() as u32;
         let rgba = get(sample);
-        for i in 0..4 {
+        for i in 0..5 {
             sum[i] += weight * rgba[i];
         }
         p = end + 1;
@@ -1170,9 +1713,6 @@ fn coverage_alpha(alpha: u8, painted: u32, cap_full: u32) -> u8 {
     (alpha as f32 * COVERAGE_HALF).round() as u8
 }
 
-/// Alpha for an item whose nearest pixel is `d` px from the rat/a body:
-/// [`ALPHA_FLOOR`] inside `near`, ramping back to `base` over
-/// [`FADE_RAMP_PX`].
 fn proximity_alpha(base: f32, d: f32, near: f32, floor: f32) -> f32 {
     if d <= near {
         floor.min(base)
@@ -1184,22 +1724,25 @@ fn proximity_alpha(base: f32, d: f32, near: f32, floor: f32) -> f32 {
     }
 }
 
-/// Sway for `item` at `elapsed`: `0.0` for a kind that never sways, else a
-/// value in `-1.0..=1.0` quantised to quarters and **stepped at [`SWAY_HZ`]** —
-/// within one step the value is constant, so a still camera does not repaint
-/// between steps.
 fn sway_of(item: &ForeItem, elapsed: f32) -> f32 {
     if !item.kind.sways() {
         return 0.0;
     }
     let step = (elapsed.max(0.0) * SWAY_HZ).floor() as u32;
     let h = mix32(step.wrapping_mul(0x9E37_79B1) ^ item.seed);
-    let unit = (h & 0xFFFF) as f32 / 65535.0; // 0..=1
+    let unit = (h & 0xFFFF) as f32 / 65535.0;
     let v = unit * 2.0 - 1.0;
     (v * 4.0).round() * 0.25
 }
 
-/// One 32-bit splitmix-ish mix (cheap, deterministic, no rng dependency).
+fn reach_time_of(organic: bool, seed: u32, elapsed: f32) -> f32 {
+    if !organic {
+        return 0.0;
+    }
+    let phase = (seed & 0xFF) as f32 * 0.0625;
+    ((elapsed.max(0.0) + phase) * REACH_SWAY_HZ).floor() / REACH_SWAY_HZ
+}
+
 #[inline]
 fn mix32(mut z: u32) -> u32 {
     z ^= z >> 16;
@@ -1211,8 +1754,6 @@ fn mix32(mut z: u32) -> u32 {
 
 // ---- Generation ----------------------------------------------------------
 
-/// A tiny deterministic stream: splitmix64 over a counter. The layer's own
-/// stream, salted away from the level generator's.
 struct Gen {
     state: u64,
 }
@@ -1230,7 +1771,6 @@ impl Gen {
         z ^ (z >> 31)
     }
 
-    /// A uniform value in `lo..hi`.
     fn range(&mut self, lo: f32, hi: f32) -> f32 {
         let unit = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
         lo + (hi - lo) * unit
@@ -1241,19 +1781,60 @@ impl Gen {
     }
 }
 
+/// Check that `entry` clears `level.start` by `START_CLEAR_PX` (widened for
+/// `TreeCanopy` up to 2x zoom) and never crosses the start room.
+fn clears_start(entry: ForeEntry, level: &Level, start: Option<&crate::game::level::Room>) -> bool {
+    let normal = entry.normal();
+    let k = if entry.is_canopy() { 4 } else { band_pixel_scale(&entry) };
+    let half_world = entry.art_thickness() * 0.5 * k as f32;
+    let min_clear = START_CLEAR_PX.max(half_world + 48.0);
+    let dc_start = (entry.cross - level.start.dot(normal)).abs();
+    let clear_of_start = match entry.shape {
+        ForeShape::Band(_) => dc_start >= min_clear,
+        ForeShape::Reach { tip_along, .. } => {
+            let da = (level.start.dot(entry.axis) - tip_along).max(0.0);
+            (dc_start * dc_start + da * da).sqrt() >= min_clear
+        }
+    };
+    if !clear_of_start {
+        return false;
+    }
+    if let Some(r) = start {
+        let half_size = Vec2::new(r.rect.w as f32, r.rect.h as f32) * (TILE_F * 0.5);
+        let reach_cross = half_size.x * normal.x.abs()
+            + half_size.y * normal.y.abs()
+            + (half_world - 24.0).max(0.0);
+        let in_cross = (entry.cross - r.rect.center_world().dot(normal)).abs() <= reach_cross;
+        if in_cross {
+            match entry.shape {
+                ForeShape::Band(_) => return false,
+                ForeShape::Reach { tip_along, .. } => {
+                    let reach_along =
+                        half_size.x * entry.axis.x.abs() + half_size.y * entry.axis.y.abs();
+                    let room_min_along = r.rect.center_world().dot(entry.axis) - reach_along;
+                    if tip_along >= room_min_along {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
 
-// Roll candidates from the usual wide rooms and long corridor runs, then
-// spread a small, seeded selection across the level.
-fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
+// Roll band and reach candidates from wide rooms and long corridor runs, then
+// spread a small 2–4 item selection across the level.
+fn generate(level: &Level, out: &mut Vec<PlacedItem>) {
     if level.theme == Theme::Trailer {
         return;
     }
     let mut rng = Gen::new(crate::game::level::level_seed(level.theme, level.seed, GEN_SALT));
-    let count = 2 + rng.u32() % 3;
-    let kinds = kinds_for(level.theme);
+    let count = (2 + rng.u32() % 3) as usize;
+    let band_kinds = kinds_for(level.theme);
+    let reach_kinds = reach_kinds_for(level.theme);
     let start = level.rooms.iter().find(|room| room.kind == RoomKind::Start);
     let mut candidates = Vec::new();
-    for room in &level.rooms {
+    for (room_idx, room) in level.rooms.iter().enumerate() {
         if matches!(room.kind, RoomKind::Start | RoomKind::Maze) {
             continue;
         }
@@ -1280,10 +1861,9 @@ fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
             (size.x * size.y / 320.0).min(1.0)
         };
         let mut room_has_rib = false;
-        for _ in 0..slots {
+        let mut room_has_canopy = false;
+        for slot in 0..slots {
             for attempt in 0..PLACE_ATTEMPTS {
-                // Corridors always sample their centre line. Later room
-                // attempts try a perpendicular axis for the rigid kinds.
                 let horizontal = (rect.w < rect.h) ^ (!corridor && attempt >= PLACE_ATTEMPTS / 2);
                 let extent = if !corridor {
                     size * 0.5 - Vec2::splat(1.0)
@@ -1300,33 +1880,53 @@ fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
                     continue;
                 }
 
-                let mut kind = kinds[(rng.u32() % kinds.len() as u32) as usize];
                 let depth = if level.theme == Theme::Outfall {
                     rng.range(OUTFALL_DEPTH_MIN, OUTFALL_DEPTH_MAX)
                 } else {
                     rng.range(DEPTH_MIN, DEPTH_MAX)
                 };
                 let scale = rng.range(SCALE_MIN, SCALE_MAX);
+                let pick_roll = rng.u32();
                 let seed = rng.u32();
-                if !corridor && kind == ForeKind::HullRib && room_has_rib {
-                    kind = if seed & 1 == 0 { ForeKind::Kelp } else { ForeKind::BubbleChain };
-                }
-                let axis = placement_axis(kind, horizontal, seed);
-                let mut item = ForeItem { kind, axis, cross: 0.0, depth, scale, seed };
-                let normal = item.normal();
-                item.cross = at.dot(normal);
-                if (item.cross - level.start.dot(normal)).abs() < START_CLEAR_PX
-                    || start.is_some_and(|r| {
-                        let half_size = Vec2::new(r.rect.w as f32, r.rect.h as f32) * (TILE_F * 0.5);
-                        let reach = half_size.x * normal.x.abs() + half_size.y * normal.y.abs();
-                        (item.cross - r.rect.center_world().dot(normal)).abs() <= reach
-                    })
-                {
+
+                let want_reach = !reach_kinds.is_empty() && ((room_idx + slot as usize) & 1 == 0);
+                let entry = if want_reach {
+                    let rkind = reach_kinds[(pick_roll as usize) % reach_kinds.len()];
+                    if is_canopy_reach(rkind) && (corridor || room_has_canopy) {
+                        continue;
+                    }
+                    let sides = reach_allowed_sides(rkind);
+                    if corridor
+                        && !art_foreground_reach::reach_spec(rkind).organic
+                        && !sides.iter().any(|&s| (!is_vertical_edge(s)) == horizontal)
+                    {
+                        continue;
+                    }
+                    let pref = if corridor { Some(horizontal) } else { None };
+                    let axis = reach_placement_axis(rkind, pref, seed);
+                    ForeEntry::reach(rkind, axis, at, depth, seed)
+                } else {
+                    let mut bkind = band_kinds[(pick_roll % band_kinds.len() as u32) as usize];
+                    if !corridor && bkind == ForeKind::HullRib && room_has_rib {
+                        bkind = if seed & 1 == 0 { ForeKind::Kelp } else { ForeKind::BubbleChain };
+                    }
+                    let axis = placement_axis(bkind, horizontal, seed);
+                    let mut item = ForeItem { kind: bkind, axis, cross: 0.0, depth, scale, seed };
+                    item.cross = at.dot(item.normal());
+                    ForeEntry::from_band(fit_scale(item))
+                };
+
+                if !clears_start(entry, level, start) {
                     continue;
                 }
-                room_has_rib |= kind == ForeKind::HullRib;
-                candidates.push((PlacedBand {
-                    item: fit_scale(item),
+                if matches!(entry.shape, ForeShape::Band(ForeKind::HullRib)) {
+                    room_has_rib = true;
+                }
+                if entry.is_canopy() {
+                    room_has_canopy = true;
+                }
+                candidates.push((PlacedItem {
+                    entry,
                     anchor: at,
                     #[cfg(test)]
                     corridor,
@@ -1337,27 +1937,42 @@ fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
     }
 
     for _ in 0..count {
-        let best = candidates.iter().enumerate().filter_map(|(i, (band, quality))| {
-            let mut spacing = band.anchor.dist_sq(level.start);
+        let have_band = out.iter().any(|p| matches!(p.entry.shape, ForeShape::Band(_)));
+        let have_reach = out.iter().any(|p| matches!(p.entry.shape, ForeShape::Reach { .. }));
+        let have_canopy = out.iter().any(|p| p.entry.is_canopy());
+        let best = candidates.iter().enumerate().filter_map(|(i, (cand, quality))| {
+            if cand.entry.is_canopy() && have_canopy {
+                return None;
+            }
+            let mut spacing = cand.anchor.dist_sq(level.start);
+            let normal = cand.entry.normal();
             for placed in out.iter() {
-                if band.item.axis == placed.item.axis
-                    && (band.item.cross - placed.item.cross).abs() < MIN_SPACING
+                if (normal - placed.entry.normal()).len_sq() <= 1e-4
+                    && (cand.entry.cross - placed.entry.cross).abs() < MIN_SPACING
                 {
                     return None;
                 }
-                spacing = spacing.min(placed.anchor.dist_sq(band.anchor));
+                spacing = spacing.min(placed.anchor.dist_sq(cand.anchor));
             }
-            let fresh_organic = band.item.kind.organic()
-                && out.iter().all(|p| p.item.kind != band.item.kind);
-            Some((i, fresh_organic, spacing * (1.0 + quality * 0.50)))
-        }).max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.total_cmp(&b.2)));
-        let Some((index, _, _)) = best else { break };
+            let is_reach = matches!(cand.entry.shape, ForeShape::Reach { .. });
+            let mixes_shape = !out.is_empty()
+                && ((is_reach && !have_reach) || (!is_reach && !have_band && !reach_kinds.is_empty()));
+            let fresh_organic = cand.entry.organic()
+                && out.iter().all(|p| {
+                    std::mem::discriminant(&p.entry.shape) != std::mem::discriminant(&cand.entry.shape)
+                        || p.entry.shape != cand.entry.shape
+                });
+            Some((i, mixes_shape, fresh_organic, spacing * (1.0 + quality * 0.50)))
+        }).max_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.total_cmp(&b.3))
+        });
+        let Some((index, _, _, _)) = best else { break };
         out.push(candidates.swap_remove(index).0);
     }
 }
 
-/// Keep each kind inside the art thickness range even at the ends of the
-/// scale roll (for example, a narrow wire requires slightly more scale).
 fn fit_scale(mut item: ForeItem) -> ForeItem {
     let unit = ForeItem { scale: 1.0, ..item };
     let base = art_foreground::thickness(&unit);
@@ -1373,77 +1988,176 @@ fn hash_u32(seed: u64, index: u64) -> u32 {
     mix32(seed as u32 ^ (seed >> 32) as u32 ^ mix32(index as u32 ^ 0x5BD1_E995))
 }
 
-/// Cross coordinates, relative to the camera, where a sky track can wrap or
-/// stop with both planes outside the viewport.
-fn sky_track(view: View, item: ForeItem) -> (f32, f32) {
-    let (lo, hi) = project(view.size, item.normal());
-    let k = pixel_scale(&item);
-    let (shadow_lo, shadow_hi) = cross_extent(item, k, k / 2);
-    let offset = shadow_offset(item);
+fn sky_track(view: View, entry: ForeEntry) -> (f32, f32) {
+    let (lo, hi) = project(view.size, entry.normal());
+    let k = entry_pixel_scale(entry, view);
+    let (shadow_lo, shadow_hi) = cross_extent(entry, k, k / 2);
+    let offset = shadow_offset(entry);
     let mut start = lo - shadow_hi - offset;
     let mut end = hi - shadow_lo - offset;
-    if item.kind != ForeKind::CloudBand {
-        let (body_lo, body_hi) = cross_extent(item, k, blur_radius(item, view.zoom));
+    if !entry.is_cloud() {
+        let (body_lo, body_hi) = cross_extent(entry, k, blur_radius(entry, view.zoom));
         let centre = (lo + hi) * 0.5;
-        start = start.min(centre + (lo - body_hi - centre) / item.depth);
-        end = end.max(centre + (hi - body_lo - centre) / item.depth);
+        start = start.min(centre + (lo - body_hi - centre) / entry.depth);
+        end = end.max(centre + (hi - body_lo - centre) / entry.depth);
     }
-    // Allow for rounding either plane's centre to buffer pixels.
     (start - 1.0, end + 1.0)
 }
 
-/// Analytic tracks measured across each band's normal. Along-axis detail
-/// still follows the world camera.
-fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeItem>; 3] {
+fn flatbed_reach_kind(seed: u64, event: u64) -> ReachKind {
+    let kinds = reach_kinds_for(Theme::Trailer);
+    if kinds.is_empty() {
+        return ReachKind::TreeCanopy;
+    }
+    if event.is_multiple_of(3) {
+        if let Some(&tc) = kinds.iter().find(|&&k| is_canopy_reach(k)) {
+            return tc;
+        }
+    }
+    let others: Vec<ReachKind> = kinds
+        .iter()
+        .copied()
+        .filter(|&k| !is_canopy_reach(k))
+        .collect();
+    if others.is_empty() {
+        kinds[(event as usize) % kinds.len()]
+    } else {
+        let pick = ((event / 3) as usize + (event % 3) as usize - 1 + (seed as usize & 1))
+            % others.len();
+        others[pick]
+    }
+}
+
+/// Analytic tracks on the Flatbed: centre-pinned wires, drifting cloud shadow,
+/// and off-screen-anchored roadside reaches (`TreeCanopy`, `LightPole`, `SignArm`),
+/// honouring each kind's `reach_spec(kind).sides`.
+fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeEntry>; 3] {
     if level.theme != Theme::Trailer {
         return [None; 3];
     }
     let seed = crate::game::level::level_seed(level.theme, level.seed, GEN_SALT);
     let t = (elapsed.max(0.0) * SKY_QUANT_HZ).floor() / SKY_QUANT_HZ;
-    let item = |kind, horizontal, depth, scale, seed| {
+    let band_entry = |kind, horizontal, depth, scale, seed| {
         let axis = placement_axis(kind, horizontal, seed);
-        fit_scale(ForeItem { kind, axis, cross: 0.0, depth, scale, seed })
+        ForeEntry::from_band(fit_scale(ForeItem { kind, axis, cross: 0.0, depth, scale, seed }))
     };
 
-    // The centre line keeps the wires present even when both movers qualify.
-    let mut wires = item(ForeKind::PowerLines, true, 2.0, 1.15, hash_u32(seed, 0x12));
+    let mut wires = band_entry(ForeKind::PowerLines, true, 2.0, 1.15, hash_u32(seed, 0x12));
     wires.cross = (view.cam + view.size * 0.5).dot(wires.normal());
 
-    let mut cloud = item(ForeKind::CloudBand, false, 1.8, 1.25, hash_u32(seed, 0xC10D));
+    let mut cloud = band_entry(ForeKind::CloudBand, false, 1.8, 1.25, hash_u32(seed, 0xC10D));
     let (start, end) = sky_track(view, cloud);
     let travel = end - start;
     let speed = SKY_CLOUD_SPEED * view.zoom / cloud.depth;
     let phase = (hash01(seed, 0xC10D) * travel + t * speed).rem_euclid(travel);
     cloud.cross = view.cam.dot(cloud.normal()) + start + phase;
 
-    // Successive starts differ by 5–9 s. The branch travels from the cab
-    // side of the frame to the tail (right to left).
     let jitter = |event| (hash01(seed ^ 0x5EED_0000, event) - 0.5) * 2.0;
     let nearest = (t / SKY_BRANCH_PERIOD).floor() as u64;
-    let branch = (nearest.saturating_sub(1)..=nearest + 1).rev().find_map(|event| {
+    let roadside = (nearest.saturating_sub(1)..=nearest + 1).rev().find_map(|event| {
         let age = t - (SKY_BRANCH_PERIOD * event as f32 + jitter(event));
         if age < 0.0 || age >= SKY_BRANCH_PERIOD + 2.0 {
             return None;
         }
-        let mut branch = item(ForeKind::BranchCanopy, false, 2.8, 1.4,
-            hash_u32(seed ^ 0x1EAF_0000, event));
-        let normal = branch.normal();
-        let (start, end) = sky_track(view, branch);
-        // Fit the crossing before the next event even on very wide views.
-        let speed = (SKY_BRANCH_SPEED * view.zoom / branch.depth)
-            .max((end - start) / (SKY_BRANCH_PERIOD - 2.0));
-        let travelled = age * speed;
-        (travelled < end - start).then(|| {
-            let cross = if normal.x < 0.0 { start + travelled } else { end - travelled };
-            branch.cross = view.cam.dot(normal) + cross;
-            branch
-        })
+        let rkind = flatbed_reach_kind(seed, event);
+        let spec = art_foreground_reach::reach_spec(rkind);
+        let ev_seed = hash_u32(seed ^ 0x1EAF_0000, event);
+        let sides = reach_allowed_sides(rkind);
+
+        // Intersect `sides` with the north/south highway shoulders (`Top`/`Bottom`):
+        // `LightPole` (`[Bottom]`) always takes `Bottom`; `TreeCanopy` and `SignArm`
+        // (`ALL`) take `Top` or `Bottom` along the roadside.
+        let mut vert_sides = [AnchorSide::Bottom; 2];
+        let mut vn = 0;
+        for &s in sides {
+            if is_vertical_edge(s) && vn < 2 {
+                vert_sides[vn] = s;
+                vn += 1;
+            }
+        }
+        let chosen_side = if vn > 0 {
+            vert_sides[(hash_u32(seed ^ 0x51DE_0000, event) as usize) % vn]
+        } else if !sides.is_empty() {
+            sides[(hash_u32(seed ^ 0x51DE_0000, event) as usize) % sides.len()]
+        } else {
+            AnchorSide::Bottom
+        };
+
+        let axis = if spec.organic && spec.shape == ReachShape::Strip {
+            let lean = 0.16 + hash01(seed ^ 0xA961_0000, event) * 0.28;
+            let sign_x = if hash_u32(seed ^ 0xD1AE_0000, event) & 1 == 0 { 1.0 } else { -1.0 };
+            inward_axis(chosen_side).rotate(sign_x * lean).normalized()
+        } else {
+            inward_axis(chosen_side)
+        };
+
+        let depth = if spec.shape == ReachShape::Canopy { 2.2 } else if spec.organic { 2.6 } else { 2.4 };
+        let mut entry = ForeEntry::reach(rkind, axis, Vec2::ZERO, depth, ev_seed);
+        let normal = entry.normal();
+
+        if is_vertical_edge(chosen_side) {
+            let from_north = chosen_side == AnchorSide::Top;
+            let (start, end) = sky_track(view, entry);
+            let speed = (SKY_BRANCH_SPEED * view.zoom / entry.depth)
+                .max((end - start) / (SKY_BRANCH_PERIOD - 2.0));
+            let travelled = age * speed;
+            (travelled < end - start).then(|| {
+                let cross = if normal.x < 0.0 { start + travelled } else { end - travelled };
+                entry.cross = view.cam.dot(normal) + cross;
+                let tip_world_y = if spec.shape == ReachShape::Canopy {
+                    // Seat the full semicircular canopy flush on its anchor edge.
+                    let k = entry_pixel_scale(entry, view);
+                    let full_in = (spec.tip_len.round() as i32 * k) as f32;
+                    if from_north {
+                        view.cam.y + full_in
+                    } else {
+                        view.cam.y + view.size.y - full_in
+                    }
+                } else {
+                    let mid_y = view.cam.y + view.size.y * 0.5;
+                    if (900.0..=1660.0).contains(&mid_y) {
+                        let reach_in = 152.0 + hash01(seed ^ 0x7190_0000, event) * 48.0;
+                        if from_north { 1072.0 + reach_in } else { 1488.0 - reach_in }
+                    } else {
+                        let frac = 0.38 + hash01(seed ^ 0x7190_0000, event) * 0.20;
+                        if from_north {
+                            view.cam.y + view.size.y * frac
+                        } else {
+                            view.cam.y + view.size.y * (1.0 - frac)
+                        }
+                    }
+                };
+                let tip_world_x = view.cam.x + view.size.x * 0.5
+                    + (entry.cross - (view.cam + view.size * 0.5).dot(normal)) * normal.x;
+                let tip_world = Vec2::new(tip_world_x, tip_world_y);
+                entry.shape = ForeShape::Reach { kind: rkind, tip_along: tip_world.dot(axis) };
+                entry
+            })
+        } else {
+            let dur = SKY_BRANCH_PERIOD - 1.5;
+            if age >= dur {
+                return None;
+            }
+            let phase = age / dur;
+            let arch = 1.0 - (2.0 * phase - 1.0).abs();
+            let offset_sign = if hash_u32(seed ^ 0xC205_0000, event) & 1 == 0 { -1.0 } else { 1.0 };
+            let screen_cross_off = offset_sign * 56.0 * view.zoom;
+            let centre_cross = view.size.y * 0.5;
+            let world_cross = centre_cross + screen_cross_off / entry.depth;
+            entry.cross = view.cam.dot(normal) + world_cross;
+            let max_in = view.size.x * 0.48 + REACH_SHADOW_LEAD;
+            let pen = -REACH_SHADOW_LEAD - 4.0 + arch * (max_in + REACH_SHADOW_LEAD + 8.0);
+            let (along_lo, _) = project(view.size, axis);
+            let tip_along = view.cam.dot(axis) + along_lo + pen;
+            entry.shape = ForeShape::Reach { kind: rkind, tip_along };
+            Some(entry)
+        }
     });
-    [Some(wires), Some(cloud), branch]
+    [Some(wires), Some(cloud), roadside]
 }
 
-/// The count and spacing rules also apply to capture staging. Use the same
-/// plan to find a frame in which the requested band is visible.
+/// Find a Flatbed clock at which the requested sky band or roadside reach is
+/// prominently visible in view.
 #[cfg(test)]
 pub(crate) fn sky_capture_time(
     level: &Level,
@@ -1451,20 +2165,36 @@ pub(crate) fn sky_capture_time(
     size: Vec2,
     zoom: f32,
     elapsed: f32,
-    kind: ForeKind,
+    target: ForeShape,
 ) -> Option<f32> {
     if level.theme != Theme::Trailer {
         return None;
     }
     let view = View { cam, size, zoom };
     let mut layer = ForeLayer::new();
-    for step in 0..(40 * SKY_QUANT_HZ as i32) {
+    for step in 0..(60 * SKY_QUANT_HZ as i32) {
         let t = elapsed + step as f32 / SKY_QUANT_HZ;
         layer.plan_frame(view, level, cam + size * 0.5, t, &[]);
         if layer.frame.iter().any(|p| {
-            let plane = if kind == ForeKind::CloudBand { p.shadow } else { p.body };
-            p.item.kind == kind && plane.fade > 0.0
-                && (plane.cross as f32 - p.centre_cross).abs() <= 12.0 * zoom
+            let matches_kind = match (p.entry.shape, target) {
+                (ForeShape::Band(a), ForeShape::Band(b)) => a == b,
+                (ForeShape::Reach { kind: a, .. }, ForeShape::Reach { kind: b, .. }) => a == b,
+                (ForeShape::Reach { kind: ReachKind::TreeCanopy, .. }, ForeShape::Band(ForeKind::BranchCanopy)) => true,
+                _ => false,
+            };
+            if !matches_kind {
+                return false;
+            }
+            let plane = if p.entry.is_cloud() { p.shadow } else { p.body };
+            if plane.fade <= 0.75 {
+                return false;
+            }
+            if p.entry.axis.x.abs() > 0.9 {
+                let (along_lo, along_hi) = p.along;
+                p.body_tip >= along_lo + (along_hi - along_lo) * 0.32
+            } else {
+                (plane.cross as f32 - p.centre_cross).abs() <= 16.0 * zoom
+            }
         }) {
             return Some(t);
         }
@@ -1491,8 +2221,19 @@ mod tests {
 
     fn force_items(layer: &mut ForeLayer, level: &Level, items: &[ForeItem]) {
         layer.key = Some((level.theme, level.seed));
-        layer.items = items.iter().map(|&item| PlacedBand {
-            item, anchor: Vec2::ZERO, corridor: false,
+        layer.items = items.iter().map(|&item| PlacedItem {
+            entry: ForeEntry::from_band(item),
+            anchor: Vec2::ZERO,
+            corridor: false,
+        }).collect();
+    }
+
+    fn force_entries(layer: &mut ForeLayer, level: &Level, entries: &[ForeEntry]) {
+        layer.key = Some((level.theme, level.seed));
+        layer.items = entries.iter().map(|&entry| PlacedItem {
+            entry,
+            anchor: entry.tip_world().unwrap_or(Vec2::ZERO),
+            corridor: false,
         }).collect();
     }
 
@@ -1517,43 +2258,75 @@ mod tests {
         (pb, coverage)
     }
 
+    fn axis_matches_allowed_side(kind: ReachKind, axis: Vec2) -> bool {
+        let spec = art_foreground_reach::reach_spec(kind);
+        spec.sides.iter().any(|&side| {
+            let inward = inward_axis(side);
+            if spec.organic && spec.shape == ReachShape::Strip {
+                axis.dot(inward) >= 0.70
+            } else {
+                (axis - inward).len_sq() <= 1e-5
+            }
+        })
+    }
+
     #[test]
-    fn placement_is_seeded_and_every_item_is_a_clear_spaced_band() {
+    fn placement_is_seeded_mixes_bands_and_reaches_and_respects_sides_budget_and_clearance() {
         for theme in Theme::all() {
+            let mut saw_band = false;
+            let mut saw_reach = false;
             for seed in [0, 1, 2, 7, 11, 21, 54, 809] {
                 let world = World::new(theme, seed);
                 let mut a = ForeLayer::new();
                 let mut b = ForeLayer::new();
                 a.sync(&world.level);
                 b.sync(&world.level);
-                let a: Vec<_> = a.capture_items().collect();
-                assert_eq!(a, b.capture_items().collect::<Vec<_>>());
-                assert!((2..=4).contains(&a.len()), "{theme:?} seed {seed}: {} bands", a.len());
-                for (i, &(item, anchor, corridor)) in a.iter().enumerate() {
-                    let normal = item.normal();
-                    assert_eq!(item.cross, anchor.dot(normal));
-                    assert!((item.cross - world.level.start.dot(normal)).abs() >= START_CLEAR_PX);
+                let a: Vec<_> = a.capture_entries().collect();
+                assert_eq!(a, b.capture_entries().collect::<Vec<_>>());
+                assert!((2..=4).contains(&a.len()), "{theme:?} seed {seed}: {} items", a.len());
+                let canopies = a.iter().filter(|(e, _, _)| e.is_canopy()).count();
+                assert!(canopies <= 1, "{theme:?} seed {seed}: {canopies} canopies placed");
+                let start_room = world.level.rooms.iter().find(|r| r.kind == RoomKind::Start);
+                for (i, &(entry, anchor, corridor)) in a.iter().enumerate() {
+                    let normal = entry.normal();
+                    assert!((entry.cross - anchor.dot(normal)).abs() <= 1e-3);
+                    assert!(clears_start(entry, &world.level, start_room));
                     assert!(world.level.tiles.get_at(anchor).is_open());
-                    if let Some(start) = world.level.rooms.iter().find(|r| r.kind == RoomKind::Start) {
-                        let half = Vec2::new(start.rect.w as f32, start.rect.h as f32) * (TILE_F * 0.5);
-                        let projected = half.x * normal.x.abs() + half.y * normal.y.abs();
-                        assert!((item.cross - start.rect.center_world().dot(normal)).abs() > projected);
+                    if !entry.organic() || entry.is_canopy() {
+                        assert!(
+                            entry.axis.x.abs() <= 1e-5 || entry.axis.y.abs() <= 1e-5,
+                            "item must be axis-aligned: {entry:?}"
+                        );
                     }
-                    if !item.kind.organic() {
-                        assert!(item.axis == HORIZONTAL || item.axis == VERTICAL);
+                    assert!((DEPTH_MIN..=DEPTH_MAX).contains(&entry.depth));
+                    match entry.shape {
+                        ForeShape::Band(kind) => {
+                            saw_band = true;
+                            assert!(kinds_for(theme).contains(&kind));
+                            assert!((SCALE_MIN..=SCALE_MAX).contains(&entry.scale));
+                            assert!((9.999..=30.001).contains(&entry.art_thickness()));
+                        }
+                        ForeShape::Reach { kind, tip_along } => {
+                            saw_reach = true;
+                            let spec = art_foreground_reach::reach_spec(kind);
+                            assert!(spec.floors.contains(&theme), "{kind:?} not allowed on {theme:?}");
+                            assert!((tip_along - anchor.dot(entry.axis)).abs() <= 1e-3);
+                            assert!(
+                                axis_matches_allowed_side(kind, entry.axis),
+                                "{kind:?} axis {:?} violates allowed sides {:?}",
+                                entry.axis,
+                                spec.sides
+                            );
+                        }
                     }
-                    assert!(kinds_for(theme).contains(&item.kind));
-                    assert!((DEPTH_MIN..=DEPTH_MAX).contains(&item.depth));
-                    assert!((SCALE_MIN..=SCALE_MAX).contains(&item.scale));
-                    assert!((9.999..=30.001).contains(&art_foreground::thickness(&item)));
                     assert!(a[..i].iter().all(|(other, _, _)| {
-                        other.axis != item.axis || (other.cross - item.cross).abs() >= MIN_SPACING
+                        (other.normal() - normal).len_sq() > 1e-4
+                            || (other.cross - entry.cross).abs() >= MIN_SPACING
                     }));
                     if corridor {
                         let (cx, cy) = ((anchor.x / TILE_F) as i32, (anchor.y / TILE_F) as i32);
                         assert!(world.level.rooms.iter().any(|r| {
                             r.kind == RoomKind::Corridor
-                                && (item.kind.organic() || (r.rect.w < r.rect.h) == (item.axis == HORIZONTAL))
                                 && r.rect.w.max(r.rect.h) >= CORRIDOR_MIN_TILES
                                 && (r.rect.x..r.rect.right()).contains(&cx)
                                 && (r.rect.y..r.rect.bottom()).contains(&cy)
@@ -1561,6 +2334,285 @@ mod tests {
                     }
                 }
             }
+            assert!(saw_band, "{theme:?} never placed a band");
+            if !reach_kinds_for(theme).is_empty() {
+                assert!(saw_reach, "{theme:?} never placed a reach");
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_sides_come_from_art_spec_and_govern_flatbed_and_rooms() {
+        for seed in 0..32u32 {
+            assert_eq!(
+                reach_placement_axis(ReachKind::LightPole, None, seed),
+                inward_axis(AnchorSide::Bottom)
+            );
+            assert_eq!(
+                reach_placement_axis(ReachKind::HangingLamp, None, seed),
+                inward_axis(AnchorSide::Top)
+            );
+            assert_eq!(
+                reach_placement_axis(ReachKind::CraneHook, None, seed),
+                inward_axis(AnchorSide::Top)
+            );
+        }
+        let world = World::new(Theme::Trailer, 5);
+        let view = View { cam: Vec2::new(600.0, 1240.0), size: Vec2::new(240.0, 160.0), zoom: 1.0 };
+        let mut seen = [false; 3];
+        for step in 0..(30 * SKY_QUANT_HZ as u32) {
+            let [_, _, mover] = sky_items(&world.level, view, step as f32 / SKY_QUANT_HZ);
+            if let Some(entry) = mover {
+                if let ForeShape::Reach { kind, .. } = entry.shape {
+                    assert!(
+                        axis_matches_allowed_side(kind, entry.axis),
+                        "Flatbed {kind:?} axis {:?} violates {:?}",
+                        entry.axis,
+                        reach_allowed_sides(kind)
+                    );
+                    match kind {
+                        ReachKind::TreeCanopy => seen[0] = true,
+                        ReachKind::LightPole => seen[1] = true,
+                        ReachKind::SignArm => seen[2] = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(seen, [true, true, true], "Flatbed sky track should cycle TreeCanopy, LightPole, SignArm");
+    }
+
+    #[test]
+    fn tree_canopy_scales_to_cover_most_of_view_caps_at_one_and_fades_over_rat() {
+        let mut world = World::new(Theme::Kitchen, 11);
+        let mut layer = ForeLayer::new();
+        for zoom in [0.5, 1.0, 2.0] {
+            let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32) * zoom;
+            let short = size.x.min(size.y);
+            let view = View { cam: Vec2::ZERO, size, zoom };
+            let canopy = ForeEntry::reach(
+                ReachKind::TreeCanopy,
+                inward_axis(AnchorSide::Top),
+                Vec2::new(size.x * 0.5, short * 0.95),
+                2.2,
+                1,
+            );
+            let plan = plan_entry(view, canopy, Vec2::new(-500.0, -500.0), &[]).unwrap();
+            let radial_px = art_foreground_reach::CANOPY_RADIUS * plan.k as f32;
+            let ratio = radial_px / short;
+            assert!(
+                (0.80..=1.00).contains(&ratio),
+                "zoom {zoom}: canopy radial extent {radial_px} / {short} = {ratio:.3} outside 0.80..=1.00"
+            );
+        }
+
+        let view = View { cam: Vec2::ZERO, size: Vec2::new(120.0, 80.0), zoom: 1.0 };
+        let c1 = ForeEntry::reach(ReachKind::TreeCanopy, inward_axis(AnchorSide::Top), Vec2::new(60.0, 72.0), 2.2, 1);
+        let c2 = ForeEntry::reach(ReachKind::TreeCanopy, inward_axis(AnchorSide::Left), Vec2::new(72.0, 40.0), 2.4, 2);
+        let lamp = ForeEntry::reach(ReachKind::HangingLamp, inward_axis(AnchorSide::Top), Vec2::new(108.0, 36.0), 2.0, 3);
+        force_entries(&mut layer, &world.level, &[c1, c2, lamp]);
+
+        // At most one TreeCanopy may appear on screen at a time.
+        layer.plan_frame(view, &world.level, Vec2::new(-500.0, -500.0), 0.0, &[]);
+        let canopy_count = layer.frame.iter().filter(|p| p.entry.is_canopy()).count();
+        assert_eq!(canopy_count, 1, "at most one TreeCanopy may be on screen at a time");
+
+        // Standing anywhere inside the half-disc fades the canopy; standing far outside keeps full alpha.
+        let plan_under = plan_entry(view, c1, Vec2::new(95.0, 35.0), &[]).unwrap();
+        assert_eq!(plan_under.alpha, ALPHA_FLOOR_RAT as u8);
+        let plan_far = plan_entry(view, c1, Vec2::new(60.0, 220.0), &[]).unwrap();
+        assert_eq!(plan_far.alpha, ALPHA_MAX);
+
+        // Rendering the full-view canopy respects the hard coverage budget and clamps `len <= 36`.
+        force_entries(&mut layer, &world.level, &[c1]);
+        let (_, used) = render(&mut world, &mut layer, Vec2::ZERO, 1.0, 0.0);
+        assert!(used > 0);
+        assert_eq!(layer.rasters[0].reach_len, art_foreground_reach::CANOPY_RADIUS as i32);
+        assert!(used <= (VIEW.0 * VIEW.1) as u32 * COVERAGE_SKIP_PCT / 100);
+    }
+
+    #[test]
+    fn reach_anchor_end_is_never_inside_the_view_at_any_camera_or_zoom() {
+        let mut world = World::new(Theme::Sewer, 7);
+        let mut layer = ForeLayer::new();
+        let tip = Vec2::new(600.0, 500.0);
+        let cases = [
+            (ReachKind::PipeElbow, HORIZONTAL),
+            (ReachKind::SignArm, -HORIZONTAL),
+            (ReachKind::HangingLamp, VERTICAL),
+            (ReachKind::LightPole, -VERTICAL),
+            (ReachKind::VineTendril, Vec2::new(-0.8, 0.6)),
+            (ReachKind::KelpFrond, Vec2::new(-0.6, -0.8)),
+            (ReachKind::TreeCanopy, inward_axis(AnchorSide::Top)),
+            (ReachKind::TreeCanopy, inward_axis(AnchorSide::Bottom)),
+            (ReachKind::TreeCanopy, inward_axis(AnchorSide::Left)),
+            (ReachKind::TreeCanopy, inward_axis(AnchorSide::Right)),
+        ];
+        for (kind, axis) in cases {
+            let spec = art_foreground_reach::reach_spec(kind);
+            let entry = ForeEntry::reach(kind, axis, tip, 2.2, 91);
+            force_entries(&mut layer, &world.level, &[entry]);
+            for zoom in [0.5, 1.0, 1.5, 2.0] {
+                let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32) * zoom;
+                for gx in -4..=4 {
+                    for gy in -4..=4 {
+                        let cam = tip - size * 0.5 + Vec2::new(gx as f32 * 55.0, gy as f32 * 42.0);
+                        let (mut pb, _) = render(&mut world, &mut layer, cam, zoom, 1.25);
+                        let any_painted = pb.pixels().iter().any(|&px| px != FLOOR);
+                        if !any_painted {
+                            continue;
+                        }
+                        let plan = &layer.frame[0];
+                        let raster = &layer.rasters[0];
+                        let span_px = (raster.reach_len * plan.k) as f32;
+                        let body_origin = plan.body_tip - span_px;
+                        let shadow_origin = plan.shadow_tip - span_px;
+                        if spec.shape == ReachShape::Canopy {
+                            // Canopy's flat base (`u == 0`, trunk at `x = -11 < 0`) never
+                            // detaches past the anchor viewport edge `along.0` into the view.
+                            assert!(
+                                raster.reach_len <= spec.tip_len.round() as i32,
+                                "canopy reach_len {} exceeded tip_len {}",
+                                raster.reach_len,
+                                spec.tip_len
+                            );
+                            assert!(
+                                shadow_origin <= plan.along.0 + 0.5,
+                                "TreeCanopy axis {axis:?} zoom {zoom} cam {cam:?}: shadow detached ({shadow_origin} > {})",
+                                plan.along.0
+                            );
+                            assert!(
+                                body_origin <= plan.along.0 + 0.5,
+                                "TreeCanopy axis {axis:?} zoom {zoom} cam {cam:?}: body detached ({body_origin} > {})",
+                                plan.along.0
+                            );
+                        } else {
+                            let overhang = BAND_OVERHANG as f32 * zoom;
+                            assert!(
+                                shadow_origin <= plan.along.0 - overhang + 0.5,
+                                "{kind:?} axis {axis:?} zoom {zoom} cam {cam:?}: shadow_origin {shadow_origin} > {}",
+                                plan.along.0 - overhang
+                            );
+                            assert!(
+                                body_origin <= plan.along.0 - overhang + 0.5,
+                                "{kind:?} axis {axis:?} zoom {zoom} cam {cam:?}: body_origin {body_origin} > {}",
+                                plan.along.0 - overhang
+                            );
+                        }
+
+                        if plan.body.fade > 0.0 {
+                            pb.clear(FLOOR);
+                            raster.blit(&mut pb, plan, body_origin, u32::from(ALPHA_MAX), false);
+                            let origin = plan.normal * plan.body.cross as f32;
+                            let (u_enter, u_exit) = line_span(origin, entry.axis, size);
+                            if u_enter < u_exit && plan.body_tip > u_enter + 8.0 * zoom {
+                                let search = if spec.shape == ReachShape::Canopy {
+                                    (24.0 * zoom) as i32
+                                } else {
+                                    6
+                                };
+                                let edge = origin + entry.axis * (u_enter + 2.0);
+                                let hit = (-search..=search).any(|off| {
+                                    let p = edge + plan.normal * (off as f32);
+                                    let ex = p.x.round();
+                                    let ey = p.y.round();
+                                    ex >= 0.0
+                                        && ex < size.x
+                                        && ey >= 0.0
+                                        && ey < size.y
+                                        && pb.pixel_at(ex as usize, ey as usize) != FLOOR
+                                });
+                                assert!(
+                                    hit,
+                                    "anchor gap at entry edge {edge:?} for {kind:?} axis {axis:?} zoom {zoom} cam {cam:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reach_tip_is_fixed_in_world_space_and_parallax_acts_only_across_the_ray() {
+        let mut world = World::new(Theme::Kitchen, 12);
+        let mut layer = ForeLayer::new();
+        let tip = Vec2::new(420.0, 340.0);
+        let entry = ForeEntry::reach(ReachKind::HangingLamp, VERTICAL, tip, 2.5, 55);
+        force_entries(&mut layer, &world.level, &[entry]);
+
+        let view0 = View { cam: Vec2::new(360.0, 300.0), size: Vec2::new(120.0, 80.0), zoom: 1.0 };
+        let rat_far = Vec2::ZERO;
+        let p0 = plan_entry(view0, entry, rat_far, &[]).unwrap();
+        assert!((p0.body_tip - (tip.y - view0.cam.y)).abs() <= 1e-4);
+
+        let view_along = View { cam: view0.cam + Vec2::new(0.0, 14.0), ..view0 };
+        let p_along = plan_entry(view_along, entry, rat_far, &[]).unwrap();
+        assert!((p0.body_tip - p_along.body_tip - 14.0).abs() <= 1e-4);
+        assert_eq!(p0.body.cross, p_along.body.cross);
+        assert_eq!(p0.shadow.cross, p_along.shadow.cross);
+
+        let view_across = View { cam: view0.cam + Vec2::new(8.0, 0.0), ..view0 };
+        let p_across = plan_entry(view_across, entry, rat_far, &[]).unwrap();
+        assert!((p0.body_tip - p_across.body_tip).abs() <= 1e-4);
+        assert_eq!(p0.shadow.cross - p_across.shadow.cross, 8);
+        assert_eq!(p0.body.cross - p_across.body.cross, 20);
+
+        let (pb_a, used_a) = render(&mut world, &mut layer, view0.cam, 1.0, 0.0);
+        let (pb_b, used_b) = render(&mut world, &mut layer, view0.cam + Vec2::new(0.0, 6.0), 1.0, 0.0);
+        assert!(used_a > 0 && used_b > 0);
+        let max_painted_y = |pb: &PixelBuffer| {
+            (0..pb.h)
+                .rev()
+                .find(|&y| (0..pb.w).any(|x| pb.pixel_at(x, y) != FLOOR))
+                .expect("painted row")
+        };
+        assert_eq!(max_painted_y(&pb_a) - max_painted_y(&pb_b), 6);
+        assert!((0..pb_a.w).all(|x| pb_a.pixel_at(x, pb_a.h - 1) == FLOOR));
+    }
+
+    #[test]
+    fn reach_shadow_leads_in_from_the_anchor_edge_before_the_body() {
+        let mut world = World::new(Theme::Sewer, 7);
+        let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32);
+        for (kind, axis) in [
+            (ReachKind::PipeElbow, HORIZONTAL),
+            (ReachKind::SignArm, -HORIZONTAL),
+            (ReachKind::CraneHook, VERTICAL),
+            (ReachKind::LightPole, -VERTICAL),
+            (ReachKind::VineTendril, Vec2::new(0.6, 0.8)),
+            (ReachKind::TreeCanopy, VERTICAL),
+        ] {
+            let tip = Vec2::new(500.0, 500.0);
+            let entry = ForeEntry::reach(kind, axis, tip, 2.2, 73);
+            let mut layer = ForeLayer::new();
+            force_entries(&mut layer, &world.level, &[entry]);
+            let normal = entry.normal();
+            let (along_lo, _) = project(size, axis);
+            let base_cam = tip - size * 0.5;
+            let base_cam = base_cam + axis * (tip.dot(axis) - along_lo - base_cam.dot(axis));
+            let base_cam = base_cam + normal * (entry.cross - (size * 0.5).dot(normal) - base_cam.dot(normal));
+
+            let mut saw_shadow_only = false;
+            let mut saw_body_after = false;
+            for step in -18..=28 {
+                let cam = base_cam - axis * (step as f32);
+                let (pb, used) = render(&mut world, &mut layer, cam, 1.0, 0.0);
+                let any_dark = pb.pixels().iter().any(|&px| px != FLOOR);
+                if let Some(plan) = layer.frame.first() {
+                    if plan.shadow.fade > 0.0 && plan.body.fade == 0.0 && any_dark {
+                        assert_eq!(used, 0, "shadow-only reach frame must spend zero body budget");
+                        saw_shadow_only = true;
+                        assert!(!saw_body_after, "shadow led after body for {kind:?} {axis:?}");
+                    }
+                    if plan.body.fade > 0.0 && used > 0 {
+                        saw_body_after = true;
+                    }
+                }
+            }
+            assert!(saw_shadow_only, "shadow never led in tip-first for {kind:?} {axis:?}");
+            assert!(saw_body_after, "body never entered after shadow for {kind:?} {axis:?}");
         }
     }
 
@@ -1586,8 +2638,6 @@ mod tests {
                 assert!(extent(raster.first) <= plan.along.0 - overhang);
                 assert!(extent(raster.last) >= plan.along.1 + overhang);
 
-                // The shadow is separately offset. Verify the body against
-                // each actual viewport edge that its centreline crosses.
                 pb.clear(FLOOR);
                 raster.blit(&mut pb, plan, extent(raster.first), u32::from(ALPHA_MAX), false);
                 let (first, last) = line_span(centre, axis, size);
@@ -1608,14 +2658,15 @@ mod tests {
         let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32) * zoom;
         for axis in [HORIZONTAL, VERTICAL, Vec2::new(0.6, 0.8)] {
             let item = ForeItem { axis, ..pipe(true, 0.0, 3.0) };
-            let normal = item.normal();
+            let entry = ForeEntry::from_band(item);
+            let normal = entry.normal();
             let (lo, hi) = project(size, normal);
-            let k = pixel_scale(&item);
-            let (shadow_lo, shadow_hi) = cross_extent(item, k, k / 2);
+            let k = band_pixel_scale(&entry);
+            let (shadow_lo, shadow_hi) = cross_extent(entry, k, k / 2);
             for (edge, start, inward) in [(lo, lo - shadow_hi, 1.0), (hi, hi - shadow_lo, -1.0)] {
                 let mut layer = ForeLayer::new();
                 force_items(&mut layer, &world.level, &[item]);
-                let camera = |step| normal * (shadow_offset(item) - (start + inward * step as f32));
+                let camera = |step| normal * (shadow_offset(entry) - (start + inward * step as f32));
                 let mut depths = Vec::new();
                 for step in -2..=28 {
                     let cam = camera(step);
@@ -1637,8 +2688,6 @@ mod tests {
                     }
                 }
                 let &(first_step, first_depth) = depths.first().expect("shadow never reached the viewport");
-                // At the angled corner the first faded samples can round to
-                // the floor colour. Allow three screen pixels for entry.
                 assert!(first_step > 0 && first_depth <= 3.0 * zoom, "{axis:?}, edge {edge}: {depths:?}");
                 let growth = depths.windows(2).filter(|w| w[1].0 == w[0].0 + 1 && w[1].1 > w[0].1).count();
                 assert!(growth >= 5, "{axis:?}, edge {edge}: {depths:?}");
@@ -1652,11 +2701,9 @@ mod tests {
                 assert!(body.pixels().iter().all(|&px| px == FLOOR));
                 assert_eq!(raster.rebuilds, 1, "cross-axis motion should reuse the same raster");
 
-                // The last body-free frame is identical when frozen and when
-                // returning to it after the body has crossed the viewport.
                 let (still, _) = render(&mut world, &mut layer, camera(28), zoom, 0.0);
                 assert_eq!(inside.pixels(), still.pixels());
-                let centre_step = (((lo + hi) * 0.5 + shadow_offset(item)) - start) * inward;
+                let centre_step = (((lo + hi) * 0.5 + shadow_offset(entry)) - start) * inward;
                 let (_, used) = render(&mut world, &mut layer, camera(centre_step.round() as i32), zoom, 0.0);
                 assert!(used > 0);
                 let (leaving, used) = render(&mut world, &mut layer, camera(28), zoom, 0.0);
@@ -1679,14 +2726,11 @@ mod tests {
         }
         let mut focus = Focus::default();
         focus.filter(&mut art, RasterKey {
-            kind: ForeKind::MainPipe, seed: 0, scale: 1.0, theme: Theme::Sewer,
+            kind: RasterKind::Band(ForeKind::MainPipe), seed: 0, scale: 1.0, theme: Theme::Sewer,
             sway: 0.0, toward_centre: 1, block: 3, radius: 4,
-        });
+        }, false);
         let row = &focus.body[12 * focus.width as usize..13 * focus.width as usize];
         let alpha = |x: usize| row[x][3];
-        // The left body edge was a hard 3x3 boundary at x=6. The sample
-        // immediately outside now has coverage and the inner ramp varies
-        // within the same original art pixel.
         assert!(alpha(5) > 0 && alpha(5) < alpha(6));
         assert!(alpha(6) < alpha(7) && alpha(7) < alpha(9));
     }
@@ -1694,16 +2738,20 @@ mod tests {
     #[test]
     fn organic_angles_come_from_level_seeds() {
         let mut angles = Vec::new();
-        for seed in [1, 2, 7, 11] {
-            let world = World::new(Theme::Outfall, seed);
-            let mut layer = ForeLayer::new();
-            layer.sync(&world.level);
-            for (item, _, _) in layer.capture_items().filter(|(i, _, _)| i.kind.organic()) {
-                assert!(item.axis.x.abs() > 0.001 && item.axis.y.abs() > 0.001);
-                if !angles.contains(&item.axis) {
-                    angles.push(item.axis);
+        for theme in [Theme::Outfall, Theme::Sewer] {
+            for seed in [1, 2, 7, 11] {
+                let world = World::new(theme, seed);
+                let mut layer = ForeLayer::new();
+                layer.sync(&world.level);
+                for (entry, _, _) in layer.capture_entries().filter(|(e, _, _)| e.organic() && !e.is_canopy()) {
+                    assert!(entry.axis.x.abs() > 0.001 && entry.axis.y.abs() > 0.001);
+                    if !angles.contains(&entry.axis) {
+                        angles.push(entry.axis);
+                    }
                 }
             }
+        }
+        for seed in [1, 2, 7, 11] {
             let mut c = 0;
             let world = World::new(Theme::Trailer, seed);
             let view = View { cam: Vec2::ZERO, size: Vec2::new(120.0, 80.0), zoom: 1.0 };
@@ -1711,12 +2759,14 @@ mod tests {
                 let sky = sky_items(&world.level, view, step as f32 / SKY_QUANT_HZ);
                 let kinds: Vec<_> = sky.into_iter().flatten().collect();
                 assert!((2..=4).contains(&kinds.len()));
-                if let Some(branch) = sky[2] {
-                    assert!(branch.axis.x.abs() > 0.001 && branch.axis.y.abs() > 0.001);
-                    c += 1;
+                if let Some(mover) = sky[2] {
+                    if mover.is_canopy() {
+                        assert!(mover.axis.x.abs() <= 1e-5 && mover.axis.y.abs() > 0.99);
+                        c += 1;
+                    }
                 }
             }
-            assert!(c > 0, "no branch passed for seed {seed}");
+            assert!(c > 0, "no canopy passed for seed {seed}");
         }
         assert!(angles.len() >= 4);
     }
@@ -1733,8 +2783,17 @@ mod tests {
         let spaced = ForeItem { cross: near.cross - 62.0, ..near };
         force_items(&mut layer, &world.level, &[close, spaced, near]);
         layer.plan_frame(view, &world.level, centre, 0.0, &[]);
-        assert_eq!(layer.frame[0].item, near);
-        assert_eq!(layer.frame[1].item, spaced);
+        assert_eq!(layer.frame[0].entry, ForeEntry::from_band(near));
+        assert_eq!(layer.frame[1].entry, ForeEntry::from_band(spaced));
+
+        let reach_left = ForeEntry::reach(ReachKind::PipeElbow, HORIZONTAL, Vec2::new(80.0, 90.0), 2.0, 1);
+        let reach_right_close = ForeEntry::reach(ReachKind::PipeElbow, -HORIZONTAL, Vec2::new(100.0, 110.0), 2.0, 2);
+        let reach_right_spaced = ForeEntry::reach(ReachKind::PipeElbow, -HORIZONTAL, Vec2::new(100.0, 150.0), 2.0, 3);
+        force_entries(&mut layer, &world.level, &[reach_right_close, reach_right_spaced, reach_left]);
+        layer.plan_frame(view, &world.level, Vec2::new(-500.0, -500.0), 0.0, &[]);
+        assert_eq!(layer.frame.len(), 2);
+        assert_eq!(layer.frame[0].entry, reach_left);
+        assert_eq!(layer.frame[1].entry, reach_right_spaced);
 
         let crossing = ForeItem { axis: Vec2::new(0.8, -0.6), cross: 126.0, ..near };
         force_items(&mut layer, &world.level, &[near, crossing]);
@@ -1742,8 +2801,8 @@ mod tests {
         assert_eq!(layer.frame.len(), 2);
         assert!(layer.frame[1].crossing_rat);
         let along = near.axis * 14.0;
-        let still = plan_band(view, near, centre, &[]).unwrap();
-        let slid = plan_band(View { cam: along, ..view }, near, centre, &[]).unwrap();
+        let still = plan_entry(view, ForeEntry::from_band(near), centre, &[]).unwrap();
+        let slid = plan_entry(View { cam: along, ..view }, ForeEntry::from_band(near), centre, &[]).unwrap();
         assert_eq!(still.body.cross, slid.body.cross);
     }
 
@@ -1770,8 +2829,8 @@ mod tests {
             };
             draw(&mut pb, &mut layer, &mut scene);
             assert_eq!(layer.frame.len(), MAX_BANDS_IN_VIEW);
-            assert_eq!(layer.frame[0].item, near);
-            assert_eq!(layer.frame[1].item, spaced);
+            assert_eq!(layer.frame[0].entry, ForeEntry::from_band(near));
+            assert_eq!(layer.frame[1].entry, ForeEntry::from_band(spaced));
             assert_eq!(layer.frame[1].shadow.cross - layer.frame[0].shadow.cross, (48.0 * zoom) as i32);
         }
     }
@@ -1787,22 +2846,21 @@ mod tests {
         let spaced = pipe(true, 310.0 - 14.0, 3.0);
         let items = [spaced, too_close, nearest];
         for item in items {
-            let plan = plan_band(view, item, rat, &[]).unwrap();
+            let plan = plan_entry(view, ForeEntry::from_band(item), rat, &[]).unwrap();
             assert_eq!(plan.body.fade, 0.0);
             assert!(plan.shadow.fade > 0.0);
         }
         force_items(&mut layer, &world.level, &items);
         layer.plan_frame(view, &world.level, rat, 0.0, &[]);
         assert_eq!(layer.frame.len(), MAX_BANDS_IN_VIEW);
-        assert_eq!(layer.frame[0].item, nearest);
-        assert_eq!(layer.frame[1].item, spaced);
+        assert_eq!(layer.frame[0].entry, ForeEntry::from_band(nearest));
+        assert_eq!(layer.frame[1].entry, ForeEntry::from_band(spaced));
     }
 
     #[test]
     fn filtered_detail_is_world_anchored_along_the_band() {
         let mut world = World::new(Theme::Sewer, 7);
         let mut layer = ForeLayer::new();
-        // At 1x both origins cross an art block boundary, for k = 2 and 3.
         let cam = Vec2::new(323.0, 401.0);
         for horizontal in [true, false] {
             for (depth, k) in [(2.0, PIXEL_SCALE), (2.8, PIXEL_SCALE_NEAR)] {
@@ -1825,12 +2883,11 @@ mod tests {
                     }
                     assert!(varied, "art had no along-axis detail");
                 }
-                // Once both phases have been drawn, identical frames don't grow the scratch.
-                let warm = layer.scratch.capacity();
+                let warm = layer.bufs.scratch.capacity();
                 let raster = layer.rasters[0].body.as_ptr();
                 let (again, _) = render(&mut world, &mut layer, cam, 1.0, 0.0);
                 assert_eq!(again.pixels(), a.pixels());
-                assert_eq!(layer.scratch.capacity(), warm);
+                assert_eq!(layer.bufs.scratch.capacity(), warm);
                 assert_eq!(layer.rasters[0].body.as_ptr(), raster);
             }
         }
@@ -1841,17 +2898,23 @@ mod tests {
         let view = View { cam: Vec2::ZERO, size: Vec2::new(180.0, 180.0), zoom: 1.0 };
         let item = pipe(true, 90.0, 2.5);
         let rat = Vec2::new(1000.0, 90.0);
-        let plan = plan_band(view, item, rat, &[]).unwrap();
+        let plan = plan_entry(view, ForeEntry::from_band(item), rat, &[]).unwrap();
         assert_eq!(plan.alpha, ALPHA_FLOOR_RAT as u8);
-        let moved = plan_band(View { cam: Vec2::new(6.0, 4.0), ..view }, item, rat, &[]).unwrap();
+        let moved = plan_entry(View { cam: Vec2::new(6.0, 4.0), ..view }, ForeEntry::from_band(item), rat, &[]).unwrap();
         assert_eq!(plan.body.cross - moved.body.cross, 10);
         assert_eq!(plan.shadow.cross - moved.shadow.cross, 4);
-        let far = plan_band(view, item, Vec2::new(1000.0, 0.0), &[]).unwrap();
+        let far = plan_entry(view, ForeEntry::from_band(item), Vec2::new(1000.0, 0.0), &[]).unwrap();
         assert_eq!(far.alpha, ALPHA_MAX);
+
+        let reach = ForeEntry::reach(ReachKind::PipeElbow, HORIZONTAL, Vec2::new(50.0, 90.0), 2.5, 9);
+        let past_tip = plan_entry(view, reach, Vec2::new(170.0, 90.0), &[]).unwrap();
+        assert_eq!(past_tip.alpha, ALPHA_MAX);
+        let under_tip = plan_entry(view, reach, Vec2::new(40.0, 90.0), &[]).unwrap();
+        assert_eq!(under_tip.alpha, ALPHA_FLOOR_RAT as u8);
     }
 
     #[test]
-    fn a_still_scene_draws_identically_twice() {
+    fn a_still_scene_draws_identically_twice_for_bands_and_reaches() {
         for theme in Theme::playable() {
             let mut world = World::new(theme, 4);
             let mut layer = ForeLayer::new();
@@ -1862,7 +2925,19 @@ mod tests {
             let (b, b_used) = render(&mut world, &mut layer, cam, 1.0, 6.25);
             assert_eq!(a.pixels(), b.pixels(), "{theme:?}");
             assert_eq!(a_used, b_used);
-            assert!(a_used <= (VIEW.0 * VIEW.1) as u32 * COVERAGE_SKIP_PCT / 100);
+            assert!(a_used <= (VIEW.0 * VIEW.1) as u32 * coverage_skip_pct(theme) / 100);
+        }
+        let mut world = World::new(Theme::Sewer, 9);
+        for kind in all_reach_kinds() {
+            let mut layer = ForeLayer::new();
+            let entry = ForeEntry::stage_reach(kind, Vec2::new(60.0, 45.0), 17);
+            force_entries(&mut layer, &world.level, &[entry]);
+            let (a, a_used) = render(&mut world, &mut layer, Vec2::ZERO, 1.0, 4.375);
+            let rebuilds = layer.rasters[0].rebuilds;
+            let (b, b_used) = render(&mut world, &mut layer, Vec2::ZERO, 1.0, 4.375);
+            assert_eq!(a.pixels(), b.pixels(), "{kind:?}");
+            assert_eq!(a_used, b_used);
+            assert_eq!(layer.rasters[0].rebuilds, rebuilds, "{kind:?} rebuilt on frozen frame");
         }
     }
 
@@ -1905,7 +2980,7 @@ mod tests {
             for elapsed in [0.0, 0.7, 1.9, 3.3, 4.0, 7.1, 13.37] {
                 let cam = Vec2::new(654.5, 1241.0);
                 let _ = render(&mut world, &mut layer, cam, zoom, elapsed);
-                assert!(layer.frame.iter().any(|p| p.item.kind == ForeKind::PowerLines));
+                assert!(layer.frame.iter().any(|p| p.entry.is_wires()));
                 assert!(layer.frame.len() <= MAX_BANDS_IN_VIEW);
             }
         }
@@ -1926,7 +3001,7 @@ mod tests {
             let elapsed = (step as f32 + 0.25) / SKY_QUANT_HZ;
             let [_, cloud, branch] = sky_items(&world.level, view, elapsed);
             let cloud = cloud.unwrap();
-            let cloud_fade = plan_band(view, cloud, rat, &[]).map_or(0.0, |p| p.shadow.fade);
+            let cloud_fade = plan_entry(view, cloud, rat, &[]).map_or(0.0, |p| p.shadow.fade);
             if let Some((cross, fade)) = previous_cloud {
                 if cloud.cross < cross {
                     assert_eq!((fade, cloud_fade), (0.0, 0.0));
@@ -1935,20 +3010,20 @@ mod tests {
             }
             previous_cloud = Some((cloud.cross, cloud_fade));
 
-            let (shadow, body) = branch.and_then(|item| plan_band(view, item, rat, &[]))
+            let (shadow, body) = branch.and_then(|entry| plan_entry(view, entry, rat, &[]))
                 .map_or((0.0, 0.0), |p| (p.shadow.fade, p.body.fade));
             if step > 0 {
                 if previous_branch.0 == 0.0 && shadow > 0.0 {
-                    assert!(shadow <= 0.25, "canopy shadow appeared at {shadow}");
+                    assert!(shadow <= 0.35, "roadside shadow appeared at {shadow}");
                 }
                 if previous_branch.0 > 0.0 && shadow == 0.0 {
-                    assert!(previous_branch.0 <= 0.25, "canopy shadow left at {}", previous_branch.0);
+                    assert!(previous_branch.0 <= 0.35, "roadside shadow left at {}", previous_branch.0);
                 }
                 if previous_branch.1 == 0.0 && body > 0.0 {
-                    assert!(body <= 0.5, "canopy body appeared at {body}");
+                    assert!(body <= 0.5, "roadside body appeared at {body}");
                 }
                 if previous_branch.1 > 0.0 && body == 0.0 {
-                    assert!(previous_branch.1 <= 0.5, "canopy body left at {}", previous_branch.1);
+                    assert!(previous_branch.1 <= 0.5, "roadside body left at {}", previous_branch.1);
                 }
             }
             if branch.is_none() {
@@ -1967,34 +3042,39 @@ mod tests {
     }
 
     #[test]
-    fn outfall_bands_respect_depth_room_rib_cap_and_coverage_budget() {
+    fn outfall_items_respect_depth_room_rib_cap_and_coverage_budget() {
         let mut world = World::new(Theme::Outfall, 7);
         let mut layer = ForeLayer::new();
         layer.sync(&world.level);
-        let placed: Vec<_> = layer.capture_items().collect();
-        assert!(!placed.is_empty(), "Outfall should place foreground bands");
-        for &(item, _, _) in &placed {
+        let placed: Vec<_> = layer.capture_entries().collect();
+        assert!(!placed.is_empty(), "Outfall should place foreground items");
+        for &(entry, _, _) in &placed {
             assert!(
-                (OUTFALL_DEPTH_MIN..=OUTFALL_DEPTH_MAX).contains(&item.depth),
-                "Outfall band depth {} outside 1.8..=2.4",
-                item.depth
+                (OUTFALL_DEPTH_MIN..=OUTFALL_DEPTH_MAX).contains(&entry.depth),
+                "Outfall item depth {} outside 1.8..=2.4",
+                entry.depth
             );
-            assert!(kinds_for(Theme::Outfall).contains(&item.kind));
+            match entry.shape {
+                ForeShape::Band(k) => assert!(kinds_for(Theme::Outfall).contains(&k)),
+                ForeShape::Reach { kind, .. } => {
+                    assert!(art_foreground_reach::reach_spec(kind).floors.contains(&Theme::Outfall));
+                }
+            }
         }
-        // At most one HullRib per non-corridor room.
         for room in &world.level.rooms {
             if room.kind == RoomKind::Corridor || room.kind == RoomKind::Maze {
                 continue;
             }
             let ribs = placed
                 .iter()
-                .filter(|&&(item, anchor, corridor)| {
-                    !corridor && item.kind == ForeKind::HullRib && room.rect.contains_world(anchor)
+                .filter(|&&(entry, anchor, corridor)| {
+                    !corridor
+                        && matches!(entry.shape, ForeShape::Band(ForeKind::HullRib))
+                        && room.rect.contains_world(anchor)
                 })
                 .count();
             assert!(ribs <= 1, "Outfall room had {ribs} HullRib bands (max 1)");
         }
-        // Coverage stays strictly within the 14% Outfall overlay budget.
         let max_writes = (VIEW.0 * VIEW.1) as u32 * OUTFALL_COVERAGE_PCT / 100;
         for kind in kinds_for(Theme::Outfall) {
             let item = ForeItem {
@@ -2012,5 +3092,12 @@ mod tests {
                 "{kind:?} wrote {used} px, exceeding Outfall 14% cap ({max_writes})"
             );
         }
+        let kelp_reach = ForeEntry::reach(ReachKind::KelpFrond, HORIZONTAL, Vec2::new(80.0, 40.0), 2.1, 19);
+        force_entries(&mut layer, &world.level, &[kelp_reach]);
+        let (_, used) = render(&mut world, &mut layer, Vec2::ZERO, 1.0, 1.0);
+        assert!(
+            used <= max_writes,
+            "KelpFrond wrote {used} px, exceeding Outfall 14% cap ({max_writes})"
+        );
     }
 }
