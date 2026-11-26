@@ -78,7 +78,7 @@ pub struct InkSlow(pub f32);
 #[inline]
 pub fn is_ground(kind: EnemyKind) -> bool {
     // A registered kind walks or flies exactly as its base body does.
-    !matches!(
+    !matches!(kind, EnemyKind::GlassShrimp | EnemyKind::Lampfish) && !matches!(
         kind.archetype(),
         EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
     )

@@ -101,18 +101,36 @@ pub const MAX_ATTEMPTS: u32 = 4;
 /// attempt is used so the player still gets a runnable map.
 pub fn generate(theme: Theme, seed: u64) -> Level {
     let mut last: Option<(Level, Vec<String>)> = None;
+    let mut outfall_attempts = Vec::new();
     for attempt in 0..MAX_ATTEMPTS {
         let level = generate_once(theme, seed, attempt);
         match validate::validate(&level) {
             Ok(()) => return level,
+            Err(errors) if theme == Theme::Outfall => outfall_attempts.push((attempt, level, errors)),
             Err(errors) => last = Some((level, errors)),
         }
+    }
+    for (attempt, mut level, errors) in outfall_attempts {
+        if repair_outfall_lures(&mut level, attempt) {
+            return level;
+        }
+        last = Some((level, errors));
     }
     let (level, errors) = last.expect("MAX_ATTEMPTS is at least one");
     if cfg!(debug_assertions) {
         panic!("level generation failed validation for {theme:?} seed {seed}: {errors:#?}");
     }
     level
+}
+
+fn repair_outfall_lures(level: &mut Level, attempt: u32) -> bool {
+    let rank_seed = level_seed(level.theme, level.seed, attempt);
+    hazards::place_lure_traps(level, rank_seed, true);
+    if validate::validate(level).is_err() {
+        return false;
+    }
+    puddles::place(level, attempt);
+    true
 }
 
 /// One generation attempt: the five stages, then the derived data (masks, the
@@ -286,6 +304,13 @@ fn generate_stages(
         trailer: crate::game::level::TrailerDeck::default(),
         puddles: Vec::new(),
     };
+    if theme == Theme::Outfall {
+        stage!(hazards, {
+            let rank_seed = level_seed(theme, seed, attempt);
+            hazards::place_tidal_pits(&mut level, rank_seed);
+            hazards::place_lure_traps(&mut level, rank_seed, false);
+        });
+    }
     stage!(lights, lights::place(&mut level, attempt));
     let mut level = strip_boss_arena(level);
     // Standing water: the last stage of all, on its own salted rng over the
@@ -463,7 +488,7 @@ mod tests {
     /// Seeds per theme (`0..TRACE_SEEDS`): 5 × 20 = 100 pinned maps.
     const TRACE_SEEDS: u64 = 20;
 
-    /// Pinned trace, `[theme][seed]`, themes in [`Theme::all`] order.
+    /// Pinned trace, `[theme][seed]`, in the original five-theme order.
     const TRACE_HASHES: [[u64; TRACE_SEEDS as usize]; 5] = [
         [
             1554844677090305139,
@@ -818,7 +843,8 @@ mod tests {
     #[test]
     fn map_trace_pin() {
         let mut actual = [[0u64; TRACE_SEEDS as usize]; 5];
-        for (t, theme) in Theme::all().into_iter().enumerate() {
+        let legacy = [Theme::Sewer, Theme::Kitchen, Theme::Lab, Theme::Laundry, Theme::Printworks];
+        for (t, theme) in legacy.into_iter().enumerate() {
             for seed in 0..TRACE_SEEDS {
                 actual[t][seed as usize] = map_hash(&generate_once(theme, seed, 0));
             }
@@ -833,6 +859,68 @@ mod tests {
              cell must stay put (regenerate the pin only for an intended \
              layout/maze/placement change)"
         );
+    }
+
+    #[test]
+    fn outfall_seed_sweep_keeps_dry_routes_lures_sconces_and_wet_banks() {
+        use crate::game::hazards::OUTFALL_LURE_COUNT;
+        use crate::game::level::LightFixtureKind;
+
+        let mut valid_by_attempt = [0usize; 2];
+        for seed in 0..20 {
+            let accepted = generate(Theme::Outfall, seed);
+            validate::validate(&accepted).unwrap();
+            for (attempt, count) in valid_by_attempt.iter_mut().enumerate() {
+                let level = generate_once(Theme::Outfall, seed, attempt as u32);
+                if validate::validate(&level).is_ok() {
+                    *count += 1;
+                }
+            }
+            let objects = &accepted.objects;
+            assert_eq!(objects.lure_traps.len(), OUTFALL_LURE_COUNT, "seed {seed}");
+            assert!((4..=8).contains(&objects.tidal_pits.len()), "seed {seed}");
+            assert!((240..=265).contains(&accepted.puddles.len()), "seed {seed}");
+            assert!((8..=lights::OUTFALL_SCONCE_CAP).contains(&objects.lights.len()), "seed {seed}");
+            let entry = accepted.start_room().unwrap().rect;
+            assert_eq!(objects.lights.iter().filter(|f| entry.contains_world(f.pos)
+                && f.is_live_sconce()).count(), 4, "seed {seed}");
+            assert!(objects.lights.iter().all(|f| f.kind == LightFixtureKind::Sconce));
+
+            let (mut walkable, mut wet) = (0, 0);
+            for y in (0..accepted.tiles.rows()).step_by(2) {
+                for x in (0..accepted.tiles.cols()).step_by(2) {
+                    let at = TileMap::tile_rect(x, y).center();
+                    if accepted.tiles.get(x, y) == TileKind::Open && accepted.pit_at(at).is_none() {
+                        walkable += 1;
+                        wet += accepted.wet_at(at) as usize;
+                    }
+                }
+            }
+            let coverage = wet as f32 / walkable as f32;
+            println!("Outfall seed {seed}: wet {coverage:.3}, pits {}, fixtures {}",
+                objects.tidal_pits.len(), objects.lights.len());
+            assert!((0.30..=0.42).contains(&coverage), "seed {seed}: wet {coverage:.3}");
+        }
+        assert!(valid_by_attempt.into_iter().sum::<usize>() >= 20);
+        assert!(valid_by_attempt.into_iter().all(|count| count > 0));
+    }
+
+    #[test]
+    fn outfall_exhausted_attempt_repair_rescans_lure_banks() {
+        use crate::game::hazards::OUTFALL_LURE_COUNT;
+
+        let attempt = MAX_ATTEMPTS - 1;
+        let mut level = (0..20).find_map(|seed| {
+            let level = generate_once(Theme::Outfall, seed, attempt);
+            validate::validate(&level).is_ok().then_some(level)
+        }).expect("one of the final-attempt layouts should validate");
+        level.objects.lure_traps.clear();
+        assert!(validate::validate(&level).is_err());
+        assert!(repair_outfall_lures(&mut level, attempt));
+        assert_eq!(level.objects.lure_traps.len(), OUTFALL_LURE_COUNT);
+        let lures = level.objects.lure_traps.clone();
+        assert!(repair_outfall_lures(&mut level, attempt));
+        assert_eq!(level.objects.lure_traps, lures);
     }
 
     // ---- The persisted placement records -----------------------------------

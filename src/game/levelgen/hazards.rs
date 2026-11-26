@@ -343,6 +343,206 @@ fn place_one(
 }
 
 
+
+const TIDAL_SIDES: [(i32, i32); 4] = [(0, 1), (1, 0), (0, -1), (-1, 0)];
+const LURE_SPACING: f32 = 80.0;
+pub(super) const REPAIRED_LURE_SPACING: f32 = 64.0;
+
+/// Drop pockets sit flush against solid bedrock. Two continuous rows of dry
+/// floor wrap the lip and extend past its ends, keeping the bank optional.
+fn tidal_bank(
+    level: &Level,
+    room: TileRect,
+    cell: (i32, i32),
+    inward: (i32, i32),
+    width: i32,
+    depth: i32,
+) -> Option<TileRect> {
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::TileKind;
+
+    let (dx, dy) = inward;
+    let at = |along, across| (cell.0 + dy.abs() * along + dx * across,
+                              cell.1 + dx.abs() * along + dy * across);
+    let tile = |along, across| {
+        let (x, y) = at(along, across);
+        level.tiles.get(x, y)
+    };
+    if (0..width).any(|i| tile(i, -1) != TileKind::Wall(WallKind::Solid)) {
+        return None;
+    }
+    for j in 0..depth + 2 {
+        for i in -1..=width {
+            let (x, y) = at(i, j);
+            if !room.contains(x, y) || level.tiles.get(x, y) != TileKind::Open {
+                return None;
+            }
+        }
+    }
+    let end = at(width - 1, depth - 1);
+    Some(TileRect::new(cell.0.min(end.0), cell.1.min(end.1),
+        (cell.0 - end.0).abs() + 1, (cell.1 - end.1).abs() + 1))
+}
+
+pub(super) fn tidal_exclusions(level: &Level) -> Vec<TileRect> {
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::cell_of;
+
+    let around = |(x, y), gap| TileRect::new(x, y, 1, 1).inflate(gap);
+    let mut avoid: Vec<_> = level.start_room().iter().map(|r| r.rect.inflate(1)).collect();
+    for maze in &level.mazes {
+        avoid.extend([maze.ring.inflate(4), around(maze.fork, 3)]);
+    }
+    avoid.extend(level.tiles.iter_walls().filter_map(|(x, y, kind)| {
+        matches!(kind, WallKind::Doorway { .. } | WallKind::RatHole { .. })
+            .then(|| around((x, y), 2))
+    }));
+    avoid.extend(level.objects.one_way_doors.iter().map(|door| around(door.cell, 3)));
+    avoid.extend(level.objects.shop_holes.iter().map(|shop| around(shop.mouth, 3)));
+    avoid.extend(level.objects.sticky_traps.iter().map(|trap| around(cell_of(trap.pos), 2)));
+    avoid.extend(level.objects.mousetraps.iter().map(|trap| around(cell_of(trap.pos), 2)));
+    avoid
+}
+
+fn outfall_rank(seed: u64, (x, y): (i32, i32)) -> u64 {
+    let mut hash = seed ^ (x as u64).wrapping_mul(0x9e37_79b9)
+        ^ (y as u64).wrapping_mul(0x85eb_ca6b);
+    hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^ (hash >> 31)
+}
+
+pub(super) fn place_tidal_pits(level: &mut Level, seed: u64) {
+    use crate::game::level::{Pit, PitKind};
+
+    let avoid = tidal_exclusions(level);
+    let mut sites = Vec::new();
+    for room in level.rooms.iter().filter(|r| matches!(r.kind, RoomKind::Hall | RoomKind::Room)) {
+        let r = room.rect;
+        for cell @ (x, y) in r.cells() {
+            for inward in TIDAL_SIDES {
+                let edge = match inward {
+                    (0, 1) => y == r.y,
+                    (1, 0) => x == r.x,
+                    (0, -1) => y == r.bottom() - 1,
+                    _ => x == r.right() - 1,
+                };
+                if !edge {
+                    continue;
+                }
+                let rank = outfall_rank(seed, cell);
+                let width = 2 + (rank % 3) as i32;
+                let depth = 1 + ((rank >> 2) & 1) as i32;
+                let Some(rect) = tidal_bank(level, r, cell, inward, width, depth) else {
+                    continue;
+                };
+                if avoid.iter().all(|guard| !guard.intersects(&rect)) {
+                    sites.push((rank, rect));
+                }
+            }
+        }
+    }
+    sites.sort_by_key(|site| site.0);
+    let wanted = 4 + seed as usize % 5;
+    for (_, rect) in sites {
+        if level.objects.tidal_pits.len() == wanted {
+            break;
+        }
+        if level.objects.tidal_pits.iter().all(|pit| !pit.rect.inflate(8).intersects(&rect)) {
+            level.objects.tidal_pits.push(Pit::new(rect, PitKind::TidalDrop));
+        }
+    }
+}
+
+/// Validate a dry route on a copy. Pits stay walkable in the real tile map so
+/// direct crossings can fall and the swimming bodies can cross normally.
+pub(super) fn dry_tiles(level: &Level) -> TileMap {
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::TileKind;
+
+    let tiles = &level.tiles;
+    let mut dry = TileMap::new(tiles.cols(), tiles.rows(), tiles.theme(), tiles.seed());
+    for (x, y, kind) in tiles.iter_walls() {
+        dry.set(x, y, TileKind::Wall(kind));
+    }
+    for pit in &level.objects.tidal_pits {
+        let r = pit.rect;
+        dry.fill_cells(r.x, r.y, r.w, r.h, TileKind::Wall(WallKind::Solid));
+    }
+    dry
+}
+
+pub(super) fn place_lure_traps(level: &mut Level, seed: u64, repair: bool) {
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::{SizeClass, TileKind};
+    use crate::game::hazards::{lure_landing_clear, LureTrap, OUTFALL_LURE_COUNT};
+
+    let dry = dry_tiles(level);
+    let reach = validate::reachable(&dry, validate::cell_of(level.start), SizeClass::Large);
+    let avoid = tidal_exclusions(level);
+    let mut sites = Vec::new();
+    for y in 1..level.tiles.rows() - 1 {
+        for x in 1..level.tiles.cols() - 1 {
+            let cell = (x, y);
+            if dry.get(x, y) != TileKind::Open
+                || !validate::is_reached(&reach, &dry, cell)
+                || avoid.iter().any(|r| r.contains(x, y))
+                || TIDAL_SIDES.iter().all(|&(dx, dy)| {
+                    level.tiles.get(x - dx, y - dy) != TileKind::Wall(WallKind::Solid)
+                        || dry.get(x + dx, y + dy) != TileKind::Open
+                })
+            {
+                continue;
+            }
+            let basin = level.rooms.iter().position(|room| {
+                matches!(room.kind, RoomKind::Room | RoomKind::Hall) && room.rect.contains(x, y)
+            });
+            if basin.is_none() && !repair {
+                continue;
+            }
+            sites.push((outfall_rank(seed, cell), basin, cell));
+        }
+    }
+    sites.sort_by_key(|site| site.0);
+    let spacing = if repair { REPAIRED_LURE_SPACING } else { LURE_SPACING };
+    let mut used_basins = Vec::new();
+    level.objects.lure_traps.clear();
+    for one_per_basin in [true, false] {
+        for &(rank, basin, (x, y)) in &sites {
+            if level.objects.lure_traps.len() == OUTFALL_LURE_COUNT {
+                return;
+            }
+            if one_per_basin && basin.is_none_or(|b| used_basins.contains(&b)) {
+                continue;
+            }
+            let pos = TileMap::tile_rect(x, y).center();
+            if level.objects.lure_traps.iter().any(|trap| trap.pos.dist_sq(pos) < spacing * spacing) {
+                continue;
+            }
+            // Neighbours at sqrt(2) tiles or two tiles. Rotate the fixed order
+            // by the site's rank, then keep only generator-legal landings.
+            const OFFSETS: [(i32, i32); 8] = [(1, 1), (2, 0), (1, -1), (0, -2),
+                (-1, -1), (-2, 0), (-1, 1), (0, 2)];
+            let landings: Vec<_> = (0..OFFSETS.len()).filter_map(|i| {
+                let (dx, dy) = OFFSETS[(i + (rank & 7) as usize) % OFFSETS.len()];
+                let cell = (x + dx, y + dy);
+                let at = TileMap::tile_rect(cell.0, cell.1).center();
+                (validate::is_reached(&reach, &dry, cell)
+                    && avoid.iter().all(|r| !r.contains(cell.0, cell.1))
+                    && lure_landing_clear(level, pos, at)).then_some(at)
+            }).collect();
+            if landings.is_empty() {
+                continue;
+            }
+            level.objects.lure_traps.push(LureTrap::new(pos, landings));
+            if let Some(index) = basin {
+                used_basins.push(index);
+            }
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

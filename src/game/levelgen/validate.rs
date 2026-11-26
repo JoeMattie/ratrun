@@ -84,8 +84,10 @@ pub fn validate(level: &Level) -> Result<(), Vec<String>> {
     }
 
     // 2./3. Connectivity per size class.
-    let small = reachable(tiles, start, SizeClass::Small);
-    let large = reachable(tiles, start, SizeClass::Large);
+    let dry = (level.theme == Theme::Outfall).then(|| super::hazards::dry_tiles(level));
+    let walk = dry.as_ref().unwrap_or(tiles);
+    let small = reachable(walk, start, SizeClass::Small);
+    let large = reachable(walk, start, SizeClass::Large);
     for room in &level.rooms {
         if !reaches_rect(&small, tiles, room.rect) {
             errors.push(format!(
@@ -278,11 +280,68 @@ pub fn validate(level: &Level) -> Result<(), Vec<String>> {
     // 8. The side routes' floor hazards (§11): on public, reachable floor, off
     // every arena/start/maze reservation, and never without a dry way past.
     check_hazards(level, &small, &mut errors);
+    if level.theme == Theme::Outfall {
+        check_outfall(level, &large, &mut errors);
+    }
 
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn check_outfall(level: &Level, large: &[bool], errors: &mut Vec<String>) {
+    use crate::game::hazards::{lure_landing_clear, outfall_sand_clear, OUTFALL_LURE_COUNT};
+    use crate::game::level::PitKind;
+
+    let pits = &level.objects.tidal_pits;
+    let avoid = super::hazards::tidal_exclusions(level);
+    if pits.len() > 8 {
+        errors.push(format!("Outfall: {} pits exceed the limit of 8", pits.len()));
+    }
+    for pit in pits {
+        let r = pit.rect;
+        if pit.kind != PitKind::TidalDrop
+            || !((1..=2).contains(&r.w.min(r.h)) && (2..=4).contains(&r.w.max(r.h)))
+            || !r.cells().all(|(x, y)| level.tiles.get(x, y).is_open())
+            || avoid.iter().any(|guard| guard.intersects(&r))
+        {
+            errors.push(format!("Outfall: illegal tidal pocket {r:?}"));
+        }
+    }
+
+    let lures = &level.objects.lure_traps;
+    if lures.len() != OUTFALL_LURE_COUNT {
+        errors.push(format!("Outfall: {} lure traps, expected {OUTFALL_LURE_COUNT}", lures.len()));
+    }
+    let spacing = super::hazards::REPAIRED_LURE_SPACING;
+    for (index, trap) in lures.iter().enumerate() {
+        let (x, y) = cell_of(trap.pos);
+        if !is_reached(large, &level.tiles, (x, y))
+            || avoid.iter().any(|r| r.contains(x, y))
+            || lures[..index].iter().any(|other| trap.pos.dist_sq(other.pos) < spacing * spacing)
+            || trap.landings.is_empty()
+            || trap.landings.iter().any(|&at| {
+                let (ax, ay) = cell_of(at);
+                !is_reached(large, &level.tiles, (ax, ay))
+                    || avoid.iter().any(|r| r.contains(ax, ay))
+                    || !lure_landing_clear(level, trap.pos, at)
+            })
+        {
+            errors.push(format!("Outfall: illegal lure trap at ({x}, {y})"));
+        }
+    }
+
+    for room in level.rooms.iter().filter(|r| matches!(r.kind, RoomKind::Hall) && r.rect.area() >= 900) {
+        let has_arrival = room.rect.inflate(-2).cells().any(|(x, y)| {
+            let at = TileMap::tile_rect(x, y).center();
+            is_reached(large, &level.tiles, (x, y))
+                && outfall_sand_clear(level, at, 18.0, SizeClass::Large)
+        });
+        if !has_arrival {
+            errors.push(format!("Outfall: no clear arrival in {:?}", room.rect));
+        }
     }
 }
 

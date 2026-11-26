@@ -258,8 +258,10 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     let room_area = field.inflate(-ROOM_MARGIN);
 
     // ---- 1. the start area: a great hall centred on the map --------------
-    let start_w = even(rng.random_range(START_W.0..=START_W.1));
-    let start_h = even(rng.random_range(START_H.0..=START_H.1));
+    let outfall = theme == Theme::Outfall;
+    let (start_w_range, start_h_range) = if outfall { ((42, 46), (30, 34)) } else { (START_W, START_H) };
+    let start_w = even(rng.random_range(start_w_range.0..=start_w_range.1));
+    let start_h = even(rng.random_range(start_h_range.0..=start_h_range.1));
     let start_room = TileRect::new(
         cols / 2 - start_w / 2,
         rows / 2 - start_h / 2,
@@ -286,8 +288,9 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     // boss now arrives where the rat is). It is carved first and is otherwise an
     // ordinary hall: the sprawl may merge with it, grow wings off it, furnish it
     // and light it, and the shop-hole placement reads it as the map's far room.
-    let far_w = even(rng.random_range(FAR_HALL_W.0..=FAR_HALL_W.1));
-    let far_h = even(rng.random_range(FAR_HALL_H.0..=FAR_HALL_H.1));
+    let (far_w_range, far_h_range) = if outfall { ((36, 40), (30, 34)) } else { (FAR_HALL_W, FAR_HALL_H) };
+    let far_w = even(rng.random_range(far_w_range.0..=far_w_range.1));
+    let far_h = even(rng.random_range(far_h_range.0..=far_h_range.1));
     let centre = start_room.center_world();
     let far = |rect: &TileRect| rect.center_world().dist(centre) >= 48.0 * TILE_F;
     let boss_arena = pick_rect(rng, field, ROOM_MARGIN, far_w, far_h, 2, |rect| {
@@ -308,7 +311,10 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
             far_h,
         )
     });
-    carve_count(tiles, boss_arena);
+    let far_open = carve_count(tiles, boss_arena);
+    if outfall {
+        open += far_open;
+    }
     let far_index = areas.len();
     areas.push(Area {
         rect: boss_arena,
@@ -336,6 +342,7 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         // The flatbed has its own generator; this is only reached by tests
         // that exercise `build_layout` directly on every theme.
         Theme::Trailer => 0.50,
+        Theme::Outfall => 0.64,
     };
     let target = OPEN_TARGET.0 + rng.random_range(0..=4) as f64 * 0.01;
     let target_cells = (cols * rows) as f64 * target;
@@ -356,7 +363,11 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         // Every map grows at least two plazas, whatever the theme's bias says:
         // the horde needs great halls to surround the rat in.
         let plaza = rng.random_bool(hall_bias) || areas.len() < 3;
-        let (w, h) = if plaza {
+        let (w, h) = if outfall && plaza {
+            (rng.random_range(36..=50), rng.random_range(26..=38))
+        } else if outfall {
+            (rng.random_range(18..=28), rng.random_range(14..=22))
+        } else if plaza {
             (
                 rng.random_range(PLAZA_W.0..=PLAZA_W.1),
                 rng.random_range(PLAZA_H.0..=PLAZA_H.1),
@@ -430,7 +441,12 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
             if partner == parent || linked.contains(&(partner.min(child), partner.max(child))) {
                 continue;
             }
-            if let Some(gallery) = punch_arch(tiles, rng, rect, areas[partner].rect, OPENING_W.0) {
+            let secondary = if outfall && degree[partner] >= 2 && degree[child] >= 2 {
+                2
+            } else {
+                OPENING_W.0
+            };
+            if let Some(gallery) = punch_arch(tiles, rng, rect, areas[partner].rect, secondary) {
                 corridors.push(gallery);
             }
             degree[child] += 1;
@@ -538,7 +554,8 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     // does not always offer a shared wall to open.
     let mut rescued = 0;
     let mut hopeless: Vec<usize> = Vec::new();
-    while rescued < MAX_RESCUE_LINKS {
+    let rescue_limit = if outfall { 5 } else { MAX_RESCUE_LINKS };
+    while rescued < rescue_limit {
         let starved = (0..areas.len())
             .filter(|&index| {
                 areas[index].rect.area() >= LARGE_AREA_CELLS
@@ -582,7 +599,7 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     // owner ruled out, so a big single-mouth space gets one more wide way in.
     let mut rescued_spaces = 0;
     let mut tries: Vec<(usize, usize)> = Vec::new();
-    while rescued_spaces < MAX_RESCUE_LINKS {
+    while rescued_spaces < rescue_limit {
         let Some((starved, partner)) = single_mouth_pair(tiles, &areas, &tries) else {
             break;
         };
@@ -631,6 +648,9 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     }
 
     // ---- 6. cover and texture -------------------------------------------
+    if outfall {
+        chamfer_bowls(tiles, &areas, &maze_slots, &corridors);
+    }
     let partitions = scatter_cover(tiles, rng, &areas, &maze_slots, start_cell);
 
     // ---- 6b. the floor's own geometry (wave 3 side routes) ---------------
@@ -883,8 +903,13 @@ fn punch_arch(
     }
     // A jamb at each end where the span allows one, so the opening reads as an
     // arch in a wall rather than a room that lost its side.
-    let widest = (span - 2).clamp(1, OPENING_W.1);
-    let mut narrowest = OPENING_W.0.min(widest).max(1);
+    let (lo_width, hi_width) = if tiles.theme() == Theme::Outfall {
+        if min_open == 2 && gap >= 2 { (2, 3) } else { (4, 7) }
+    } else {
+        OPENING_W
+    };
+    let widest = (span - 2).clamp(1, hi_width);
+    let mut narrowest = lo_width.min(widest).max(1);
     let widest = widest.max(narrowest);
     narrowest = narrowest.max(min_open.max(1).min(widest)).min(widest);
     let open = rng.random_range(narrowest..=widest).min(span);
@@ -924,6 +949,32 @@ fn punch_arch(
             TileRect::new(band, first, gap, open)
         }
     })
+}
+
+/// Cut only exterior corners, clear of joins and the reserved maze approach.
+fn chamfer_bowls(tiles: &mut TileMap, areas: &[Area], mazes: &[TileRect], corridors: &[TileRect]) {
+    for (index, area) in areas.iter().enumerate() {
+        let rect = area.rect;
+        for (x, dx) in [(rect.x, 1), (rect.right() - 1, -1)] {
+            for (y, dy) in [(rect.y, 1), (rect.bottom() - 1, -1)] {
+                let guard = TileRect::new(x, y, 1, 1).inflate(3);
+                if areas.iter().enumerate().any(|(i, a)| i != index && a.rect.intersects(&guard))
+                    || mazes.iter().chain(corridors).any(|r| r.intersects(&guard))
+                    || (0..3).any(|offset| {
+                        tiles.get(x - dx, y + dy * offset) != SOLID
+                            || tiles.get(x + dx * offset, y - dy) != SOLID
+                    })
+                {
+                    continue;
+                }
+                tiles.set(x, y, SOLID);
+                if (x + y + index as i32) % 2 == 0 {
+                    tiles.set(x + dx, y, SOLID);
+                    tiles.set(x, y + dy, SOLID);
+                }
+            }
+        }
+    }
 }
 
 /// Carve a wide L-shaped link between two areas that are too far apart for a
@@ -1428,6 +1479,7 @@ fn scatter_cover(
     slots: &[TileRect],
     start_cell: (i32, i32),
 ) -> Vec<TileRect> {
+    let outfall = tiles.theme() == Theme::Outfall;
     let mut partitions: Vec<TileRect> = Vec::new();
     let mut painted: Vec<TileRect> = Vec::new();
     let spawn_box = TileRect::new(start_cell.0 - 1, start_cell.1 - 1, 3, 3);
@@ -1449,7 +1501,8 @@ fn scatter_cover(
 
         // 1. Notched corners: a bite out of one or two corners, so an area is
         //    not a rectangle.
-        for _ in 0..rng.random_range(0..=2) {
+        let notches = if outfall { 0 } else { rng.random_range(0..=2) };
+        for _ in 0..notches {
             let nw = rng.random_range(3..=6);
             let nh = rng.random_range(3..=5);
             let (x, y) = match rng.random_range(0..4) {
@@ -1469,18 +1522,16 @@ fn scatter_cover(
         // 2. Partitions: a free-standing one-cell wall across the area, four
         //    cells clear of the wall ring so both its ends have a way round.
         if rect.area() >= 620 && rng.random_bool(0.8) {
-            let count = if rect.area() >= 1200 {
+            let count = if !outfall && rect.area() >= 1200 {
                 rng.random_range(1..=2)
             } else {
                 1
             };
             for _ in 0..count {
                 let horizontal = rng.random_bool(0.5);
-                let longest = if horizontal {
-                    inner.w.min(PARTITION_LEN.1)
-                } else {
-                    inner.h.min(PARTITION_LEN.1)
-                };
+                let limit = if outfall { 16 } else { PARTITION_LEN.1 };
+                let span = if horizontal { inner.w } else { inner.h };
+                let longest = span.min(limit);
                 if longest < PARTITION_LEN.0 {
                     continue;
                 }
@@ -1510,7 +1561,8 @@ fn scatter_cover(
         }
 
         // 3. Wall stubs: short spurs off the wall ring, pointing in.
-        for _ in 0..rng.random_range(0..=3) {
+        let stubs = if outfall { 0 } else { rng.random_range(0..=3) };
+        for _ in 0..stubs {
             let len = rng.random_range(3..=6);
             let stub = match rng.random_range(0..4) {
                 0 => TileRect::new(
@@ -1546,7 +1598,8 @@ fn scatter_cover(
         }
 
         // 4. Pillars: free-standing blocks in the open floor.
-        for _ in 0..rng.random_range(0..=4) {
+        let pillars = if outfall { 0 } else { rng.random_range(0..=4) };
+        for _ in 0..pillars {
             let (w, h) = [(2, 2), (2, 3), (3, 2), (3, 3)][rng.random_range(0..4)];
             if w > inner.w || h > inner.h {
                 continue;
@@ -1958,7 +2011,11 @@ pub fn furnish(tiles: &mut TileMap, layout: &Layout, rng: &mut StdRng, theme: Th
         if inner.w < 1 || inner.h < 1 {
             continue;
         }
-        let count = (room.rect.area() / 90).clamp(2, 9);
+        let count = if theme == Theme::Outfall {
+            (room.rect.area() / 260).clamp(2, 5)
+        } else {
+            (room.rect.area() / 90).clamp(2, 9)
+        };
         for _ in 0..count {
             let kind = kinds[rng.random_range(0..kinds.len())];
             let (w, h) = kind.cells();
@@ -1969,6 +2026,9 @@ pub fn furnish(tiles: &mut TileMap, layout: &Layout, rng: &mut StdRng, theme: Th
                 let Some(cell) = random_rect(rng, inner, w, h) else {
                     break;
                 };
+                if theme == Theme::Outfall && within(cell, room.rect.inflate(-5)) {
+                    continue;
+                }
                 if cores.iter().any(|core| cell.intersects(core)) {
                     continue;
                 }
@@ -2365,8 +2425,9 @@ mod tests {
                     // A gallery is `opening x wall thickness`: its passage is
                     // the longer side.
                     let passage = room.rect.w.max(room.rect.h);
+                    let minimum = if theme == Theme::Outfall { 2 } else { OPENING_W.0 };
                     assert!(
-                        passage >= OPENING_W.0,
+                        passage >= minimum,
                         "{ctx}: corridor {:?} is only {passage} cells wide",
                         room.rect
                     );

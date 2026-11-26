@@ -556,6 +556,13 @@ pub fn director_system(
                 log_spawn(player.pos, player.pos, 3);
                 continue;
             };
+            if level.theme == Theme::Outfall
+                && !spawn_circle_clear(&level, pos, kind.radius(), SizeClass::of_enemy(kind))
+            {
+                #[cfg(test)]
+                log_spawn(player.pos, player.pos, 3);
+                continue;
+            }
             #[cfg(test)]
             log_spawn(pos, player.pos, 0);
             let mut enemy = Enemy::spawn_with_mods(kind, pos, mult, mods, &mut rng.0);
@@ -593,7 +600,11 @@ pub fn director_system(
                 &player,
                 viewport.0,
                 &mut scratch,
-            ) {
+            ).filter(|&pos| {
+                let kind = roster::elite_kind(level.theme);
+                level.theme != Theme::Outfall
+                    || spawn_circle_clear(&level, pos, kind.radius(), SizeClass::of_enemy(kind))
+            }) {
                 #[cfg(test)]
                 log_spawn(pos, player.pos, 2);
                 let mult = director::horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
@@ -1504,7 +1515,7 @@ fn room_open_cell(
         if !cell_reachable(reach, level, p) {
             continue;
         }
-        if level.tiles.passable(cx, cy, class) && level.tiles.circle_clear(p, clear, class) {
+        if level.tiles.passable(cx, cy, class) && spawn_circle_clear(level, p, clear, class) {
             found = Some(p);
             break;
         }
@@ -1575,7 +1586,7 @@ pub fn spawn_point_in_room(
             continue;
         }
         let p = TileMap::tile_rect(cx, cy).center();
-        if level.tiles.passable(cx, cy, class) && level.tiles.circle_clear(p, clear, class) {
+        if level.tiles.passable(cx, cy, class) && spawn_circle_clear(level, p, clear, class) {
             return Some(p);
         }
     }
@@ -1610,7 +1621,7 @@ fn room_approach_point(
         if !level.tiles.passable(cx, cy, SizeClass::Large) {
             continue;
         }
-        if !level.tiles.circle_clear(p, clear, SizeClass::Large) {
+        if !spawn_circle_clear(level, p, clear, SizeClass::Large) {
             continue;
         }
         if p.dist(player.pos) < SPAWN_MIN_DIST {
@@ -1675,10 +1686,7 @@ impl FlankPlan {
                 continue;
             }
             let p = TileMap::tile_rect(cx, cy).center();
-            if !level
-                .tiles
-                .circle_clear(p, SPAWN_WALL_CLEAR, SizeClass::Large)
-            {
+            if !spawn_circle_clear(level, p, SPAWN_WALL_CLEAR, SizeClass::Large) {
                 continue;
             }
             if p.dist(player.pos) < SPAWN_MIN_DIST {
@@ -1704,9 +1712,7 @@ impl FlankPlan {
             let (cx, cy) = cell_of(p);
             if cell_in_maze(level, cx, cy)
                 || !level.tiles.passable(cx, cy, SizeClass::Large)
-                || !level
-                    .tiles
-                    .circle_clear(p, SPAWN_WALL_CLEAR, SizeClass::Large)
+                || !spawn_circle_clear(level, p, SPAWN_WALL_CLEAR, SizeClass::Large)
                 || p.dist(player.pos) < SPAWN_MIN_DIST
                 || !off_screen(p, player.pos, viewport)
                 || !cell_reachable(reach, level, p)
@@ -1794,10 +1800,7 @@ fn flank_anchor_ok(level: &Level, player: &Player, scratch: &SpawnScratch, p: Ve
     if !level.tiles.passable(cx, cy, SizeClass::Large) {
         return false;
     }
-    if !level
-        .tiles
-        .circle_clear(p, room_clearance(SizeClass::Large), SizeClass::Large)
-    {
+    if !spawn_circle_clear(level, p, room_clearance(SizeClass::Large), SizeClass::Large) {
         return false;
     }
     if p.dist(player.pos) < SPAWN_MIN_DIST {
@@ -2019,7 +2022,7 @@ fn nearest_clear(
                     if require_reach && !cell_reachable(reach, level, c) {
                         continue;
                     }
-                    if level.tiles.circle_clear(c, SPAWN_WALL_CLEAR, class) {
+                    if spawn_circle_clear(level, c, SPAWN_WALL_CLEAR, class) {
                         return Some(c);
                     }
                 }
@@ -2050,11 +2053,19 @@ pub fn spawn_point_ok(
     // grow with the map. The horde is the `Large` class, so a rat-hole cell
     // reads as a solid face here and no enemy materialises in a hole the
     // player could duck through.
-    if !level.tiles.circle_clear(p, wall_clear, SizeClass::Large) {
+    if !spawn_circle_clear(level, p, wall_clear, SizeClass::Large) {
         return false;
     }
     // Never inside a maze's ring or interior: the chase begins at the mouth.
     !in_maze(level, p)
+}
+
+fn spawn_circle_clear(level: &Level, at: Vec2, radius: f32, class: SizeClass) -> bool {
+    if level.theme == Theme::Outfall {
+        crate::game::hazards::outfall_sand_clear(level, at, radius, class)
+    } else {
+        level.tiles.circle_clear(at, radius, class)
+    }
 }
 
 #[cfg(test)]
