@@ -1043,8 +1043,10 @@ impl Bot {
                             } else {
                                 0.0
                             };
+                            let shape_index = self.miniboss_shapes.len();
+                            self.miniboss_shapes.push(shape);
                             self.threats.push(Threat::MinibossHazard {
-                                shape, warn_left, active_left: left, damage: en.damage,
+                                shape_index, warn_left, active_left: left, damage: en.damage,
                             });
                         }
                         if let Some(shape) = mb.telegraph() {

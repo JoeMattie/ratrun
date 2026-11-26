@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn recorder_keeps_the_latest_two_seconds_without_drawing_rng() {
         let mut world = World::new(Theme::Sewer, 7);
-        let mut expected = world.rng.clone();
+        let mut expected = World::new(Theme::Sewer, 7).rng;
         for i in 0..=180 {
             world.player.pos = point(i as f32, 0.0);
             world.begin_tick(DT, Vec2::ZERO, false);

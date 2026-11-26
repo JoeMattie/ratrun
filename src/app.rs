@@ -12365,14 +12365,12 @@ mod tests {
 
     #[test]
     fn the_open_map_requests_repaints_without_ticking_the_world() {
-        fn snapshot(w: &World) -> (u64, f32, Vec2, u32, u64) {
-            use rand::RngExt;
+        fn snapshot(w: &World) -> (u64, f32, Vec2, u32) {
             (
                 w.ticks,
                 w.elapsed,
                 w.player.pos,
                 w.fog().clock(),
-                w.rng.clone().random::<u64>(),
             )
         }
 
@@ -12380,6 +12378,9 @@ mod tests {
         h.enter_playing();
         h.frame(&[]);
         let before = snapshot(h.app.world.as_ref().unwrap());
+        let mut twin = Harness::new(120, 40);
+        twin.enter_playing();
+        twin.frame(&[]);
         h.frame(&[KeyCode::Tab]);
         assert_eq!(h.app.frame_demand(), crate::present::Demand::AnimatedMenu);
         h.frame(&[]);
@@ -12391,6 +12392,9 @@ mod tests {
         }
         assert_eq!(snapshot(h.app.world.as_ref().unwrap()), before);
         assert_eq!(h.app.world_draws, draws, "map animation reuses the frozen picture");
+        use rand::RngExt;
+        let next = |h: &mut Harness| h.app.world.as_mut().unwrap().rng.random::<u64>();
+        assert_eq!(next(&mut h), next(&mut twin));
     }
 
     #[test]

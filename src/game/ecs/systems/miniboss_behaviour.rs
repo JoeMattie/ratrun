@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn twin_movement_and_summon_traces_leave_the_run_rng_untouched() {
-        fn trace() -> (Vec<(Vec2, Motion)>, Vec<(u64, Vec2)>, [u64; 3]) {
+        fn scenario() -> (World, Entity, Entity, Entity) {
             let (mut w, orbit) = setup(Theme::Printworks, MinibossKind::CarbonTwin, 28.0);
             {
                 let mut mb = w.ecs.get_mut::<Miniboss>(orbit).unwrap();
@@ -909,7 +909,12 @@ mod tests {
             let at = w.player.pos + Vec2::new(0.0, 56.0);
             let summoner = w.spawn_miniboss(MinibossKind::Foreman, 0, at);
             w.ecs.get_mut::<Miniboss>(summoner).unwrap().announced = true;
-            let mut untouched = w.rng.clone();
+            (w, orbit, charge, summoner)
+        }
+
+        fn trace() -> (Vec<(Vec2, Motion)>, Vec<(u64, Vec2)>, [u64; 3]) {
+            let (mut w, orbit, charge, summoner) = scenario();
+            let mut untouched = scenario().0.rng;
             summon_wave(&mut w, summoner);
             let mut steps = Vec::new();
             for _ in 0..40 {

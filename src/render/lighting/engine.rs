@@ -793,7 +793,6 @@ impl LightMap {
         let theme = scene.level.theme;
         let pass = Pass {
             mode: scene.mode,
-            #[cfg(test)]
             elapsed: scene.elapsed,
             theme,
             fx,

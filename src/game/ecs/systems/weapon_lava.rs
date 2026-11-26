@@ -191,6 +191,7 @@ fn low_descent(glob: &LavaGlob) -> f32 {
 /// Runs immediately after Acid Rain while EnemyIndex still holds the ordered
 /// live entity list. Ground bodies are hit at landing. A flier can also be
 /// clipped on the last, low part of the descent, once per glob.
+#[allow(clippy::too_many_arguments)] // Independent ECS queries and resources.
 pub(crate) fn lava_system(
     mut commands: Commands,
     input: Res<TickInput>,
