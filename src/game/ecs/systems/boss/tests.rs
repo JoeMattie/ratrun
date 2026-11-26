@@ -97,7 +97,11 @@ fn every_boss_arrives_out_of_sight_around_the_rat() {
         // tailgate is near the map's west edge).
         assert_eq!(
             arena,
-            w.level.fight_rect_around(rat),
+            if kind == BossKind::Lantern {
+                lantern_fight_rect(&w.level, rat, boss.pos)
+            } else {
+                w.level.fight_rect_around(rat)
+            },
             "{kind:?}: the rectangle is not the one built around the rat"
         );
     }
@@ -1908,10 +1912,40 @@ fn lantern_world() -> World {
     let mut w = World::new(Theme::Sewer, 17);
     w.level = Level::empty(Theme::Outfall);
     w.flow = FlowField::new(&w.level.tiles);
-    w.player.pos = Vec2::new(860.0, 800.0);
+    w.player.pos = Vec2::new(980.0, 800.0);
     w.player.god = true;
     spawn_boss_at(&mut w, BossKind::Lantern, Vec2::new(800.0, 800.0), 1000.0);
     w
+}
+
+#[test]
+fn lantern_arrival_fits_outfall_halls_and_clears_the_widest_view() {
+    use crate::game::level::RoomKind;
+
+    let viewport = Vec2::new(160.0, 76.0);
+    for seed in 0..16 {
+        let w = World::new(Theme::Outfall, seed);
+        let level = &w.level;
+        let hall = level.rooms.iter().filter(|r| r.kind == RoomKind::Hall)
+            .max_by_key(|r| r.rect.area()).unwrap();
+        assert!(
+            hall.rect.cells().any(|(x, y)| {
+                let p = collision::TileMap::tile_rect(x, y).center();
+                (0..8).any(|i| {
+                    let dir = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 8.0);
+                    lantern::arrival_body_fits(level, p, dir)
+                })
+            }),
+            "seed {seed} largest hall {:?} cannot hold the Lantern",
+            hall.rect,
+        );
+        let mut rng = BossRng::for_run(seed, BossKind::Lantern).0;
+        let mut scratch = SpawnScratch::default();
+        let p = lantern_scheduled_landing(&mut rng, level, &w.player, viewport, &mut scratch)
+            .expect("generated Outfall has an off-screen landing");
+        assert!(lantern_arrival_hidden(level, w.player.pos, viewport, p));
+        assert!(lantern::arrival_body_fits(level, p, (w.player.pos - p).normalized()));
+    }
 }
 
 fn set_lantern_hp(w: &mut World, hp: f32) {
@@ -1927,7 +1961,8 @@ fn update_lantern(w: &mut World, dt: f32) {
 }
 
 fn advance_lantern_to(w: &mut World, state: LanternState, dt: f32) -> Boss {
-    for _ in 0..720 {
+    let max_frames = 720 + (art_boss_lantern::PHASE_SHIFT_DURATION / dt).ceil() as u32;
+    for _ in 0..max_frames {
         if let Some(boss) = boss_of(w) {
             if boss.state == BossState::Lantern(state) {
                 return boss;
@@ -1950,7 +1985,7 @@ fn lantern_keeps_its_locked_jaw_when_hp_crosses_both_thresholds() {
     update_lantern(&mut w, DT);
     assert_eq!(w.player.hp, hp, "the arrival is harmless");
 
-    w.player.pos = arrival.pos + Vec2::new(64.0, 0.0);
+    w.player.pos = arrival.pos + Vec2::new(192.0, 0.0);
     w.player.god = true;
     advance_lantern_to(&mut w, LanternState::FeintTell, DT);
     for _ in 0..32 {
@@ -1969,8 +2004,15 @@ fn lantern_keeps_its_locked_jaw_when_hp_crosses_both_thresholds() {
     let recover = advance_lantern_to(&mut w, LanternState::FeintRecover, DT);
     assert_eq!(recover.incoming_multiplier(-facing, recover.pos), 0.5);
     assert_eq!(recover.incoming_multiplier(facing.perp(), recover.pos), 1.0);
+    let submerged = advance_lantern_to(&mut w, LanternState::PhaseShift, DT);
+    assert!(submerged.hit_shapes().iter().next().is_none());
+    assert_eq!(submerged.contact_damage, 0.0);
+    assert!(submerged.lantern_view().unwrap().real_bulb.is_some());
     let dropped = advance_lantern_to(&mut w, LanternState::DropLamp, DT);
-    assert_eq!(dropped.lantern_view().unwrap().real_bulb.unwrap().radius, 52.0);
+    assert_eq!(
+        dropped.lantern_view().unwrap().real_bulb.unwrap().radius,
+        art_boss_lantern::BULB_PLANTED_LIGHT_RADIUS
+    );
     assert!(w.level.objects.outfall_boss_snuff.is_none());
 }
 
@@ -1978,7 +2020,7 @@ fn lantern_keeps_its_locked_jaw_when_hp_crosses_both_thresholds() {
 fn lantern_decoy_takes_one_ordered_projectile_and_death_restores_the_sconce() {
     use crate::game::level::{LightFixture, LightFixtureKind};
     let mut w = lantern_world();
-    let lamp = Vec2::new(790.0, 715.0);
+    let lamp = Vec2::new(870.0, 710.0);
     w.level.objects.lights.push(LightFixture {
         pos: lamp,
         kind: LightFixtureKind::Sconce,
@@ -1988,6 +2030,9 @@ fn lantern_decoy_takes_one_ordered_projectile_and_death_restores_the_sconce() {
     set_lantern_hp(&mut w, 500.0);
     let boss = (0..700)
         .find_map(|_| {
+            // Keep the fixture within snuff range while the larger fish swims.
+            let head = boss_of(&mut w).unwrap().pos;
+            w.level.objects.lights[0].pos = head + Vec2::new(0.0, -100.0);
             update_lantern(&mut w, DT);
             boss_of(&mut w).filter(|boss| boss.lantern.decoy.is_some())
         })
@@ -1995,7 +2040,7 @@ fn lantern_decoy_takes_one_ordered_projectile_and_death_restores_the_sconce() {
     assert_eq!(w.level.objects.outfall_boss_snuff, Some(0));
     assert_eq!(boss.target_points().first(), Some(boss.pos));
     let bulb = boss.lantern.decoy.unwrap().pos;
-    assert_eq!(bulb, lamp);
+    assert_eq!(bulb, w.level.objects.lights[0].pos);
     w.player.pos = boss.pos + Vec2::new(0.0, 80.0);
 
     let sweep = |from, to| {
@@ -2058,10 +2103,9 @@ fn lantern_gape_preserves_the_final_pull_slice_and_centres_the_stamp() {
         assert_eq!(w.player.iframes, 0.0);
 
         if !giant && !dash {
-            // At 13 px across the 12 px half-width, the rat body overlaps
-            // the rect, but its centre is out. One pixel inward should hit.
+            // The rat body overlaps the rect, but its centre is outside.
             w.player.god = false;
-            w.player.pos = mouth + stamp.facing.perp() * 13.0;
+            w.player.pos = mouth + stamp.facing.perp() * (art_boss_lantern::GAPE_STAMP_SIZE * 0.5 + 1.0);
             let hp = w.player.hp;
             update_lantern(&mut w, dt);
             assert_eq!(w.player.hp, hp);

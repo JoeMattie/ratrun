@@ -20,7 +20,9 @@ use bevy_ecs::prelude::*;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
 
 const FEINT_APPROACH_SECS: f32 = 1.0;
-const MOUTH_OFFSET: f32 = 14.0;
+const FEINT_LURE_MIN: f32 = 20.0 * art::BODY_SCALE * art::LURE_PROPORTION;
+const COOLDOWN_STANDOFF: f32 = HEAD_RADIUS + 40.0;
+const COOLDOWN_STEER_BAND: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug)]
 struct AttackLock {
@@ -138,6 +140,16 @@ pub fn head_fits(level: &Level, pos: Vec2) -> bool {
     point_fits(level, pos, HEAD_RADIUS, SizeClass::Large)
 }
 
+pub(super) fn arrival_body_fits(level: &Level, head: Vec2, facing: Vec2) -> bool {
+    head_fits(level, head)
+        && [(13.0, 29.0), (40.0, 18.0), (65.0, 20.0)]
+            .into_iter()
+            .all(|(back, radius)| {
+                let center = head - facing * (back * art::BODY_SCALE);
+                level.tiles.circle_clear(center, radius * art::BODY_SCALE, SizeClass::Large)
+            })
+}
+
 fn point_fits(level: &Level, pos: Vec2, radius: f32, class: SizeClass) -> bool {
     let (cx, cy) = collision::cell_of(pos);
     if level.theme == Theme::Outfall {
@@ -213,13 +225,13 @@ fn attack(origin: Vec2, facing: Vec2, shape: HazardShape) -> AttackLock {
 fn jaw(boss: &Boss) -> AttackLock {
     let bulb = boss.lantern.bulb.unwrap_or(boss.pos);
     let facing = face(boss.pos, bulb, boss.facing);
-    let center = bulb - facing * art::JAW_CRESCENT_BACK;
+    let center = art::jaw_center(boss.pos, bulb, facing);
     let shape = rect(center, facing, art::JAW_CRESCENT_WIDTH * 0.5, art::JAW_CRESCENT_LEN * 0.5);
     attack(center, facing, shape)
 }
 
 fn gape(boss: &Boss, facing: Vec2) -> AttackLock {
-    let mouth = boss.pos + facing * MOUTH_OFFSET;
+    let mouth = boss.pos + facing * art::MOUTH_OFFSET;
     let cone = HazardShape::Arc {
         center: mouth,
         inner: 0.0,
@@ -234,7 +246,8 @@ fn gape(boss: &Boss, facing: Vec2) -> AttackLock {
 }
 
 fn trench(origin: Vec2, end: Vec2, facing: Vec2, width: f32) -> AttackLock {
-    let shape = rect((origin + end) * 0.5, facing, origin.dist(end) * 0.5, width * 0.5);
+    let mouth = facing * art::MOUTH_OFFSET;
+    let shape = rect((origin + end) * 0.5 + mouth, facing, origin.dist(end) * 0.5, width * 0.5);
     let mut lock = attack(origin, facing, shape);
     lock.end = end;
     lock
@@ -283,7 +296,17 @@ fn body_path(ctx: &BossContext<'_>, boss: &Boss, facing: Vec2, reach: f32) -> Ve
     path_end(ctx.level, boss.pos, facing * reach, HEAD_RADIUS, SizeClass::Large)
 }
 
+fn feint_reach(gap: f32) -> f32 {
+    ((gap - art::FEINT_STOP_SHORT) * art::LURE_PROPORTION)
+        .clamp(FEINT_LURE_MIN, art::LURE_TETHER_MAX)
+}
+
 fn swim(ctx: &BossContext<'_>, boss: &mut Boss, speed: f32) {
+    if boss.anim < boss.lantern.next_feint {
+        cooldown_swim(ctx, boss, speed);
+        stow_lure(boss, ctx.level, art::STALK_LENGTH);
+        return;
+    }
     let dir = ctx.seek(boss);
     if dir != Vec2::ZERO {
         boss.facing = dir;
@@ -295,6 +318,23 @@ fn swim(ctx: &BossContext<'_>, boss: &mut Boss, speed: f32) {
     stow_lure(boss, ctx.level, art::STALK_LENGTH);
 }
 
+fn cooldown_swim(ctx: &BossContext<'_>, boss: &mut Boss, speed: f32) {
+    let facing = face(boss.pos, ctx.player_pos, boss.facing);
+    let gap = boss.pos.dist(ctx.player_pos);
+    let dir = if gap <= COOLDOWN_STANDOFF + COOLDOWN_STEER_BAND
+        && ctx.los_clear(boss.pos, ctx.player_pos, art::BULB_RADIUS)
+    {
+        let radial = ((gap - COOLDOWN_STANDOFF) / COOLDOWN_STEER_BAND).clamp(-2.0, 1.0);
+        facing.perp() + facing * radial
+    } else {
+        ctx.seek(boss)
+    };
+    if boss.leap_t <= 0.0 {
+        move_boss(ctx, boss, dir, speed);
+    }
+    boss.facing = facing;
+}
+
 fn snuff(ctx: &BossContext<'_>, boss: &mut Boss) {
     boss.lantern.next_snuff = boss.anim + art::SNUFF_INTERVAL;
     let mount = ctx.level.nearest_live_sconce(boss.pos, art::SNUFF_REACH);
@@ -304,7 +344,7 @@ fn snuff(ctx: &BossContext<'_>, boss: &mut Boss) {
     });
     let Some(pos) = mount_pos.or_else(|| {
         [-1.0, 1.0].into_iter().find_map(|side| {
-            let point = boss.pos + boss.facing.perp() * (side * 28.0);
+        let point = boss.pos + boss.facing.perp() * (side * 28.0 * art::BODY_SCALE);
             point_fits(ctx.level, point, art::BULB_RADIUS, SizeClass::Small).then_some(point)
         })
     }) else {
@@ -468,7 +508,23 @@ impl BossController for LanternController {
                 || (matches!(state, FeintApproach | FeintTell | DarkTell | GapeTell)
                     && !boss.lantern.locked))
         {
-            commit_phase(ctx, boss);
+            boss.lantern.attack = None;
+            boss.lantern.decoy = None;
+            boss.lantern.snuff = None;
+            boss.leap_t = 0.0;
+            boss.invuln = art::PHASE_SHIFT_DURATION;
+            enter(boss, PhaseShift, art::PHASE_SHIFT_DURATION);
+            out.cue(BossCue::LanternTell);
+            return;
+        }
+
+        if state == PhaseShift {
+            if boss.elapsed >= boss.duration {
+                commit_phase(ctx, boss);
+            } else {
+                cooldown_swim(ctx, boss, art::SWIM_SPEED);
+                stow_lure(boss, ctx.level, art::STALK_LENGTH);
+            }
             return;
         }
 
@@ -496,7 +552,7 @@ impl BossController for LanternController {
                 let dark_end = boss.pos + facing * art::DARK_LUNGE_LEN;
                 if state == DarkSwim
                     && !boss.lantern.dark_used
-                    && gap <= 70.0
+                    && gap <= 70.0 * art::BODY_SCALE
                     && head_path_fits(ctx.level, boss.pos, dark_end)
                 {
                     let lock = trench(boss.pos, dark_end, facing, art::DARK_LUNGE_WIDTH);
@@ -532,12 +588,12 @@ impl BossController for LanternController {
                     }
                 }
                 if boss.anim >= boss.lantern.next_feint
-                    && gap <= art::LURE_TETHER_MAX + art::FEINT_STOP_SHORT
+                    && gap <= art::LURE_TETHER_MAX / art::LURE_PROPORTION + art::FEINT_STOP_SHORT
                     && ctx.los_clear(boss.pos, ctx.player_pos, art::BULB_RADIUS)
                 {
                     boss.facing = facing;
                     boss.leap_t = 0.0;
-                    stow_lure(boss, ctx.level, art::STALK_LENGTH.min((gap - art::FEINT_STOP_SHORT).max(20.0)));
+                    stow_lure(boss, ctx.level, art::STALK_LENGTH.min(feint_reach(gap)));
                     enter(boss, FeintApproach, FEINT_APPROACH_SECS);
                 } else {
                     swim(ctx, boss, art::SWIM_SPEED);
@@ -545,7 +601,7 @@ impl BossController for LanternController {
             }
             FeintApproach => {
                 boss.facing = facing;
-                let reach = (gap - art::FEINT_STOP_SHORT).clamp(20.0, art::LURE_TETHER_MAX);
+                let reach = feint_reach(gap);
                 move_lure(boss, ctx, reach, art::FEINT_LURE_SPEED);
                 let bulb = boss.lantern.bulb.unwrap_or(boss.pos);
                 if done || bulb.dist_sq(boss.pos + facing * reach) <= 0.25 {
@@ -563,7 +619,7 @@ impl BossController for LanternController {
             FeintTell => {
                 if !boss.lantern.locked {
                     boss.facing = facing;
-                    let reach = (gap - art::FEINT_STOP_SHORT).clamp(20.0, art::LURE_TETHER_MAX);
+                    let reach = feint_reach(gap);
                     move_lure(boss, ctx, reach, art::FEINT_LURE_SPEED);
                     let lock = jaw(boss);
                     boss.lantern.attack = Some(lock);
@@ -647,6 +703,8 @@ impl BossController for LanternController {
                     boss.facing = facing;
                     enter(boss, GapeTell, art::GAPE_TELL_DURATION);
                     out.cue(BossCue::LanternTell);
+                } else if boss.anim < boss.lantern.next_gape {
+                    cooldown_swim(ctx, boss, art::GAPE_SWIM_SPEED);
                 } else {
                     stalk_lamp(ctx, boss);
                 }
@@ -821,6 +879,46 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
+    fn lantern_opens_distance_between_attacks() {
+        let level = Level::empty(Theme::Outfall);
+        let head = Vec2::new(800.0, 800.0);
+        let rat = head + Vec2::new(65.0, 0.0);
+        let arena = level.fight_rect_around(head);
+        let mut boss = Boss::new(BossKind::Lantern, head, 1600.0, arena, head, false);
+        let flow = FlowField::new(&level.tiles);
+        let mut rng = StdRng::seed_from_u64(1);
+        let ctx = BossContext {
+            dt: 1.0 / 60.0,
+            time: 0.0,
+            player_pos: rat,
+            player_vel: Vec2::ZERO,
+            player_radius: PLAYER_RADIUS,
+            arena,
+            level: &level,
+            flow: &flow,
+            rng: &mut rng,
+        };
+        cooldown_swim(&ctx, &mut boss, art::SWIM_SPEED);
+        assert!(boss.pos.dist(rat) > head.dist(rat));
+        assert!(head_fits(&level, boss.pos));
+    }
+
+    #[test]
+    fn lantern_lure_extends_twice_as_far_in_proportion_to_its_head() {
+        let level = Level::empty(Theme::Outfall);
+        let head = Vec2::new(900.0, 900.0);
+        let arena = level.fight_rect_around(head);
+        let mut boss = Boss::new(BossKind::Lantern, head, 1600.0, arena, head, false);
+        boss.facing = Vec2::new(1.0, 0.0);
+        for reach in [art::STALK_LENGTH, art::ARRIVAL_LURE_LEAD] {
+            stow_lure(&mut boss, &level, reach);
+            assert_eq!(boss.lantern.bulb, Some(head + boss.facing * reach));
+        }
+        assert_eq!(art::STALK_LENGTH / art::BODY_SCALE, 56.0);
+        assert_eq!(art::ARRIVAL_LURE_LEAD / art::BODY_SCALE, 72.0);
+    }
+
+    #[test]
     fn lantern_pull_and_head_travel_stop_on_the_dry_side_of_a_pit() {
         let mut level = Level::empty(Theme::Outfall);
         level.objects.tidal_pits.push(Pit::new(TileRect::new(50, 50, 1, 1), PitKind::TidalDrop));
@@ -836,13 +934,15 @@ mod tests {
         assert!(from.x > to.x && to.x > 816.0);
         assert!(outfall_sand_clear(&level, to, PLAYER_RADIUS, SizeClass::Small));
         assert!(!head_fits(&level, from), "the head overlaps the pit edge");
-        assert!(!head_path_fits(&level, Vec2::new(836.0, 808.0), Vec2::new(780.0, 808.0)));
+        let clear = Vec2::new(880.0, 808.0);
+        assert!(head_fits(&level, clear));
+        assert!(!head_path_fits(&level, clear, Vec2::new(730.0, 808.0)));
     }
 
     #[test]
     fn lantern_gape_fits_both_bearings_in_a_corridor_but_rejects_a_closed_end() {
         let mut level = Level::empty(Theme::Outfall);
-        for y in [47, 51] {
+        for y in [45, 53] {
             level.tiles.fill_cells(44, y, 15, 1, TileKind::Wall(WallKind::Solid));
         }
         level.tiles.rebuild_masks();
@@ -866,7 +966,7 @@ mod tests {
             };
             assert!(valid_gape(&ctx, &boss, gape(&boss, facing)));
         }
-        level.tiles.fill_cells(51, 48, 1, 3, TileKind::Wall(WallKind::Solid));
+        level.tiles.fill_cells(52, 46, 1, 7, TileKind::Wall(WallKind::Solid));
         level.tiles.rebuild_masks();
         assert!(!fits_rect(&level, gape(&boss, dir).stamp.unwrap()));
     }

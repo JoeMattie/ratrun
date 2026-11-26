@@ -2186,15 +2186,9 @@ fn miniboss_home(k: MinibossKind) -> Option<(Theme, usize)> {
 }
 
 fn boss_facts(k: BossKind, f: &mut Facts) {
-    // The pool the fight really has: the art's base, the kind's scale and the
-    // director's boss multiplier at the boss clock, exactly as the spawn
-    // computes it (`boss::spawn`). The card used to print `base × scale`
-    // alone, an eighth of the real pool (KING COBRA read 630).
     const HP_REF: f32 = 30_000.0;
     let stage = crate::game::campaign::theme_stage(boss_theme(k));
-    let hp = k.base_hp()
-        * k.hp_scale()
-        * crate::game::director::boss_hp_mult_for(stage, crate::game::director::BOSS_TIME);
+    let hp = k.hp_pool(stage);
     f.push_bar("HIT POINTS", format!("{hp:.0}"), hp / HP_REF);
     f.push("CONTACT", format!("{:.0}", k.contact_damage()));
     f.push("PHASES", format!("{}", k.phase_for(1.0).max(3)));

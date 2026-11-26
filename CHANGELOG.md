@@ -15,6 +15,7 @@
   view when Foreground is enabled.
 - **Return Current.** The Outfall's four-intensity score adds a displaced
   bell echo over a D-minor bass line.
+- **The Lantern grows.** The anglerfish is three times larger, swings a longer lure and puts up a longer fight.
 
 - **Tail Whip sweeps behind you.** The swipe cuts a 160° arc opposite your
   facing or aim. Ratchet Tail throws a struck foe forward into the crowd.

@@ -370,6 +370,16 @@ impl BossKind {
         }
     }
 
+    /// Full starting HP on the supplied difficulty row.
+    pub(crate) fn hp_pool(self, difficulty: usize) -> f32 {
+        let scale = if self == BossKind::Lantern && difficulty == 0 {
+            art_boss_lantern::BOSS_PRACTICE_HP_SCALE
+        } else {
+            self.hp_scale()
+        };
+        self.base_hp() * scale * director::boss_hp_mult_for(difficulty, director::BOSS_TIME)
+    }
+
     /// Single-circle collision radius used for movement and contact.
     #[inline]
     pub fn body_radius(self) -> f32 {
@@ -852,7 +862,7 @@ impl BossKind {
             BossKind::MegaRat => 132.0,
             BossKind::Hawk => 118.0,
             BossKind::Cobra => 116.0,
-            BossKind::Lantern => 76.0,
+            BossKind::Lantern => 76.0 * art_boss_lantern::BODY_SCALE,
         }
     }
 
@@ -2267,7 +2277,7 @@ impl Boss {
                 BossHitShapes::from_slice(&shapes)
             }
             BossKind::Lantern => {
-                if self.dead {
+                if self.dead || self.state == BossState::Lantern(LanternState::PhaseShift) {
                     return BossHitShapes::empty();
                 }
                 BossHitShapes::from_slice(&[BossHitShape::Circle {
@@ -3895,9 +3905,7 @@ pub(crate) struct Arrival {
 pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival) -> Boss {
     let hunting = !a.arena.contains_world(a.rat);
     // The director's curve freezes at BOSS_TIME; the boss spawns then.
-    let hp = a.kind.base_hp()
-        * a.kind.hp_scale()
-        * director::boss_hp_mult_for(a.difficulty, director::BOSS_TIME);
+    let hp = a.kind.hp_pool(a.difficulty);
     let mut boss = Boss::new(a.kind, a.pos, hp, a.arena, a.dock, hunting);
     boss.id = a.id;
     boss.facing = (a.rat - a.pos).normalized();
@@ -3981,31 +3989,24 @@ pub fn boss_spawn_system(
     // once a floor, so its own is built here rather than borrowed.
     let mut scratch = SpawnScratch::default();
     let spawn_point_reachable = crate::game::ecs::systems::spawn::spawn_point_reachable;
-    let landing = spawn_point_reachable(
-        &mut boss_rng,
-        &level,
-        &player,
-        viewport.0,
-        &mut scratch,
-    );
     let pos = if kind == BossKind::Lantern {
-        let landing = landing.filter(|&p| lantern::head_fits(&level, p)).or_else(|| {
-            (0..7).find_map(|_| {
-                spawn_point_reachable(&mut boss_rng, &level, &player, viewport.0, &mut scratch)
-                    .filter(|&p| lantern::head_fits(&level, p))
-            })
-        });
-        let Some(pos) = landing.or_else(|| lantern_arrival_beside(&level, player.pos)) else {
-            // A temporarily blocked map can retry once the rat moves.
+        let Some(pos) = lantern_scheduled_landing(&mut boss_rng, &level, &player, viewport.0, &mut scratch) else {
+            // Retry when the rat moves rather than materialising in view.
             due.claimed = false;
             override_kind.0 = Some(kind);
             return;
         };
         pos
     } else {
+        let landing = spawn_point_reachable(&mut boss_rng, &level, &player, viewport.0, &mut scratch);
         // A rat holed up where the ring is solid still gets its fight beside
         // itself, exactly like a console `boss here`.
         landing.unwrap_or_else(|| arrival_beside(&level, player.pos, radius, &arena))
+    };
+    let arena = if kind == BossKind::Lantern {
+        lantern_fight_rect(&level, player.pos, pos)
+    } else {
+        arena
     };
     let boss = open_fight(
         &mut fight,
@@ -4046,18 +4047,93 @@ fn arrival_beside(level: &Level, rat: Vec2, radius: f32, arena: &TileRect) -> Ve
         .unwrap_or_else(|| arena.center_world())
 }
 
-/// Legal Lantern placement for the scheduled fallback and `boss here`.
+// Clear the body and the lamp's initial light from the widest frame.
+const LANTERN_ARRIVAL_MARGIN: f32 = art_boss_lantern::ARRIVAL_LURE_LEAD
+    + art_boss_lantern::BULB_LIGHT_RADIUS / art_boss_lantern::LURE_PROPORTION + 16.0;
+
+/// Include the distant landing and scaled body in the clamped fight rectangle.
+pub(crate) fn lantern_fight_rect(level: &Level, rat: Vec2, head: Vec2) -> TileRect {
+    let nominal = level.fight_rect_around(rat);
+    let (lo, hi) = art_boss_lantern::body_bounds_at(head, (rat - head).normalized());
+    let (left, top) = collision::cell_of(lo);
+    let (right, bottom) = collision::cell_of(hi);
+    let left = left.min(nominal.x).max(0);
+    let top = top.min(nominal.y).max(0);
+    let right = (right + 1).max(nominal.right()).min(level.tiles.cols());
+    let bottom = (bottom + 1).max(nominal.bottom()).min(level.tiles.rows());
+    TileRect::new(left, top, right - left, bottom - top)
+}
+
+fn lantern_arrival_hidden(level: &Level, rat: Vec2, viewport: Vec2, head: Vec2) -> bool {
+    use crate::game::ecs::systems::spawn::widest_view;
+    let half = widest_view(viewport) * 0.5;
+    let camera_axis = |position: f32, extent: f32, half: f32| {
+        if extent > 2.0 * half { position.clamp(half, extent - half) } else { extent * 0.5 }
+    };
+    let center = Vec2::new(
+        camera_axis(rat.x, level.arena.x, half.x),
+        camera_axis(rat.y, level.arena.y, half.y),
+    );
+    let delta = head - center;
+    delta.x.abs() > half.x + LANTERN_ARRIVAL_MARGIN
+        || delta.y.abs() > half.y + LANTERN_ARRIVAL_MARGIN
+}
+
+fn lantern_scheduled_landing(
+    rng: &mut StdRng,
+    level: &Level,
+    player: &Player,
+    viewport: Vec2,
+    scratch: &mut SpawnScratch,
+) -> Option<Vec2> {
+    use crate::game::ecs::systems::spawn::spawn_point_reachable;
+    let margin = Vec2::new(LANTERN_ARRIVAL_MARGIN, LANTERN_ARRIVAL_MARGIN);
+    let hidden = |p| lantern_arrival_hidden(level, player.pos, viewport, p);
+    for _ in 0..8 {
+        if let Some(pos) = spawn_point_reachable(rng, level, player, viewport + margin, scratch)
+            .filter(|&pos| hidden(pos) && lantern::arrival_body_fits(level, pos, (player.pos - pos).normalized()))
+        {
+            return Some(pos);
+        }
+    }
+    lantern_room_landing(level, player.pos, hidden)
+}
+
+/// Closest legal room cell to the rat. A large-class tile alone does not
+/// guarantee that the head or the trailing body fits the room.
+fn lantern_room_landing(level: &Level, rat: Vec2, allowed: impl Fn(Vec2) -> bool) -> Option<Vec2> {
+    let mut best = None;
+    let mut best_dist = f32::INFINITY;
+    let clearance = art_boss_lantern::HEAD_RADIUS + PLAYER_RADIUS;
+    for room in &level.rooms {
+        for (x, y) in room.rect.cells() {
+            let pos = collision::TileMap::tile_rect(x, y).center();
+            let dist = pos.dist_sq(rat);
+            if dist >= best_dist || dist < clearance * clearance
+                || !allowed(pos) || !lantern::arrival_body_fits(level, pos, (rat - pos).normalized())
+            {
+                continue;
+            }
+            best_dist = dist;
+            best = Some(pos);
+        }
+    }
+    best
+}
+
+/// Place a manual Lantern on sand with room for its full silhouette.
 pub(crate) fn lantern_arrival_beside(level: &Level, rat: Vec2) -> Option<Vec2> {
     for distance in [48.0, 44.0, 52.0, 40.0, 56.0, 60.0] {
         for i in 0..16 {
             let dir = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 16.0);
-            let p = rat + dir * distance;
-            if lantern::head_fits(level, p) {
+            let p = rat + dir * (distance * art_boss_lantern::BODY_SCALE);
+            if lantern::arrival_body_fits(level, p, -dir) {
                 return Some(p);
             }
         }
     }
-    nearest_body_clear(level, rat, art_boss_lantern::HEAD_RADIUS, SizeClass::Large, 24, true)
+    lantern_room_landing(level, rat, |_| true)
+        .or_else(|| nearest_body_clear(level, rat, art_boss_lantern::HEAD_RADIUS, SizeClass::Large, 24, true))
 }
 
 /// Apply player damage to the boss through its art-defined hit shapes.
@@ -4356,7 +4432,8 @@ fn rejoin_spot(level: &Level, player: Vec2, radius: f32, lantern: bool) -> Optio
         for r in REJOIN_RADII {
             let p = player + Vec2::from_angle(angle) * r;
             let fits = if lantern {
-                lantern::head_fits(level, p) && lantern::head_path_fits(level, p, player)
+                r > radius + PLAYER_RADIUS && lantern::head_fits(level, p)
+                    && level.tiles.segment_hit(p, player, art_boss_lantern::BULB_RADIUS).is_none()
             } else {
                 level.tiles.circle_clear(p, radius, class)
                     && walkable_line(level, p, player, radius, class)
@@ -4481,7 +4558,11 @@ fn recentre_the_fight(boss: &mut Boss, level: &Level, rat: Vec2) {
     if !rat_left_the_fight(boss.arena, rat) {
         return;
     }
-    boss.arena = level.fight_rect_around(rat);
+    boss.arena = if boss.kind == BossKind::Lantern {
+        lantern_fight_rect(level, rat, boss.pos)
+    } else {
+        level.fight_rect_around(rat)
+    };
     boss.dock = level
         .tiles
         .nearest_open_center(boss.arena.center_world(), SizeClass::Large, 16)
@@ -4747,9 +4828,14 @@ pub fn boss_update_system(
         // cannot route back (or cannot outrun a kiting rat) must not be able
         // to strand the level. See [`RELOCATE_AFTER_SECS`].
         let to_player = player.pos - boss.pos;
+        let sight_radius = if boss.kind == BossKind::Lantern {
+            art_boss_lantern::BULB_RADIUS
+        } else {
+            boss.kind.body_radius()
+        };
         let no_los = level
             .tiles
-            .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
+            .segment_hit(boss.pos, player.pos, sight_radius)
             .is_some();
         // A boss that is close enough and can see the rat but cannot *move*
         // (wedged on a wall jamb, or with no attack whose footprint fits where
@@ -4940,7 +5026,11 @@ pub fn boss_update_system(
             let shapes = boss.hit_shapes();
             if shapes.circle_hits_grounded(player.pos, player.buffs.hurt_radius())
                 && player.take_damage(boss.contact_damage) {
-                    boss.contact_cd = 0.5;
+                    boss.contact_cd = if boss.kind == BossKind::Lantern {
+                        art_boss_lantern::CONTACT_INTERVAL
+                    } else {
+                        0.5
+                    };
                     sfx.0.push(Sfx::Hurt);
                     vfx::emit_player_hurt(&mut particles, &mut fight.rng.0, player.pos);
                 }
