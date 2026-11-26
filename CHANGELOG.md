@@ -5,6 +5,8 @@
 - 1× smoothing defaults to Off.
 - The foreground layer defaults to Off. Older saves reset smoothing and foreground and retain their other graphics settings.
 - Press `G` during play or pause to open Graphics, then `S` to cycle smoothing over the frozen field.
+- **Still water.** Puddle glints and reflections stay still at rest. Passing
+  splash ripples brighten the water and bend reflections as they spread.
 
 ## 0.3.0 (2026-11-25)
 
