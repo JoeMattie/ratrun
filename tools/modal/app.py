@@ -11,7 +11,7 @@ import time
 import modal
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-OUTPUT = ROOT / ".review" / "model3"
+OUTPUT = ROOT / ".review" / "model4"
 TIMEOUT = 1_500
 SIM_SECONDS = 7_200
 MAX_SHARDS = 700
@@ -21,6 +21,7 @@ CPU_PRICE = 0.0000131
 MEMORY_PRICE = 0.00000222
 RATE = CPU * CPU_PRICE + MEMORY_MIB / 1024 * MEMORY_PRICE
 SKILLS = ("expert", "skilled", "casual")
+META = ("none", "mid", "max")
 BUILD_INPUTS = ("src", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "assets/rat.png")
 
 image = (
@@ -49,7 +50,8 @@ def run_command(binary, job):
         command = [
             str(binary), "--bot-batch", str(job["runs"]), "--seed", str(job["seed"]),
             "--seed-exact", "--skill", job["skill"], "--threads", "1",
-            "--max-sim-seconds", str(SIM_SECONDS),
+            "--meta", job.get("meta", "none"),
+            "--max-sim-seconds", str(job.get("max_sim_seconds", SIM_SECONDS)),
             "--tuning", str(tuning), "--json",
         ]
         if job.get("practice"):
@@ -97,8 +99,11 @@ def read_manifest(path):
     for job in jobs:
         if not re.fullmatch(r"[a-z0-9-]+", job["id"]):
             raise ValueError("invalid job ID")
-        if job["skill"] not in SKILLS or not 1 <= job["runs"] <= 8 or job["seed"] < 0:
+        if (job["skill"] not in SKILLS or job.get("meta", "none") not in META
+                or not 1 <= job["runs"] <= 8 or job["seed"] < 0):
             raise ValueError(f"invalid shard inputs for {job['id']}")
+        if not SIM_SECONDS <= job.get("max_sim_seconds", SIM_SECONDS) <= 2 * SIM_SECONDS:
+            raise ValueError(f"simulation cap out of range for {job['id']}")
     return manifest
 
 
@@ -138,12 +143,15 @@ def main(manifest: str, output: str = str(OUTPUT)):
             if key not in remaining:
                 raise RuntimeError(f"unexpected or duplicate shard {key}")
             atomic_write(directory / f"{key}.json", raw)
+            job = remaining[key]
             receipt = {
                 "sha256": hashlib.sha256(raw).hexdigest(),
-                "seconds": elapsed, "attempt": attempt + 1, "max_sim_seconds": SIM_SECONDS,
+                "seconds": elapsed, "attempt": attempt + 1,
+                "max_sim_seconds": job.get("max_sim_seconds", SIM_SECONDS),
             }
             atomic_write(directory / f"{key}.receipt", json.dumps(receipt).encode())
             del remaining[key]
-        pending = list(remaining.values())
+        pending = [job for job in remaining.values()
+                   if not (directory / f"{job['id']}.receipt").exists()]
     if pending:
         raise RuntimeError(f"{len(pending)} incomplete shards in {directory}")

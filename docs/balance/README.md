@@ -15,7 +15,8 @@ This directory records the balance studies, model parameters, confirmation data,
 9. [Owner experiment — half player HP and 2× enemy HP (`v0.4.2`)](#owner-experiment--half-player-hp-and-2-enemy-hp-v042)
 10. [No-carry restructure — fresh starts per sector and Head Start (`main`)](#no-carry-restructure--fresh-starts-per-sector-and-head-start-main)
 11. [Modal Round 4 — adaptive horde power scaling and owner playtest](#modal-round-4--adaptive-horde-power-scaling-and-owner-playtest)
-12. [Durable conclusions](#durable-conclusions)
+12. [Shipped defaults (round 4 playtest)](#shipped-defaults-round-4-playtest)
+13. [Durable conclusions](#durable-conclusions)
 
 ---
 
@@ -31,6 +32,7 @@ This directory records the balance studies, model parameters, confirmation data,
 | [`round4-fitted.toml`](round4-fitted.toml) | Modal Round 4 carried-campaign candidate overlay (51 knobs including `power_scaling`; requires the `power-scaling` branch schema). |
 | [`round4-playtest.toml`](round4-playtest.toml) | Owner-anchored fresh-sector playtest overlay (`carry = false`, half player HP on Sewer, eased sectors 2–4, `power_scaling` on; requires the `power-scaling` branch schema). |
 | [`round4-carried-playtest.toml`](round4-carried-playtest.toml) | Earlier carried-build version of the owner-anchored power-scaling playtest overlay (`carry = true`). |
+| [`round4-recommended.toml`](round4-recommended.toml) | The owner's playtest overlay as it now ships: these are the game's defaults, and loading this file reports no changed fields. |
 | [`round1-confirmation.json`](round1-confirmation.json) | Verbatim Round 1 fresh-seed predictions, observed means/counts, and Wilson 95% intervals (`seeds 5000–5299`). |
 | [`round2-confirmation.json`](round2-confirmation.json) | Verbatim Round 2 fresh-seed confirmation data (`seeds 6000–6299`). |
 | [`round3-confirmation.json`](round3-confirmation.json) | Verbatim Round 3 fresh-seed confirmation data (`seeds 7000–7299`). |
@@ -567,6 +569,42 @@ Rather than shipping the Round 4 Modal candidate or running a second large fresh
 
 - **Worked:** Same-seed comparisons quantified both `power_scaling` and the Nest ladder cleanly, proved `v0.4.2` (`22.53` weighted loss) outperformed the refitted power-scaling candidate (`59.32`), and provided neutral per-sector HP multipliers (`sector_hp_mult`) for direct owner playtesting.
 - **Did not work:** Adaptive DPS-based HP scaling widened the Expert–Casual gap (`74.3 pp` vs `70.0 pp` power-off and `72.7 pp` `v0.4.2`), pushed Sewer deaths back to `61%–73%`, and showed near-zero Casual holdout signal (`0.0184` vs `0.0182` Brier). Power scaling stayed opt-in.
+
+---
+
+## Shipped defaults (round 4 playtest)
+
+The owner playtested [`round4-playtest.toml`](round4-playtest.toml) with fresh starts on every campaign floor and judged it **"pretty good"**. Those values now ship as the game's defaults ([`round4-recommended.toml`](round4-recommended.toml) is that file with the ruling below folded in), so an ordinary run plays that game with no tuning file, and loading the file against the shipped build reports no changed fields.
+
+Two owner rulings moved the sector knobs after the playtest:
+
+- **The rat's HP does not change between sectors.** `[player] max_hp` ships at `79.477` — the playtest file's level-one value — on every floor, and the branch's `[player] sector_hp_mult` knob is gone.
+- **Nothing on the rat changes with the sector either** ("we can't be changing rat HP per level … health regen should be fixed as well"). HP, regeneration, armour, heals, passives and splices are one set of numbers on all four floors; there is no player-side sector knob at all. The old `[player] sector_damage_taken_mult` — which multiplied every hit *after* armour, and so quietly halved the rat's armour and its 1 HP floor on the later sectors — is gone.
+- **The later floors halve what their enemies deal instead.** `[enemies] sector_damage_mult = [1.0, 0.5, 0.5, 0.5]` is applied where each hit is created (ordinary and elite contact, enemy bullets and lobs, floor-roster attacks, the Drake, the Shore Crab, miniboss strikes, boss attacks/hazards/projectiles, and the floors' own hazards — traps, steam, the drip shaft, pits and sliding cargo), before it reaches `Player::take_damage`. Kitchen, Lab and Flatbed keep the playtest's doubled durability with one flat HP number, and the rat's armour is now worth the same flat HP on every floor.
+
+Every other field is the playtest file verbatim:
+
+| Knob | Shipped value |
+| --- | --- |
+| `[campaign] carry` | `false` |
+| `[player] max_hp` | `79.477` on every sector (the `sector_hp_mult` knob was removed) |
+| `[enemies] sector_damage_mult` | `[1.0, 0.5, 0.5, 0.5]` |
+| `[enemies] sector_hp_mult` | `[2.45, 0.86956522, 0.86956522, 0.86956522]` |
+| `[director] power_scaling` | `true` |
+| `[director] power_hp_exponent` | `0.45` |
+| `[director] power_memory_secs` | `18.0` |
+| `[director] power_hp_floor` / `power_hp_ceiling` | `0.9` / `1.15` |
+| `[director] power_reference_hp` | `[31.85, 16.0, 25.0, 15.0]` |
+| `[director] power_fresh_reference_hp` | `[16.0, 19.5, 19.0]` |
+| `[director] fresh_build_hp_level` | `[0.6144, 0.6204, 0.6256]` |
+| `[director] fresh_level_hp_extra` | `[1.15, 1.17, 1.18]` |
+| `[director] fresh_pressure_sector_scale` | `[0.72, 0.84, 0.65]` |
+| `[bosses] fresh_build_level` | `[1.13083333, 1.03404255, 1.00956522]` |
+| `[minibosses] fresh_hp` | `[[270, 1395, 2520, 3825], [297, 1440, 2610, 3915], [306, 1402.5, 2550, 3782.5]]` |
+
+**Equivalence proof:** `--tuning-dump` of the shipped build matches the previous build run with [`round4-playtest.toml`](round4-playtest.toml) on all `828` fields except the two above — `player.max_hp` (`158.954` → `79.477`) and the `player.sector_hp_mult` → `enemies.sector_damage_mult` swap (`828` fields still, since one sector array replaced another under `[enemies]`). No other value moved.
+
+**HP-dependent side effects:** regeneration is flat HP/s (`0.4647` base plus `+0.5` a stack), the same on every sector, so with one HP number it is relatively twice as strong on Kitchen, Lab and Flatbed as it was in the playtest file. Every heal expressed as a fraction of max HP (Medkit `35%`, Bandage `25%`, the Chest fallback) scales with the rat's HP, so it stays proportional to the halved hits it now takes. Armour is a flat subtraction from the *scaled* enemy hit, so a point of armour is worth one HP on every sector and the `1 HP` minimum hit is one HP everywhere (it used to become `0.5` on sectors 2–4). The one numerical difference against the old player-side multiplier is exactly that ordering: with armour `a` and an incoming hit `h`, the old code landed `(h - a).max(1) × 0.5` on a later sector and the new code lands `(h × 0.5 - a).max(1)`, which is `armour × 0.5` softer. With armour `0` — the starting build — the two are identical.
 
 ---
 

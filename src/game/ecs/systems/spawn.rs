@@ -97,7 +97,7 @@ use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{
-    BossDue, Cvars, DebugFlags, DifficultyLevel, DrakeSpawner, LevelIndex, NextEnemyId, NextSpawnId,
+    BossDue, Cvars, DamageLedger, DebugFlags, DifficultyLevel, DrakeSpawner, LevelIndex, NextEnemyId, NextSpawnId,
     RngRes, RunCounters, SfxQueue, TickInput, Viewport,
 };
 use crate::game::ecs::systems::approach::in_sim_view;
@@ -286,6 +286,15 @@ pub struct DirectorConsole<'w> {
     pub debug: Res<'w, DebugFlags>,
 }
 
+#[derive(SystemParam)]
+pub struct DirectorRun<'w> {
+    schedule: Res<'w, MinibossSchedule>,
+    opening: Res<'w, super::floor_sewer::OpeningSpawns>,
+    tuning: Res<'w, crate::tuning::RunTuning>,
+    sfx: ResMut<'w, SfxQueue>,
+    damage: Res<'w, DamageLedger>,
+}
+
 /// The two monotonic id counters, bundled for the same reason.
 #[derive(SystemParam)]
 pub struct DirectorIds<'w> {
@@ -328,10 +337,7 @@ pub fn director_system(
     level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
-    (schedule, opening, tuning, mut sfx): (
-        Res<MinibossSchedule>, Res<super::floor_sewer::OpeningSpawns>,
-        Res<crate::tuning::RunTuning>, ResMut<SfxQueue>,
-    ),
+    DirectorRun { schedule, opening, tuning, mut sfx, damage }: DirectorRun,
     // Console tunables: `set enemy_cap/spawn_rate`, `peace`. Neutral defaults.
     console: DirectorConsole,
     mut boss_due: ResMut<BossDue>,
@@ -363,6 +369,10 @@ pub fn director_system(
     // also freezes at the boss time, so the horde keeps its late-curve rate for
     // as long as the boss fight lasts.
     let curve = tuning.director.curve_clock(difficulty.0, elapsed);
+    // Keep the last buildup estimate during cleanup, when target supply drops.
+    if tuning.director.power_scaling && !boss_phase && elapsed < tuning.director.boss_time {
+        director.power.tick(&tuning, difficulty.0, elapsed, dt, damage.dealt.iter().sum());
+    }
     // The level's own horde modifiers: damage and speed ramp over the level
     // (`tuning.director.enemy_mods_for`); level 1 is exactly `EnemyMods::NONE`.
     let mods = tuning.director.enemy_mods_for(difficulty.0, elapsed);
@@ -445,7 +455,8 @@ pub fn director_system(
         }
         // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
         // pool stays on `hp_mult_for`, so this cannot stretch a boss fight).
-        let mult = tuning.horde_hp_mult_for(difficulty.0, elapsed);
+        let mult = tuning.horde_hp_mult_for(difficulty.0, elapsed)
+            * director.power.hp(&tuning.director);
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
         // of all of it materialising on the ring.
@@ -638,7 +649,8 @@ pub fn director_system(
             }) {
                 #[cfg(test)]
                 log_spawn(pos, player.pos, 2);
-                let mult = tuning.horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
+                let mult = tuning.horde_hp_mult_for(difficulty.0, elapsed) * 1.6
+                    * director.power.hp(&tuning.director);
                 // The elite wears the floor's own heavy (the roster's H slot):
                 // its elite is that body with the double stripe and the
                 // attachment, so the silhouette the rat has been fighting since
@@ -2261,6 +2273,58 @@ mod tests {
     }
 
     #[test]
+    fn power_uses_damage_to_scale_new_pulses_without_healing_living_enemies() {
+        let enabled = crate::tuning::Tuning::parse(
+            "[director]\npower_scaling = true\npower_hp_floor = 0.75\npower_hp_ceiling = 1.25",
+        ).unwrap();
+        let make_world = |values| {
+            let mut w = World::with_tuning(Theme::Sewer, 61, crate::tuning::RunTuning::new(values));
+            open_level(&mut w.level);
+            w.player.pos = TileMap::tile_rect(60, 60).center();
+            w
+        };
+        let mut adapted = make_world(enabled.clone());
+        let mut control = make_world(crate::tuning::Tuning::default());
+        let mut disabled = enabled;
+        disabled.director.power_scaling = false;
+        let mut disabled = make_world(disabled);
+        for (i, damage) in [0.0, 0.0, 100_000.0].into_iter().enumerate() {
+            let old = adapted.enemies();
+            let now = 1.0 + i as f32 * 60.0;
+            let dt = if i == 0 { 1.0 / 60.0 } else { 60.0 };
+            for w in [&mut adapted, &mut control, &mut disabled] {
+                w.ecs.resource_mut::<super::DamageLedger>().add(WeaponKind::Gnaw, damage);
+                director_tick(w, dt, now);
+            }
+            let actual = adapted.enemies();
+            let expected = control.enemies();
+            let off = disabled.enemies();
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(off.len(), expected.len());
+            assert!(actual.len() > old.len(), "a new pulse must arrive");
+            for (baseline, disabled) in expected.iter().zip(off) {
+                assert_eq!((baseline.kind, baseline.pos, baseline.hp, baseline.max_hp),
+                    (disabled.kind, disabled.pos, disabled.hp, disabled.max_hp));
+            }
+            for (after, before) in actual.iter().zip(&old) {
+                assert_eq!((after.hp, after.max_hp), (before.hp, before.max_hp));
+            }
+            for (enemy, baseline) in actual.iter().zip(expected).skip(old.len()) {
+                assert_eq!((enemy.kind, enemy.pos), (baseline.kind, baseline.pos));
+                let mult = enemy.max_hp / baseline.max_hp;
+                assert!((0.75 - 1e-6..=1.25 + 1e-6).contains(&mult));
+                if i == 1 {
+                    assert!((mult - 0.75).abs() < 1e-6);
+                } else if i == 2 {
+                    assert!((mult - 1.25).abs() < 1e-6);
+                } else {
+                    assert!(mult > 0.99);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pressure_keeps_spawn_totals_and_xp_supply_close_with_room_to_spawn() {
         let enabled = crate::tuning::RunTuning::default();
         let disabled = crate::tuning::RunTuning::new(
@@ -2639,8 +2703,10 @@ mod tests {
         let expected = crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
             .base_hp()
             // The horde's own curve: the shared ramp times level one's
-            // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate).
+            // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate), times the
+            // shipped Sewer sector row.
             * w.tuning().horde_hp_mult_for(0, open)
+            * w.tuning().enemies.sector_hp_mult[0]
             * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
     }
@@ -2830,7 +2896,8 @@ mod tests {
         );
         // The scalars are level 0's: hp is the kind's own pool times the level-0
         // curve at spawn, with no per-stage extra.
-        let expected_mult = w.tuning().horde_hp_mult_for(0, spawned_at);
+        let expected_mult = w.tuning().horde_hp_mult_for(0, spawned_at)
+            * w.tuning().enemies.sector_hp_mult[0];
         let spawned = w.enemies();
         for e in spawned.iter() {
             assert!(
@@ -2866,7 +2933,10 @@ mod tests {
             let elites: Vec<&Enemy> = snapshot.iter().filter(|e| e.elite).collect();
             assert_eq!(elites.len(), 1, "{theme:?}: no elite arrived");
             assert_eq!(elites[0].kind, heavy, "{theme:?}: the wrong elite body");
-            let expected = heavy.base_hp() * w.tuning().horde_hp_mult_for(0, open) * 1.6;
+            let expected = heavy.base_hp()
+                * w.tuning().horde_hp_mult_for(0, open)
+                * w.tuning().enemies.sector_hp_mult[0]
+                * 1.6;
             assert!(
                 (elites[0].max_hp - expected).abs() < 1e-3,
                 "{theme:?}: elite hp {} is not the 1.6x pool {expected}",
@@ -3871,7 +3941,8 @@ mod tests {
             let expected = w.tuning().horde_hp_mult_for(level, 300.0);
             for e in enemies.iter().filter(|e| !e.elite) {
                 // (The elite branch stacks its own 1.6x on top of the curve.)
-                let base = e.max_hp / expected;
+                let sector = crate::game::director::level_slot(level);
+                let base = e.max_hp / (expected * w.tuning().enemies.sector_hp_mult[sector]);
                 assert!(
                     (base - e.kind.base_hp()).abs() < 1e-2,
                     "level {level}: {:?} hp {} is not its base × {expected}",
@@ -3882,8 +3953,11 @@ mod tests {
             let plain = enemies.iter().find(|e| !e.elite).expect("a plain spawn");
             multipliers.push(plain.max_hp / plain.kind.base_hp());
         }
+        // The shipped fresh rows rise across the facility floors. The Sewer
+        // still leads them all: its own sector row is 2.45x while the later
+        // floors carry 0.86956522.
         assert!(
-            multipliers[1] > multipliers[0] && multipliers[2] > multipliers[1],
+            multipliers[1] < multipliers[2] && multipliers[2] < multipliers[3],
             "hp did not scale with the campaign level: {multipliers:?}"
         );
     }

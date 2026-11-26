@@ -605,6 +605,8 @@ fn tick_crab_pots(
     damage_numbers: &mut DamageNumbers,
     sfx: &mut SfxQueue,
     empty_pots: &mut Vec<(Vec2, Vec2)>,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     use CrabPotState::*;
 
@@ -641,7 +643,7 @@ fn tick_crab_pots(
                 if rat_inside && !rat_held {
                     player.vel = Vec2::ZERO;
                     player.dash_active = 0.0;
-                    if player.take_damage(POT_RAT_DAMAGE) {
+                    if player.take_damage(POT_RAT_DAMAGE * dmg_scale) {
                         sfx.0.push(Sfx::Hurt);
                     }
                     pot.caught_rat = player.alive();
@@ -854,6 +856,8 @@ fn snap_window(
     particles: &mut Particles,
     damage_numbers: &mut DamageNumbers,
     sfx: &mut Vec<Sfx>,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     if player_alive && !*player_struck {
         let p = player.pos;
@@ -862,7 +866,7 @@ fn snap_window(
                 player, pos, facing, MOUSETRAP_KILL_U_MIN, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_HALF_V,
             )
         {
-            let dmg = snap_player_damage(player, hair);
+            let dmg = snap_player_damage(player, hair) * dmg_scale;
             if player.take_damage(dmg) {
                 *player_struck = true;
                 vfx::emit_player_hurt(particles, rng, p);
@@ -991,20 +995,27 @@ pub fn traps_system(
         Res<BossDue>,
         Res<BossOverride>,
         Res<MinibossSchedule>,
+        // The sector row for the floor's hit softening: this system is at
+        // bevy's 16-parameter limit, so it rides in the spawn bundle.
+        Res<crate::game::ecs::resources::LevelIndex>,
     ),
     mut next_enemy_id: ResMut<NextEnemyId>,
     bosses: Query<&Boss>,
 ) {
     let dt = input.dt;
+    // `[enemies] sector_damage_mult`: the crab pot's door and the mousetrap's
+    // bar carry it, as they did when the softening sat on the rat.
+    let dmg_scale = crate::game::director::sector_damage_mult(&tuning, spawn.8.0);
     traps.sync(&level, &mut enemies);
     if level.theme == Theme::Outfall && !level.objects.crab_pots.is_empty() {
         let scratch = &mut *scratch;
         tick_crab_pots(
             &mut level.objects.crab_pots, &mut traps.pots, dt, &mut player, &mut enemies,
             &mut scratch.hits, &mut damage_numbers, &mut sfx, &mut scratch.empty_pots,
+            dmg_scale,
         );
         if !scratch.empty_pots.is_empty() {
-            let (counters, difficulty, debug, cvars, director, due, forced, appointments) = spawn;
+            let (counters, difficulty, debug, cvars, director, due, forced, appointments, ..) = spawn;
             let elapsed = counters.elapsed;
             let blocked = debug.peace
                 || appointments.suppress(elapsed)
@@ -1533,6 +1544,7 @@ pub fn traps_system(
                             &mut particles,
                             &mut damage_numbers,
                             &mut sfx.0,
+                            dmg_scale,
                         );
                         mouse.hit_done = true;
                         // One crack, one splinter burst, one flash, on the tick
@@ -1595,6 +1607,7 @@ pub fn traps_system(
                         &mut particles,
                         &mut damage_numbers,
                         &mut sfx.0,
+                        dmg_scale,
                     );
                     traps.mice[i].hit_done = true;
                 }

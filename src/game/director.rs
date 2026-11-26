@@ -204,8 +204,22 @@ pub const FLANK_DWELL_SECS: f32 = 8.0;
 
 /// `level` as an index into [`LEVEL_CLOCK_OFFSET`] (out-of-range clamps).
 #[inline]
-fn level_slot(level: usize) -> usize {
+pub(crate) fn level_slot(level: usize) -> usize {
     level.min(LEVEL_CLOCK_OFFSET.len() - 1)
+}
+
+/// `[enemies] sector_damage_mult` for the floor being simulated: the softening
+/// every hit the floor's enemies — and the floor's own hazards — land on the
+/// rat is multiplied by **where the hit is created**, before it reaches
+/// [`crate::game::player::Player::take_damage`].
+///
+/// The owner's ruling is that nothing on the rat may change with the sector, so
+/// the rat's HP, armour, regen, heals and passives are one set of numbers on
+/// every floor and the later sectors' easing lives here instead. Rows follow
+/// campaign order and clamp like every other sector table ([`level_slot`]).
+#[inline]
+pub(crate) fn sector_damage_mult(tuning: &crate::tuning::RunTuning, level: usize) -> f32 {
+    tuning.enemies.sector_damage_mult[level_slot(level)]
 }
 
 /// The difficulty clock, in seconds: the real run clock, frozen at
@@ -248,6 +262,7 @@ pub struct Director {
     /// scale it spawned with. Never an rng draw, never a spawn, never a position.
     pub approach: Vec<(u64, f32)>,
     pub(crate) pressure: PressureState,
+    pub(crate) power: HordePower,
 }
 
 impl Default for Director {
@@ -265,7 +280,56 @@ impl Default for Director {
             chamber_room: -1,
             approach: Vec::new(),
             pressure: PressureState::default(),
+            power: HordePower::default(),
         }
+    }
+}
+
+/// Floor-local weapon throughput. Both rates use the same exponential memory,
+/// so a change in the reference curve has the same lag as a change in damage.
+/// The director reads the ledger before this tick's weapons run.
+#[derive(Default)]
+pub(crate) struct HordePower {
+    previous_damage: f32,
+    actual_dps: f32,
+    expected_dps: f32,
+}
+
+impl HordePower {
+    pub(crate) fn tick(&mut self, tuning: &crate::tuning::Tuning, level: usize, elapsed: f32, dt: f32, total_damage: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        // Use the nominal horde's rate and HP curves. The current power boost,
+        // surges, and balance overlays never raise the reference behind the rat.
+        let knobs = &tuning.director;
+        let (reference_hp, nominal_horde_hp) = if let Some(fresh) = tuning.fresh_sector_slot(level) {
+            let curve = curve_clock(level, elapsed);
+            let ramp = ((curve - LEVEL_HP_EXTRA_AFTER) / (BOSS_TIME - LEVEL_HP_EXTRA_AFTER)).clamp(0.0, 1.0);
+            (knobs.power_fresh_reference_hp[fresh], hp_mult_at(curve) * FRESH_BUILD_HP_LEVEL[fresh]
+                * (1.0 + (FRESH_LEVEL_HP_EXTRA[fresh] - 1.0) * ramp))
+        } else {
+            (knobs.power_reference_hp[level_slot(level)], horde_hp_mult_for(level, elapsed))
+        };
+        let expected = (reference_hp * spawn_rate_for(level, elapsed) * nominal_horde_hp).max(f32::MIN_POSITIVE);
+        if self.expected_dps == 0.0 {
+            self.expected_dps = expected;
+            self.actual_dps = expected;
+        }
+        let damage = (total_damage - self.previous_damage).max(0.0);
+        self.previous_damage = total_damage;
+        let window = knobs.power_memory_secs + dt;
+        self.actual_dps += (damage - self.actual_dps * dt) / window;
+        self.expected_dps += (expected - self.expected_dps) * (dt / window);
+    }
+
+    pub(crate) fn hp(&self, tuning: &crate::tuning::Director) -> f32 {
+        if !tuning.power_scaling || self.expected_dps == 0.0 || tuning.power_hp_exponent == 0.0 {
+            return 1.0;
+        }
+        (self.actual_dps / self.expected_dps)
+            .dpowf(tuning.power_hp_exponent)
+            .clamp(tuning.power_hp_floor, tuning.power_hp_ceiling)
     }
 }
 
@@ -518,6 +582,9 @@ pub(crate) const BUILD_HP: [(f32, f32); 7] = [
 /// practice run plays level one's row (`DifficultyLevel`). Rising, so the
 /// Flatbed finale is the hardest level.
 pub const BUILD_HP_LEVEL: [f32; 4] = [0.8, 2.2, 2.4, 2.6];
+
+pub(crate) const FRESH_BUILD_HP_LEVEL: [f32; 3] = [0.6144, 0.6204, 0.6256];
+pub(crate) const FRESH_LEVEL_HP_EXTRA: [f32; 3] = [1.15, 1.17, 1.18];
 
 /// The boss pool's own correction per campaign level, on top of
 /// [`BUILD_HP_LEVEL`]: measured median fights 66 / 78 / 72 / 66 s against the

@@ -243,8 +243,11 @@ pub fn floor_kitchen_system(
     mut order: Local<Vec<(u64, Entity)>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy, Option<&mut EggDial>)>,
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`).
+    sector: crate::game::ecs::resources::SectorDamage,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     order.clear();
     order.extend(
         enemies
@@ -291,6 +294,7 @@ pub fn floor_kitchen_system(
             &mut rng,
             &mut particles,
             &mut sfx,
+            dmg_scale,
         );
         e.w4.phase = dial.phase;
         e.w4.t = dial.t;
@@ -330,6 +334,8 @@ fn egg_tick(
     rng: &mut RngRes,
     particles: &mut Particles,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     match dial.phase {
         EGG_PHASE_WIND => {
@@ -355,7 +361,7 @@ fn egg_tick(
                     player.pos,
                     0.0,
                 )
-                && player.take_damage(EGG_RING_DAMAGE)
+                && player.take_damage(EGG_RING_DAMAGE * dmg_scale)
             {
                 dial.hit = true;
                 vfx::emit_player_hurt(particles, &mut rng.0, player.pos);

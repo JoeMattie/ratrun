@@ -263,6 +263,8 @@ pub struct LevelOutcome {
     pub boss_hp_lost: Option<f32>,
     #[serde(default)]
     pub level_up_times: Vec<f32>,
+    #[serde(default)]
+    pub second_weapon_at: Option<f32>,
 }
 
 /// One named miniboss fight as it appears in a report.
@@ -386,6 +388,7 @@ impl LevelOutcome {
             hp_lost: Some(s.hp_lost),
             boss_hp_lost: s.reached_boss.then_some(s.boss_hp_lost),
             level_up_times: s.level_up_times.clone(),
+            second_weapon_at: s.second_weapon_at,
         }
     }
 }
@@ -664,6 +667,8 @@ pub struct RunLevelSummary {
     pub boss_hp_lost: Option<f32>,
     #[serde(default)]
     pub level_up_times: Vec<f32>,
+    #[serde(default)]
+    pub second_weapon_at: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1308,6 +1313,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                     hp_lost: l.hp_lost,
                     boss_hp_lost: l.boss_hp_lost,
                     level_up_times: l.level_up_times.clone(),
+                    second_weapon_at: l.second_weapon_at,
                 })
                 .collect(),
         });

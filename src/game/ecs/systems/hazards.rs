@@ -108,8 +108,13 @@ pub fn hazards_system(
     mut sfx: ResMut<SfxQueue>,
     mut hits: Local<Vec<(u64, Entity)>>,
     mut struck: Local<Vec<(u32, Entity)>>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the drip
+    // shaft and the steam plume carry it, as they did when the softening sat on
+    // the rat.
+    sector: crate::game::ecs::resources::SectorDamage,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     let pads_exist = !level.objects.ink_pads.is_empty();
     let grates_exist = !level.objects.steam_grates.is_empty();
     if !pads_exist && !grates_exist && level.objects.sewer_opening.is_none() {
@@ -145,7 +150,7 @@ pub fn hazards_system(
             && !player_dashing
             && !player_dash_now
             && covers_rat
-            && player.take_damage(DRIP_DAMAGE)
+            && player.take_damage(DRIP_DAMAGE * dmg_scale)
         {
             shaft.player_struck = true;
             sfx.0.push(Sfx::Hurt);
@@ -197,7 +202,7 @@ pub fn hazards_system(
             if !player_alive || !grate.covers(player_pos, player.buffs.hurt_radius()) {
                 continue;
             }
-            if player.take_damage(STEAM_DAMAGE) {
+            if player.take_damage(STEAM_DAMAGE * dmg_scale) {
                 grate.player_struck = true;
                 rat_hit = Some(player_pos);
             }
@@ -406,7 +411,7 @@ mod tests {
         let burned = world
             .enemies()
             .iter()
-            .all(|e| !e.alive() || e.hp < crate::game::enemy::EnemyKind::Skitterer.base_hp());
+            .all(|e| !e.alive() || e.hp < e.max_hp);
         assert!(burned, "the plume did not scald the pursuer standing in it");
     }
 

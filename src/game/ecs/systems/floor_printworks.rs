@@ -220,9 +220,13 @@ pub fn floor_printworks_system(
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy, Option<&mut PressBody>)>,
     mut wicks: Query<(Entity, &SpawnId, &mut Wick, Option<&InkSlide>)>,
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the staple
+    // feet carry it.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut scratch: Local<PrintworksScratch>,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     let ppos = player.pos;
     let scratch = &mut *scratch;
     // The Wind-up Mouse: the live key (highest `SpawnId` wins), the same rule
@@ -310,7 +314,7 @@ pub fn floor_printworks_system(
             }
             EnemyKind::StapleCrawler => {
                 let mark = lure_target(&e, ppos, decoy, &level);
-                if staple_tick(&mut e, spawn_id, mark, &level, &mut player, dt) {
+                if staple_tick(&mut e, spawn_id, mark, &level, &mut player, dt, dmg_scale) {
                     sfx.0.push(Sfx::Hurt);
                     vfx::emit_player_hurt(&mut particles, &mut rng.0, ppos);
                 }
@@ -425,6 +429,8 @@ fn staple_tick(
     level: &Level,
     player: &mut Player,
     dt: f32,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) -> bool {
     let rat = player.pos;
     // The borrowed Bell Flea hop never starts: its cooldown is held full.
@@ -452,7 +458,7 @@ fn staple_tick(
             // One latch for both feet: one hit per strike.
             if e.w4.spent == 0
                 && staple_hits(&feet, rat, player.buffs.hurt_radius())
-                && player.take_damage(STAPLE_FOOT_DAMAGE)
+                && player.take_damage(STAPLE_FOOT_DAMAGE * dmg_scale)
             {
                 e.w4.spent = 1;
                 hit = true;

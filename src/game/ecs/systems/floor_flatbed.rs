@@ -426,9 +426,13 @@ pub fn floor_flatbed_system(
     glue: Query<&crate::game::ecs::systems::traps::TrapSlow>,
     ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the Loose
+    // Can's roll carries it.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     let level: &Level = &level;
     let flow: &FlowField = &flow;
     // Cheap gate: none of this floor's rule-carrying bodies alive, nothing to
@@ -488,6 +492,7 @@ pub fn floor_flatbed_system(
                         &mut particles,
                         &mut rng,
                         &mut sfx,
+                        dmg_scale,
                     ),
                     None => {
                         // First tick: run it on a fresh state and attach that
@@ -509,6 +514,7 @@ pub fn floor_flatbed_system(
                             &mut particles,
                             &mut rng,
                             &mut sfx,
+                            dmg_scale,
                         );
                         commands.entity(entity).insert(fresh);
                     }
@@ -555,6 +561,8 @@ fn can_tick(
     particles: &mut Particles,
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     let class = SizeClass::of_enemy(e.kind);
     // A stun mid-tell or mid-roll (a fall through the deck, the Sonic Squeak)
@@ -596,7 +604,7 @@ fn can_tick(
             // hit: a roll that crosses an invulnerable rat stays unspent.
             if !state.spent
                 && can_roll_hits(prev, e.pos, player.pos, player.buffs.hurt_radius())
-                && player.take_damage(e.damage)
+                && player.take_damage(e.damage * dmg_scale)
             {
                 state.spent = true;
                 vfx::emit_player_hurt(particles, &mut rng.0, player.pos);

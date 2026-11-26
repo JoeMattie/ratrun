@@ -21,7 +21,7 @@ FLOORS = ("Sewer", "Kitchen", "Lab", "Flatbed")
 BOSSES = ("jaguar", "horseshoe crab", "broom human", "subject r-01",
           "mower", "king cobra", "magpie", "the redtail")
 PHASES = ((60, 180), (180, 360), (360, 660), (660, 850))
-WIN_BANDS = np.array([(0.75, 0.85), (0.40, 0.55), (0.10, 0.20)])
+WIN_BANDS = np.array([(0.80, 0.90), (0.50, 0.65), (0.20, 0.30)])
 WEIGHTS = {"wins": 35, "death_spread": 20, "hp_tension": 20,
            "level_ups": 10, "bosses": 10, "close_calls": 5}
 FLOOR_DEATH = [f"death_floor_{f}" for f in range(1, 5)]
@@ -348,8 +348,9 @@ def clean(value):
     return value
 
 
-def fit(output, defaults):
+def fit(output, anchor):
     screen, data, seconds = load_stage(output, "screen")
+    data = {point: data[point] for point in screen["points"]}
     # Fit whole settings on the common cohort. A stall is neither a death nor
     # a win and must not quietly remove just one of that setting's eight seeds.
     excluded = {
@@ -412,7 +413,7 @@ def fit(output, defaults):
         "train": train, "holdout": test, "excluded": excluded, "validation": scores, "choices": choices,
         "heldout_wins": heldout_wins,
         "candidate": prediction, "sensitivity": sensitivity, "screen_seconds": seconds,
-        "training_profiles": profiles, "defaults_overlay": overlay(candidate, defaults),
+        "training_profiles": profiles, "defaults_overlay": overlay(candidate, anchor),
     }
     return clean(result)
 
@@ -421,10 +422,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--defaults", type=Path, required=True)
+    parser.add_argument("--anchor", type=Path, required=True, help="Round 3 screening's original defaults")
     args = parser.parse_args()
+    from design import study_anchor
     with threadpool_limits(limits=1):
-        defaults = tomllib.loads(args.defaults.read_text())
-        result = fit(args.output, defaults)
+        anchor = study_anchor(tomllib.loads(args.defaults.read_text()), tomllib.loads(args.anchor.read_text()))
+        result = fit(args.output, anchor)
     (args.output / "solution.json").write_text(json.dumps(result, separators=(",", ":"), allow_nan=False))
     print(f"Loss {result['loss']:.3f}. Edges: {', '.join(result['edges']) or 'none'}.")
 

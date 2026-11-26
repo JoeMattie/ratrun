@@ -380,15 +380,24 @@ pub fn wave4_system(
     mut next_id: ResMut<NextSpawnId>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,
-    decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
-    // The floor slows the steering pass would have applied. A wave-4 body owns
-    // its movement (see `W4::holds`), so it has to read them itself: a glued
-    // centipede still crawls and an inked lilliputian still walks slowly.
-    glue: Query<&crate::game::ecs::systems::traps::TrapSlow>,
-    ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
+    // Three read-only queries in one tuple: this system is at bevy's
+    // 16-parameter limit and the sector softening below needs a slot.
+    (decoys, glue, ink): (
+        Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
+        // The floor slows the steering pass would have applied. A wave-4 body
+        // owns its movement (see `W4::holds`), so it has to read them itself: a
+        // glued centipede still crawls and an inked lilliputian still walks
+        // slowly.
+        Query<&crate::game::ecs::systems::traps::TrapSlow>,
+        Query<&crate::game::ecs::systems::hazards::InkSlow>,
+    ),
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the Murder
+    // Hornet's jab carries it.
+    sector: crate::game::ecs::resources::SectorDamage,
     mut scratch: Local<Wave4Scratch>,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     let ppos = player.pos;
     let scratch = &mut *scratch;
     // The live key (highest `SpawnId` wins), the same rule the steering lure
@@ -510,6 +519,7 @@ pub fn wave4_system(
                 &mut particles,
                 &mut rng,
                 &mut sfx,
+                dmg_scale,
             ),
             EnemyKind::Lilliputian => lilliputian_tick(
                 &mut e,
@@ -1006,6 +1016,8 @@ fn hornet_tick(
     particles: &mut Particles,
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     let class = SizeClass::of_enemy(e.kind);
     match e.w4.phase {
@@ -1032,7 +1044,7 @@ fn hornet_tick(
             // every other hit in the game.
             if e.w4.spent == 0
                 && collision::circles_overlap(player.pos, player.buffs.hurt_radius(), e.pos, e.radius)
-                && player.take_damage(HORNET_JAB_DAMAGE)
+                && player.take_damage(HORNET_JAB_DAMAGE * dmg_scale)
             {
                 e.w4.spent = 1;
                 vfx::emit_player_hurt(particles, &mut rng.0, player.pos);

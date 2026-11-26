@@ -38,7 +38,7 @@ section!(Campaign {
 });
 
 section!(Player {
-    max_hp: f32 = 158.954; "Starting maximum health (HP)",
+    max_hp: f32 = 79.477; "Starting maximum health (HP); the rat keeps this on every campaign sector",
     regen: f32 = 0.46474266; "Starting regeneration (HP/s)",
     move_speed: f32 = 58.0; "Starting movement speed (world px/s)",
     armor: f32 = 0.0; "Starting flat damage reduction (HP per hit)",
@@ -79,8 +79,8 @@ section!(Director {
     build_hp: [(f32, f32); 7] = d::BUILD_HP; "Build HP correction knots [curve seconds, multiplier]",
     build_hp_level: [f32; 4] = [0.6262416, 2.6255746, 3.595_260_1, 2.2739563]; "Build HP correction multipliers by campaign sector",
     level_hp_extra: [f32; 4] = d::LEVEL_HP_EXTRA; "Horde-only HP multipliers reached at the boss by sector",
-    fresh_build_hp_level: [f32; 3] = [0.64, 0.66, 0.68]; "Build HP correction by sector with campaign carry disabled",
-    fresh_level_hp_extra: [f32; 3] = [1.23, 1.26, 1.29]; "Horde-only HP at the boss by sector with campaign carry disabled",
+    fresh_build_hp_level: [f32; 3] = d::FRESH_BUILD_HP_LEVEL; "Build HP correction by sector with campaign carry disabled",
+    fresh_level_hp_extra: [f32; 3] = d::FRESH_LEVEL_HP_EXTRA; "Horde-only HP at the boss by sector with campaign carry disabled",
     level_hp_extra_after: f32 = d::LEVEL_HP_EXTRA_AFTER; "Horde-only HP ramp grace period (s)",
     level_damage_top: [f32; 4] = [0.61121884, 1.0319662, 1.2344486, 2.0158477]; "Horde contact damage multipliers reached at the boss by sector",
     level_speed_top: [f32; 4] = d::LEVEL_SPEED_TOP; "Horde speed multipliers reached at the boss by sector",
@@ -104,9 +104,16 @@ section!(Director {
     pressure_recovery_budget_cut: f32 = 0.19937819; "Fraction of the live ordinary budget removed during recovery",
     pressure_recovery_heal: f32 = 0.67160283; "Fraction of non-heal rare finds converted to Medkits during recovery",
     pressure_sector_scale: [f32; 4] = [0.4145341, 1.1853494, 1.3945287, 1.603708]; "Beat strength by campaign sector. Zero skips beats and warnings",
-    fresh_pressure_sector_scale: [f32; 3] = [0.88, 0.95, 0.80]; "Beat strength in sectors two to four with campaign carry disabled",
+    fresh_pressure_sector_scale: [f32; 3] = [0.72, 0.84, 0.65]; "Beat strength in sectors two to four with campaign carry disabled",
     pressure_sewer_opening_secs: f32 = 167.557_22; "Length of Sewer opening contact grace in seconds",
     pressure_sewer_opening_cut: f32 = 0.26234644; "Fraction of ordinary contact damage removed during Sewer opening grace",
+    power_scaling: bool = true; "Adjust newly spawned ordinary and elite enemy HP to recent weapon damage",
+    power_hp_exponent: f32 = 0.45; "Raise the measured to expected damage ratio to this power",
+    power_hp_floor: f32 = 0.9; "Minimum power-based HP multiplier",
+    power_hp_ceiling: f32 = 1.15; "Maximum power-based HP multiplier",
+    power_memory_secs: f32 = 18.0; "Damage averaging time constant in simulation seconds",
+    power_reference_hp: [f32; 4] = [31.85, 16.0, 25.0, 15.0]; "Expected damage per scheduled body at unit horde HP, by sector",
+    power_fresh_reference_hp: [f32; 3] = [16.0, 19.5, 19.0]; "Power reference HP for fresh builds in sectors two to four",
 });
 
 pub(crate) const SECTOR_KEYS: [&str; 4] = ["1", "2", "3", "4"];
@@ -198,15 +205,17 @@ section!(Enemies {
     contact_damage_mult: f32 = 1.0; "Global ordinary enemy contact damage multiplier",
     speed_mult: f32 = 0.85838351; "Global ordinary enemy movement speed multiplier",
     kinds: BTreeMap<EnemyKind, Enemy> = enemy_defaults(); "Per-kind ordinary enemy stats",
+    sector_hp_mult: [f32; 4] = [2.45, 0.86956522, 0.86956522, 0.86956522]; "Ordinary enemy HP multipliers by campaign sector, including scripted arrivals",
+    sector_damage_mult: [f32; 4] = [1.0, 0.5, 0.5, 0.5]; "Multiplier on every enemy (and floor hazard) hit by campaign sector, applied where the hit is created, before the rat's armour",
 });
 
 section!(Minibosses {
     times: [f32; 4] = std::array::from_fn(|i| d::MINIBOSS_TIMES[i]); "Scheduled arrivals by appointment (simulation seconds)",
     hp: [[f32; 4]; 4] = std::array::from_fn(|sector| std::array::from_fn(|slot| miniboss::appointment_hp_for(sector, slot))); "Actual starting HP [sector][appointment]",
     fresh_hp: [[f32; 4]; 3] = [
-        [300.0, 1550.0, 2800.0, 4250.0],
-        [330.0, 1600.0, 2900.0, 4350.0],
-        [360.0, 1650.0, 3000.0, 4450.0],
+        [270.0, 1395.0, 2520.0, 3825.0],
+        [297.0, 1440.0, 2610.0, 3915.0],
+        [306.0, 1402.5, 2550.0, 3782.5],
     ]; "Actual starting HP [sector][appointment] with campaign carry disabled",
     strike_damage: [f32; 4] = std::array::from_fn(miniboss::appointment_signature_damage); "Signature damage by appointment (HP before armor)",
     contact_damage: f32 = miniboss::MINIBOSS_CONTACT_DAMAGE; "Body contact damage (HP before armor)",
@@ -233,7 +242,7 @@ section!(Boss {
 section!(Bosses {
     hp_mult: f32 = 0.76265487; "Global named boss HP multiplier",
     build_level: [f32; 4] = [0.9580967, 0.65357122, 0.380501, 0.77749956]; "Boss-only build HP multipliers by campaign sector",
-    fresh_build_level: [f32; 3] = [1.18, 1.08, 1.08]; "Boss-only build HP multipliers with campaign carry disabled",
+    fresh_build_level: [f32; 3] = [1.13083333, 1.03404255, 1.00956522]; "Boss-only build HP multipliers with campaign carry disabled",
     contact_damage_mult: f32 = 1.0; "Global named boss grounded contact damage multiplier",
     kinds: BTreeMap<BossKind, Boss> = boss_defaults(); "Per-kind named boss stats",
 });
@@ -484,6 +493,21 @@ impl Tuning {
             bail!("xp.gem_tier_min must be in ascending order");
         }
         let director = &self.director;
+        if self.enemies.sector_damage_mult.contains(&0.0)
+            || self.enemies.sector_hp_mult.contains(&0.0)
+        {
+            bail!("enemies.sector_damage_mult and enemies.sector_hp_mult must be positive");
+        }
+        if director.power_hp_floor <= 0.0 || director.power_hp_floor > 1.0
+            || director.power_hp_ceiling < 1.0
+        {
+            bail!("director power HP bounds must satisfy 0 < floor <= 1 <= ceiling");
+        }
+        if director.power_memory_secs <= 0.0 || director.power_reference_hp.contains(&0.0)
+            || director.power_fresh_reference_hp.contains(&0.0)
+        {
+            bail!("director power memory and reference HP must be positive");
+        }
         if director.pressure_recovery_budget_cut > 1.0
             || director.pressure_recovery_heal > 1.0
             || director.pressure_sewer_opening_cut >= 1.0
@@ -782,13 +806,100 @@ mod tests {
         assert_eq!(tuned.player.xp_to_next, 12);
         assert_eq!(tuned.player.max_hp(), 200.0);
         let kind = EnemyKind::Pillbug;
+        // The shipped Sewer row is 2.45x; the tuned run keeps it and adds 1.5.
+        let sector = baseline.tuning().enemies.sector_hp_mult[0];
         let standard = baseline.spawn_enemy(kind, Vec2::ZERO, 1.0);
         let hardened = tuned.spawn_enemy(kind, Vec2::ZERO, 1.0);
-        assert_eq!(baseline.ecs.get::<crate::game::enemy::Enemy>(standard).unwrap().hp, kind.base_hp());
+        assert_eq!(baseline.ecs.get::<crate::game::enemy::Enemy>(standard).unwrap().hp, kind.base_hp() * sector);
         let speed = baseline.ecs.get::<crate::game::enemy::Enemy>(standard).unwrap().speed();
         assert_eq!(speed, kind.speed() * baseline.tuning().enemies.speed_mult);
         assert!(!baseline.tuning().changed);
-        assert_eq!(tuned.ecs.get::<crate::game::enemy::Enemy>(hardened).unwrap().hp, kind.base_hp() * 1.5);
+        assert_eq!(tuned.ecs.get::<crate::game::enemy::Enemy>(hardened).unwrap().hp, kind.base_hp() * 1.5 * sector);
+    }
+
+    #[test]
+    fn player_hp_is_flat_while_the_sector_rows_move_the_enemies() {
+        use crate::game::{level::Theme, loadout::Loadout, world::World};
+        use crate::math::Vec2;
+
+        let run = RunTuning::new(Tuning::parse(
+            "[player]\nmax_hp = 160.0\n\
+             [enemies]\nsector_hp_mult = [2.0, 0.75, 1.0, 1.0]",
+        ).unwrap());
+        let mut sewer = World::with_tuning(Theme::Sewer, 16, run.clone());
+        assert_eq!(sewer.player.hp, 160.0);
+        sewer.player.loadout.rebuild_stats();
+        assert_eq!(sewer.player.max_hp(), 160.0);
+        let kind = EnemyKind::Pillbug;
+        let sewer_enemy = sewer.spawn_enemy(kind, Vec2::ZERO, 1.0);
+        assert_eq!(sewer.ecs.get::<crate::game::enemy::Enemy>(sewer_enemy).unwrap().hp, kind.base_hp() * 2.0);
+
+        let carried = crate::game::campaign::next_loadout(&sewer.player.loadout, &[]).unwrap();
+        assert_eq!(carried.weapons[0].kind, Loadout::START_WEAPON);
+        let mut kitchen = World::new_level_tuned(1, Theme::Kitchen, 16, carried, Default::default(), run);
+        // No per-sector player HP: the same number on the second floor.
+        assert_eq!(kitchen.player.hp, 160.0);
+        let kitchen_enemy = kitchen.spawn_enemy(kind, Vec2::ZERO, 1.0);
+        assert_eq!(kitchen.ecs.get::<crate::game::enemy::Enemy>(kitchen_enemy).unwrap().hp, kind.base_hp() * 0.75);
+        // The sector softening lives on the enemies, not on the hit: the
+        // shipped row halves what a later floor's enemies deal, and the rat's
+        // own damage path is the same on both floors.
+        assert_eq!(crate::game::director::sector_damage_mult(sewer.tuning(), 0), 1.0);
+        assert_eq!(crate::game::director::sector_damage_mult(kitchen.tuning(), 1), 0.5);
+        let before = kitchen.player.hp;
+        assert!(kitchen.player.take_damage(10.0));
+        assert_eq!(before - kitchen.player.hp, 10.0, "the rat reads no sector");
+        sewer.player.iframes = 0.0;
+        let before = sewer.player.hp;
+        assert!(sewer.player.take_damage(10.0));
+        assert_eq!(before - sewer.player.hp, 10.0);
+    }
+
+    /// The owner's ruling, pinned: **nothing on the rat changes with the
+    /// campaign sector.** One build carried through all four floors rebuilds
+    /// the same armour, the same regen per second and the same maximum HP, and
+    /// the same hit takes the same HP off every one of them.
+    ///
+    /// The softening that replaced the old per-level "damage taken" knob is
+    /// the enemies' (`enemies.sector_damage_mult`), read for every floor here
+    /// so a future level-dependent rat stat cannot slip back in unnoticed.
+    #[test]
+    fn regen_and_armour_are_identical_on_every_campaign_sector() {
+        use crate::game::{loadout::{Loadout, PassiveKind}, world::World};
+
+        let mut carried = Loadout::starting();
+        // `starting()` has no tuning attached yet; a live run always has the
+        // shipped one, and that is what the floors rebuild against.
+        carried.tuning = Some(RunTuning::default());
+        carried.passives = vec![(PassiveKind::Armor, 2), (PassiveKind::Regen, 1)];
+        carried.rebuild_stats();
+        let want_armor = carried.stats.armor;
+        let want_regen = carried.stats.regen;
+        let want_hp = carried.stats.max_hp;
+        assert!(want_armor > 0.0 && want_regen > 0.0, "the build must move both stats");
+
+        // A 10 HP hit after armour: the same on every floor.
+        let raw = 10.0 + want_armor;
+        for level in 0..crate::game::campaign::LEVEL_COUNT {
+            let mut w = World::new_level(level, 16, carried.clone());
+            // The carry path rebuilds the numbers from the floor's tuning on
+            // arrival; do the same here, so a level-shaped stat would show.
+            w.player.loadout.rebuild_stats();
+            assert_eq!(w.player.loadout.stats.armor, want_armor, "armour moved on level {level}");
+            assert_eq!(w.player.loadout.stats.regen, want_regen, "regen moved on level {level}");
+            assert_eq!(w.player.max_hp(), want_hp, "max HP moved on level {level}");
+            w.player.iframes = 0.0;
+            let before = w.player.hp;
+            assert!(w.player.take_damage(raw), "the hit must land on level {level}");
+            assert_eq!(before - w.player.hp, 10.0, "the rat's damage differs on level {level}");
+            // The enemies are where the sector shows up (the shipped row is
+            // `[1.0, 0.5, 0.5, 0.5]`).
+            assert_eq!(
+                crate::game::director::sector_damage_mult(w.tuning(), level),
+                [1.0, 0.5, 0.5, 0.5][level],
+                "the enemy row must be the shipped one on level {level}"
+            );
+        }
     }
 
     #[test]

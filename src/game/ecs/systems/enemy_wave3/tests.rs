@@ -408,6 +408,7 @@ fn a_wick_burst_hurts_both_sides_and_chains_its_own_fuse() {
     // the burst deals 20), and a skitterer to prove the friendly fire.
     let second = w.spawn_enemy(EnemyKind::WickMoth, what + Vec2::new(4.0, 0.0), 1.0);
     let bug = w.spawn_enemy(EnemyKind::Skitterer, what + Vec2::new(-3.0, 0.0), 1.0);
+    let bug_max = state(&w, bug).max_hp;
     assert_eq!(wick_count(&mut w), 0);
 
     // Kill the first moth: the corpse arms its own fuse, nothing else yet.
@@ -427,7 +428,7 @@ fn a_wick_burst_hurts_both_sides_and_chains_its_own_fuse() {
     );
     let bug_hp = state(&w, bug).hp;
     assert!(
-        (bug_hp - (EnemyKind::Skitterer.base_hp() - WICK_ENEMY_DAMAGE)).abs() < 1e-3,
+        (bug_hp - (bug_max - WICK_ENEMY_DAMAGE)).abs() < 1e-3,
         "the burst should take {WICK_ENEMY_DAMAGE} off a nearby enemy, left {bug_hp}"
     );
     // The moth it killed lit its own full fuse: one wick remains, at full
@@ -492,6 +493,7 @@ fn the_porter_heals_after_the_raise_and_flinches_when_hit() {
     w.player.pos = p;
     let porter = w.spawn_enemy(EnemyKind::Porter, p + Vec2::new(40.0, 0.0), 1.0);
     let ally = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(50.0, 0.0), 1.0);
+    let ally_max = state(&w, ally).max_hp;
     put(&mut w, ally, |e| e.hp = 2.0);
     ready(&mut w, porter, |e| e.w3.heal_cd = 0.0);
 
@@ -504,7 +506,7 @@ fn the_porter_heals_after_the_raise_and_flinches_when_hit() {
     ticks(&mut w, secs(PORTER_RAISE_SECS) + 2);
     assert_eq!(
         state(&w, ally).hp,
-        EnemyKind::Skitterer.base_hp(),
+        ally_max,
         "the heal should top the ally up to its max"
     );
     let s = state(&w, porter);

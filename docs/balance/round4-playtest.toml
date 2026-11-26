@@ -1,3 +1,8 @@
+# Historical overlay: it needs the pre-shipping branch schema
+# (`[player] sector_hp_mult`). The shipped build folds this file into its
+# defaults — see `round4-recommended.toml` and "Shipped defaults (round 4
+# playtest)" in README.md.
+#
 # Owner playtest with fresh starts on every campaign floor.
 # The Sewer keeps the half-HP test's 79.477 base HP. Its new horde bodies
 # have 1.10–1.41 times the HP they had in that test.

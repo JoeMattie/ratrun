@@ -235,6 +235,9 @@ pub fn wave3_system(
     // The Wind-up Mouse's key: a lured body aims its warned attack at the key,
     // not at the rat (the lure already moves it there — see `enemy_steering`).
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
+    // The floor's hit softening (`[enemies] sector_damage_mult`): the wick
+    // burst, the flea's cross and the turnkey's bar all carry it.
+    sector: crate::game::ecs::resources::SectorDamage,
     // One reused scratch bundle: the `SpawnId`-ordered enemy list, the
     // warned-attack ledger, the porter's ally snapshot, the wick order and the
     // finished treatments. (`bevy_ecs` accepts at most 16 system parameters, so
@@ -242,6 +245,7 @@ pub fn wave3_system(
     mut scratch: Local<Wave3Scratch>,
 ) {
     let dt = input.dt;
+    let dmg_scale = sector.mult();
     let ppos = player.pos;
     let scratch = &mut *scratch;
     // The live key (highest `SpawnId` wins if two ever exist, the same rule the
@@ -285,7 +289,7 @@ pub fn wave3_system(
         // The burst: 9 to the rat, 20 to every enemy inside the radius (its own
         // side included — that is the whole point of the wick).
         if pos.dist(ppos) <= WICK_BURST_RADIUS + player.buffs.hurt_radius()
-            && player.take_damage(WICK_RAT_DAMAGE)
+            && player.take_damage(WICK_RAT_DAMAGE * dmg_scale)
         {
             sfx.0.push(Sfx::Hurt);
             vfx::emit_player_hurt(&mut particles, &mut rng.0, ppos);
@@ -393,6 +397,7 @@ pub fn wave3_system(
                 &mut particles,
                 &mut rng,
                 &mut sfx,
+                dmg_scale,
             ),
             EnemyKind::Porter => {
                 porter_tick(&mut e, self_id, dt, &scratch.allies, &scratch.warns, &mut particles, &mut rng, &mut sfx, &mut scratch.heals)
@@ -407,6 +412,7 @@ pub fn wave3_system(
                 &mut particles,
                 &mut rng,
                 &mut sfx,
+                dmg_scale,
             ),
             _ => {}
         }
@@ -552,6 +558,8 @@ fn flea_tick(
     particles: &mut Particles,
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     match e.w3.flea_phase {
         0 => {
@@ -605,7 +613,7 @@ fn flea_tick(
             e.vel = Vec2::ZERO;
             e.w3.flea_phase = 2;
             e.w3.flea_t = FLEA_GAP_SECS;
-            flea_impact(&mut rng.0, particles, player, e.pos, false, sfx);
+            flea_impact(&mut rng.0, particles, player, e.pos, false, sfx, dmg_scale);
         }
         _ => {
             e.w3.flea_t -= dt;
@@ -617,7 +625,7 @@ fn flea_tick(
             e.vel = Vec2::ZERO;
             e.w3.flea_phase = 0;
             e.w3.flea_cd = FLEA_JUMP_PERIOD;
-            flea_impact(&mut rng.0, particles, player, e.pos, true, sfx);
+            flea_impact(&mut rng.0, particles, player, e.pos, true, sfx, dmg_scale);
         }
     }
 }
@@ -631,11 +639,12 @@ fn flea_impact(
     at: Vec2,
     echo: bool,
     sfx: &mut SfxQueue,
+    dmg_scale: f32,
 ) {
     vfx::emit_flea_impact(particles, rng, at, FLEA_CROSS_RADIUS, echo);
     sfx.0.push(Sfx::FleaHop);
     if at.dist(player.pos) <= FLEA_CROSS_RADIUS + player.buffs.hurt_radius()
-        && player.take_damage(FLEA_CROSS_DAMAGE)
+        && player.take_damage(FLEA_CROSS_DAMAGE * dmg_scale)
     {
         sfx.0.push(Sfx::Hurt);
     }
@@ -713,6 +722,8 @@ fn turnkey_tick(
     particles: &mut Particles,
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
+    // `[enemies] sector_damage_mult` for this floor.
+    dmg_scale: f32,
 ) {
     if e.w3.bar_t > 0.0 {
         e.w3.bar_t = (e.w3.bar_t - dt).max(0.0);
@@ -720,7 +731,7 @@ fn turnkey_tick(
         if !e.w3.bar_telling()
             && !e.w3.bar_spent
             && bar_hits(e.w3.bar_pos, e.w3.bar_dir, rat, player.buffs.hurt_radius())
-            && player.take_damage(CROSSBAR_DAMAGE)
+            && player.take_damage(CROSSBAR_DAMAGE * dmg_scale)
         {
             e.w3.bar_spent = true;
             vfx::emit_player_hurt(particles, &mut rng.0, rat);

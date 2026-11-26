@@ -31,13 +31,33 @@ Any effective change marks the run **TUNED** and voids Nest banking, high scores
 | `player` | Base health, regeneration, movement, armor, magnet radius, dash and hit immunity. The Nest, passives and splices apply to the player base as usual. |
 | `xp` | Geometric step cost, steps per level, the three-card opening ramp, weapon damage per level, drops, gem tier thresholds and merge rules. Enemy-kind XP is in `enemies.kinds`. |
 | `director`, `director.sectors.<1–4>` | Pulse frequency, opening pulse, rate and live-budget tables, elite cadence, curve speed, HP corrections, sector ramps, boss arrival and cleanup pressure. Rate and HP knot tables interpolate, while the live budget holds each value until its next row. Keep curve times in ascending order. The pulse interval multiplier adjusts frequency without changing the number of bodies in each pulse. |
-| `enemies`, `enemies.kinds.<Kind>` | Global HP, contact damage and speed multipliers, and per-kind base HP, speed, damage, XP, and gold. Base overrides apply before global multipliers. Attacks that use the body's damage stat also use its tuned damage. |
+| `enemies`, `enemies.kinds.<Kind>` | Global HP, contact damage and speed multipliers, the per-sector HP and hit-damage rows, and per-kind base HP, speed, damage, XP, and gold. Base overrides apply before global multipliers. Attacks that use the body's damage stat also use its tuned damage. |
 | `minibosses` | Four appointment times, HP by sector and appointment, signature damage, contact damage, and XP. Appointments at or after boss arrival are skipped. |
 | `bosses`, `bosses.kinds.<Kind>` | Global and per-kind HP and contact multipliers, per-kind hazard damage and warning multipliers, and separate swipe controls for the Jungle Cat. Sector-one HP scale covers bare practice. The Lantern has separate sector-one and later-sector defaults. |
 | `loot` | Gold probability and value, named payouts, rare pickup odds and weights, healing, chest fallback and evolution eligibility, and Purse payout. Enemies and minibosses have their own XP tables. |
 | `weapons`, `weapons.kinds.<Kind>` | Global and per-weapon damage and per-weapon recovery, including evolutions. Below `1.0` means faster recovery. Super Dash uses dash recovery. |
 
 Use the kind keys printed by the dump. Keep the same number of entries when editing an array. Sector arrays follow campaign order. In a practice run using a bare build, the game uses sector one's difficulty values.
+
+`[enemies] sector_hp_mult` scales ordinary enemy HP by sector after each
+spawn's own HP calculation. This includes authored and summoned ordinary
+bodies. It ships as `[2.45, 0.86956522, 0.86956522, 0.86956522]`: the Sewer's
+horde carries the owner's half-HP playtest weight and the facility floors
+ease off.
+
+`[enemies] sector_damage_mult` scales every hit the floor's enemies deal by
+the world's campaign sector, before it reaches the rat and therefore before
+its armor. It ships as `[1.0, 0.5, 0.5, 0.5]`. It covers ordinary and elite
+contact, enemy bullets and lobs, floor-roster attacks, the Drake, the Shore
+Crab, miniboss strikes, boss contact, hazards and projectiles, and the
+floors' own hazards (mousetraps, crab pots, steam, the drip shaft, the pits on
+Outfall and Flatbed, sliding cargo).
+
+There is **no** player-side sector knob, by owner ruling: the rat's HP, armor,
+regeneration, heals, passives and splices are one set of numbers on every
+floor (`[player] max_hp` ships at `79.477`, the fresh-start level-one value).
+The later floors ease off by hitting softer, not by changing the rat. A level-
+dependent *enemy* value is fine; a level-dependent rat value is not.
 
 ## Sector buildup
 
@@ -86,7 +106,33 @@ surges, recovery and Sewer opening grace.
 The shipped balance also adjusts the rat's starting HP, regeneration, hit
 immunity and XP costs, plus the horde's speed, sector HP and contact ramps,
 and boss HP. The effective defaults qualify for progression with or without
-a tuning file.
+a tuning file. Round four ships the owner's playtest: `79.477` starting HP on
+every sector, `2.45×` ordinary HP in the Sewer and `0.87×` on Kitchen, Lab and
+Flatbed, build HP corrections of `0.61 / 0.62 / 0.63` with horde tops of
+`1.15 / 1.17 / 1.18` and boss-only multipliers of `1.13 / 1.03 / 1.01` on the
+fresh sectors, and surge strengths of `0.72 / 0.84 / 0.65`.
+
+## Horde power scaling
+
+Set `power_scaling = true` in `[director]` to size the next wave against
+recent effective weapon damage. Each ordinary pulse and timed elite takes
+one HP multiplier at spawn. The scripted opening pair, guests, minibosses,
+and floor bosses keep their encounter HP. Spawn cadence and payouts stay
+on their existing curves. The shipped power switch is **on** since round
+four, with `power_hp_exponent = 0.45`, `power_memory_secs = 18`, a `0.9–1.15`
+clamp, and references `power_reference_hp = [31.85, 16.0, 25.0, 15.0]` and
+`power_fresh_reference_hp = [16.0, 19.5, 19.0]`.
+
+The director divides smoothed damage per second by a smoothed reference.
+The reference combines the nominal horde rate and HP curves with
+`power_reference_hp`, a four-sector calibration in HP per scheduled body at
+unit horde HP. `power_memory_secs` is the averaging time constant. The sample
+starts neutral on each floor and holds its last buildup value during boss
+cleanup. The director raises the ratio to `power_hp_exponent` and clamps it
+between `power_hp_floor` and `power_hp_ceiling`.
+
+With `[campaign] carry = false`, sectors two through four use the nominal
+fresh horde curve and `power_fresh_reference_hp` for their DPS reference.
 
 ## Boss hazards
 

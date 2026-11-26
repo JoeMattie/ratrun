@@ -1277,6 +1277,7 @@ impl Enemy {
         context: bevy_ecs::lifecycle::HookContext,
     ) {
         let tuning = world.resource::<crate::tuning::RunTuning>().clone();
+        let level = world.resource::<crate::game::ecs::resources::LevelIndex>().0;
         let Some(mut enemy) = world.get_mut::<Self>(context.entity) else { return };
         if enemy.named {
             return;
@@ -1285,8 +1286,10 @@ impl Enemy {
         let base_hp = enemy.kind.base_hp();
         let hp_scale = if row.hp == base_hp { 1.0 } else { row.hp / base_hp };
         let base_damage = enemy.kind.damage();
-        enemy.hp *= hp_scale * tuning.enemies.hp_mult;
-        enemy.max_hp *= hp_scale * tuning.enemies.hp_mult;
+        let hp_scale = hp_scale * tuning.enemies.hp_mult
+            * tuning.enemies.sector_hp_mult[super::director::level_slot(level)];
+        enemy.hp *= hp_scale;
+        enemy.max_hp *= hp_scale;
         enemy.damage = if row.contact_damage == base_damage {
             enemy.damage
         } else if base_damage > 0.0 {

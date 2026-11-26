@@ -22,7 +22,7 @@ def main():
     source.add_argument("--binary", type=Path)
     source.add_argument("--native-report", type=Path, help="Previously run native shard JSON")
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--id", default="defaults-expert-1000")
+    parser.add_argument("--id", default="power-expert-1000")
     args = parser.parse_args()
     pilot = args.output / "raw" / "pilot"
     manifest = read_manifest(pilot / "manifest.json")
