@@ -44,6 +44,9 @@
 - **Outfall floor.** The little lakes are gone. The seabed is mixed gravel,
   pebbles, shell grit and broad silt and shingle fields, and it no longer
   splashes, ripples or reflects like water.
+- **The Outfall.** Seabed gravel, shell grit, pebbles, silt and shingle patches
+  replace standing puddles on the ocean floor, and pale drifting motes float
+  through the water in both dim and lit areas.
 
 ## 0.4.4 (2026-11-26, playtest build)
 

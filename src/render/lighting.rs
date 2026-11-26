@@ -49,7 +49,7 @@ pub use gi::{env_pin as gi_env_pin, from_env as gi_from_env, GlobalLight};
 pub(crate) use overhead::{draw_deferred as draw_overhead_shadows, OverheadScene};
 pub(crate) use specular::{
     boss_pen, cloth_pen, dropping_pen, enemy_pen, giant_rat_pen, pool_pen, prop_pen, rat_helmet_pen,
-    rat_pen, rat_visor_pen, washer_glass_pen,
+    rat_pen, rat_visor_pen, stone_pen, washer_glass_pen,
 };
 #[cfg(test)]
 pub(crate) use underwater::apply_off_grade;

@@ -16,9 +16,12 @@
 //!   one arm of that function and the whole tested path lights up; the tests
 //!   below drive it through a thread-local override.
 
+use std::f32::consts::TAU;
+
 use super::engine::{Grid, LayerMask, LightingMode};
 use super::fx::{strength, Canvas, FxFrame};
-use super::material;
+use super::material::{self, MaterialKind};
+use crate::detmath::{cos, sin};
 use crate::game::level::{LightZoneKind, Theme};
 use crate::render::palette::Rgb;
 
@@ -88,6 +91,47 @@ const CAUSTIC_LEVEL_STEP: i32 = 3;
 const CAUSTIC_COOL: Rgb = (120, 200, 255);
 /// Cool pale cyan-blue cast for Outfall marine snow.
 const MARINE_SNOW_COOL: Rgb = (176, 226, 248);
+
+// ---------------------------------------------------------------------------
+// Outfall ambient drifting motes (always-on, all lighting tiers)
+// ---------------------------------------------------------------------------
+
+/// World pixels per ambient Outfall mote at `Full`: a 120×80 view floats 56
+/// motes (inside the 40–70 band).
+const AMBIENT_AREA_PER_MOTE: usize = 170;
+const AMBIENT_COUNT_MIN: usize = 40;
+const AMBIENT_COUNT_MAX: usize = 70;
+/// Reduced tier counts so lower lighting tiers stay light on terminal churn.
+const AMBIENT_HARD_NUM: usize = 7;
+const AMBIENT_HARD_DEN: usize = 10;
+const AMBIENT_HARD_MIN: usize = 24;
+const AMBIENT_COARSE_DIV: usize = 2;
+const AMBIENT_COARSE_MIN: usize = 18;
+const AMBIENT_COMPACT_NUM: usize = 2;
+const AMBIENT_COMPACT_DEN: usize = 5;
+const AMBIENT_COMPACT_MIN: usize = 14;
+/// Virtual world-space seeding domain before wrapping into the view.
+const AMBIENT_DOMAIN_PX: f32 = 1024.0;
+/// Base random-direction drift speed (px/s) and gentle downward settle (px/s).
+const AMBIENT_DRIFT_MIN_PX_S: f32 = 1.6;
+const AMBIENT_DRIFT_SPAN_PX_S: f32 = 1.8;
+const AMBIENT_SETTLE_MIN_PX_S: f32 = 0.7;
+const AMBIENT_SETTLE_SPAN_PX_S: f32 = 0.7;
+/// Per-mote two-octave smooth wandering wave velocity budgets (px/s), combining
+/// with base drift + settle for ~3–8 px/s organic omnidirectional wander.
+const AMBIENT_WAVE1_SPEED_MIN: f32 = 2.0;
+const AMBIENT_WAVE1_SPEED_SPAN: f32 = 1.5;
+const AMBIENT_WAVE2_SPEED_MIN: f32 = 0.9;
+const AMBIENT_WAVE2_SPEED_SPAN: f32 = 0.9;
+/// Brightness lifts (output RGB levels): faint self-lit floor in dim water,
+/// boosted when a mote floats through a lamp or headlamp beam.
+const AMBIENT_DIM_LIFT_MIN: i32 = 20;
+const AMBIENT_DIM_LIFT_SPAN: i32 = 14;
+const AMBIENT_LIT_BONUS: i32 = 44;
+/// Companion pixel brightness for 2 px motes (% of core lift).
+const AMBIENT_SECOND_PX_PCT: i32 = 55;
+/// Pale cool sea-mist colour for ambient drifting motes in dim water.
+const AMBIENT_MOTE_COOL: Rgb = (196, 234, 244);
 
 /// The per-stage strength, Q8. The game always uses [`Gains::live`]; the tests
 /// zero it to prove that strength 0 draws nothing.
@@ -520,13 +564,205 @@ fn hash(mut seed: u32) -> u32 {
     seed ^ (seed >> 15)
 }
 
+/// How many always-on ambient drifting motes The Outfall floats at this view
+/// size and lighting tier (`40..=70` at `Full`, reduced on `Hard`/`Coarse`/
+/// `Compact`).
+pub(super) fn ambient_mote_count(w: usize, h: usize, mode: LightingMode) -> usize {
+    if w == 0 || h == 0 {
+        return 0;
+    }
+    let base = (w * h / AMBIENT_AREA_PER_MOTE).clamp(AMBIENT_COUNT_MIN, AMBIENT_COUNT_MAX);
+    match mode {
+        LightingMode::Full => base,
+        LightingMode::Hard => (base * AMBIENT_HARD_NUM / AMBIENT_HARD_DEN)
+            .max(AMBIENT_HARD_MIN)
+            .min(base),
+        LightingMode::Coarse => (base / AMBIENT_COARSE_DIV)
+            .max(AMBIENT_COARSE_MIN)
+            .min(base),
+        LightingMode::Compact => (base * AMBIENT_COMPACT_NUM / AMBIENT_COMPACT_DEN)
+            .max(AMBIENT_COMPACT_MIN)
+            .min(base),
+        LightingMode::Off => 0,
+    }
+}
+
+/// Analytic world-space position `(wx, wy)` of one ambient Outfall mote from
+/// `(seed, elapsed, slot)` plus its secondary hash words `(h1, h2)` for size
+/// and brightness variation. Continuous in `elapsed`, wandering in all
+/// directions at ~3–8 px/s with a slight downward settle.
+#[inline]
+fn ambient_mote_state(seed: u32, elapsed: f32, slot: usize) -> (f32, f32, u32, u32) {
+    let h0 = hash(seed ^ (slot as u32).wrapping_mul(0x9e37_79b9) ^ 0x4f55_5446);
+    let h1 = hash(h0 ^ 0x5bf0_3635);
+    let h2 = hash(h1 ^ 0x2545_f491);
+    let t = elapsed.max(0.0);
+
+    let x0 = (h0 & 0xffff) as f32 * (AMBIENT_DOMAIN_PX / 65_536.0);
+    let y0 = ((h0 >> 16) & 0xffff) as f32 * (AMBIENT_DOMAIN_PX / 65_536.0);
+
+    let angle = (h1 & 0x3ff) as f32 * (TAU / 1024.0);
+    let drift_spd =
+        AMBIENT_DRIFT_MIN_PX_S + (((h1 >> 10) & 255) as f32 / 255.0) * AMBIENT_DRIFT_SPAN_PX_S;
+    let settle =
+        AMBIENT_SETTLE_MIN_PX_S + (((h1 >> 18) & 63) as f32 / 63.0) * AMBIENT_SETTLE_SPAN_PX_S;
+    let vx = cos(angle) * drift_spd;
+    let vy = sin(angle) * drift_spd + settle;
+
+    // Two incommensurate smooth sine waves per axis act as a band-limited
+    // smooth noise field per mote with strictly bounded drift velocity.
+    let w1x = 0.34 + ((h1 >> 24) & 31) as f32 * (0.24 / 31.0);
+    let w2x = 0.78 + (h2 & 31) as f32 * (0.42 / 31.0);
+    let w1y = 0.31 + ((h2 >> 5) & 31) as f32 * (0.26 / 31.0);
+    let w2y = 0.73 + ((h2 >> 10) & 31) as f32 * (0.45 / 31.0);
+
+    let p1x = ((h2 >> 15) & 31) as f32 * (TAU / 32.0);
+    let p2x = ((h2 >> 20) & 31) as f32 * (TAU / 32.0);
+    let p1y = ((h2 >> 25) & 31) as f32 * (TAU / 32.0);
+    let p2y = ((h0 >> 12) & 31) as f32 * (TAU / 32.0);
+
+    let v1x = AMBIENT_WAVE1_SPEED_MIN + (((h0 >> 4) & 15) as f32 / 15.0) * AMBIENT_WAVE1_SPEED_SPAN;
+    let v2x = AMBIENT_WAVE2_SPEED_MIN + (((h0 >> 8) & 15) as f32 / 15.0) * AMBIENT_WAVE2_SPEED_SPAN;
+    let v1y = AMBIENT_WAVE1_SPEED_MIN + (((h1 >> 4) & 15) as f32 / 15.0) * AMBIENT_WAVE1_SPEED_SPAN;
+    let v2y = AMBIENT_WAVE2_SPEED_MIN + (((h1 >> 8) & 15) as f32 / 15.0) * AMBIENT_WAVE2_SPEED_SPAN;
+
+    let wx = x0
+        + vx * t
+        + (v1x / w1x) * sin((t * w1x + p1x).rem_euclid(TAU))
+        + (v2x / w2x) * sin((t * w2x + p2x).rem_euclid(TAU));
+    let wy = y0
+        + vy * t
+        + (v1y / w1y) * sin((t * w1y + p1y).rem_euclid(TAU))
+        + (v2y / w2y) * sin((t * w2y + p2y).rem_euclid(TAU));
+    (wx, wy, h1, h2)
+}
+
+/// Analytic world-space coordinates `(wx, wy)` of one ambient Outfall mote.
+#[cfg(test)]
+fn ambient_mote_world_pos(seed: u32, elapsed: f32, slot: usize) -> (f32, f32) {
+    let (wx, wy, _, _) = ambient_mote_state(seed, elapsed, slot);
+    (wx, wy)
+}
+
+/// Always-on ambient drifting particulate layer for The Outfall.
+///
+/// Analytic from `(level.seed, elapsed, slot)` with zero allocation and zero
+/// rng; anchored to world space for proper camera parallax; visible faintly in
+/// dim water and brighter inside lamps and the headlamp beam. Runs at every
+/// live lighting tier (`Full`, `Hard`, `Coarse`, `Compact`) and is a no-op on
+/// every other floor.
+pub(super) fn draw_outfall_ambient(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    elapsed: f32,
+) {
+    if frame.theme != Theme::Outfall || canvas.w == 0 || canvas.h == 0 {
+        return;
+    }
+    let count = ambient_mote_count(canvas.w, canvas.h, frame.mode);
+    if count == 0 {
+        return;
+    }
+    let seed = (frame.level.seed as u32) ^ (frame.level.seed >> 32) as u32;
+    let cam_x = frame.cam.x.round() as i64;
+    let cam_y = frame.cam.y.round() as i64;
+    let w_i = canvas.w as i64;
+    let h_i = canvas.h as i64;
+    let grid_ok = grid.stride > 0 && grid.w > 0 && grid.h > 0;
+    let allow_2px = matches!(frame.mode, LightingMode::Full | LightingMode::Hard);
+
+    for slot in 0..count {
+        let (wx, wy, h1, h2) = ambient_mote_state(seed, elapsed, slot);
+        let sx = (wx.floor() as i64 - cam_x).rem_euclid(w_i) as i32;
+        let sy = (wy.floor() as i64 - cam_y).rem_euclid(h_i) as i32;
+
+        let mut lit = 0i32;
+        let mut dom_rgb: Option<Rgb> = None;
+        if grid_ok {
+            let si = grid.sample_index(sx as usize, sy as usize);
+            if grid
+                .surfaces
+                .get(si)
+                .is_some_and(|surface| surface.layer & LayerMask::FLOOR.0 == 0)
+            {
+                continue;
+            }
+            if let Some(sample) = grid.samples.get(si) {
+                let mul_peak = i32::from(sample.mul[0].max(sample.mul[1]).max(sample.mul[2]));
+                lit = ((mul_peak - 112).clamp(0, 220) * 256) / 220;
+            }
+            if let Some(info) = grid.info.get(si) {
+                let dom_lit = (i32::from(info.dom).min(360) * 256) / 360;
+                let air_peak = i32::from(info.air[0].max(info.air[1]).max(info.air[2]));
+                let air_lit = (air_peak.min(900) * 256) / 900;
+                lit = lit.max(dom_lit).max(air_lit);
+                if info.dom > 0 {
+                    dom_rgb = Some(info.dom_rgb);
+                }
+            }
+        }
+
+        let dim_lift =
+            AMBIENT_DIM_LIFT_MIN + (i32::from((h1 >> 29) as u8) * AMBIENT_DIM_LIFT_SPAN) / 7;
+        let lift = dim_lift + (lit * AMBIENT_LIT_BONUS) / 256;
+        let tint = match dom_rgb {
+            Some(rgb) if lit > 40 => (
+                ((u16::from(AMBIENT_MOTE_COOL.0) * 2 + u16::from(rgb.0)) / 3) as u8,
+                ((u16::from(AMBIENT_MOTE_COOL.1) * 2 + u16::from(rgb.1)) / 3) as u8,
+                ((u16::from(AMBIENT_MOTE_COOL.2) * 2 + u16::from(rgb.2)) / 3) as u8,
+            ),
+            _ => AMBIENT_MOTE_COOL,
+        };
+
+        stamp_ambient(canvas, sx, sy, lift, tint);
+        if allow_2px && (h2 & 3) == 0 {
+            let (dx, dy) = if (h2 & 4) == 0 { (1, 0) } else { (0, 1) };
+            let nx = sx + dx;
+            let ny = sy + dy;
+            if nx >= 0 && ny >= 0 && (nx as usize) < canvas.w && (ny as usize) < canvas.h {
+                let on_floor = !grid_ok
+                    || grid
+                        .surfaces
+                        .get(grid.sample_index(nx as usize, ny as usize))
+                        .is_none_or(|s| s.layer & LayerMask::FLOOR.0 != 0);
+                if on_floor {
+                    stamp_ambient(canvas, nx, ny, lift * AMBIENT_SECOND_PX_PCT / 100, tint);
+                }
+            }
+        }
+    }
+}
+
+/// Additive speck stamp for ambient Outfall motes: skips creatures and emissive
+/// pixels so bodies and lamps stay crisp.
+#[inline]
+fn stamp_ambient(canvas: &mut Canvas<'_>, x: i32, y: i32, amount: i32, tint: Rgb) {
+    if amount <= 0 || x < 0 || y < 0 || x as usize >= canvas.w || y as usize >= canvas.h {
+        return;
+    }
+    let i = y as usize * canvas.w + x as usize;
+    let mat = canvas.mat_at(i);
+    if material::is_creature(mat) || material::kind(mat) == MaterialKind::Emissive {
+        return;
+    }
+    let pixel = &mut canvas.px[i];
+    *pixel = (
+        pixel.0.saturating_add(channel(amount, tint.0)),
+        pixel.1.saturating_add(channel(amount, tint.1)),
+        pixel.2.saturating_add(channel(amount, tint.2)),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::engine::LightingMode;
     use super::super::fx::{step8, testkit, LightInfo};
     use super::{
-        caustics_here, caustics_q8, draw_with, mote_count, set_caustics_override, Flavour, FxFrame,
-        Gains, Grid, LayerMask, LightZoneKind, Rgb, Theme, MOTE_COUNT_MAX, MOTE_COUNT_MIN,
+        ambient_mote_count, ambient_mote_world_pos, caustics_here, caustics_q8,
+        draw_outfall_ambient, draw_with, mote_count, set_caustics_override, Flavour, FxFrame,
+        Gains, Grid, LayerMask, LightZoneKind, Rgb, Theme, AMBIENT_COUNT_MAX, AMBIENT_COUNT_MIN,
+        MOTE_COUNT_MAX, MOTE_COUNT_MIN,
     };
     use crate::game::level::Level;
     use crate::math::Vec2;
@@ -978,5 +1214,170 @@ mod tests {
         let c = run(&grid, &frame(&lvl, LightingMode::Hard, 0.25), Gains::live(), w, h);
         assert_eq!(a, b, "Hard holds two 8 Hz steps per step");
         assert_ne!(a, c, "and moves at 4 Hz");
+    }
+
+    #[test]
+    fn outfall_ambient_motes_positions_are_continuous_and_wander_with_settle() {
+        let seed = 0x1234_5678u32;
+        let dt = 1.0 / 60.0;
+        let mut speed_sum = 0.0f32;
+        let mut vy_sum = 0.0f32;
+        let mut up_count = 0usize;
+        let mut left_count = 0usize;
+        let mut right_count = 0usize;
+        let slots = 60;
+        for slot in 0..slots {
+            let (x0, y0) = ambient_mote_world_pos(seed, 2.5, slot);
+            let (x1, y1) = ambient_mote_world_pos(seed, 2.5 + dt, slot);
+            let dx = x1 - x0;
+            let dy = y1 - y0;
+            let dist = (dx * dx + dy * dy).sqrt();
+            // Continuous: a 1/60 s step must move a fraction of a pixel, never jump.
+            assert!(
+                dist < 0.25,
+                "mote {slot} jumped {dist} px in {dt} s (must be continuous)"
+            );
+            let speed = dist / dt;
+            assert!(
+                speed <= 12.0,
+                "mote {slot} speed {speed} px/s exceeded gentle drift budget"
+            );
+            speed_sum += speed;
+            vy_sum += dy / dt;
+            if dy < 0.0 {
+                up_count += 1;
+            }
+            if dx < 0.0 {
+                left_count += 1;
+            }
+            if dx > 0.0 {
+                right_count += 1;
+            }
+        }
+        let mean_speed = speed_sum / slots as f32;
+        let mean_vy = vy_sum / slots as f32;
+        assert!(
+            (2.5..=8.5).contains(&mean_speed),
+            "mean ambient mote speed {mean_speed} px/s outside ~3–8 px/s band"
+        );
+        assert!(
+            mean_vy > 0.2 && mean_vy < 3.0,
+            "expected slight downward settle, got mean vy={mean_vy}"
+        );
+        assert!(
+            up_count > 0 && left_count > 10 && right_count > 10,
+            "motes must wander in all directions (up={up_count}, left={left_count}, right={right_count})"
+        );
+    }
+
+    #[test]
+    fn outfall_ambient_motes_count_is_within_budget_across_all_tiers() {
+        let full = ambient_mote_count(120, 80, LightingMode::Full);
+        let hard = ambient_mote_count(120, 80, LightingMode::Hard);
+        let coarse = ambient_mote_count(120, 80, LightingMode::Coarse);
+        let compact = ambient_mote_count(120, 80, LightingMode::Compact);
+        assert!(
+            (AMBIENT_COUNT_MIN..=AMBIENT_COUNT_MAX).contains(&full),
+            "Full 120×80 count {full} outside 40..=70"
+        );
+        assert!(hard > 0 && hard < full, "Hard ({hard}) must be reduced from Full ({full})");
+        assert!(coarse > 0 && coarse < hard, "Coarse ({coarse}) must be reduced from Hard ({hard})");
+        assert!(
+            compact > 0 && compact <= coarse,
+            "Compact ({compact}) must run at reduced count"
+        );
+        assert_eq!(ambient_mote_count(120, 80, LightingMode::Off), 0);
+
+        for (w, h) in [(60, 40), (120, 80), (240, 160)] {
+            let n = ambient_mote_count(w, h, LightingMode::Full);
+            assert!(
+                (AMBIENT_COUNT_MIN..=AMBIENT_COUNT_MAX).contains(&n),
+                "{w}x{h} Full ambient count {n} out of budget"
+            );
+        }
+    }
+
+    #[test]
+    fn outfall_ambient_motes_show_in_dim_and_brighter_in_lit_and_parallax_and_outfall_only() {
+        let (w, h) = (120, 80);
+        let base: Rgb = (24, 42, 52);
+
+        // Dim grid (ambient only) vs bright grid (lit): both show motes, lit is brighter.
+        let dim_grid = testkit::flat_grid(w, h, 1, [100, 110, 118]);
+        let mut lit_grid = testkit::flat_grid(w, h, 1, [320, 320, 320]);
+        for info in lit_grid.info.iter_mut() {
+            info.dom = 400;
+            info.dom_rgb = (240, 220, 180);
+        }
+
+        let draw_ambient = |grid: &Grid, theme: Theme, mode: LightingMode, cam: Vec2, t: f32| {
+            let l = level(theme);
+            let mut f = frame(&l, mode, t);
+            f.cam = cam;
+            let mut pb = PixelBuffer::new(w, h);
+            pb.clear(base);
+            let mut canvas = testkit::canvas(&mut pb);
+            draw_outfall_ambient(grid, &mut canvas, &f, t);
+            pb.pixels().to_vec()
+        };
+
+        // Visible at every live tier including Coarse and Compact even in dim water.
+        for mode in LightingMode::LIVE {
+            let px = draw_ambient(&dim_grid, Theme::Outfall, mode, Vec2::ZERO, 1.5);
+            let painted = px.iter().filter(|&&c| c != base).count();
+            assert!(
+                painted >= 14,
+                "{mode:?}: expected visible ambient motes in dim water, got {painted} px"
+            );
+        }
+
+        // Brighter where light is.
+        let dim_px = draw_ambient(&dim_grid, Theme::Outfall, LightingMode::Full, Vec2::ZERO, 1.5);
+        let lit_px = draw_ambient(&lit_grid, Theme::Outfall, LightingMode::Full, Vec2::ZERO, 1.5);
+        let max_lift = |px: &[Rgb]| -> u8 {
+            px.iter()
+                .map(|c| c.2.saturating_sub(base.2))
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(
+            max_lift(&lit_px) > max_lift(&dim_px) + 15,
+            "lit motes ({}) must be brighter than dim motes ({})",
+            max_lift(&lit_px),
+            max_lift(&dim_px)
+        );
+
+        // World-space anchoring: panning cam by (17, 11) shifts every mote by (-17, -11) mod (w, h).
+        let panned = draw_ambient(
+            &dim_grid,
+            Theme::Outfall,
+            LightingMode::Coarse,
+            Vec2::new(17.0, 11.0),
+            1.5,
+        );
+        let origin = draw_ambient(&dim_grid, Theme::Outfall, LightingMode::Coarse, Vec2::ZERO, 1.5);
+        for y in 0..h {
+            for x in 0..w {
+                let ox = (x + 17) % w;
+                let oy = (y + 11) % h;
+                assert_eq!(
+                    panned[y * w + x],
+                    origin[oy * w + ox],
+                    "world-anchored mote mismatch at ({x},{y})"
+                );
+            }
+        }
+
+        // Outfall only: every other theme draws nothing.
+        for theme in Theme::playable() {
+            if theme == Theme::Outfall {
+                continue;
+            }
+            let px = draw_ambient(&lit_grid, theme, LightingMode::Full, Vec2::ZERO, 1.5);
+            assert!(
+                px.iter().all(|&c| c == base),
+                "{theme:?} must not draw Outfall ambient motes"
+            );
+        }
     }
 }
