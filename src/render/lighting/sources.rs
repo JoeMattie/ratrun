@@ -28,7 +28,11 @@ use super::*;
 const MAX_RIMS: usize = 512;
 const MAX_DROPPING_LIGHTS: usize = 12;
 const DROPPING_DRY_SECS: f32 = 2.0;
-const GLOW_RGB: Rgb = (110, 255, 120);
+// The green channel can reach the lighting ceiling when pools overlap. Keep
+// the other channels low so overlapping spills retain their colour.
+const GLOW_RGB: Rgb = (0, 255, 0);
+const DROPPING_GLOW_REACH: f32 = 2.75;
+const DROPPING_GLOW_GAIN: f32 = 10.0;
 
 fn dropping_light(drop: &Dropping) -> Option<Light> {
     let left = DROPPING_LIFE - drop.age;
@@ -40,9 +44,9 @@ fn dropping_light(drop: &Dropping) -> Option<Light> {
     let fade = (left / DROPPING_DRY_SECS).min(1.0);
     let mut light = Light::radial(
         drop.pos,
-        DROPPING_LIGHT_RADIUS[rank],
+        DROPPING_LIGHT_RADIUS[rank] * DROPPING_GLOW_REACH,
         GLOW_RGB,
-        DROPPING_LIGHT_ENERGY[rank] * arm * fade,
+        DROPPING_LIGHT_ENERGY[rank] * DROPPING_GLOW_GAIN * arm * fade,
     );
     light.falloff = Falloff::Small;
     light.height = 2.0;

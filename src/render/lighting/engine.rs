@@ -2004,20 +2004,16 @@ mod dropping_light_tests {
     #[test]
     fn dropping_lights_scale_by_rank_arm_and_dry() {
         let cases = [
-            (1, DROPPING_ARM, 18.0, 0.80),
-            (2, DROPPING_ARM, 22.0, 1.05),
-            (3, DROPPING_ARM, 26.0, 1.35),
-            (4, DROPPING_ARM, 31.0, 1.65),
-            (5, DROPPING_ARM, 36.0, 2.00),
-            (5, 0.0, 36.0, 1.00),
-            (5, DROPPING_LIFE - 2.0, 36.0, 2.00),
-            (5, DROPPING_LIFE - 1.0, 36.0, 1.00),
-            (5, DROPPING_LIFE - 0.5, 36.0, 0.50),
+            (1, DROPPING_ARM, 49.5, 8.0),
+            (2, DROPPING_ARM, 60.5, 10.5),
+            (3, DROPPING_ARM, 71.5, 13.5),
+            (4, DROPPING_ARM, 85.25, 16.5),
+            (5, DROPPING_ARM, 99.0, 20.0),
+            (5, 0.0, 99.0, 10.0),
+            (5, DROPPING_LIFE - 2.0, 99.0, 20.0),
+            (5, DROPPING_LIFE - 1.0, 99.0, 10.0),
+            (5, DROPPING_LIFE - 0.5, 99.0, 5.0),
         ];
-        // Rank 1 and rank 5 are larger and brighter than the legacy [10..20] / [0.45..1.10] tables
-        // and grow strictly with rank.
-        assert!(cases[0].2 > 10.0 && cases[4].2 > 20.0);
-        assert!(cases[0].3 > 0.45 && cases[4].3 > 1.10);
         for pair in cases[..5].windows(2) {
             assert!(pair[1].2 > pair[0].2, "radius must grow with rank");
             assert!(pair[1].3 > pair[0].3, "energy must grow with rank");
@@ -2040,8 +2036,10 @@ mod dropping_light_tests {
         for (entry, (_, _, radius, energy)) in lights.into_iter().zip(cases) {
             let light = entry.light;
             assert!(matches!(light.shape, LightShape::Radial { radius: r } if r == radius));
-            assert!((light.energy - energy).abs() < 1e-6);
-            assert_eq!(light.color, (110, 255, 120));
+            assert!((light.energy - energy).abs() < 1e-5);
+            assert_eq!(light.color, (0, 255, 0));
+            assert!((light.extent() - 1.7 * radius).abs() < 1e-5);
+            assert_eq!(light.scatter, 0.0);
             assert_eq!(light.falloff, Falloff::Small);
             assert!(light.flicker.is_none());
         }
@@ -2097,11 +2095,35 @@ mod dropping_light_tests {
             .grid
             .info
             .iter()
-            .any(|info| info.dom_rgb == (110, 255, 120) && info.spec > 0));
+            .any(|info| info.dom_rgb == (0, 255, 0) && info.spec > 0));
         assert!(map
             .fx_lights
             .iter()
             .all(|light| light.tag != LightTag::Ground));
+    }
+
+    #[test]
+    fn eight_dropping_lights_keep_a_green_pool_at_every_tier() {
+        let mut w = fx_world(Theme::Sewer);
+        let center = Vec2::new(48.0, 32.0);
+        w.player.pos = center + Vec2::new(0.0, 40.0);
+        for id in 0..8 {
+            let angle = id as f32 * std::f32::consts::TAU / 8.0;
+            let pos = center + Vec2::from_angle(angle) * 22.0;
+            spawn_drop(&mut w, id, pos, 5, DROPPING_ARM);
+        }
+        for mode in LightingMode::LIVE {
+            for fx in [false, true] {
+                let mut scene = fx_scene(&w, mode, ColorDepth::Truecolor, Vec2::ZERO);
+                scene.fx = fx;
+                let mut pb = PixelBuffer::new(96, 64);
+                pb.clear((80, 80, 80));
+                let mut map = LightMap::new();
+                map.apply_scene(&mut pb, &scene);
+                let (r, g, b) = pb.pixel_at(48, 32);
+                assert!(g > r.max(b).saturating_add(20), "{mode:?}, fx={fx}: {r}, {g}, {b}");
+            }
+        }
     }
 
     #[test]
