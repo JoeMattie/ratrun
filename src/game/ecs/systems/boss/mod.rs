@@ -3117,7 +3117,8 @@ pub fn resolve_hazards(
         if !hazard.is_active() {
             continue;
         }
-        if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, PLAYER_RADIUS) {
+        let radius = if hazard.damage > 0.0 { player.buffs.hurt_radius() } else { PLAYER_RADIUS };
+        if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, radius) {
             if hazard.damage <= 0.0 {
                 // Push-only hazard (the cat's damage-free outer roar ring and
                 // the Mangle's intake lane): the knockback is a sustained shove
@@ -4767,7 +4768,7 @@ pub fn boss_update_system(
         // "safe pocket" state).
         if !boss.is_airborne() && boss.contact_cd <= 0.0 && boss.contact_damage > 0.0 {
             let shapes = boss.hit_shapes();
-            if shapes.circle_hits_grounded(player.pos, PLAYER_RADIUS)
+            if shapes.circle_hits_grounded(player.pos, player.buffs.hurt_radius())
                 && player.take_damage(boss.contact_damage) {
                     boss.contact_cd = 0.5;
                     sfx.0.push(Sfx::Hurt);
@@ -4816,7 +4817,7 @@ pub fn boss_update_system(
         } else {
             p.pos = next;
         }
-        if collision::segment_circle_hit(p.prev, p.pos, p.radius, player.pos, PLAYER_RADIUS)
+        if collision::segment_circle_hit(p.prev, p.pos, p.radius, player.pos, player.buffs.hurt_radius())
             && player.take_damage(p.damage)
         {
             vfx::emit_player_hurt(&mut particles, &mut fight.rng.0, player.pos);

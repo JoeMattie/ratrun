@@ -339,7 +339,7 @@ impl MovementParams<'_, '_> {
     /// Move between signatures. The return value permits a tell this tick.
     pub(super) fn advance(
         &self, entity: Entity, id: u64, mb: &mut Miniboss, body: &mut Enemy,
-        level: &Level, rat: Vec2, range: f32, until_ready: f32, dt: f32,
+        level: &Level, rat: Vec2, range: f32, chase_mult: f32, until_ready: f32, dt: f32,
         particles: &mut Particles,
     ) -> bool {
         let ready = until_ready <= 0.0;
@@ -363,7 +363,7 @@ impl MovementParams<'_, '_> {
                 dir
             };
             let before = body.pos;
-            body.steer(before + dir * 32.0, dir, dt, glue * ink);
+            body.steer(before + dir * 32.0, dir, dt, glue * ink * chase_mult);
             body.pos = level.tiles.resolve_circle(body.pos, body.radius, LARGE, None);
         };
         let toward = if open_step(level, body.pos, rat, body.radius) || chase == Vec2::ZERO {

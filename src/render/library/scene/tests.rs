@@ -852,7 +852,7 @@ fn the_steam_grate_cycles() {
     );
 }
 
-/// Four pocket finds are walked over and collected (the plate then shows what
+/// Pickup scenes are walked over and collected (the plate then shows what
 /// the pickup did).
 #[test]
 fn the_pocket_finds_are_collected() {
@@ -862,6 +862,9 @@ fn the_pocket_finds_are_collected() {
         PickupKind::BottleCap,
         PickupKind::CleanSocks,
         PickupKind::GrowthSerum,
+        PickupKind::ShrinkDraught,
+        PickupKind::WhiteCoat,
+        PickupKind::TheCollar,
     ] {
         let key = Key::Pickup(kind);
         let mut scene = LibraryScene::build(key).expect("a pickup scene");

@@ -63,7 +63,6 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::detmath::DetF32;
 use crate::game::ecs::components::SpawnId;
-use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Level;
@@ -307,7 +306,7 @@ fn needle_tick(
             // One hit per strike, through the rat's i-frames like every other
             // hit in the game.
             if !n.hit
-                && ray_hits(n.plant, n.dir, ppos, PLAYER_RADIUS)
+                && ray_hits(n.plant, n.dir, ppos, player.buffs.hurt_radius())
                 // A wall between the barrel and the rat stops the needle.
                 && crate::game::ecs::systems::projectiles::los_clear(
                     level,

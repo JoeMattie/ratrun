@@ -242,7 +242,8 @@ pub fn trailer_system(
             let offset = TrailerDeck::slide_offset(slide, counters.elapsed);
             let centre = slide.rest + slide.dir * offset;
             let d = player.pos - centre;
-            if d.x.abs() <= slide.half.x + PLAYER_RADIUS && d.y.abs() <= slide.half.y + PLAYER_RADIUS {
+            let radius = player.buffs.hurt_radius();
+            if d.x.abs() <= slide.half.x + radius && d.y.abs() <= slide.half.y + radius {
                 if player.take_damage(SLIDE_DAMAGE) {
                     let push = slide.dir * (slide.half.x + PLAYER_RADIUS + 2.0);
                     player.pos = level.tiles.resolve_circle(

@@ -241,6 +241,9 @@ impl MinimapFrame {
                 PickupKind::PocketWatch => PickupTag::PocketWatch,
                 PickupKind::CleanSocks => PickupTag::CleanSocks,
                 PickupKind::GrowthSerum => PickupTag::GrowthSerum,
+                PickupKind::ShrinkDraught => PickupTag::ShrinkDraught,
+                PickupKind::WhiteCoat => PickupTag::WhiteCoat,
+                PickupKind::TheCollar => PickupTag::Collar,
             };
             self.markers.push(MapMarker {
                 cx: cx as f32,

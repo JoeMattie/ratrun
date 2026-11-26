@@ -273,7 +273,12 @@ pub fn enemy_steering_system(
         // Sewer: the Pipe Eel eases its velocity at half the rate (`floor_sewer`).
         // `None` for every other kind, so nothing else changes.
         let eel_before = crate::game::ecs::systems::floor_sewer::pipe_eel_before(&e);
-        e.steer(target, flow_dir, dt, speed_mult * glue * ink);
+        let chase = if player.buffs.collar > 0.0 && e.elite {
+            crate::game::ecs::systems::powerups::COLLAR_CHASE_MULT
+        } else {
+            1.0
+        };
+        e.steer(target, flow_dir, dt, speed_mult * glue * ink * chase);
         crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
         crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.

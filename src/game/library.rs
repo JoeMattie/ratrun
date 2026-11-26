@@ -371,6 +371,9 @@ fn pickup_name(k: PickupKind) -> &'static str {
         PickupKind::PocketWatch => "Pocket Watch",
         PickupKind::CleanSocks => "Clean Socks",
         PickupKind::GrowthSerum => "Growth Serum",
+        PickupKind::ShrinkDraught => "Shrink Draught",
+        PickupKind::WhiteCoat => "White Coat",
+        PickupKind::TheCollar => "The Collar",
     }
 }
 
@@ -653,16 +656,7 @@ pub fn all_rows() -> Vec<Row> {
 
     // ---- FIELD GUIDE ----------------------------------------------------
     const FINDS: &str = "POCKET FINDS";
-    for k in [
-        PickupKind::Heal,
-        PickupKind::Magnet,
-        PickupKind::Nuke,
-        PickupKind::BottleCap,
-        PickupKind::WindupMouse,
-        PickupKind::PocketWatch,
-        PickupKind::CleanSocks,
-        PickupKind::GrowthSerum,
-    ] {
+    for k in PickupKind::all() {
         let (hint, dossier) = pickup_text(k);
         rows.push(Row {
             key: Key::Pickup(k),
@@ -1571,6 +1565,18 @@ fn pickup_text(k: PickupKind) -> (&'static str, &'static str) {
              body under the rat is crushed where it stands. The picture grows; the \
              skeleton, the corridors and the rat-hole clearances do not.",
         ),
+        PickupKind::ShrinkDraught => (
+            "Rare drop · any floor",
+            "Grazes miss more often and you move faster. Your weapons keep their reach. +             Logged for a smaller cohort.",
+        ),
+        PickupKind::WhiteCoat => (
+            "Rare drop · any floor",
+            "You take no hits and your weapons pause. The coat is returned on exit.",
+        ),
+        PickupKind::TheCollar => (
+            "Rare drop · any floor",
+            "Gems pay double XP. Elites and the miniboss close faster. +             The tag still carries your number.",
+        ),
     }
 }
 
@@ -2269,6 +2275,21 @@ fn pickup_facts(k: PickupKind, f: &mut Facts) {
             f.push("TAKES", "half damage except contact");
             f.push("LASTS", format!("{:.0}s", powerups::GROWTH_SECS));
         }
+        PickupKind::ShrinkDraught => {
+            f.push("SIZE", format!("{:.2}×", powerups::SHRINK_SCALE));
+            f.push("HURT RADIUS", format!("{:.1} px", powerups::SHRINK_HURT_RADIUS));
+            f.push("MOVE SPEED", format!("+{:.0}%", (powerups::SHRINK_MOVE_MULT - 1.0) * 100.0));
+            f.push("LASTS", format!("{:.0}s", powerups::SHRINK_SECS));
+        }
+        PickupKind::WhiteCoat => {
+            f.push("EFFECT", "no hits taken or weapon use");
+            f.push("LASTS", format!("{:.0}s", powerups::WHITE_COAT_SECS));
+        }
+        PickupKind::TheCollar => {
+            f.push("GEM XP", format!("{:.0}×", powerups::COLLAR_XP_MULT));
+            f.push("ELITES AND MINIBOSS", format!("+{:.0}% move speed", (powerups::COLLAR_CHASE_MULT - 1.0) * 100.0));
+            f.push("LASTS", format!("{:.0}s", powerups::COLLAR_SECS));
+        }
     }
     f.push("FOUND", "the rare pickup roll");
     f.push("SHOWN AS", "a solid two-tone silhouette");
@@ -2870,16 +2891,7 @@ fn category_len(cat: Category) -> usize {
 }
 
 /// Every pickup kind, in discriminant order.
-const PICKUP_KINDS: [PickupKind; 8] = [
-    PickupKind::Heal,
-    PickupKind::Magnet,
-    PickupKind::Nuke,
-    PickupKind::BottleCap,
-    PickupKind::WindupMouse,
-    PickupKind::PocketWatch,
-    PickupKind::CleanSocks,
-    PickupKind::GrowthSerum,
-];
+const PICKUP_KINDS: [PickupKind; PickupKind::all().len()] = PickupKind::all();
 
 /// Rebuild a [`Key`] from its persisted `(category, kind)` pair, so
 /// [`Library::reveal_all`] can walk the whole table.

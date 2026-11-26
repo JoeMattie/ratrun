@@ -1891,6 +1891,9 @@ impl Bot {
                         5.0
                     }
                 }
+                PickupKind::ShrinkDraught => 5.0,
+                PickupKind::WhiteCoat => 3.5,
+                PickupKind::TheCollar => 4.5,
             };
             bonus += want * (1.0 - d / 190.0) * dir.dot((ppos - p).normalized());
         }

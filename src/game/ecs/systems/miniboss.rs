@@ -1206,7 +1206,12 @@ pub fn miniboss_system(
                     0.0
                 };
                 let range = mb.kind.engage_range_for(mb.signature());
-                if movement.advance(entity, id, &mut mb, &mut e, &level, ppos, range,
+                let chase_mult = if player.buffs.collar > 0.0 {
+                    super::powerups::COLLAR_CHASE_MULT
+                } else {
+                    1.0
+                };
+                if movement.advance(entity, id, &mut mb, &mut e, &level, ppos, range, chase_mult,
                     until_ready, dt, &mut particles)
                 {
                     mb.manoeuvre.motion = Motion::Roam;
@@ -1363,7 +1368,7 @@ pub(super) fn apply_strike(
     } else {
         mb.hit_this_strike
     };
-    if already_hit || !shape.contains(player.pos, crate::game::ecs::constants::PLAYER_RADIUS) {
+    if already_hit || !shape.contains(player.pos, player.buffs.hurt_radius()) {
         return false;
     }
     // Consecutive passes and drops are separate hits. Ignore only the

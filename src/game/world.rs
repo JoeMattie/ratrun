@@ -2642,6 +2642,9 @@ impl World {
                         | PickupKind::PocketWatch
                         | PickupKind::CleanSocks
                         | PickupKind::GrowthSerum
+                        | PickupKind::ShrinkDraught
+                        | PickupKind::WhiteCoat
+                        | PickupKind::TheCollar
                 );
                 let gr = (if is_pocket { 6.0 } else { 7.0 } + pulse * 3.5) as i32;
                 let grf = gr as f32;
@@ -3098,10 +3101,13 @@ impl World {
         const HOSTILE: (u8, u8, u8) = (255, 120, 60);
         const BOSS: (u8, u8, u8) = (255, 220, 60);
 
-        // The rat: the exact circle `resolve_circle` and contact damage use.
+        // The body circle, plus the smaller hurt disc while shrunk.
         {
             let s = self.w2s(self.player.pos, cam);
             pb.ring(s.0, s.1, PLAYER_RADIUS.round() as i32, PLAYER);
+            if self.player.buffs.tiny > 0.0 {
+                pb.ring(s.0, s.1, self.player.buffs.hurt_radius().round() as i32, HOSTILE);
+            }
         }
 
         // Enemies and minibosses.
@@ -3620,18 +3626,15 @@ impl World {
         );
         // The giant is lit as a body five times the size (a slow dome), not as
         // the small rat's.
-        let giant = giant_draw_scale(self.player.buffs.giant);
-        let pen = pb.set_pen(if giant.is_some_and(|s| s > 1.5) {
+        let scale = giant_draw_scale(self.player.buffs.giant)
+            .or_else(|| tiny_draw_scale(self.player.buffs.tiny));
+        let pen = pb.set_pen(if scale.is_some_and(|s| s > 1.5) {
             crate::render::lighting::giant_rat_pen()
         } else {
             crate::render::lighting::rat_pen()
         });
-        // Growth Serum (batch 13): while the find runs, the giant rat is drawn
-        // directly at high resolution (`art_rat_giant::draw_giant_rat`) across
-        // `scale` 1.0..=5.0. The camera, the zoom and everything else are
-        // untouched.
-        match giant {
-            Some(scale) => self.draw_giant_rat(pb, cam, scale, flash),
+        match scale {
+            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash),
             None => art_rat::draw_rat_with_whip(
                 pb,
                 &self.player,
@@ -3641,6 +3644,17 @@ impl World {
                 lash,
                 Some(&self.whip_chain),
             ),
+        }
+        if self.player.buffs.collar > 0.0 {
+            let face = self.player.face.normalized();
+            let neck = self.player.pos + face * (2.0 * scale.unwrap_or(1.0));
+            let (x, y) = self.w2s(neck, cam);
+            let glint = if (self.elapsed * 6.0) as i32 % 3 == 0 {
+                (255, 240, 180)
+            } else {
+                PickupKind::TheCollar.color()
+            };
+            pb.plot(x, y, glint);
         }
         pb.set_pen(pen);
         if self.whip_chain.is_active() {
@@ -3678,8 +3692,7 @@ impl World {
         }
     }
 
-    /// **Growth Serum**: the rat, drawn procedurally at up to five times its
-    /// ordinary size (`scale` in `1.0..=5.0`).
+    /// Draw the rat procedurally at the current size buff's scale.
     ///
     /// Calls [`art_rat_giant::draw_giant_rat`] directly into the scene buffer so
     /// the giant rat renders at full detail rather than as a nearest-neighbour
@@ -3690,7 +3703,7 @@ impl World {
     ///
     /// Render-only: it reads the player, the frame clock and the render-only
     /// whip chain, and writes pixels.
-    fn draw_giant_rat(&self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
+    fn draw_scaled_rat(&self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
         art_rat_giant::draw_giant_rat(pb, &self.player, self.elapsed, cam, scale, tail_flash);
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
@@ -4256,6 +4269,18 @@ pub fn giant_draw_scale(buff_left: f32) -> Option<f32> {
         }
     }
     Some(scale.max(1.0))
+}
+
+fn tiny_draw_scale(buff_left: f32) -> Option<f32> {
+    use crate::game::ecs::systems::powerups as p;
+    if buff_left <= 0.0 {
+        return None;
+    }
+    let elapsed = (p::SHRINK_SECS - buff_left).max(0.0);
+    let ramp = elapsed.min(buff_left).min(p::SHRINK_RAMP_SECS) / p::SHRINK_RAMP_SECS;
+    let blink = buff_left <= p::SHRINK_BLINK_SECS && (buff_left * 6.0) as i32 % 2 == 0;
+    let target = if blink { p::SHRINK_BLINK_SCALE } else { p::SHRINK_SCALE };
+    Some(1.0 - (1.0 - target) * ramp)
 }
 
 /// Fraction of max HP a nest revive (`meta::Track::Revive`) stands the rat back
@@ -5091,6 +5116,20 @@ mod zoom_tests {
         }
         assert!(seen[0] && seen[1], "the warning blink never showed both sizes");
         assert_eq!(giant_draw_scale(0.0), None);
+    }
+
+    #[test]
+    fn shrink_draught_draw_scale_eases_and_blinks() {
+        use crate::game::ecs::systems::powerups as p;
+        let scale = |left| tiny_draw_scale(left).unwrap();
+        assert_eq!(tiny_draw_scale(0.0), None);
+        assert_eq!(scale(p::SHRINK_SECS), 1.0);
+        let halfway = scale(p::SHRINK_SECS - p::SHRINK_RAMP_SECS * 0.5);
+        assert!((halfway - (1.0 + p::SHRINK_SCALE) * 0.5).abs() < 1e-5);
+        assert!((scale(8.0) - p::SHRINK_SCALE).abs() < 1e-6);
+        assert_eq!(scale(1.4), p::SHRINK_BLINK_SCALE);
+        assert!((scale(1.6) - p::SHRINK_SCALE).abs() < 1e-6);
+        assert!(scale(0.01) > 0.95);
     }
 
     /// Mean luminance of the `2r × 2r` block of screen pixels around `(cx, cy)`

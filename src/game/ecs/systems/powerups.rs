@@ -126,6 +126,18 @@ pub const GIANT_MOVE_MULT: f32 = 0.9;
 /// scales every amplitude down by `world::SHAKE_SCALE` already).
 pub const GIANT_STOMP_SHAKE: f32 = 3.5;
 
+pub const SHRINK_SECS: f32 = 12.0;
+pub const SHRINK_SCALE: f32 = 0.35;
+pub const SHRINK_RAMP_SECS: f32 = 0.3;
+pub const SHRINK_BLINK_SECS: f32 = 2.0;
+pub const SHRINK_BLINK_SCALE: f32 = 0.5;
+pub const SHRINK_HURT_RADIUS: f32 = 1.5;
+pub const SHRINK_MOVE_MULT: f32 = 1.15;
+pub const WHITE_COAT_SECS: f32 = 5.0;
+pub const COLLAR_SECS: f32 = 16.0;
+pub const COLLAR_XP_MULT: f32 = 2.0;
+pub const COLLAR_CHASE_MULT: f32 = 1.3;
+
 /// World px the rat walks between two little heel prints.
 const SOCK_PRINT_SPACING: f32 = 9.0;
 
@@ -218,6 +230,15 @@ pub fn powerups_system(
     }
     if expired[4] {
         vfx::emit_buff_expire(&mut particles, ppos, PickupKind::GrowthSerum);
+    }
+    for (did_expire, kind) in [
+        (expired[5], PickupKind::ShrinkDraught),
+        (expired[6], PickupKind::WhiteCoat),
+        (expired[7], PickupKind::TheCollar),
+    ] {
+        if did_expire {
+            vfx::emit_buff_expire(&mut particles, ppos, kind);
+        }
     }
 
     // 2. Materialise a Wind-up Mouse collected since the last tick: move the
@@ -344,7 +365,7 @@ pub fn giant_stomp_system(
 ) {
     // Not giant: the beat is parked at zero, so a find always opens on a fresh
     // stomp (the first crush lands on the tick the serum's first beat is up).
-    if !player.buffs.is_giant() {
+    if !player.buffs.is_giant() || player.buffs.weapons_suspended() {
         *beat = 0.0;
         return;
     }
@@ -523,6 +544,201 @@ mod tests {
     fn enemy_pos(w: &mut World, e: Entity) -> Vec2 {
         let mut q = w.ecs.query::<&Enemy>();
         q.get(&w.ecs, e).expect("enemy alive").pos
+    }
+
+    #[test]
+    fn new_pickup_timers_refresh_and_expire_on_simulation_time() {
+        use crate::game::player::Buffs;
+
+        let mut w = open_arena(719);
+        let cases: [(PickupKind, f32, fn(&Buffs) -> f32); 3] = [
+            (PickupKind::ShrinkDraught, SHRINK_SECS, |b| b.tiny),
+            (PickupKind::WhiteCoat, WHITE_COAT_SECS, |b| b.white_coat),
+            (PickupKind::TheCollar, COLLAR_SECS, |b| b.collar),
+        ];
+        for (kind, secs, left) in cases {
+            collect(&mut w, kind);
+            assert_eq!(left(&w.player.buffs), secs);
+            buff_tick(&mut w);
+            assert!((left(&w.player.buffs) - (secs - DT)).abs() < 1e-5);
+            collect(&mut w, kind);
+            assert_eq!(left(&w.player.buffs), secs);
+            for dt in [secs - 0.125, 0.125] {
+                assert!(left(&w.player.buffs) > 0.0);
+                w.begin_tick(dt, Vec2::ZERO, false);
+                w.ecs.run_system_cached(powerups_system).unwrap();
+                w.end_tick();
+            }
+            assert_eq!(left(&w.player.buffs), 0.0);
+        }
+        assert!(!w.player.buffs.any());
+    }
+
+    #[test]
+    fn shrink_draught_avoids_grazes_but_not_direct_hits() {
+        for shrunk in [false, true] {
+            let mut w = open_arena(720);
+            if shrunk {
+                collect(&mut w, PickupKind::ShrinkDraught);
+            }
+            let p = w.player.pos;
+            let enemy = w.spawn_enemy(EnemyKind::Brute, p, 1.0);
+            let mut body = w.ecs.get_mut::<Enemy>(enemy).unwrap();
+            body.pos = p + Vec2::new(body.radius + 2.25, 0.0);
+            let graze = Bullet::new(
+                p + Vec2::new(0.0, 4.25),
+                Vec2::ZERO,
+                20.0,
+                Faction::Enemy,
+                (255, 0, 0),
+            );
+            w.spawn_bullet(graze);
+            w.player.iframes = 0.0;
+            let hp = w.player.hp;
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(combat::contact_system).unwrap();
+            w.end_tick();
+            assert_eq!(w.player.hp == hp, shrunk, "contact graze");
+
+            w.player.iframes = 0.0;
+            let hp = w.player.hp;
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(combat::enemy_bullet_hits_system).unwrap();
+            w.end_tick();
+            assert_eq!(w.player.hp == hp, shrunk, "pellet graze");
+
+            w.clear_bullets();
+            w.spawn_bullet(Bullet::new(p, Vec2::ZERO, 20.0, Faction::Enemy, (255, 0, 0)));
+            w.player.iframes = 0.0;
+            let hp = w.player.hp;
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(combat::enemy_bullet_hits_system).unwrap();
+            w.end_tick();
+            assert!(w.player.hp < hp, "a direct pellet must still land");
+        }
+    }
+
+    #[test]
+    fn shrink_draught_speeds_movement_and_preserves_weapon_output() {
+        use crate::game::ecs::systems::{player, weapons};
+        use crate::game::weapon::{Weapon, WeaponKind};
+
+        let trial = |shrunk| {
+            let mut w = open_arena(721);
+            if shrunk {
+                collect(&mut w, PickupKind::ShrinkDraught);
+            }
+            let mut spray = Weapon::new(WeaponKind::CheeseSpray);
+            spray.timer = 0.0;
+            w.player.loadout.weapons = vec![spray];
+            w.begin_tick(DT, Vec2::new(1.0, 0.0), false);
+            w.ecs.run_system_cached(player::player_system).unwrap();
+            w.ecs.run_system_cached(weapons::fire_weapons_system).unwrap();
+            w.end_tick();
+            let shots = w.bullets().iter().map(|b| (b.damage, b.vel, b.life)).collect::<Vec<_>>();
+            (w.player.vel.x, shots)
+        };
+        let (plain_speed, plain_shots) = trial(false);
+        let (tiny_speed, tiny_shots) = trial(true);
+        assert!(plain_speed > 0.0);
+        assert!((tiny_speed - plain_speed * SHRINK_MOVE_MULT).abs() < 1e-4);
+        assert!(!plain_shots.is_empty());
+        assert_eq!(tiny_shots, plain_shots);
+    }
+
+    #[test]
+    fn white_coat_blocks_incoming_hits_and_suspends_all_weapon_triggers() {
+        use crate::game::bullet::Orbit;
+        use crate::game::ecs::resources::{ActiveFx, LaserFx};
+        use crate::game::ecs::systems::{player, weapons, weapons_wave3b};
+        use crate::game::weapon::{Weapon, WeaponKind};
+
+        let mut w = open_arena(722);
+        collect(&mut w, PickupKind::WhiteCoat);
+        w.player.buffs.shield = BOTTLE_CAP_SECS;
+        w.player.iframes = 0.0;
+        let hp = w.player.hp;
+        assert!(!w.player.take_damage(20.0));
+        assert_eq!(w.player.hp, hp);
+        assert_eq!(w.player.buffs.shield, BOTTLE_CAP_SECS);
+        assert_eq!(w.player.iframes, 0.0);
+
+        w.player.loadout.weapons = [
+            WeaponKind::CheeseSpray,
+            WeaponKind::TailThrash,
+            WeaponKind::LaserEyes,
+            WeaponKind::SuperDash,
+        ]
+        .into_iter()
+        .map(|kind| Weapon { timer: 0.0, ..Weapon::new(kind) })
+        .collect();
+        let p = w.player.pos;
+        let enemy = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 10.0);
+        let target_hp = w.ecs.get::<Enemy>(enemy).unwrap().hp;
+        let mut spore = Bullet::new(p, Vec2::ZERO, 10.0, Faction::Player, (255, 0, 0));
+        spore.orbit = Some(Orbit { angle: 0.0, radius: 10.0, speed: 1.0 });
+        w.spawn_bullet(spore);
+        let trigger = |w: &mut World, dash| {
+            w.begin_tick_with(DT, Vec2::new(1.0, 0.0), dash, true);
+            w.ecs.run_system_cached(player::player_system).unwrap();
+            w.ecs.run_system_cached(weapons::fire_weapons_system).unwrap();
+            w.ecs.run_system_cached(weapons::active_weapons_system).unwrap();
+            w.ecs.run_system_cached(weapons_wave3b::laser_eyes_system).unwrap();
+            w.ecs.run_system_cached(weapons_wave3b::super_dash_system).unwrap();
+            w.ecs.run_system_cached(projectiles::bullets_system).unwrap();
+            w.end_tick();
+        };
+        trigger(&mut w, true);
+        assert!(w.player.dash_active > 0.0, "the ordinary dash is available");
+        assert!(w.bullets().is_empty());
+        assert_eq!(w.ecs.resource::<ActiveFx>().thrash_left, 0.0);
+        assert!(!w.ecs.resource::<LaserFx>().active());
+        assert_eq!(w.ecs.get::<Enemy>(enemy).unwrap().hp, target_hp);
+
+        w.player.buffs.white_coat = DT;
+        buff_tick(&mut w);
+        w.player.iframes = 0.0;
+        assert!(w.player.take_damage(20.0), "the Coat has expired");
+        assert_eq!(w.player.buffs.shield, 0.0, "the Cap takes the next hit");
+        trigger(&mut w, false);
+        assert!(!w.bullets().is_empty(), "auto-fire returns after expiry");
+        assert!(w.ecs.resource::<ActiveFx>().thrash_left > 0.0);
+        assert!(w.ecs.resource::<LaserFx>().active());
+    }
+
+    #[test]
+    fn collar_doubles_gem_xp_and_hastens_only_elites_and_the_miniboss() {
+        use crate::game::ecs::systems::miniboss::MinibossKind;
+        use crate::game::gem::Gem;
+
+        let trial = |collared| {
+            let mut w = open_arena(723);
+            if collared {
+                collect(&mut w, PickupKind::TheCollar);
+            }
+            let p = w.player.pos;
+            let at = p + Vec2::new(40.0, 0.0);
+            let ordinary = w.spawn_enemy(EnemyKind::Brute, at, 1.0);
+            let elite = w.spawn_enemy(EnemyKind::Brute, at, 1.0);
+            w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
+            let miniboss = w.spawn_miniboss(MinibossKind::Corkscrew, 0, p + Vec2::new(100.0, 0.0));
+            w.spawn_gem(Gem::new(p, 2));
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(super::super::miniboss::miniboss_system).unwrap();
+            w.ecs.run_system_cached(enemy_move::enemy_steering_system).unwrap();
+            w.ecs.run_system_cached(loot::gems_system).unwrap();
+            w.end_tick();
+            let speeds = [ordinary, elite, miniboss]
+                .map(|e| w.ecs.get::<Enemy>(e).unwrap().vel.len());
+            (w.player.xp, speeds)
+        };
+        let (xp, [normal, elite, miniboss]) = trial(false);
+        let (collared_xp, [collared_normal, collared_elite, collared_miniboss]) = trial(true);
+        assert_eq!((xp, collared_xp), (2, 4));
+        assert!(normal > 0.0 && elite > 0.0 && miniboss > 0.0);
+        assert_eq!(collared_normal, normal);
+        assert!((collared_elite - elite * COLLAR_CHASE_MULT).abs() < 1e-4);
+        assert!((collared_miniboss - miniboss * COLLAR_CHASE_MULT).abs() < 1e-4);
     }
 
     // ---- Bottle Cap ------------------------------------------------------
@@ -1354,10 +1570,7 @@ mod tests {
 
     // ---- Drop weights ----------------------------------------------------
 
-    /// The weighted table is the design's (Heal 32, Magnet 18, Nuke 4 + Growth
-    /// Serum 4 — the Nuke's bucket split between them, batch 13 — Bottle Cap
-    /// 14, Wind-up Mouse 10, Pocket Watch 9, Clean Socks 9) and every kind is
-    /// reachable. The total stays 100, so no other find's bucket moved.
+    /// The three new outcomes use two Heal buckets and one Nuke bucket.
     #[test]
     fn drop_weights_match_the_design() {
         use rand::rngs::StdRng;
@@ -1370,14 +1583,17 @@ mod tests {
         }
         let pct = |k: PickupKind| *counts.get(&k).unwrap_or(&0) as f32 * 100.0 / n as f32;
         for (kind, want) in [
-            (PickupKind::Heal, 32.0),
+            (PickupKind::Heal, 30.0),
             (PickupKind::Magnet, 18.0),
-            (PickupKind::Nuke, 4.0),
+            (PickupKind::Nuke, 3.0),
             (PickupKind::GrowthSerum, 4.0),
             (PickupKind::BottleCap, 14.0),
             (PickupKind::WindupMouse, 10.0),
             (PickupKind::PocketWatch, 9.0),
             (PickupKind::CleanSocks, 9.0),
+            (PickupKind::ShrinkDraught, 1.0),
+            (PickupKind::WhiteCoat, 1.0),
+            (PickupKind::TheCollar, 1.0),
         ] {
             let got = pct(kind);
             assert!(
@@ -1385,7 +1601,7 @@ mod tests {
                 "{kind:?} came up {got:.2}%, the design says {want}%"
             );
         }
-        assert_eq!(counts.len(), 8, "every kind must be reachable");
+        assert_eq!(counts.len(), PickupKind::all().len(), "every kind must be reachable");
     }
 
     /// A successful drop spends the same number of rng draws as before: the

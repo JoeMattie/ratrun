@@ -1016,6 +1016,9 @@ pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: 
         PickupKind::PocketWatch => draw_pocket_watch(pb, s, bob),
         PickupKind::CleanSocks => draw_clean_socks(pb, s, pulse),
         PickupKind::GrowthSerum => draw_growth_serum(pb, s, bob),
+        PickupKind::ShrinkDraught | PickupKind::WhiteCoat | PickupKind::TheCollar => {
+            super::art_pickups3::draw_pickup3(pb, s, kind, bob * 0.25);
+        }
     }
 }
 

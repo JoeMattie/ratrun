@@ -440,12 +440,15 @@ pub enum PickupTag {
     // ---- Batch 13: the giant-rat powerup, appended so the wave-3 tags keep
     // their discriminants.
     GrowthSerum,
+    ShrinkDraught,
+    WhiteCoat,
+    Collar,
 }
 
 impl PickupTag {
     /// Every icon this tag can draw, in legend order (chest first: it is the
     /// landmark the player walks back for).
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 12] = [
         Self::Chest,
         Self::Heal,
         Self::Magnet,
@@ -455,6 +458,9 @@ impl PickupTag {
         Self::PocketWatch,
         Self::CleanSocks,
         Self::GrowthSerum,
+        Self::ShrinkDraught,
+        Self::WhiteCoat,
+        Self::Collar,
     ];
 
     /// The single glyph that stands for this find on the expanded map and in
@@ -471,6 +477,9 @@ impl PickupTag {
             Self::PocketWatch => 'w',
             Self::CleanSocks => 's',
             Self::GrowthSerum => 'G',
+            Self::ShrinkDraught => 'T',
+            Self::WhiteCoat => 'W',
+            Self::Collar => 'K',
         }
     }
 
@@ -487,6 +496,9 @@ impl PickupTag {
             Self::PocketWatch => (150, 210, 226),
             Self::CleanSocks => (240, 240, 232),
             Self::GrowthSerum => (255, 88, 196),
+            Self::ShrinkDraught => (192, 235, 255),
+            Self::WhiteCoat => (255, 255, 248),
+            Self::Collar => (255, 201, 100),
         }
     }
 
@@ -502,6 +514,9 @@ impl PickupTag {
             Self::PocketWatch => "Pocket Watch",
             Self::CleanSocks => "Clean Socks",
             Self::GrowthSerum => "Growth Serum",
+            Self::ShrinkDraught => "Shrink Draught",
+            Self::WhiteCoat => "White Coat",
+            Self::Collar => "The Collar",
         }
     }
 }
@@ -2170,8 +2185,8 @@ fn draw_expanded_sidebar(
     }
 
     // Rare finds key: one glyph per walk-back-worthy object, so every icon the
-    // map stamps is named. Two columns when the rail is wide enough, so eight
-    // finds cost four rows instead of eight. The block needs its spacer, its
+    // map stamps is named. Two columns when the rail is wide enough.
+    // The block needs its spacer, its
     // header and at least one entry row above the status line (`y + 4`): with a
     // discovered maze on the 80×24 rail the old `y + 2` test printed a bare
     // `FINDS` header with nothing under it.
@@ -2186,7 +2201,8 @@ fn draw_expanded_sidebar(
         );
         y += 1;
         let two_col = max_w >= 30;
-        let col_w = if two_col { max_w / 2 } else { max_w };
+        // The right column has the longest labels, including Shrink Draught.
+        let col_w = if two_col { max_w / 2 - 1 } else { max_w };
         let mut i = 0usize;
         while i < PickupTag::ALL.len() && y + 2 < bottom {
             let per_row = if two_col { 2 } else { 1 };
@@ -2195,6 +2211,7 @@ fn draw_expanded_sidebar(
                     break;
                 };
                 let cx = x + (slot as u16) * (col_w as u16);
+                let label_w = if slot == 0 { col_w } else { max_w - col_w };
                 buf[(cx, y)].set_char(tag.glyph()).set_style(
                     Style::default()
                         .fg(palette::to_color(tag.rgb()))
@@ -2205,7 +2222,7 @@ fn draw_expanded_sidebar(
                     cx + 2,
                     y,
                     tag.label(),
-                    col_w.saturating_sub(2),
+                    label_w.saturating_sub(2),
                     Style::default().fg(COAT).bg(PLATE),
                 );
             }

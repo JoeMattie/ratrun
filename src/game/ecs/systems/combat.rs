@@ -124,6 +124,7 @@ use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{self, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
+#[cfg(test)]
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::ecs::resources::{
@@ -282,6 +283,7 @@ pub fn enemy_bullet_hits_system(
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     let ppos = player.pos;
+    let hurt_radius = player.buffs.hurt_radius();
     let mut hit = false;
     order_bullets(&bullets, &mut order);
     for &(_id, entity) in order.iter() {
@@ -291,7 +293,7 @@ pub fn enemy_bullet_hits_system(
         if b.faction != Faction::Enemy {
             continue;
         }
-        if collision::segment_circle_hit(b.prev_pos, b.pos, b.radius, ppos, PLAYER_RADIUS)
+        if collision::segment_circle_hit(b.prev_pos, b.pos, b.radius, ppos, hurt_radius)
             && player.take_damage(b.damage)
         {
             hit = true;
@@ -326,6 +328,7 @@ fn contact_one(
     hit_dmg: &mut f32,
     hit_kind: &mut Option<EnemyKind>,
     giant: bool,
+    hurt_radius: f32,
 ) {
     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
         return;
@@ -343,7 +346,7 @@ fn contact_one(
     if giant && crate::game::ecs::systems::powerups::giant_crushes(&e) {
         return;
     }
-    if e.contact_cd <= 0.0 && collision::circles_overlap(ppos, PLAYER_RADIUS, e.pos, e.radius) {
+    if e.contact_cd <= 0.0 && collision::circles_overlap(ppos, hurt_radius, e.pos, e.radius) {
         if e.damage > *hit_dmg {
             *hit_dmg = e.damage;
             *hit_kind = Some(e.kind);
@@ -385,11 +388,12 @@ pub fn contact_system(
     // `take_damage` returns false while i-frames are up. Skip the loop
     // entirely in that case so enemies do not spend their contact cooldown
     // (or get knocked back) for a hit that cannot land.
-    if player.iframes > 0.0 {
+    if player.iframes > 0.0 || player.buffs.white_coat > 0.0 {
         return;
     }
     // Growth Serum: ordinary bodies cannot bite the giant (see `contact_one`).
     let giant = player.buffs.is_giant();
+    let hurt_radius = player.buffs.hurt_radius();
     let mut hit_dmg = 0.0f32;
     let mut hit_kind: Option<EnemyKind> = None;
     // `EnemyIndex` was rebuilt by `enemy_move::grid_refresh_system` from the
@@ -416,6 +420,7 @@ pub fn contact_system(
                 &mut hit_dmg,
                 &mut hit_kind,
                 giant,
+                hurt_radius,
             );
         }
     } else {
@@ -431,6 +436,7 @@ pub fn contact_system(
                 &mut hit_dmg,
                 &mut hit_kind,
                 giant,
+                hurt_radius,
             );
         }
     }

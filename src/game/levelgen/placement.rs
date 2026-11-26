@@ -1294,31 +1294,21 @@ pub fn snap_spec(
     } else if roll < CHEST_ROLL + CHEESE_ROLL {
         TrapBait::Cheese
     } else {
-        // The valuable finds only (no common filler): Magnet, Nuke, Growth
-        // Serum, Bottle Cap, Pocket Watch and a big Heal, weighted by how much
-        // the run wants them. Batch 13's Growth Serum shares the Nuke's slot
-        // (one point each, so the total stays 13 and every bait whose roll is
-        // not a Nuke still reads the same) — it is as rare as the Nuke, which
-        // is what the design asked for.
-        const GOOD: [(PickupKind, u64); 6] = [
-            (PickupKind::Magnet, 3),
-            (PickupKind::Nuke, 1),
-            (PickupKind::GrowthSerum, 1),
-            (PickupKind::BottleCap, 3),
-            (PickupKind::PocketWatch, 3),
-            (PickupKind::Heal, 2),
-        ];
-        let total: u64 = GOOD.iter().map(|(_, w)| *w).sum();
-        let pick = splitmix64(h ^ 0x51ED_2701_9E37_79B9) % total;
-        let mut acc = 0;
-        let mut chosen = PickupKind::Magnet;
-        for (kind, weight) in GOOD {
-            acc += weight;
-            if pick < acc {
-                chosen = kind;
-                break;
-            }
-        }
+        // Keep the original 13 slots. Divide each into four using the same
+        // hash word, so only the donated Heal and Nuke outcomes can change.
+        let word = splitmix64(h ^ 0x51ED_2701_9E37_79B9);
+        let quarter = word / 13 % 4;
+        let chosen = match word % 13 {
+            0..=2 => PickupKind::Magnet,
+            3 if quarter == 0 => PickupKind::TheCollar,
+            3 => PickupKind::Nuke,
+            4 => PickupKind::GrowthSerum,
+            5..=7 => PickupKind::BottleCap,
+            8..=10 => PickupKind::PocketWatch,
+            11 if quarter == 0 => PickupKind::ShrinkDraught,
+            12 if quarter == 0 => PickupKind::WhiteCoat,
+            _ => PickupKind::Heal,
+        };
         TrapBait::Pickup(chosen)
     };
     // Hair trigger: always under a chest, ~12 % of the pickup baits and ~5 % of

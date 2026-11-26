@@ -184,7 +184,7 @@ pub fn hazards_system(
             if !grate.plume() || grate.player_struck {
                 continue;
             }
-            if !player_alive || !grate.covers(player_pos, PLAYER_RADIUS) {
+            if !player_alive || !grate.covers(player_pos, player.buffs.hurt_radius()) {
                 continue;
             }
             if player.take_damage(STEAM_DAMAGE) {
