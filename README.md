@@ -93,8 +93,6 @@ dark.*
   → (Lab | Printworks) → the Flatbed. Pack up to three powerups between sectors
   and choose your next door with Tab or a click. Clearing the Sewer opens
   Outfall practice. Sector select always offers Flatbed practice.
-- **Daily run.** The title's Daily follows Sewer → Kitchen → Lab → Flatbed
-  with a seed that changes at midnight UTC. Your best is saved for each day.
 - **Every floor has its own roster**: eight enemy kinds that unlock on the
   clock, from the first fodder to a third trick at 9:45, and its own four
   minibosses — 56 ordinary kinds and 28 named minibosses across seven floors.

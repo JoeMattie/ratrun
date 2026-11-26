@@ -141,19 +141,15 @@ const FANFARE_DELAY_SECS: f32 = 0.55;
 
 /// The keyboard walks the same rows as `menu::draw_title`.
 const TITLE_ROWS: usize = menu::TITLE_ROWS;
-const TITLE_SECTOR_ROW: usize = 2;
+const TITLE_SECTOR_ROW: usize = 1;
 const TITLE_ACTIONS: [Target; TITLE_ROWS] = [
     Target::Start,
-    Target::Daily,
     Target::Sectors,
     Target::Options,
     Target::Library,
     Target::Nest,
     Target::Quit,
 ];
-
-#[cfg(test)]
-const TEST_DAILY_DAY: u64 = 20_783; // 2026-11-26 UTC
 
 /// Environment pins for scripted runs (`0..=100`). They override the saved
 /// levels for the session without being written back over them.
@@ -422,10 +418,6 @@ pub struct App {
     /// The campaign run in flight (`None` on the title and during a practice
     /// run). It owns the carried loadout and the banked totals.
     campaign: Option<CampaignState>,
-    /// UTC day when the Daily began. The date and seed travel with the run.
-    daily_run_day: Option<u64>,
-    #[cfg(test)]
-    test_daily_day: u64,
     /// A single-sector practice run: the floor it plays alone. The campaign
     /// stage it belongs to is [`crate::game::campaign::theme_stage`].
     practice: Option<Theme>,
@@ -739,9 +731,6 @@ impl App {
             last_select_area: Rect::new(0, 0, 0, 0),
             menu_idx: 0,
             campaign: None,
-            daily_run_day: None,
-            #[cfg(test)]
-            test_daily_day: TEST_DAILY_DAY,
             practice: None,
             testbed: None,
             keep_route: None,
@@ -1152,22 +1141,7 @@ impl App {
     /// story dossier and then the access-route intro; a retry after a defeat
     /// skips the dossier.
     fn start_run(&mut self) {
-        self.start_campaign(true, None);
-    }
-
-    fn daily_day(&self) -> u64 {
-        #[cfg(test)]
-        {
-            self.test_daily_day
-        }
-        #[cfg(not(test))]
-        {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                / 86_400
-        }
+        self.start_campaign(true);
     }
 
     /// Set the rack caps the next run starts with (the persistent slot
@@ -1198,7 +1172,6 @@ impl App {
     /// the floor/apex counters and the revive/sting state. Called by every
     /// `start_*` (never by `enter_world`, which also runs for floor two).
     fn begin_run_bookkeeping(&mut self) {
-        self.daily_run_day = None;
         self.keep_route = None;
         self.banked = false;
         self.bank_tally = None;
@@ -1210,10 +1183,9 @@ impl App {
         }
     }
 
-    fn start_campaign(&mut self, via_story: bool, daily_day: Option<u64>) {
-        let seed = daily_day.map_or_else(|| self.seed(), campaign::daily_seed);
+    fn start_campaign(&mut self, via_story: bool) {
+        let seed = self.seed();
         self.begin_run_bookkeeping();
-        self.daily_run_day = daily_day;
         // The nest: the profile's permanent upgrades are compiled once here and
         // ride every floor (the campaign carries the loadout, modifiers and
         // all).
@@ -1448,7 +1420,7 @@ impl App {
         match self.practice {
             Some(theme) if self.testbed.is_some() => self.start_testbed(theme),
             Some(theme) => self.start_practice(theme),
-            None => self.start_campaign(false, self.daily_run_day),
+            None => self.start_campaign(false),
         }
     }
 
@@ -1462,7 +1434,6 @@ impl App {
         self.bank_the_run();
         self.world = None;
         self.campaign = None;
-        self.daily_run_day = None;
         self.practice = None;
         self.testbed = None;
         self.screen = Screen::Title;
@@ -3080,11 +3051,6 @@ impl App {
                 self.sfx(Sfx::UiSelect);
                 self.start_run();
             }
-            Some(Target::Daily) => {
-                let day = self.daily_day();
-                self.sfx(Sfx::UiSelect);
-                self.start_campaign(true, Some(day));
-            }
             Some(Target::Sectors) => {
                 self.sfx(Sfx::UiSelect);
                 // The select screen lists every floor — the getaway ride has a
@@ -4108,9 +4074,6 @@ impl App {
     }
 
     fn keep_route_options(&self) -> &'static [Theme] {
-        if self.daily_run_day.is_some() {
-            return &[];
-        }
         self.campaign
             .as_ref()
             .map(CampaignState::next_options)
@@ -4307,7 +4270,7 @@ impl App {
         if let (Some(camp), Some(w)) = (self.campaign.as_mut(), self.world.as_ref()) {
             // The route is chosen on this screen, so it has to be recorded
             // before the next level's world is built.
-            if let Some(route) = self.keep_route.filter(|_| self.daily_run_day.is_none()) {
+            if let Some(route) = self.keep_route {
                 camp.choose_route(route);
             }
             if camp.complete_level(w, &chosen).is_ok() {
@@ -4356,7 +4319,7 @@ impl App {
         match activated {
             Some(Target::Restart) => {
                 self.sfx(Sfx::UiSelect);
-                self.start_campaign(true, self.daily_run_day);
+                self.start_campaign(true);
             }
             Some(Target::Menu) => {
                 self.sfx(Sfx::UiSelect);
@@ -4863,7 +4826,6 @@ impl App {
             // The nest's banking tally, already computed by `finalize`.
             nest: self.bank_tally,
             console_used: self.console_cheat,
-            daily_day: self.daily_run_day,
         }
     }
 
@@ -4893,8 +4855,6 @@ impl App {
             // shows the numbers, labelled as tainted.
             if self.console_cheat {
                 self.new_best = false;
-            } else if let Some(day) = self.daily_run_day {
-                self.new_best = self.scores.record_daily(day, final_score);
             } else {
                 // "New high score" means it beat the table's best, computed
                 // before this run's entry is inserted (an under-full table is
@@ -4984,7 +4944,6 @@ impl App {
                     self.menu_idx,
                     floor,
                     unlocked,
-                    self.daily_day(),
                     &self.scores,
                     &self.rat_art,
                     &self.input.controls,
@@ -5009,7 +4968,6 @@ impl App {
                         self.menu_idx,
                         floor,
                         unlocked,
-                        self.daily_day(),
                         &self.scores,
                         &self.rat_art,
                         &self.input.controls,
@@ -5030,7 +4988,6 @@ impl App {
                     self.menu_idx,
                     floor,
                     unlocked,
-                    self.daily_day(),
                     &self.scores,
                     &self.rat_art,
                     &self.input.controls,
@@ -5052,7 +5009,6 @@ impl App {
                         self.menu_idx,
                         self.floor(),
                         self.sector_unlocked(),
-                        self.daily_day(),
                         &self.scores,
                         &self.rat_art,
                         &self.input.controls,
@@ -5091,7 +5047,6 @@ impl App {
                         self.menu_idx,
                         floor,
                         unlocked,
-                        self.daily_day(),
                         &self.scores,
                         &self.rat_art,
                         &self.input.controls,
@@ -5252,7 +5207,6 @@ impl App {
                         self.menu_idx,
                         floor,
                         unlocked,
-                        self.daily_day(),
                         &self.scores,
                         &self.rat_art,
                         &self.input.controls,
@@ -5276,7 +5230,6 @@ impl App {
                         self.menu_idx,
                         floor,
                         unlocked,
-                        self.daily_day(),
                         &self.scores,
                         &self.rat_art,
                         &self.input.controls,
@@ -5698,10 +5651,8 @@ impl App {
             ),
         };
         let list = {
-            let daily_stamp = self.daily_run_day.map(menu::daily_stamp);
             let view = campaign_ui::CampaignVictoryView {
                 menu_key: self.input.controls.action_label(Action::Quit),
-                daily_stamp: daily_stamp.as_deref(),
                 final_score: self.last_score,
                 total_time_secs: total_time,
                 total_kills,
@@ -6901,117 +6852,6 @@ mod tests {
         let text = h.frame(&[]);
         assert!(text.contains("START"), "title should show START RUN");
         assert!(text.contains("QUIT"));
-    }
-
-    #[test]
-    fn daily_uses_the_utc_day_at_activation_for_its_seed_and_route() {
-        let mut h = Harness::new(57, 20);
-        assert!(h.frame(&[]).contains("DAILY · 26 NOV"));
-        h.app.scores.record_daily(TEST_DAILY_DAY, 4_242);
-        assert!(h.frame(&[KeyCode::Down]).contains("DAILY BEST   4242"));
-        h.click("DAILY · 26 NOV");
-        let daily = h.app.campaign.as_ref().unwrap();
-        let seed = daily.run_seed;
-        assert_eq!(seed, 0xa88b_fa96_75a7_5e5a);
-        let route = daily.route;
-        assert_eq!(route, campaign::Route::ORIGINAL);
-
-        h.app.back_to_title();
-        h.frame(&[KeyCode::Enter]);
-        let same_day = h.app.campaign.as_ref().unwrap();
-        assert_eq!((same_day.run_seed, same_day.route), (seed, route));
-
-        h.app.back_to_title();
-        h.frame(&[]);
-        h.app.test_daily_day += 1;
-        // The title was last drawn before midnight. Activation reads the new day.
-        h.frame(&[KeyCode::Enter]);
-        let next_day = h.app.campaign.as_ref().unwrap();
-        assert_eq!(h.app.daily_run_day, Some(TEST_DAILY_DAY + 1));
-        assert_ne!(next_day.run_seed, seed);
-        assert_eq!(next_day.route, route);
-    }
-
-    #[test]
-    fn daily_locks_the_route_and_banks_a_campaign_victory() {
-        let mut h = Harness::new(57, 20);
-        h.frame(&[]);
-        h.click("DAILY · 26 NOV");
-        h.frame(&[KeyCode::Enter]); // Story → Map Intro
-        h.frame(&[KeyCode::Enter]); // Map Intro → Playing
-        let seed = h.app.campaign.as_ref().unwrap().run_seed;
-
-        for (index, theme) in [Theme::Sewer, Theme::Kitchen, Theme::Lab, Theme::Trailer]
-            .into_iter()
-            .enumerate()
-        {
-            assert!(matches!(h.app.screen, Screen::Playing));
-            let w = h.app.world.as_mut().unwrap();
-            assert_eq!((w.level_index, w.level.theme), (index, theme));
-            assert_eq!(w.level.seed, campaign::level_seed(seed, index));
-            w.gold = 37;
-            h.finish_level();
-
-            if campaign::is_final_level(index) {
-                break;
-            }
-            h.frame(&[KeyCode::Enter]);
-            assert!(matches!(h.app.screen, Screen::KeepThree));
-            let text = h.frame(&[KeyCode::Tab]);
-            assert!(!text.contains("Tab route"));
-            for i in 0..2 {
-                assert!(h.app.hits.rect_for(Target::RouteOption(i)).is_none());
-                h.app.update_keep_three(Some(Target::RouteOption(i)));
-            }
-            assert_eq!(h.app.keep_route, None);
-            h.frame(&[KeyCode::Char(' ')]); // pack Gnaw
-            h.frame(&[KeyCode::Enter]); // confirm pack
-            h.frame(&[KeyCode::Enter]); // skip intro
-        }
-
-        assert!(matches!(h.app.screen, Screen::Victory));
-        assert!(h.screen_text().contains("DAILY 26 NOV"));
-        let tally = h.app.bank_tally.unwrap();
-        assert_eq!(tally.purse, 37);
-        assert_eq!(tally.floor_bonus, 4 * meta::FLOOR_BONUS);
-        assert_eq!(tally.win_bonus, meta::WIN_BONUS);
-        assert_eq!(h.app.scores.meta.bank, tally.banked);
-        assert_eq!(h.app.scores.daily_best(TEST_DAILY_DAY), Some(h.app.last_score));
-        assert!(h.app.scores.entries.is_empty());
-    }
-
-    #[test]
-    fn daily_incident_report_keeps_the_start_date_and_console_runs_skip_the_best() {
-        let mut h = Harness::new(57, 20);
-        h.app.start_campaign(false, Some(TEST_DAILY_DAY));
-        h.frame(&[KeyCode::Enter]);
-        h.app.test_daily_day += 1;
-        {
-            let world = h.app.world.as_mut().unwrap();
-            world.player.hp = -1.0;
-            world.score = 1_200;
-        }
-        let text = h.frame(&[]);
-        assert!(matches!(h.app.screen, Screen::End));
-        assert!(text.contains("DAILY 26 NOV") && text.contains("NEW DAILY BEST"));
-        h.terminal.backend_mut().resize(80, 24);
-        assert!(h.frame(&[]).contains("DAILY 26 NOV"));
-        let best = h.app.last_score;
-        assert_eq!(h.app.scores.daily_best(TEST_DAILY_DAY), Some(best));
-        assert_eq!(h.app.scores.daily_best(TEST_DAILY_DAY + 1), None);
-
-        h.frame(&[KeyCode::Enter]); // retry stays on the same day's seed
-        assert_eq!(h.app.daily_run_day, Some(TEST_DAILY_DAY));
-        h.frame(&[KeyCode::Enter]); // Map Intro → Playing
-        h.app.console_flag_cheat();
-        let world = h.app.world.as_mut().unwrap();
-        world.player.hp = -1.0;
-        world.score = best + 1;
-        h.frame(&[]);
-        assert!(matches!(h.app.screen, Screen::End));
-        assert!(!h.app.new_best);
-        assert_eq!(h.app.scores.daily_best(TEST_DAILY_DAY), Some(best));
-        assert!(h.app.bank_tally.is_some_and(|tally| tally.voided));
     }
 
     /// The getaway ride is the sector row's fourth entry, and it fits at the
@@ -8698,33 +8538,6 @@ mod tests {
             }
             "title" => {
                 hh.frame(&[]);
-            }
-            "daily-keep" | "daily-end" | "daily-victory" => {
-                hh.app.start_campaign(false, Some(TEST_DAILY_DAY));
-                if target == "daily-victory" {
-                    let campaign = hh.app.campaign.as_mut().unwrap();
-                    campaign.level = campaign::LEVEL_COUNT - 1;
-                    let world = campaign.world();
-                    hh.app.enter_world(world, false);
-                }
-                hh.frame(&[KeyCode::Enter]);
-                {
-                    let world = hh.app.world.as_mut().unwrap();
-                    world.gold = 131;
-                    world.score = 1_200;
-                }
-                match target.as_str() {
-                    "daily-keep" => {
-                        hh.grant_keepables();
-                        hh.finish_level();
-                        hh.frame(&[KeyCode::Enter]);
-                    }
-                    "daily-end" => {
-                        hh.app.world.as_mut().unwrap().player.hp = -1.0;
-                        hh.frame(&[]);
-                    }
-                    _ => hh.finish_level(),
-                }
             }
             "story" => {
                 hh.frame(&[KeyCode::Char('l')]);
@@ -12145,48 +11958,39 @@ mod tests {
 
     // ---- The nest (permanent upgrades) ------------------------------------
 
-    /// Every drawn title row is reachable: the keyboard walks all seven in the
-    /// drawn order and Enter activates the selected one; a click on a row's
-    /// label does the same thing. START RUN is the default selection.
+    /// Keyboard and pad walk the six title rows in display order. Each row
+    /// can be activated by confirming the selection or clicking its rectangle.
     #[test]
-    fn every_title_row_is_selectable_by_keyboard_and_mouse_at_every_size() {
-        const ROWS: [(&str, &str); TITLE_ROWS] = [
-            ("START RUN", "run"),
-            ("DAILY · 26 NOV", "daily"),
-            ("Sector", "SectorSelect"),
-            ("OPTIONS", "Options"),
-            ("LIBRARY", "Library"),
-            ("THE NEST", "Nest"),
-            ("QUIT", "quit"),
+    fn every_title_row_is_selectable_at_every_size() {
+        use crate::controls::PadBind;
+        use crate::gamepad::PadEvent;
+
+        const ROWS: [(&str, Target, &str); 6] = [
+            ("START RUN", Target::Start, "Story"),
+            ("Sector", Target::Sectors, "SectorSelect"),
+            ("OPTIONS", Target::Options, "Options"),
+            ("LIBRARY", Target::Library, "Library"),
+            ("THE NEST", Target::Nest, "Nest"),
+            ("QUIT", Target::Quit, "Title"),
         ];
-        let landed = |h: &Harness, want: &str, how: &str, size: (u16, u16)| {
-            let name = h.app.screen.name_for_test();
-            match want {
-                "run" => assert!(
-                    name != "Title" && !h.app.should_quit && h.app.daily_run_day.is_none(),
-                    "{size:?} {how}: START RUN left the app on {name}"
-                ),
-                "daily" => {
-                    assert_eq!(name, "Story", "{size:?} {how}");
-                    assert_eq!(h.app.daily_run_day, Some(TEST_DAILY_DAY), "{size:?} {how}");
-                }
-                "quit" => assert!(h.app.should_quit, "{size:?} {how}: QUIT did not quit"),
-                other => assert_eq!(name, other, "{size:?} {how}: wrong screen"),
-            }
+        let landed = |h: &Harness, target: Target, want: &str, how: &str, size: (u16, u16)| {
+            assert_eq!(h.app.screen.name_for_test(), want, "{size:?} {how}: {target:?}");
+            assert_eq!(h.app.should_quit, target == Target::Quit, "{size:?} {how}: {target:?}");
         };
+        assert_eq!(TITLE_ROWS, ROWS.len());
         for size in [(57u16, 20u16), (80, 24), (120, 40)] {
             let mut first = Harness::new(size.0, size.1);
-            let text = first.frame(&[]);
+            first.frame(&[]);
             assert_eq!(first.app.menu_idx, 0, "START RUN is the default row");
-            // Every row is drawn, top to bottom in table order.
             let mut last_y = 0;
-            for (i, (label, _)) in ROWS.iter().enumerate() {
-                assert!(text.contains(label), "{size:?}: {label} is not drawn:\n{text}");
-                let (_, y) = first.locate(label);
-                assert!(i == 0 || y > last_y, "{size:?}: {label} is out of order");
+            for (i, (label, target, want)) in ROWS.into_iter().enumerate() {
+                let (x, y) = first.locate(label);
+                let rect = first.app.hits.rect_for(target).expect("title row hit rectangle");
+                assert_eq!(first.app.hits.at(x, y), Some(target), "{size:?}: {label}");
+                assert_eq!(rect.y, y, "{size:?}: {label}");
+                assert!(i == 0 || y == last_y + 1, "{size:?}: {label} is out of order");
                 last_y = y;
-            }
-            for (i, (label, want)) in ROWS.iter().enumerate() {
+
                 // Keyboard: Down i times, then Enter.
                 let mut h = Harness::new(size.0, size.1);
                 h.frame(&[]);
@@ -12194,22 +11998,39 @@ mod tests {
                     h.frame(&[KeyCode::Down]);
                 }
                 assert_eq!(h.app.menu_idx, i, "{size:?}: Down did not reach {label}");
-                assert_eq!(TITLE_ACTIONS.len(), ROWS.len());
                 h.frame(&[KeyCode::Enter]);
-                landed(&h, want, "keyboard", size);
-                // Mouse: a click on the row's own label.
+                landed(&h, target, want, "keyboard", size);
+
+                // Pad: each release gives the next press a fresh navigation step.
                 let mut h = Harness::new(size.0, size.1);
+                h.app.input.pad_event(PadEvent::Connected);
+                for _ in 0..i {
+                    h.app.input.begin_frame();
+                    h.app.input.pad_event(PadEvent::Button(PadBind::DPadDown, true));
+                    h.app.update(1.0 / 60.0);
+                    h.app.input.begin_frame();
+                    h.app.input.pad_event(PadEvent::Button(PadBind::DPadDown, false));
+                    h.app.update(1.0 / 60.0);
+                }
+                assert_eq!(h.app.menu_idx, i, "{size:?}: D-pad down did not reach {label}");
+                h.app.input.begin_frame();
+                h.app.input.pad_event(PadEvent::Button(PadBind::South, true));
+                h.app.update(1.0 / 60.0);
+                landed(&h, target, want, "pad", size);
+
+                // Click the row's leading cell, outside the sector arrows.
+                let mut h = Harness::new(size.0, size.1);
+                h.app.menu_idx = (i + 1) % TITLE_ROWS;
                 h.frame(&[]);
-                h.click(label);
-                landed(&h, want, "mouse", size);
+                let rect = h.app.hits.rect_for(target).expect("title row hit rectangle");
+                h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (rect.x, rect.y))]);
+                assert_eq!(h.app.menu_idx, i, "{size:?}: click did not select {label}");
+                landed(&h, target, want, "mouse", size);
             }
-            // Down wraps from QUIT back to START RUN.
-            let mut h = Harness::new(size.0, size.1);
-            h.frame(&[]);
-            for _ in 0..TITLE_ROWS {
-                h.frame(&[KeyCode::Down]);
-            }
-            assert_eq!(h.app.menu_idx, 0, "{size:?}: the rows do not wrap");
+            first.frame(&[KeyCode::Up]);
+            assert_eq!(first.app.menu_idx, TITLE_ROWS - 1, "{size:?}: Up did not wrap");
+            first.frame(&[KeyCode::Down]);
+            assert_eq!(first.app.menu_idx, 0, "{size:?}: Down did not wrap");
         }
     }
 
@@ -14349,7 +14170,6 @@ mod tests {
             h.screen_text().contains("01 Sewer") && !h.screen_text().contains('×'),
             "the Sewer is open, so the title row marks nothing locked"
         );
-        h.frame(&[KeyCode::Down]);
         h.frame(&[KeyCode::Down, KeyCode::Right]);
         assert!(
             h.screen_text().contains("02 Kitchen") && !h.screen_text().contains('×'),
@@ -15470,7 +15290,6 @@ mod tests {
     /// The title's OPTIONS row follows the sector row.
     fn title_to_options(h: &mut Harness) {
         h.frame(&[]);
-        h.frame(&[KeyCode::Down]);
         h.frame(&[KeyCode::Down]);
         h.frame(&[KeyCode::Down]);
         h.frame(&[KeyCode::Enter]);

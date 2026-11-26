@@ -111,8 +111,6 @@ pub enum Target {
     NestRow(usize),
     /// The nest's free refund-all row.
     NestRefund,
-    /// The title's dated Daily campaign row.
-    Daily,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -272,7 +270,7 @@ pub(crate) fn material(theme: Theme) -> palette::Rgb {
     }
 }
 
-pub const TITLE_ROWS: usize = 7;
+pub const TITLE_ROWS: usize = 6;
 
 pub fn title_art_width(area: Rect) -> Option<u32> {
     let rows = area.height.saturating_sub(24);
@@ -328,49 +326,6 @@ fn masthead(f: &mut Frame, r: Rect, large: bool, clock: usize) {
     }
 }
 
-/// Format a UTC day number as `26 NOV` for the Daily row and report stamps.
-fn daily_date(day: u64) -> String {
-    fn leap(year: u16) -> bool {
-        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
-    }
-
-    // The Gregorian calendar repeats every 400 years. Only the month and
-    // day are displayed, so each whole cycle can be dropped.
-    let mut days = day % 146_097;
-    let mut year = 1970;
-    loop {
-        let year_days = if leap(year) { 366 } else { 365 };
-        if days < year_days {
-            break;
-        }
-        days -= year_days;
-        year += 1;
-    }
-    let months = [
-        ("JAN", 31), ("FEB", if leap(year) { 29 } else { 28 }), ("MAR", 31),
-        ("APR", 30), ("MAY", 31), ("JUN", 30), ("JUL", 31), ("AUG", 31),
-        ("SEP", 30), ("OCT", 31), ("NOV", 30), ("DEC", 31),
-    ];
-    for (month, month_days) in months {
-        if days < month_days {
-            return format!("{:02} {month}", days + 1);
-        }
-        days -= month_days;
-    }
-    unreachable!("day within a Gregorian year");
-}
-
-pub(crate) fn daily_stamp(day: u64) -> String {
-    format!("DAILY {}", daily_date(day))
-}
-
-fn daily_best_line(scores: &ScoreTable, day: u64, accent: Color) -> Line<'static> {
-    let best = scores
-        .daily_best(day)
-        .map_or_else(|| "—".to_string(), |score| score.to_string());
-    Line::from(vec![label("DAILY BEST   ", accent), Span::styled(best, heavy(COAT))])
-}
-
 /// The title screen: wordmark, specimen art and the rows for starting a run.
 ///
 /// The sector row shows the selected sector and whether it is open. `←`/`→`
@@ -384,7 +339,6 @@ pub fn draw_title(
     choice: usize,
     sector: usize,
     sector_unlocked: bool,
-    daily_day: u64,
     scores: &ScoreTable,
     rat: &[String],
     controls_src: &Controls,
@@ -472,7 +426,6 @@ pub fn draw_title(
     };
     let rows: [(Target, String); TITLE_ROWS] = [
         (Target::Start, "START RUN".to_string()),
-        (Target::Daily, format!("DAILY · {}", daily_date(daily_day))),
         (Target::Sectors, sector_row),
         (Target::Options, "OPTIONS".to_string()),
         (Target::Library, "LIBRARY".to_string()),
@@ -515,15 +468,15 @@ pub fn draw_title(
         );
     }
     y += TITLE_ROWS as u16 + gap;
-    let best_line = if rows.get(choice).is_some_and(|(target, _)| *target == Target::Daily) {
-        daily_best_line(scores, daily_day, accent)
-    } else {
+    center(
+        f,
+        body,
+        y,
         Line::from(vec![
             label("BEST   ", accent),
             Span::styled(scores.best().to_string(), heavy(COAT)),
-        ])
-    };
-    center(f, body, y, best_line);
+        ]),
+    );
     if r.height >= 12 {
         let wide = r.width >= 72;
         let lines = legend;
@@ -1683,7 +1636,6 @@ pub fn draw_end(
     nest: Option<&crate::meta::BankTally>,
     // The live bindings: the chips name the keys that actually work.
     controls_src: &Controls,
-    daily_day: Option<u64>,
 ) {
     let (status, accent) = if won && practice {
         ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
@@ -1709,9 +1661,6 @@ pub fn draw_end(
         1,
         Span::styled(format!(" ▰▰  {status}  ▰▰ "), heavy(PLATE).bg(accent)),
     );
-    if let Some(day) = daily_day {
-        center(f, r, 2, Span::styled(daily_stamp(day), heavy(accent)));
-    }
     f.render_widget(
         Paragraph::new(lore_line)
             .centered()
@@ -1744,7 +1693,7 @@ pub fn draw_end(
         ),
     );
     if new_best {
-        center(f, r, 8, best_banner(daily_day));
+        center(f, r, 8, best_banner());
     }
     // The nest tally sits on row 9, under the numbers it came from. The plate
     // is at most 21 rows (19 of content), so the old `r.height >= 20` gate was
@@ -1767,20 +1716,15 @@ pub fn draw_end(
         table_shift = (lines.len() as u16).saturating_sub(1);
     }
     let table = centered_rect(35, inner.height, inner);
-    let entries = if let Some(day) = daily_day {
-        center(f, r, 10 + table_shift, daily_best_line(scores, day, accent));
-        &[][..]
-    } else {
-        // The header needs a row of its own above the chips.
-        if r.height > 11 + table_shift {
-            f.render_widget(
-                Line::styled("RK    SCORE   SECTOR         TIME", ink(accent)),
-                band(table, 10 + table_shift, 1),
-            );
-        }
-        scores.entries.as_slice()
-    };
-    for (i, e) in entries
+    // The header needs a row of its own above the chips.
+    if r.height > 11 + table_shift {
+        f.render_widget(
+            Line::styled("RK    SCORE   SECTOR         TIME", ink(accent)),
+            band(table, 10 + table_shift, 1),
+        );
+    }
+    for (i, e) in scores
+        .entries
         .iter()
         .take(usize::from(r.height.saturating_sub(12 + table_shift)).min(5))
         .enumerate()
@@ -1870,13 +1814,8 @@ fn end_chips(controls_src: &Controls) -> [String; 3] {
     ]
 }
 
-fn best_banner(daily_day: Option<u64>) -> Span<'static> {
-    let text = if daily_day.is_some() {
-        " ◆  NEW DAILY BEST  ◆ "
-    } else {
-        " ◆  NEW HIGH SCORE  ◆ "
-    };
-    Span::styled(text, heavy(TAIL))
+fn best_banner() -> Span<'static> {
+    Span::styled(" ◆  NEW HIGH SCORE  ◆ ", heavy(TAIL))
 }
 
 /// Snapshot of a completed run's metrics for the expanded end-of-run Incident Report.
@@ -1911,8 +1850,6 @@ pub struct RunSummary {
     pub nest: Option<crate::meta::BankTally>,
     /// The run used the admin console (no score or record was saved).
     pub console_used: bool,
-    /// UTC day the Daily run started, including when it crosses midnight.
-    pub daily_day: Option<u64>,
 }
 
 /// `SECTOR 2/3`, plus a `PRACTICE` marker for single-sector runs.
@@ -2653,7 +2590,6 @@ pub fn draw_end_summary(
             summary.practice,
             summary.nest.as_ref(),
             controls_src,
-            summary.daily_day,
         );
         return;
     }
@@ -2709,9 +2645,6 @@ pub fn draw_end_summary(
     }
     header_spans.push(Span::styled(format!("   GOLD {}", summary.gold), heavy(TRAIL_GOLD)));
     center(f, r, y_stamp, Line::from(header_spans));
-    if let Some(day) = summary.daily_day {
-        center(f, r, y_stamp + 1, Span::styled(daily_stamp(day), heavy(accent)));
-    }
 
     // Lore line.
     f.render_widget(
@@ -2829,7 +2762,7 @@ pub fn draw_end_summary(
 
     // New High Score banner or divider.
     if new_best {
-        center(f, r, y_best, best_banner(summary.daily_day));
+        center(f, r, y_best, best_banner());
     } else {
         f.render_widget(
             Line::styled(rule.as_str(), ink(TRACK)),
@@ -2889,22 +2822,16 @@ pub fn draw_end_summary(
 
     // Ranked Records leaderboard (highlight current run's entry).
     let table = centered_rect(41, inner.height, inner);
-    let entries = if let Some(day) = summary.daily_day {
-        center(f, r, y_table, daily_best_line(scores, day, accent));
-        &[][..]
-    } else {
-        f.render_widget(
-            Line::styled("   RK    SCORE   SECTOR         TIME", ink(accent)),
-            band(table, y_table, 1),
-        );
-        scores.entries.as_slice()
-    };
+    f.render_widget(
+        Line::styled("   RK    SCORE   SECTOR         TIME", ink(accent)),
+        band(table, y_table, 1),
+    );
     // Rows between the table head and the chips, less the spacer the unsplit
     // layout keeps above the chips (a split tally spends that spacer).
     let spacer = if y_table == y_arsenal + 2 { 3 } else { 2 };
     let max_rows = usize::from(r.height.saturating_sub(y_table + spacer)).min(5);
     let mut highlighted = false;
-    for (i, e) in entries.iter().take(max_rows).enumerate() {
+    for (i, e) in scores.entries.iter().take(max_rows).enumerate() {
         let s = e.time as u32;
         let is_this_run = !highlighted
             && e.score == summary.final_score
@@ -2962,20 +2889,6 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    #[test]
-    fn daily_date_uses_the_gregorian_calendar() {
-        for (day, label) in [
-            (0, "01 JAN"),
-            (11_016, "29 FEB"), // 2000 is a leap year.
-            (20_818, "31 DEC"),
-            (20_819, "01 JAN"),
-            (47_541, "01 MAR"), // 2100 is a common year.
-            (146_097, "01 JAN"),
-        ] {
-            assert_eq!(daily_date(day), label);
-        }
-    }
-
     fn screen_text(t: &Terminal<TestBackend>) -> String {
         t.backend()
             .buffer()
@@ -3000,7 +2913,6 @@ mod tests {
                     0,
                     0,
                     true,
-                    0,
                     &scores,
                     &rat,
                     controls,
@@ -3018,10 +2930,10 @@ mod tests {
         let controls = Controls::default();
         for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
             let (text, hits) = title_frame(w, h, &controls);
-            assert!(
-                hits.rect_for(Target::Story).is_some(),
-                "{w}x{h}: the story lost its click target"
-            );
+            let story = hits.rect_for(Target::Story).expect("story legend hit rectangle");
+            let quit = hits.rect_for(Target::Quit).expect("quit row hit rectangle");
+            assert!(story.y >= quit.bottom(), "{w}x{h}: the legend overlaps the menu");
+            assert!(text.contains("↑↓ select"), "{w}x{h}: the navigation hint is missing");
             for needle in ["Q quit", "L story"] {
                 let n = text.matches(needle).count();
                 assert_eq!(n, 1, "{w}x{h}: {needle:?} printed {n} times:\n{text}");
@@ -3168,7 +3080,6 @@ mod tests {
                         practice,
                         Some(&tally),
                         &Controls::default(),
-                        None,
                     );
                 })
                 .unwrap();
@@ -3191,7 +3102,7 @@ mod tests {
         t.draw(|f| {
             draw_end(
                 f, f.area(), won, 4200, 41, 312.0, 9, 180, false, "Lore.", &scores, &mut hits, 1,
-                Theme::Sewer, practice, Some(&tally), &Controls::default(), None,
+                Theme::Sewer, practice, Some(&tally), &Controls::default(),
             );
         })
         .unwrap();
@@ -3226,7 +3137,6 @@ mod tests {
             practice,
             console_used: tally.voided,
             nest: Some(tally),
-            daily_day: None,
         }
     }
 
@@ -3620,7 +3530,6 @@ mod tests {
             armor: 2.0,
             sector: 3,
             practice: false,
-            daily_day: None,
             nest: Some(crate::meta::BankTally {
                 raised: 240,
                 spent: 30,

@@ -14,7 +14,6 @@
 //!   relocks a floor). Files written before floors were tracked separately
 //!   store one record per campaign *stage*; they migrate to floors on load
 //!   (see [`CampaignProgress::migrate_legacy`]).
-//! * `daily_bests` — the highest finished score for each UTC day played.
 
 use std::collections::BTreeMap;
 
@@ -537,9 +536,6 @@ pub struct ScoreTable {
     /// the racks are 4 + 4 and no bonus applies).
     #[serde(default, deserialize_with = "deserialize_meta")]
     pub meta: crate::meta::MetaProfile,
-    /// Daily best scores, keyed by the UTC day number at the start of the run.
-    #[serde(default)]
-    pub daily_bests: BTreeMap<u64, u32>,
 }
 
 impl Default for ScoreTable {
@@ -560,7 +556,6 @@ impl Default for ScoreTable {
             auto_pick: false,
             graphics: GraphicsFile::default(),
             meta: crate::meta::MetaProfile::default(),
-            daily_bests: BTreeMap::new(),
         }
     }
 }
@@ -744,19 +739,6 @@ impl ScoreTable {
         score > self.best()
     }
 
-    pub fn daily_best(&self, day: u64) -> Option<u32> {
-        self.daily_bests.get(&day).copied()
-    }
-
-    /// Record the day's best score. A tie keeps the existing record.
-    pub fn record_daily(&mut self, day: u64, score: u32) -> bool {
-        if self.daily_best(day).is_some_and(|best| best >= score) {
-            return false;
-        }
-        self.daily_bests.insert(day, score);
-        true
-    }
-
     // ---- Floor progress (sector select) ---------------------------------
 
     /// Has `theme` been cleared in any run?
@@ -861,30 +843,23 @@ mod tests {
     }
 
     #[test]
-    fn daily_bests_are_independent_and_round_trip_through_the_save() {
-        let mut table = ScoreTable::default();
-        assert!(table.record_daily(20_783, 1_200));
-        assert!(!table.record_daily(20_783, 600));
-        assert!(!table.record_daily(20_783, 1_200));
-        assert!(table.record_daily(20_783, 1_400));
-        assert!(table.record_daily(20_784, 800));
-
-        let reloaded = ScoreTable::parse(&table.to_json());
-        assert_eq!(reloaded.daily_best(20_783), Some(1_400));
-        assert_eq!(reloaded.daily_best(20_784), Some(800));
-        assert_eq!(reloaded.daily_best(20_785), None);
-    }
-
-    #[test]
-    fn a_save_from_before_the_daily_keeps_its_scores_and_bank() {
+    fn legacy_save_loads_and_drops_retired_fields() {
         let json = r#"{
             "entries":[{"score":1200,"time":180.0,"level":7,"map":"Sewer","won":false}],
-            "meta":{"bank":250}
+            "meta":{"bank":250},
+            "daily_bests":{"20783":1400,"20784":800},
+            "daily_day":20784
         }"#;
-        let table: ScoreTable = serde_json::from_str(json).unwrap();
-        assert!(table.daily_bests.is_empty());
+
+        // Unknown fields load directly, without needing the save salvage path.
+        let _: ScoreTable = serde_json::from_str(json).unwrap();
+        let table = ScoreTable::parse(json);
         assert_eq!(table.best(), 1_200);
         assert_eq!(table.meta.bank, 250);
+        let saved: serde_json::Value = serde_json::from_str(&table.to_json()).unwrap();
+        let fields = saved.as_object().unwrap();
+        assert!(!fields.contains_key("daily_bests"));
+        assert!(!fields.contains_key("daily_day"));
     }
 
     #[test]

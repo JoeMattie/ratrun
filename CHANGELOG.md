@@ -28,9 +28,7 @@
 - **Shrink Draught.** A short-lived dose makes you smaller and quicker.
 - **White Coat.** Blocks incoming damage and suspends your weapons for 5s.
 - **The Collar.** Doubles gem XP while elites and the miniboss close in faster.
-- **Daily run.** A dated title row opens a seeded campaign through the Sewer,
-  Kitchen, Lab and Flatbed. It banks to the Nest and saves a local best for
-  each UTC day. The incident report and victory plate carry the start date.
+- Removed the Daily run
 - **Blackouts.** Indoor lamps go out for 8s at 5:00 and 11:00. The Lab's
   second outage moves to 7:30 and lasts 18s. Enemy glints, shots and attack
   warnings stay visible.
