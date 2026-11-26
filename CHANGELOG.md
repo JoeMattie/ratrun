@@ -1,19 +1,48 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-25)
 
-- **Foreground layer, second version.** The overhead things are few and big
-  now, and attached: pipes, ducts, rails and clotheslines run wall to wall,
-  hoods and arms reach in from a wall, lamps and hoists hang on cords that
-  leave the top of the view. The Flatbed gets roadside branches sweeping
-  past, power lines with passing poles, and cloud shadows. They thin out
-  around the rat and near a boss.
+Not signed or notarised on macOS: right-click the app and choose Open the
+first time.
+
+
+- **A Graphics page in Options.** Lighting quality, light effects, smoothing,
+  the foreground layer, glyph particles and screen shake, all saved between
+  sessions.
+- **Smoother picture at 1x.** Sprite and prop edges are rounded with part-cell
+  block glyphs (an xBR upscale fitted to sextants) where the terminal has
+  them. `SMOOTHING` on the Graphics page picks between six levels, including
+  an experimental wedge-glyph mode. Costs about 0.4 ms a frame at 120x40.
+- **Standing water.** The Sewers are very wet, the Laundry and Kitchen have
+  puddles, and the rat splashes through them. Lamps reflect in the water.
+- **Round-glyph particles.** Dust motes in lit rooms, sparks off hits, and
+  bubbles and steam from pipes and grates, drawn with small round glyphs.
+- **Hantavirus is deployed by droppings.** The rat leaves one behind it every
+  cycle; the first enemy to step in one takes the infection, which then jumps
+  down the pack as before.
+- **The Drake.** A big duck wanders into the Sewers from 2:30. It winds up,
+  shows you the lane, and pecks three times. It is slow to recover.
+- **The giant rat is drawn properly** at every size, instead of the small
+  sprite with its pixels doubled.
+- **Whip and laser reach stop at the screen edge.** Neither hits what you
+  cannot see.
+- **Gene splices last one sector.** Both sockets are empty again on the next
+  floor, so the shop matters every time.
+- **Loot markers shrink when the view is zoomed out.**
+- **MIT licence.**
+- **Foreground layer, rebuilt.** The overhead things are few, huge and
+  attached: pipes, ducts, rails and clotheslines run wall to wall, hoods and
+  arms reach in from a wall, lamps and hoists hang on cords that leave the top
+  of the view. They are drawn magnified, with chunky scaled-up pixels, and
+  thin out around the rat and near a boss. The Flatbed gets roadside branches
+  sweeping past, power lines with passing poles, and cloud shadows.
+  `FOREGROUND` on the Graphics page turns the layer off.
 
 - **Lighting effects.** Light pools are smooth instead of blocky, floors and
   walls take a little relief, wet and metal things catch the lamp, bodies
   throw soft shadows (one straight down, one from each nearby lamp), lamps
   put faint shafts and dust in the air, and wet floors carry a streak of the
-  lamp above them. All of it is restrained by design. `RATRUN_FX=0` (or the
+  lamp above them. Shadows, shafts, sheen and reflections were turned up after the first pass; bloom stays low. `RATRUN_FX=0` (or the
   console's `fx off`) restores the previous look exactly. Costs about a third
   of a millisecond a frame and a fifth to a third more terminal output.
 - **Laser Eyes** is now two beams that close inward like scissors, at every
