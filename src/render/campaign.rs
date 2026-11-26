@@ -1018,12 +1018,13 @@ fn panel(
     vline(buf, x0, y0 + 1, r.height - 2, '│', lit);
     vline(buf, x1, y0 + 1, r.height - 2, '│', dim);
 
-    if r.width > 5 && !caption.is_empty() {
-        put_str(buf, x0 + 2, y0, caption, r.width - 4, heavy(edge).bg(PLATE));
+    let cap_x = crate::render::stamp_build_version_on_border(buf, r);
+    if r.right() > cap_x + 2 && !caption.is_empty() {
+        put_str(buf, cap_x, y0, caption, r.right() - cap_x - 2, heavy(edge).bg(PLATE));
     }
     if let Some(rc) = right_caption {
         let rw = rc.chars().count() as u16;
-        let cap_end = x0 + 2 + caption.chars().count() as u16 + 2;
+        let cap_end = cap_x + caption.chars().count() as u16 + 2;
         if rw > 0 && x1 > cap_end + rw + 1 {
             put_str(buf, x1 - rw - 1, y0, rc, rw, ink(MUTED).bg(PLATE));
         }
@@ -1125,7 +1126,8 @@ fn stamp_header_pips(
     let y = panel_rect.y;
     let pips_w: u16 = 16;
     let x = panel_rect.right().saturating_sub(pips_w + 1);
-    let cap_end = panel_rect.x + 2 + caption.chars().count() as u16 + 2;
+    let cap_x = crate::render::border_caption_x(buf.area, panel_rect);
+    let cap_end = cap_x + caption.chars().count() as u16 + 2;
     if x <= cap_end {
         return;
     }
@@ -1868,8 +1870,13 @@ pub fn draw_keep_three_with<const ROUTES: usize>(
         }
     }
 
+    let has_route = view.route.iter().any(|chip| chip.is_some());
+    let cap_x = crate::render::border_caption_x(area, layout.panel_rect);
+    let cap_pad = cap_x.saturating_sub(layout.panel_rect.x);
     let mut cap = StackBuf::<64>::new();
-    if view.route.iter().flatten().count() == MAX_ROUTE_CHIPS && layout.panel_rect.width < 80 {
+    if (view.route.iter().flatten().count() == MAX_ROUTE_CHIPS && layout.panel_rect.width < 80)
+        || (has_route && layout.panel_rect.width < 68 + cap_pad)
+    {
         let _ = write!(cap, " PACK {} ", required);
     } else if layout.panel_rect.width >= 64 {
         let _ = write!(
@@ -1900,7 +1907,7 @@ pub fn draw_keep_three_with<const ROUTES: usize>(
         .map(|chip| chip.name.chars().count() as u16 + 3)
         .sum();
     let gold_w = gold_text.as_str().chars().count() as u16;
-    let header_need = 2 + cap.as_str().chars().count() as u16 + gold_w + 3 + chips_w + 3;
+    let header_need = cap_pad + cap.as_str().chars().count() as u16 + gold_w + 3 + chips_w + 3;
     let gold_in_caption =
         chips_w == 0 || layout.panel_rect.width < 40 || header_need <= layout.panel_rect.width;
     if gold_in_caption {
@@ -1918,7 +1925,7 @@ pub fn draw_keep_three_with<const ROUTES: usize>(
     // The stage pips share the top border with the route chips. The chips are
     // a control and the pips are decoration, so when both cannot fit the pips
     // go (the chips used to be painted over half of them).
-    let chips_end = layout.panel_rect.x + 2 + cap.as_str().chars().count() as u16 + 3 + chips_w;
+    let chips_end = cap_x + cap.as_str().chars().count() as u16 + 3 + chips_w;
     if chips_w == 0 || chips_end + 15 < layout.panel_rect.right() {
         stamp_header_pips(
             buf,
@@ -2500,10 +2507,9 @@ pub fn draw_keep_three_with<const ROUTES: usize>(
     // panel header, after the caption, so every layout (120x40, 80x24, 57x20)
     // shows the choice without losing a manifest row. Original route first;
     // Tab cycles, and the chips are clickable.
-    let has_route = view.route.iter().any(|chip| chip.is_some());
     if has_route && layout.panel_rect.width >= 40 {
         let y = layout.panel_rect.y;
-        let mut x = layout.panel_rect.x + 2 + cap.as_str().chars().count() as u16 + 3;
+        let mut x = cap_x + cap.as_str().chars().count() as u16 + 3;
         let room = layout.panel_rect.right().saturating_sub(3);
         for (i, chip) in view.route.iter().enumerate() {
             let Some(chip) = chip else { continue };
@@ -3619,7 +3625,7 @@ pub fn draw_level_select_with(
         .count();
 
     let mut cap = StackBuf::<48>::new();
-    if card.width >= 44 {
+    if card.width >= 58 {
         let _ = write!(cap, " CAMPAIGN   /   SELECT SECTOR ");
     } else {
         let _ = write!(cap, " SELECT SECTOR ");

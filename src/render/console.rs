@@ -61,13 +61,38 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console) {
         }
     }
 
-    // Title bar.
-    let title = " CONSOLE — ` to close · help for commands · Esc closes ";
+    // Title bar: build version at the left end, then the console heading.
+    let mut tx = panel.x;
+    let vw = crate::render::BUILD_VERSION.len() as u16;
+    if panel.width >= vw + 16 {
+        buf[(tx, panel.y)]
+            .set_char(' ')
+            .set_style(Style::default().bg(TITLE_BG).fg(crate::render::BUILD_VERSION_FG));
+        buf.set_stringn(
+            tx + 1,
+            panel.y,
+            crate::render::BUILD_VERSION,
+            vw as usize,
+            Style::default()
+                .bg(TITLE_BG)
+                .fg(crate::render::BUILD_VERSION_FG),
+        );
+        buf[(tx + 1 + vw, panel.y)]
+            .set_char(' ')
+            .set_style(Style::default().bg(TITLE_BG).fg(crate::render::BUILD_VERSION_FG));
+        tx += vw + 2;
+    }
+    let avail_title = panel.right().saturating_sub(tx) as usize;
+    let title = if avail_title >= 55 {
+        " CONSOLE — ` to close · help for commands · Esc closes "
+    } else {
+        " CONSOLE — ` to close · help · Esc closes "
+    };
     buf.set_stringn(
-        panel.x,
+        tx,
         panel.y,
         title,
-        panel.width as usize,
+        avail_title,
         Style::default()
             .bg(TITLE_BG)
             .fg(COAT)

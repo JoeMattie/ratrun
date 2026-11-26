@@ -66,6 +66,7 @@ compare the canvas with the intended cells. Collect frame timings with
 ## Worker rules (this repo, all agents)
 
 - **No compiling and no running.** Feature workers do not build, test, clippy, fmt or run the game. The coordinator or a designated integration worker merges and verifies the batch in the integration checkout. Write the code and the tests you would have run, and report what is unverified.
+- **Integration builds bump the patch version.** Every integration build bumps the third octet of `version` in `Cargo.toml` (`0.4.3` → `0.4.4` → …; `render::BUILD_VERSION` shows `env!("CARGO_PKG_VERSION")` in the top-left corner of every screen), moves the `Unreleased` entries in `CHANGELOG.md` under `## <version> (<YYYY-MM-DD>, playtest build)` with a fresh empty `## Unreleased` above, names that build number in its commit message and report, and installs the built release executable as `/Users/joe/dev/ratrun/target/playtest/ratrun`. Releases are tagged or published only when the owner asks.
 - **Finished workers are cleared from Orca.** Subtasks are deleted once they report, so do not leave work un-reported and do not start new work after reporting.
 
 ## Architecture
@@ -301,6 +302,7 @@ The scripted placements draw no simulation rng. The map pin includes the generat
 
 ## UI screens
 
+- **Build number** (`render::BUILD_VERSION = env!("CARGO_PKG_VERSION")`, `render::BUILD_VERSION_FG`): stamped dim and readable in the top-left corner of every screen (the top HUD rail's left end, top-row panel borders via `stamp_build_version_on_border`, `BACKDROP` plates via `stamp_build_version_corner`, the drop-down console title bar, and the `--ai` wall). Render-only; nothing in the simulation reads it.
 - **Title**: rat plate, START RUN, the sector row (all seven floors), OPTIONS, LIBRARY, THE NEST, QUIT, plus a controls legend that names the live dash key. `Story` (the intro crawl) opens from `L`.
 - **Sector select**: one card per floor with cleared/open/locked state and per-floor bests; picking a later floor starts a labelled **practice** run.
 - **Intros**: `MapIntro` is level 1's access-route card; `LevelIntro` is the plate for later levels.
@@ -373,4 +375,5 @@ When spinning up workers, use `/orchestration` to split the work across parallel
 ## Standing rules for workers in this repo
 
 - **Feature workers do not compile or run tests.** Do not run `cargo` (build, check, test, clippy, run, fmt), `rustc` or `rustfmt` in a worker checkout. The coordinator or a designated integration worker builds and verifies the batch in the integration checkout. Write the tests you would have run and say what is unverified.
+- **Integration builds bump the patch version.** Every integration bumps the patch number (`0.4.3` → `0.4.4` → …), adds its `CHANGELOG.md` section under `## <version> (<YYYY-MM-DD>, playtest build)` with a fresh empty `## Unreleased` above, names the build number in its commit message and report, and installs `/Users/joe/dev/ratrun/target/playtest/ratrun`; releases are tagged only when the owner asks.
 - **Finished workers are cleared from Orca.** Once a worker reports `worker_done` its subtask is deleted so the workspace stays readable. Do not leave work un-reported, and do not start new work after reporting.

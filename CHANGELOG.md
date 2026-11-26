@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.3 (2026-11-26, playtest build)
+
 - **Headlamp.** Illuminates your path for 18s and reveals it on the map.
   Ordinary enemies veer away from the middle of the beam.
 - **Growth Serum.** Longer strides and slower footfalls at giant size.
@@ -16,6 +18,7 @@
   lane and it takes more damage to bring down.
 - **The Sweeper.** Keep your distance and it may sprint at you. Watch
   the marked lane and strike when it stops for breath.
+- **Build number.** Shown in the top-left corner of every screen.
 
 ## 0.4.2 (2026-11-26)
 

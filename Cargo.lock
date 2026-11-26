@@ -2306,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "ratrun"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "bevy_ecs",

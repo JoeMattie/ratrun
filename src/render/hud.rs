@@ -1556,8 +1556,9 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         x.set(cur);
     };
 
-    let compact = !has_rack && area.width < 72 && weapons.len() > 3;
-    let tight = area.width < 64;
+    let compact = !has_rack && area.width < 78;
+    let tight = area.width < 68 || (!has_rack && area.width < 88);
+    let narrow_badge = compact || area.width < 64;
     let show_threat = if has_rack {
         area.width >= 72
     } else {
@@ -1573,12 +1574,24 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // characters (`SPACE` → `SPC`, the abbreviation the HUD has always used);
     // they must never print `SPC` for a key the player rebound.
     let ready_token = short_key_token(state.active_name.as_str(), area.width >= 80);
-    let show_icons = !tight || weapons.len() <= 3;
+    let show_icons = area.width >= 64 || weapons.len() <= 3;
     let show_streak = (if has_rack { area.width >= 68 } else { area.width >= 92 })
         && !state.streak_buf.is_empty();
 
     let value = Style::default().fg(COAT).add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(MUTED);
+
+    // 0. Build version at the left end of the top rail (`0.4.3`), shifting the
+    //    clock badge and telemetry right so nothing overlaps.
+    if area.width >= crate::render::BUILD_VERSION.len() as u16 + 12 {
+        put(
+            crate::render::BUILD_VERSION,
+            Style::default()
+                .fg(crate::render::BUILD_VERSION_FG)
+                .bg(PLATE),
+        );
+        put(" ", Style::default().bg(PLATE));
+    }
 
     // 1. Clock badge + countdown (or the boss-fight state after the boss time).
     let badge_bg = if clock_boss {
@@ -1591,18 +1604,18 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         accent
     };
     let badge_label = if clock_boss {
-        if compact {
+        if narrow_badge {
             "◆"
         } else {
             " ◆ "
         }
     } else if urgent {
-        if compact {
+        if narrow_badge {
             "!"
         } else {
             " ! "
         }
-    } else if compact {
+    } else if narrow_badge {
         "T"
     } else {
         " T "
@@ -1654,10 +1667,19 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     } else {
         value
     };
-    put(if compact { " Lv" } else { "  Lv" }, muted);
+    put(if tight { " Lv" } else { "  Lv" }, muted);
     put(&state.level, lv_style);
 
-    put(if compact { " KO" } else { "  KO " }, muted);
+    put(
+        if compact {
+            " KO"
+        } else if tight {
+            " KO "
+        } else {
+            "  KO "
+        },
+        muted,
+    );
     put(&state.kills, value);
     if show_streak {
         put(
@@ -1666,15 +1688,24 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         );
     }
 
-    put(if compact { " Score " } else { "  Score " }, muted);
+    put(if tight { " Score " } else { "  Score " }, muted);
     put(&state.score, value);
-    put(if area.width < 68 { " ◉" } else { "  Gold " }, muted);
+    put(
+        if area.width < 68 {
+            " ◉"
+        } else if tight {
+            " Gold "
+        } else {
+            "  Gold "
+        },
+        muted,
+    );
     put(&state.gold, Style::default().fg(TRAIL_GOLD).add_modifier(Modifier::BOLD));
 
     // 4. Inline single-row weapon rack (used when height < 3; taller HUDs draw
     //    the 2-row half-block pixel icon rack for weapons + passives below).
     if !has_rack {
-        put(if compact { " │" } else { "  │" }, Style::default().fg(EDGE));
+        put(if tight { " │" } else { "  │" }, Style::default().fg(EDGE));
         let fire_rate = world.player.loadout.stats.fire_rate_mult.max(0.1);
         // The caps run to 8 + 8 and this degenerate single-row rail cannot hold
         // them: the slots it must drop are counted in a `+N` marker at its end,
@@ -4426,6 +4457,53 @@ mod tests {
                 !rail.ends_with("S"),
                 "{tw}x{th}: the top rail clips a status word: {rail:?}"
             );
+        }
+    }
+
+    #[test]
+    fn top_rail_stamps_build_version_at_the_left_without_clipping_telemetry() {
+        let ver = crate::render::BUILD_VERSION;
+        let mut w = known_world();
+        w.gold = 47;
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, &w, &[], false);
+        state.tick(1.0 / 60.0, &w, &[], false);
+
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40), (57, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let top = Rect::new(0, 0, area.width, top_height(area));
+                    draw_top(f, top, &w, &mut state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let rail: String = (0..tw).map(|x| buf[(x, 0)].symbol()).collect();
+            let vw = ver.chars().count() as u16;
+            assert!(
+                rail.starts_with(ver) && buf[(vw, 0)].symbol() == " ",
+                "{tw}x{th}: top rail must start with {ver:?} + space: {rail:?}"
+            );
+            for x in 0..vw {
+                assert_eq!(
+                    buf[(x, 0)].fg,
+                    crate::render::BUILD_VERSION_FG,
+                    "{tw}x{th}: version cell {x} lost its dim fg"
+                );
+                assert_eq!(buf[(x, 0)].bg, PLATE);
+            }
+            assert!(rail.contains("13:55"), "{tw}x{th}: clock missing: {rail:?}");
+            assert!(rail.contains("Lv3"), "{tw}x{th}: level missing: {rail:?}");
+            assert!(rail.contains("42"), "{tw}x{th}: kills missing: {rail:?}");
+            assert!(rail.contains("Score 1234"), "{tw}x{th}: score missing: {rail:?}");
+            assert!(rail.contains("47"), "{tw}x{th}: gold missing: {rail:?}");
+            if th >= 20 {
+                assert!(
+                    rail.contains("SEWERS"),
+                    "{tw}x{th}: right-aligned floor pill fell off: {rail:?}"
+                );
+            }
         }
     }
 }

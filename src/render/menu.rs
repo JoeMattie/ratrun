@@ -231,8 +231,15 @@ pub(crate) fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect 
         let buf = f.buffer_mut();
         buf.set_style(band(r, 0, 1), ink(edge));
         buf.set_style(Rect::new(r.x, r.y, 1, r.height), ink(edge));
-        if r.width > 5 {
-            buf.set_stringn(r.x + 2, r.y, caption, (r.width - 4) as usize, heavy(edge));
+        let cap_x = crate::render::stamp_build_version_on_border(buf, r);
+        if r.right() > cap_x + 2 {
+            buf.set_stringn(
+                cap_x,
+                r.y,
+                caption,
+                (r.right() - cap_x - 2) as usize,
+                heavy(edge),
+            );
         }
     }
     inner
@@ -346,8 +353,14 @@ pub fn draw_title(
 ) {
     let tone = material(theme);
     let accent = to_color(tone);
-    let r = panel(f, area, " R-47   /   CONTAINMENT ", accent);
-    if area.width >= 53 && !area.is_empty() {
+    let title_cap = if area.width < 64 {
+        " R-47 / CONTAINMENT "
+    } else {
+        " R-47   /   CONTAINMENT "
+    };
+    let r = panel(f, area, title_cap, accent);
+    let cap_end = crate::render::border_caption_x(area, area) + title_cap.len() as u16;
+    if area.right() > cap_end + 23 && !area.is_empty() {
         f.buffer_mut().set_string(
             area.right() - 23,
             area.y,
@@ -873,9 +886,24 @@ pub fn draw_story(f: &mut Frame, area: Rect, time: f32, hits: &mut HitMap) {
     // Lower the exposure of the title behind the open file.
     f.buffer_mut()
         .set_style(area, ink(Color::Rgb(40, 48, 50)).bg(Color::Rgb(11, 15, 17)));
+    let card = centered_rect(69, 22, area);
+    if card.y > area.y && area.height > 0 {
+        let buf = f.buffer_mut();
+        if buf[(area.x, area.y)].symbol() == "┌" {
+            let vw = crate::render::BUILD_VERSION.len() as u16;
+            if area.width >= vw + 4 {
+                buf.set_style(
+                    Rect::new(area.x + 1, area.y, vw + 2, 1),
+                    ink(crate::render::BUILD_VERSION_FG).bg(Color::Rgb(11, 15, 17)),
+                );
+            }
+        } else {
+            crate::render::stamp_build_version_corner(buf, area, Color::Rgb(11, 15, 17));
+        }
+    }
     let r = panel(
         f,
-        centered_rect(69, 22, area),
+        card,
         " DOSSIER   /   CELL BLOCK C ",
         TAIL,
     );

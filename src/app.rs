@@ -5971,6 +5971,7 @@ fn miniboss_kind_named(
 /// Paint the near-black plate backdrop the campaign screens sit on.
 fn draw_backdrop(frame: &mut Frame, area: Rect) {
     frame.render_widget(Block::default().style(Style::default().bg(BACKDROP)), area);
+    crate::render::stamp_build_version_corner(frame.buffer_mut(), area, BACKDROP);
 }
 
 /// The single-cell glyph and tint for a passive, so the keep/intro cards mix
@@ -18157,4 +18158,145 @@ mod tests {
         assert!(pacer.idle(), "the Library never went idle on a still card");
     }
 
+    #[test]
+    fn every_screen_shows_the_build_version_in_the_top_left_at_all_sizes() {
+        let ver = crate::render::BUILD_VERSION;
+        assert_eq!(ver, env!("CARGO_PKG_VERSION"));
+        assert_eq!(ver.split('.').count(), 3);
+        let vw = ver.chars().count() as u16;
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let check_top_left = |hh: &mut Harness, label: &str| {
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+                let buf = hh.terminal.backend().buffer();
+                let top_row: String = (0..w).map(|x| buf[(x, 0)].symbol()).collect();
+                let left_window: String = (0..w.min(18)).map(|x| buf[(x, 0)].symbol()).collect();
+                let Some(byte) = left_window.find(ver) else {
+                    panic!(
+                        "{w}x{h} {label}: missing {ver:?} in top-left {left_window:?} (row: {top_row:?})"
+                    );
+                };
+                assert_eq!(
+                    top_row.matches(ver).count(),
+                    1,
+                    "{w}x{h} {label}: expected {ver:?} once on row 0, got {top_row:?}"
+                );
+                let col = left_window[..byte].chars().count() as u16;
+                for dx in 0..vw {
+                    assert_eq!(
+                        buf[(col + dx, 0)].fg,
+                        crate::render::BUILD_VERSION_FG,
+                        "{w}x{h} {label}: cell {} of {ver:?} lost its dim fg",
+                        col + dx
+                    );
+                }
+            };
+
+            // Title-hosted screens.
+            let mut hh = Harness::new(w, h);
+            check_top_left(&mut hh, "Title");
+            hh.app.screen = Screen::SectorSelect;
+            check_top_left(&mut hh, "SectorSelect");
+            hh.app.screen = Screen::Story;
+            check_top_left(&mut hh, "Story");
+            hh.app.open_options(Screen::Title);
+            check_top_left(&mut hh, "Options(Title)");
+            hh.app.open_controls();
+            check_top_left(&mut hh, "Controls(Title)");
+            hh.app.close_controls();
+            hh.app.open_graphics();
+            check_top_left(&mut hh, "Graphics(Title)");
+            hh.app.open_library(Screen::Title);
+            check_top_left(&mut hh, "Library(Title)");
+            hh.app.open_nest(Screen::Title);
+            check_top_left(&mut hh, "Nest(Title)");
+
+            // In-run HUD, overlays, pause-hosted sub-menus, campaign & end plates.
+            let mut run = Harness::new(w, h);
+            run.app.start_run();
+            run.app.screen = Screen::MapIntro;
+            check_top_left(&mut run, "MapIntro");
+            run.enter_playing();
+            check_top_left(&mut run, "Playing");
+            run.app.map_open = true;
+            check_top_left(&mut run, "Playing(Map)");
+            run.app.map_open = false;
+            run.app.screen = Screen::Paused;
+            check_top_left(&mut run, "Paused");
+            run.app.open_options(Screen::Paused);
+            check_top_left(&mut run, "Options(Paused)");
+            run.app.open_controls();
+            check_top_left(&mut run, "Controls(Paused)");
+            run.app.close_controls();
+            run.app.open_graphics();
+            check_top_left(&mut run, "Graphics(Paused)");
+            run.app.open_library(Screen::Paused);
+            check_top_left(&mut run, "Library(Paused)");
+            run.app.open_nest(Screen::Paused);
+            check_top_left(&mut run, "Nest(Paused)");
+
+            {
+                let loadout = &run.app.world.as_ref().unwrap().player.loadout;
+                run.app.levelup_choices = vec![
+                    Upgrade::Passive(PassiveKind::Damage),
+                    Upgrade::Passive(PassiveKind::Armor),
+                    Upgrade::Passive(PassiveKind::Magnet),
+                ];
+                run.app.levelup_desc = run
+                    .app
+                    .levelup_choices
+                    .iter()
+                    .map(|up| loadout.describe(up))
+                    .collect();
+            }
+            run.app.screen = Screen::LevelUp;
+            check_top_left(&mut run, "LevelUp");
+
+            run.app.chest_reward = Some(crate::game::loadout::ChestReward::Gold(25));
+            run.app.screen = Screen::Chest;
+            check_top_left(&mut run, "Chest");
+
+            run.app.screen = Screen::Shop;
+            check_top_left(&mut run, "Shop");
+
+            run.app.screen = Screen::LevelIntro;
+            check_top_left(&mut run, "LevelIntro");
+
+            run.grant_keepables();
+            run.app.keep_entries = entries_for(&run.keepables());
+            run.app.keep_selected = vec![false; run.app.keep_entries.len()];
+
+            run.app.screen = Screen::LevelComplete;
+            check_top_left(&mut run, "LevelComplete");
+
+            std::sync::Arc::make_mut(&mut run.app.tuning.values).campaign.carry = false;
+            run.app.screen = Screen::KeepThree;
+            check_top_left(&mut run, "KeepThree(SectorTransfer)");
+            run.enable_legacy_carry();
+            check_top_left(&mut run, "KeepThree(Manifest)");
+
+            run.app.screen = Screen::End;
+            check_top_left(&mut run, "End");
+
+            run.app.screen = Screen::Victory;
+            check_top_left(&mut run, "Victory");
+
+            run.app.open_nest(Screen::Victory);
+            check_top_left(&mut run, "Nest(Victory)");
+
+            run.app.console.open_panel();
+            run.app.console.anim = 1.0;
+            check_top_left(&mut run, "Console");
+        }
+
+        // The `--ai` spectator wall stamps the same version in its top-left corner.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let wall = crate::spectate::WallState::new(4);
+            let area = Rect::new(0, 0, 80, 24);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            crate::spectate::render_wall(&mut buf, area, &wall);
+            let head: String = (0..vw).map(|x| buf[(x, 0)].symbol()).collect();
+            assert_eq!(head, ver);
+        }
+    }
 }

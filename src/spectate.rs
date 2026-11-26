@@ -604,6 +604,9 @@ pub fn render_wall(buf: &mut Buffer, area: Rect, wall: &WallState) {
             }
         }
     }
+    if area.height >= 2 {
+        crate::render::stamp_build_version_corner(buf, area, palette::PLATE);
+    }
 }
 
 /// Rows a tile gives up for its caption (zero on very short tiles).
@@ -2399,5 +2402,29 @@ mod tests {
         // The summary strip below the grid belongs to no game.
         assert_eq!(state.game_at(area, 78, 23), None);
         assert_eq!(state.game_at(area, 200, 200), None);
+    }
+
+    #[test]
+    fn wall_stamps_build_version_in_top_left_grid_and_zoom() {
+        let ver = crate::render::BUILD_VERSION;
+        let vw = ver.chars().count() as u16;
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            for zoom in [None, Some(0)] {
+                let mut state = wall(4);
+                state.zoom = zoom;
+                let area = Rect::new(0, 0, tw, th);
+                let mut buf = Buffer::empty(area);
+                render_wall(&mut buf, area, &state);
+                let head: String = (0..vw).map(|x| buf[(x, 0)].symbol()).collect();
+                assert_eq!(head, ver, "{tw}x{th} zoom={zoom:?}: missing build version");
+                for x in 0..vw {
+                    assert_eq!(
+                        buf[(x, 0)].fg,
+                        crate::render::BUILD_VERSION_FG,
+                        "{tw}x{th} zoom={zoom:?}: cell {x} fg"
+                    );
+                }
+            }
+        }
     }
 }
