@@ -142,6 +142,13 @@ pub(crate) fn cloth_pen() -> u8 {
     pen(MaterialKind::Cloth, false, 0)
 }
 
+/// The matte, non-creature pen for a Hantavirus dropping pellet so lighting
+/// effects (bump, specular, reflections, water glints) never glaze the dark
+/// pellet green even on wet tile or inside a puddle.
+pub(crate) fn dropping_pen() -> u8 {
+    pen(MaterialKind::Fur, false, 0)
+}
+
 /// What an ordinary enemy is made of. The materials are the contract's
 /// reading of `WAVE4_ROSTERS.md`: wet and shiny bodies are Slime, chitin and
 /// carapace are Shell, matte coats and wings are Fur (rim light only), keys,
