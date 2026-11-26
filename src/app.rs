@@ -369,6 +369,8 @@ struct PictureKey {
     shake: u32,
     /// Scheduled fixture attenuation, in bits, derived from the floor clock.
     blackout: u32,
+    /// Render-only level-up ring timer on the rat (`World::level_up_ring`, bits).
+    level_ring: u32,
 }
 
 impl PictureKey {
@@ -386,6 +388,7 @@ impl PictureKey {
             fx: w.lighting_fx,
             shake: w.shake_scale.to_bits(),
             blackout: w.blackout().to_bits(),
+            level_ring: w.level_up_ring.to_bits(),
         }
     }
 }
@@ -4533,12 +4536,18 @@ impl App {
     }
 
     /// Tell the player what the auto-pick took, in the HUD callout area: the
-    /// card's icon, its name and its new rank (`AUTO  Cheese Spray Lv3`).
+    /// new character level, the card's icon, its name and its new rank
+    /// (`LEVEL 8 · AUTO` / `Cheese Spray Lv3`).
     fn toast_auto_pick(&mut self, label: &str, icon: &'static crate::game::art_icons::Icon) {
+        let lvl = self
+            .world
+            .as_ref()
+            .map_or(1, |w| w.player.level.saturating_sub(w.pending_levelups).max(1));
+        let tag = format!("LEVEL {lvl} · AUTO");
         self.hud.push_callout_with_icon(
             hud::CalloutKind::AutoPick,
             Some(icon),
-            "AUTO",
+            &tag,
             label,
             AUTO_PICK_TOAST_SECS,
         );
@@ -5770,6 +5779,7 @@ impl App {
                 w.foreground = self.foreground;
                 w.lighting_fx = self.fx;
                 w.shake_scale = self.shake_scale;
+                w.level_up_ring = self.hud.level_ring;
                 let key = PictureKey::of(w, self.run_counter, &self.pixels);
                 if self.picture_dirty || self.picture_key != Some(key) {
                     w.draw(&mut self.pixels);
@@ -11926,6 +11936,13 @@ mod tests {
         h.app.set_shake_scale(1.0);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 5, "the shake share must redraw");
+        // The render-only level-up ring is drawn in `World::draw_scene`, so a
+        // change to `hud.level_ring` redraws once and stays frozen while paused.
+        h.app.hud.level_ring = hud::LEVEL_RING_SECS * 0.5;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 6, "the level-up ring must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 6, "and stay frozen while paused");
 
         // Any discrete input (it may have changed anything): redraw once.
         let mut h = paused_harness();
@@ -13322,6 +13339,192 @@ mod tests {
                 std::fs::write(path.with_extension("ansi"), ansi).unwrap();
                 std::fs::write(path.with_extension("txt"), plain).unwrap();
             }
+        }
+    }
+
+    /// Gated behind `RATRUN_LEVEL_DIR`: captures the level-readout HUD across
+    /// `57x20`, `80x24`, `120x40` and `180x55`, 256/16-colour folded frames,
+    /// and a 6-frame level-up moment filmstrip (with the world ring, banner,
+    /// badge/bar flash and auto-pick toast).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn capture_level_readout() {
+        use crate::game::enemy::EnemyKind;
+        use crate::game::gem::Gem;
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        use crate::game::weapon::{Weapon, WeaponKind};
+        use crate::term::{sanitize_with, ColorDepth, GlyphSet};
+        use std::fmt::Write as _;
+
+        let Some(dir) = std::env::var_os("RATRUN_LEVEL_DIR") else {
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+
+        let write_dump = |stem: &str, buf: &ratatui::buffer::Buffer| {
+            let (width, height) = (buf.area.width, buf.area.height);
+            let mut ansi = String::new();
+            let mut plain = String::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let c = &buf[(x, y)];
+                    let (r, g, b) = color_rgb(c.fg);
+                    let (br, bg, bb) = color_rgb(c.bg);
+                    let _ = write!(
+                        ansi,
+                        "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                        c.symbol()
+                    );
+                    plain.push_str(c.symbol());
+                }
+                ansi.push_str("\x1b[0m\n");
+                plain.push('\n');
+            }
+            let path = dir.join(stem);
+            std::fs::write(path.with_extension("ansi"), ansi).unwrap();
+            std::fs::write(path.with_extension("txt"), plain).unwrap();
+        };
+
+        let stage_world = |h: &mut Harness| {
+            h.enter_playing();
+            if let Some(w) = h.app.world.as_mut() {
+                if let Some(room) = w.level.largest_hall() {
+                    w.player.pos = room.rect.to_world().center();
+                }
+                for _ in 0..90 {
+                    w.update(1.0 / 60.0, Vec2::new(0.2, 0.05), false);
+                }
+                w.clear_enemies();
+                w.clear_gems();
+                w.pending_levelups = 0;
+
+                w.player.loadout.weapons = vec![
+                    {
+                        let mut wp = Weapon::new(WeaponKind::Gnaw);
+                        wp.level = 4;
+                        wp.timer = 0.18;
+                        wp
+                    },
+                    {
+                        let mut wp = Weapon::new(WeaponKind::CheeseSpray);
+                        wp.level = 3;
+                        wp.timer = 0.35;
+                        wp
+                    },
+                    {
+                        let mut wp = Weapon::new(WeaponKind::TailThrash);
+                        wp.level = 2;
+                        wp.timer = 0.0;
+                        wp
+                    },
+                    {
+                        let mut wp = Weapon::new(WeaponKind::AcidSpit);
+                        wp.level = 2;
+                        wp.timer = 0.50;
+                        wp
+                    },
+                ];
+                w.player.loadout.passives.clear();
+                for (p, n) in [
+                    (PassiveKind::Damage, 2),
+                    (PassiveKind::Armor, 2),
+                    (PassiveKind::Magnet, 1),
+                ] {
+                    for _ in 0..n {
+                        w.player.loadout.apply(&Upgrade::Passive(p));
+                    }
+                }
+                w.player.hp = 104.0;
+                w.player.god = true;
+                w.player.hurt_flash = 0.0;
+                w.player.iframes = 0.0;
+                w.player.dash_cd = 0.0;
+                w.player.level = 7;
+                w.player.xp_to_next = crate::game::player::xp_for_level(7);
+                w.player.xp = (w.player.xp_to_next * 3) / 5;
+                w.elapsed = 192.0;
+                w.kills = 164;
+                w.score = 2840;
+                w.gold = 68;
+
+                let p = w.player.pos;
+                for &(dx, dy, kind) in &[
+                    (-26.0f32, -8.0f32, EnemyKind::Skitterer),
+                    (28.0, -10.0, EnemyKind::Pillbug),
+                    (-22.0, 12.0, EnemyKind::Bat),
+                    (24.0, 11.0, EnemyKind::Skitterer),
+                ] {
+                    w.spawn_enemy(kind, p + Vec2::new(dx, dy), 24.0);
+                }
+                for &(dx, dy, val) in &[(-14.0f32, 7.0f32, 2u32), (15.0, -6.0, 5), (19.0, 8.0, 1)] {
+                    w.spawn_gem(Gem::new(p + Vec2::new(dx, dy), val));
+                }
+            }
+            h.app.hud.reset();
+            let _ = h.frame(&[]);
+            let _ = h.frame(&[]);
+        };
+
+        // 1. Steady-state HUD across all 4 required sizes: 57x20, 80x24, 120x40, 180x55.
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40), (180, 55)] {
+            let mut hh = Harness::new(w, h);
+            stage_world(&mut hh);
+            hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            let buf = hh.terminal.backend().buffer().clone();
+            write_dump(&format!("hud-{w}x{h}"), &buf);
+
+            if (w, h) == (80, 24) || (w, h) == (120, 40) {
+                let mut c256 = buf.clone();
+                sanitize_with(&mut c256, GlyphSet::Unicode, ColorDepth::Ansi256);
+                write_dump(&format!("hud-{w}x{h}-256c"), &c256);
+            }
+            if (w, h) == (80, 24) {
+                let mut c16 = buf.clone();
+                sanitize_with(&mut c16, GlyphSet::Unicode, ColorDepth::Ansi16);
+                write_dump(&format!("hud-{w}x{h}-16c"), &c16);
+            }
+        }
+
+        // 2. Level-up moment filmstrip (LV 7 -> LV 8 in live play with auto-pick on),
+        //    plus a 256-colour capture right on the peak level-up frame.
+        let mut hh = Harness::new(120, 40);
+        stage_world(&mut hh);
+        hh.app.scores.auto_pick = true;
+        if let Some(w) = hh.app.world.as_mut() {
+            w.player.xp = w.player.xp_to_next.saturating_sub(2);
+        }
+        let _ = hh.frame(&[]);
+        hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+        write_dump("filmstrip-0-before", hh.terminal.backend().buffer());
+
+        // Drop a gem on the rat to cross LV 7 -> LV 8 naturally on the next tick.
+        if let Some(w) = hh.app.world.as_mut() {
+            let pos = w.player.pos;
+            w.spawn_gem(Gem::new(pos, 5));
+        }
+        let _ = hh.frame(&[]);
+        hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+        write_dump("filmstrip-1-impact", hh.terminal.backend().buffer());
+        {
+            let mut c256 = hh.terminal.backend().buffer().clone();
+            sanitize_with(&mut c256, GlyphSet::Unicode, ColorDepth::Ansi256);
+            write_dump("levelup-120x40-256c", &c256);
+        }
+
+        // Advance through the smooth ring expansion, banner hold, and bar flash decay.
+        let checkpoints = [
+            (7usize, "filmstrip-2-ring-early"),
+            (10, "filmstrip-3-ring-mid"),
+            (12, "filmstrip-4-ring-late"),
+            (36, "filmstrip-5-settled"),
+        ];
+        for (ticks, label) in checkpoints {
+            for _ in 0..ticks {
+                let _ = hh.frame(&[]);
+            }
+            hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            write_dump(label, hh.terminal.backend().buffer());
         }
     }
     // ---- Minimap + fog of war -------------------------------------------
@@ -16464,6 +16667,39 @@ mod tests {
             assert!(
                 text.contains(head),
                 "{w}x{h} toast label {head:?} not rendered:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_pick_toast_and_banner_report_the_new_character_level() {
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40), (180, 55)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            hh.app.scores.auto_pick = true;
+            // Tick once to initialize HudState's `prev_level` at 1, then earn
+            // enough XP via a gem to reach Level 2 in live play.
+            let _ = hh.frame(&[]);
+            {
+                let world = hh.app.world.as_mut().unwrap();
+                world.clear_enemies();
+                let need = world.player.xp_to_next;
+                let pos = world.player.pos;
+                world.spawn_gem(crate::game::gem::Gem::new(pos, need));
+            }
+            let text = hh.frame(&[]);
+            assert!(matches!(hh.app.screen, Screen::Playing), "{w}x{h} paused");
+            assert!(
+                text.contains("LEVEL 2 · AUTO"),
+                "{w}x{h}: auto-pick toast missing new level:\n{text}"
+            );
+            assert!(
+                text.contains(" LV 2 ") && text.contains("→ 3"),
+                "{w}x{h}: bottom XP bar missing LV 2 badge or → 3:\n{text}"
+            );
+            assert!(
+                hh.app.hud.level_ring > 0.0,
+                "{w}x{h}: world level-up ring was not armed"
             );
         }
     }

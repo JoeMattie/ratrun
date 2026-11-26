@@ -92,6 +92,20 @@ pub const TRAIL_GOLD: Color = Color::Rgb(248, 214, 152);
 pub const GATE_STEEL: Color = Color::Rgb(176, 204, 220);
 /// Recessed dark bay behind the 2-row HUD weapon & passive icon rack.
 pub const RACK_BG: Color = Color::Rgb(14, 18, 21);
+/// High-contrast gold badge plate for the rat's character level on the XP bar
+/// (`LightYellow` in 16-colour, xterm 221 in 256-colour, dark `PLATE` text).
+pub const LEVEL_GOLD: Color = Color::Rgb(246, 202, 72);
+/// White-hot ivory-gold pop at the onset of a level-up (`White` in 16-colour).
+pub const LEVEL_FLASH: Color = Color::Rgb(255, 252, 228);
+/// Crisp XP-gem cyan fill for progress toward the next level (`LightCyan` in 16c).
+pub const XP_CYAN: Color = Color::Rgb(92, 218, 242);
+
+/// Duration of the level badge and XP bar flash after leveling up.
+pub const LEVEL_FLASH_SECS: f32 = 0.90;
+/// Duration of the centered `LEVEL N` callout banner in the playfield.
+pub const LEVEL_BANNER_SECS: f32 = 1.35;
+/// Duration of the render-only expanding golden ring + burst around the rat.
+pub const LEVEL_RING_SECS: f32 = 0.65;
 
 /// Height in terminal rows of the top HUD region.
 ///
@@ -501,7 +515,6 @@ impl HudTelemetry {
 pub struct HudState {
     // Top bar retained buffers.
     time: String,
-    level: String,
     kills: String,
     streak_buf: String,
     score: String,
@@ -518,7 +531,10 @@ pub struct HudState {
 
     // Bottom bar retained buffers.
     hp: String,
-    xp_label: String,
+    xp_badge: String,
+    xp_bonus: String,
+    xp_right_lead: String,
+    xp_right_next: String,
     dash: String,
     /// The dash module's state word (`READY` / `WAIT` / `3.4s` / `DASHING`),
     /// written after the module's charge bar.
@@ -549,6 +565,8 @@ pub struct HudState {
     pub(crate) boss_banner: String,
     /// Nameplate text for the living named miniboss (wave 3).
     pub(crate) miniboss_text: String,
+    /// Short centered level-up banner (`◆ LEVEL 8 · +28% DMG ◆`).
+    pub(crate) level_banner: String,
 
     // Smooth visual state & feedback timers.
     pub clock: f32,
@@ -558,6 +576,9 @@ pub struct HudState {
     boss_trail_hold: f32,
     pub hurt_edge: f32,
     pub level_flash: f32,
+    pub level_banner_timer: f32,
+    pub level_banner_level: u32,
+    pub level_ring: f32,
     pub dash_ready_flash: f32,
     pub boss_intro_timer: f32,
 
@@ -611,7 +632,6 @@ impl Default for HudState {
     fn default() -> Self {
         Self {
             time: String::with_capacity(8),
-            level: String::with_capacity(6),
             kills: String::with_capacity(8),
             streak_buf: String::with_capacity(8),
             score: String::with_capacity(12),
@@ -621,7 +641,10 @@ impl Default for HudState {
             active_flash: Vec::with_capacity(8),
             right_badge: String::with_capacity(24),
             hp: String::with_capacity(16),
-            xp_label: String::with_capacity(12),
+            xp_badge: String::with_capacity(10),
+            xp_bonus: String::with_capacity(12),
+            xp_right_lead: String::with_capacity(16),
+            xp_right_next: String::with_capacity(6),
             dash: String::with_capacity(16),
             dash_status: String::with_capacity(8),
             dash_key: DashKey::Space,
@@ -633,6 +656,7 @@ impl Default for HudState {
             boss_hp_text: String::with_capacity(24),
             boss_banner: String::with_capacity(48),
             miniboss_text: String::with_capacity(48),
+            level_banner: String::with_capacity(36),
             clock: 0.0,
             hp_trail: 1.0,
             hp_trail_hold: 0.0,
@@ -640,6 +664,9 @@ impl Default for HudState {
             boss_trail_hold: 0.0,
             hurt_edge: 0.0,
             level_flash: 0.0,
+            level_banner_timer: 0.0,
+            level_banner_level: 1,
+            level_ring: 0.0,
             dash_ready_flash: 0.0,
             boss_intro_timer: 0.0,
             initialized: false,
@@ -678,6 +705,9 @@ impl HudState {
         self.boss_trail_hold = 0.0;
         self.hurt_edge = 0.0;
         self.level_flash = 0.0;
+        self.level_banner_timer = 0.0;
+        self.level_banner_level = 1;
+        self.level_ring = 0.0;
         self.dash_ready_flash = 0.0;
         self.boss_intro_timer = 0.0;
         self.initialized = false;
@@ -1034,7 +1064,7 @@ impl HudState {
 
     /// Notify the HUD that the player just equipped an upgrade from the level-up screen.
     pub fn notify_upgrade(&mut self, title: &str) {
-        self.level_flash = 0.9;
+        self.level_flash = LEVEL_FLASH_SECS;
         self.push_callout(CalloutKind::Upgrade, "EQUIPPED", title, 2.5);
     }
 
@@ -1121,11 +1151,18 @@ impl HudState {
         // player's own cue to spend it).
         self.sync_active_ready(world, dt);
 
-        // 4. Level-up flash.
-        if world.player.level > self.prev_level {
-            self.level_flash = 0.85;
-        }
+        // 4. Level-up flash, playfield banner, and world ring.
+        //    Aged before checking the crossing so a level-up earned on the exact
+        //    tick `Screen::LevelUp` opens keeps its full duration until play resumes.
         self.level_flash = (self.level_flash - dt).max(0.0);
+        self.level_banner_timer = (self.level_banner_timer - dt).max(0.0);
+        self.level_ring = (self.level_ring - dt).max(0.0);
+        if world.player.level > self.prev_level {
+            self.level_flash = LEVEL_FLASH_SECS;
+            self.level_banner_timer = LEVEL_BANNER_SECS;
+            self.level_banner_level = world.player.level;
+            self.level_ring = LEVEL_RING_SECS;
+        }
 
         // 5. Exact pickup callouts from `World::last_pickups()` (with SFX fallback for tests).
         let pickups = world.last_pickups();
@@ -1438,9 +1475,6 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
             fmt_time_into(b, time_left);
         }
     });
-    refill(&mut state.level, |b| {
-        let _ = write!(b, "{}", world.player.level);
-    });
     refill(&mut state.kills, |b| {
         let _ = write!(b, "{}", world.kills);
     });
@@ -1629,15 +1663,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         }
     }
 
-    // 3. Level, Kills (+ optional streak), Score.
-    let lv_style = if state.level_flash > 0.0 {
-        Style::default().fg(TRAIL_GOLD).add_modifier(Modifier::BOLD)
-    } else {
-        value
-    };
-    put(if compact { " Lv" } else { "  Lv" }, muted);
-    put(&state.level, lv_style);
-
+    // 3. Kills (+ optional streak), Score, Gold. The rat's character level now
+    //    owns the prominent high-contrast badge on the bottom XP bar so the top
+    //    rail stays uncluttered and never collides with the right-end `LV 2/4`
+    //    campaign sector pips.
     put(if compact { " KO" } else { "  KO " }, muted);
     put(&state.kills, value);
     if show_streak {
@@ -2394,21 +2423,6 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         }
     });
 
-    let xp_next = world.player.xp_to_next.max(1);
-    let xp = (world.player.xp as f32 / xp_next as f32).clamp(0.0, 1.0);
-    refill(&mut state.xp_label, |b| {
-        // The review's 57×20 and 80×24 captures both lost the percentage, so
-        // the one number that answers "how close is the next card" was missing
-        // on the two commonest sizes. `XP 42%` is 6 cells and still leaves the
-        // meter a real bar at every supported play size (57×20 included).
-        if area.width >= 56 {
-            let pct = (xp * 100.0).round() as u32;
-            let _ = write!(b, "XP {:>2}%", pct.min(99));
-        } else {
-            b.push_str("XP");
-        }
-    });
-
     // Dash module: a labelled charge bar that always shows its state. The key
     // is printed in the label because the binding depends on the terminal
     // (CTRL where a lone modifier press reports, SPACE where it cannot).
@@ -2467,25 +2481,6 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     });
 
     let accent = palette::marking(world.level.palette.wall_edge, world.level.palette.accent);
-    let xp_color = if state.level_flash > 0.0 {
-        palette::to_color(palette::mix(
-            rgb_of_color(accent),
-            (252, 226, 152),
-            (state.level_flash / 0.85).clamp(0.0, 1.0),
-        ))
-    } else if xp >= 0.85 {
-        palette::to_color(palette::mix(
-            world.level.palette.accent,
-            (248, 232, 186),
-            0.45 + 0.25 * pulse,
-        ))
-    } else {
-        palette::to_color(palette::mix(
-            world.level.palette.accent,
-            (176, 198, 194),
-            0.42,
-        ))
-    };
 
     // Reserve dash module width: `│ ` divider, key+DASH label, an eighth-cell
     // charge bar (always drawn: the refill is the point) and the state badge.
@@ -2515,7 +2510,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     let status_w = (state.dash_status.chars().count() as u16).max(5);
     let dash_width = (sep_w + dash_text_w + bar_block + status_w + 2).min(area.width);
     let meters = area.width.saturating_sub(dash_width);
-    let left = (meters / 2 + 3).min(meters);
+    let left = (meters * 41 / 100 + 2).min(meters);
 
     // 1. HP meter with trailing damage ghost bar.
     let hp_label_style = if hurt_active {
@@ -2536,16 +2531,13 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         TRAIL_GOLD,
     );
 
-    // 2. XP meter.
-    meter_with_trail(
+    // 2. Prominent Level badge + weapon-damage bonus + XP progress bar + next level.
+    draw_xp_module(
         frame,
         Rect::new(area.x + left, area.y, meters.saturating_sub(left), 1),
-        &state.xp_label,
-        Style::default().fg(COAT),
-        xp,
-        xp,
-        xp_color,
-        xp_color,
+        world,
+        state,
+        pulse,
     );
 
     // 3. Dash module: divider, key label, charge bar, state badge.
@@ -2777,6 +2769,274 @@ fn meter_with_trail(
     }
 }
 
+/// Prominent character-level badge, weapon-damage bonus, eighth-cell XP bar,
+/// and next-level target (` LV 7  +24% DMG  ████████░░░░  35/59 XP → 8`),
+/// scaling cleanly down to ` LV 7  █████ → 8 ` at `57×20` with zero per-frame
+/// heap allocation.
+fn draw_xp_module(
+    frame: &mut Frame,
+    r: Rect,
+    world: &World,
+    state: &mut HudState,
+    pulse: f32,
+) {
+    const STEPS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    if r.is_empty() {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    buf.set_style(r, Style::default().bg(PLATE));
+
+    let usable_right = if r.width >= 10 {
+        r.right().saturating_sub(1)
+    } else {
+        r.right()
+    };
+    let avail = usable_right.saturating_sub(r.x);
+    if avail == 0 {
+        return;
+    }
+
+    let level = world.player.level;
+    let next_lv = level.saturating_add(1);
+    let bonus = world.player.level_damage_percent();
+    let xp_cur = world.player.xp;
+    let xp_need = world.player.xp_to_next.max(1);
+    let xp = (xp_cur as f32 / xp_need as f32).clamp(0.0, 1.0);
+    let flash_t = (state.level_flash / LEVEL_FLASH_SECS).clamp(0.0, 1.0);
+
+    refill(&mut state.xp_badge, |b| {
+        if avail >= 12 {
+            let _ = write!(b, " LV {level} ");
+        } else {
+            let _ = write!(b, "LV{level}");
+        }
+    });
+    let badge_w = state.xp_badge.chars().count() as u16;
+    refill(&mut state.xp_right_next, |b| {
+        let _ = write!(b, "{next_lv}");
+    });
+    let next_digits_w = state.xp_right_next.chars().count() as u16;
+
+    // Progressive layout tiers: pick the richest combination of bonus and XP
+    // numbers that still leaves a readable bar at the current terminal width.
+    let mut chosen_bonus_mode = 0u8;
+    let mut chosen_right_mode = 0u8;
+    let mut chosen_gap_l = 0u16;
+    let mut tier_found = false;
+
+    for &(b_mode, r_mode, min_bar, gap_l) in &[
+        (2u8, 3u8, 12u16, 1u16),
+        (1, 2, 6, 1),
+        (1, 1, 6, 1),
+        (0, 1, 3, 1),
+        (0, 1, 3, 0),
+        (0, 0, 1, 0),
+    ] {
+        let eff_b = if bonus > 0 { b_mode } else { 0 };
+        refill(&mut state.xp_bonus, |b| match eff_b {
+            2 | 1 => {
+                let _ = write!(b, " +{bonus}%");
+            }
+            _ => {}
+        });
+        let dmg_tag_w = if eff_b == 2 { 4u16 } else { 0u16 }; // " DMG"
+        refill(&mut state.xp_right_lead, |b| match r_mode {
+            3 => {
+                let _ = write!(b, " {xp_cur}/{xp_need} XP ");
+            }
+            2 => {
+                let _ = write!(b, " {xp_cur}/{xp_need} ");
+            }
+            1 => b.push(' '),
+            _ => {}
+        });
+        let arrow_w = if r_mode >= 1 { 2u16 } else { 1u16 };
+        let bonus_w = state.xp_bonus.chars().count() as u16 + dmg_tag_w;
+        let lead_w = state.xp_right_lead.chars().count() as u16;
+        let right_w = lead_w + arrow_w + next_digits_w;
+        let used = badge_w + bonus_w + gap_l + right_w;
+        if avail >= used + min_bar {
+            chosen_bonus_mode = eff_b;
+            chosen_right_mode = r_mode;
+            chosen_gap_l = gap_l;
+            tier_found = true;
+            break;
+        }
+    }
+
+    refill(&mut state.xp_bonus, |b| {
+        if chosen_bonus_mode > 0 {
+            let _ = write!(b, " +{bonus}%");
+        }
+    });
+    refill(&mut state.xp_right_lead, |b| match chosen_right_mode {
+        3 => {
+            let _ = write!(b, " {xp_cur}/{xp_need} XP ");
+        }
+        2 => {
+            let _ = write!(b, " {xp_cur}/{xp_need} ");
+        }
+        1 => b.push(' '),
+        _ => {}
+    });
+
+    // 1. High-contrast bold `LV N` badge at the left end of the module.
+    let badge_bg = if flash_t > 0.0 {
+        palette::to_color(palette::mix(
+            rgb_of_color(LEVEL_GOLD),
+            rgb_of_color(LEVEL_FLASH),
+            (flash_t * 1.35).clamp(0.0, 1.0),
+        ))
+    } else {
+        LEVEL_GOLD
+    };
+    let badge_style = Style::default()
+        .fg(PLATE)
+        .bg(badge_bg)
+        .add_modifier(Modifier::BOLD);
+    let (mut cx, _) = buf.set_stringn(
+        r.x,
+        r.y,
+        &state.xp_badge,
+        avail as usize,
+        badge_style,
+    );
+
+    if !tier_found {
+        return;
+    }
+
+    // 2. Optional weapon-damage bonus (`+24%` / `+24% DMG`) beside the badge.
+    if !state.xp_bonus.is_empty() && cx < usable_right {
+        let bonus_fg = if flash_t > 0.0 { LEVEL_FLASH } else { LEVEL_GOLD };
+        (cx, _) = buf.set_stringn(
+            cx,
+            r.y,
+            &state.xp_bonus,
+            usable_right.saturating_sub(cx) as usize,
+            Style::default()
+                .fg(bonus_fg)
+                .bg(PLATE)
+                .add_modifier(Modifier::BOLD),
+        );
+        if chosen_bonus_mode == 2 && cx < usable_right {
+            (cx, _) = buf.set_stringn(
+                cx,
+                r.y,
+                " DMG",
+                usable_right.saturating_sub(cx) as usize,
+                Style::default().fg(MUTED).bg(PLATE),
+            );
+        }
+    }
+
+    cx = cx.saturating_add(chosen_gap_l).min(usable_right);
+    let arrow = if chosen_right_mode >= 1 { "→ " } else { "→" };
+    let arrow_w = if chosen_right_mode >= 1 { 2u16 } else { 1u16 };
+    let right_w = state.xp_right_lead.chars().count() as u16 + arrow_w + next_digits_w;
+    let bar_w = usable_right.saturating_sub(cx + right_w);
+
+    // 3. Eighth-cell XP progress bar, with a full-bar gold flash sweep right
+    //    after a level-up so even a freshly wrapped 0% bar visibly flashes.
+    if bar_w > 0 {
+        let fill_col = if flash_t > 0.0 {
+            palette::to_color(palette::mix(
+                rgb_of_color(XP_CYAN),
+                rgb_of_color(LEVEL_FLASH),
+                (flash_t * 1.3).clamp(0.0, 1.0),
+            ))
+        } else if xp >= 0.85 {
+            palette::to_color(palette::mix(
+                rgb_of_color(XP_CYAN),
+                rgb_of_color(LEVEL_GOLD),
+                0.45 + 0.35 * pulse,
+            ))
+        } else {
+            XP_CYAN
+        };
+        let flash_sheen = if flash_t > 0.72 {
+            1.0
+        } else if flash_t > 0.0 {
+            (flash_t / 0.72).powi(2)
+        } else {
+            0.0
+        };
+        let sheen_col = if flash_t > 0.72 { LEVEL_FLASH } else { LEVEL_GOLD };
+        let trail = flash_sheen.max(xp).clamp(xp, 1.0);
+        let units = (xp * f32::from(bar_w) * 8.0).round() as usize;
+        let trail_units = (trail * f32::from(bar_w) * 8.0).round() as usize;
+        for i in 0..bar_w {
+            let cell_base = 8 * i as usize;
+            let fill_step = units.saturating_sub(cell_base).min(8);
+            let trail_step = trail_units.saturating_sub(cell_base).min(8);
+            let cell = &mut buf[(cx + i, r.y)];
+            if fill_step == 8 {
+                cell.set_char('█').set_fg(fill_col).set_bg(TRACK);
+            } else if fill_step > 0 {
+                let bg = if trail_step > fill_step {
+                    sheen_col
+                } else {
+                    TRACK
+                };
+                cell.set_char(STEPS[fill_step]).set_fg(fill_col).set_bg(bg);
+            } else if trail_step > 0 {
+                cell.set_char(STEPS[trail_step])
+                    .set_fg(sheen_col)
+                    .set_bg(TRACK);
+            } else {
+                cell.set_char(' ').set_fg(fill_col).set_bg(TRACK);
+            }
+        }
+        cx += bar_w;
+    }
+
+    // 4. Progress to the NEXT level (`35/59 XP → 8` / `35/59 → 8` / ` → 8`).
+    if !state.xp_right_lead.is_empty() && cx < usable_right {
+        let lead_fg = if xp >= 0.85 { COAT } else { MUTED };
+        (cx, _) = buf.set_stringn(
+            cx,
+            r.y,
+            &state.xp_right_lead,
+            usable_right.saturating_sub(cx) as usize,
+            Style::default().fg(lead_fg).bg(PLATE),
+        );
+    }
+    if cx < usable_right {
+        let arrow_fg = if flash_t > 0.0 || xp >= 0.85 {
+            LEVEL_GOLD
+        } else {
+            MUTED
+        };
+        (cx, _) = buf.set_stringn(
+            cx,
+            r.y,
+            arrow,
+            usable_right.saturating_sub(cx) as usize,
+            Style::default().fg(arrow_fg).bg(PLATE),
+        );
+    }
+    if cx < usable_right {
+        let next_fg = if flash_t > 0.0 {
+            LEVEL_FLASH
+        } else if xp >= 0.85 {
+            LEVEL_GOLD
+        } else {
+            COAT
+        };
+        buf.set_stringn(
+            cx,
+            r.y,
+            &state.xp_right_next,
+            usable_right.saturating_sub(cx) as usize,
+            Style::default()
+                .fg(next_fg)
+                .bg(PLATE)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+}
+
 /// Preserved thin wrapper for unit testing single-fill eighth-cell precision.
 #[cfg(test)]
 fn meter(frame: &mut Frame, r: Rect, label: &str, ratio: f32, color: Color) {
@@ -2871,7 +3131,10 @@ mod tests {
 
         let text = row_text(&terminal);
         assert!(text.contains("13:55"), "missing countdown in {text:?}");
-        assert!(text.contains("Lv3"), "missing level in {text:?}");
+        assert!(
+            !text.contains("Lv3"),
+            "duplicate top-row Lv readout should be removed in favour of the bottom LV badge: {text:?}"
+        );
         assert!(text.contains("KO 42"), "missing kills in {text:?}");
         assert!(text.contains("Score 1234"), "missing score in {text:?}");
         // The slot prints its identity tag (`weapon_tag`), not the head of its
@@ -2995,7 +3258,10 @@ mod tests {
             })
             .unwrap();
         let text = row_text(&terminal);
-        assert!(text.contains("XP"));
+        assert!(
+            text.contains(" LV 3 ") && text.contains("→ 4"),
+            "level badge or next-level target missing in {text:?}"
+        );
         assert!(
             text.contains(&format!("♥ {full:.0}/{full:.0}")),
             "HP missing in {text:?}"
@@ -3023,7 +3289,14 @@ mod tests {
             })
             .unwrap();
         let text = row_text(&terminal);
-        assert!(text.contains("XP"));
+        assert!(
+            text.contains(" LV 1 ") && text.contains("→ 2"),
+            "level badge or next-level target not updated in {text:?}"
+        );
+        assert!(
+            !text.contains("LV 3") && !text.contains("→ 4"),
+            "stale level digits survived buffer reuse in {text:?}"
+        );
         assert!(
             text.contains(&format!("♥ 1/{full:.0}")),
             "HP not updated in {text:?}"
@@ -4295,7 +4568,7 @@ mod tests {
         state.tick(1.0 / 60.0, &w, &[], false);
         state.tick(1.0 / 60.0, &w, &[], false);
 
-        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40), (180, 55)] {
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
             terminal
                 .draw(|f| {
@@ -4340,16 +4613,22 @@ mod tests {
                 "{tw}x{th}: the weapons/passives divider is gone: {rack:?}"
             );
 
-            // The XP percentage answers "how close is the next card" and now
-            // fits at every supported play size.
-            if tw >= 56 {
+            // Prominent level badge + progress to next level at every supported size,
+            // plus weapon-damage bonus and exact XP numbers where space allows.
+            assert!(
+                bottom.contains(" LV 3 ") && bottom.contains("→ 4"),
+                "{tw}x{th}: level badge or next-level target missing: {bottom:?}"
+            );
+            if tw >= 80 {
                 assert!(
-                    bottom.contains("XP") && bottom.contains('%'),
-                    "{tw}x{th}: XP percentage missing: {bottom:?}"
+                    bottom.contains("+8%") && bottom.contains("6/12"),
+                    "{tw}x{th}: damage bonus or XP numbers missing: {bottom:?}"
                 );
+            }
+            if tw >= 120 {
                 assert!(
-                    bottom.contains("50%"),
-                    "{tw}x{th}: XP percentage is not the real value: {bottom:?}"
+                    bottom.contains("+8% DMG") && bottom.contains("6/12 XP"),
+                    "{tw}x{th}: wide damage bonus or XP label missing: {bottom:?}"
                 );
             }
             // The armour suffix has room from 80 columns up.
@@ -4388,6 +4667,68 @@ mod tests {
                 !rail.ends_with("S"),
                 "{tw}x{th}: the top rail clips a status word: {rail:?}"
             );
+        }
+    }
+
+    #[test]
+    fn level_badge_and_flash_stay_high_contrast_in_256_and_16_colours() {
+        use crate::term::{sanitize_with, ColorDepth, GlyphSet};
+
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40), (180, 55)] {
+            let mut w = known_world();
+            w.player.level = 7;
+            w.player.xp_to_next = 59;
+            w.player.xp = 0; // freshly wrapped after leveling up
+
+            // Arm the level-up moment via `HudState::tick` crossing 6 -> 7.
+            let mut state = HudState::default();
+            let mut before = known_world();
+            before.player.level = 6;
+            state.tick(1.0 / 60.0, &before, &[], false);
+            state.tick(1.0 / 60.0, &w, &[], false);
+            assert!(state.level_flash > 0.0 && state.level_banner_timer > 0.0 && state.level_ring > 0.0);
+
+            for (glyphs, depth) in [
+                (GlyphSet::Unicode, ColorDepth::Truecolor),
+                (GlyphSet::Unicode, ColorDepth::Ansi256),
+                (GlyphSet::Unicode, ColorDepth::Ansi16),
+                (GlyphSet::Safe, ColorDepth::Ansi16),
+            ] {
+                let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+                terminal
+                    .draw(|f| {
+                        let bottom = Rect::new(0, th - 1, tw, 1);
+                        draw_bottom(f, bottom, &w, &mut state);
+                    })
+                    .unwrap();
+                let mut buf = terminal.backend().buffer().clone();
+                sanitize_with(&mut buf, glyphs, depth);
+                let line: String = (0..tw).map(|x| buf[(x, th - 1)].symbol()).collect();
+                assert!(line.contains("LV 7"), "{tw}x{th} {depth:?}: missing LV 7 in {line:?}");
+                let expected_next = if glyphs == GlyphSet::Safe { "> 8" } else { "→ 8" };
+                assert!(
+                    line.contains(expected_next),
+                    "{tw}x{th} {glyphs:?} {depth:?}: missing {expected_next:?} in {line:?}"
+                );
+                // Even at 0 XP, the level-up flash lights the XP bar cells!
+                assert!(
+                    line.contains('█'),
+                    "{tw}x{th} {depth:?}: level-up flash did not light the 0% XP bar: {line:?}"
+                );
+                // High contrast: every cell of `LV 7` has distinct fg and bg after folding.
+                let lv_x = line
+                    .char_indices()
+                    .enumerate()
+                    .find_map(|(ci, (bi, _))| line[bi..].starts_with("LV 7").then_some(ci as u16))
+                    .expect("LV 7 cell index");
+                for dx in 0..4u16 {
+                    let cell = &buf[(lv_x + dx, th - 1)];
+                    assert_ne!(
+                        cell.fg, cell.bg,
+                        "{tw}x{th} {depth:?}: LV badge lost fg/bg contrast at +{dx}: {cell:?}"
+                    );
+                }
+            }
         }
     }
 }

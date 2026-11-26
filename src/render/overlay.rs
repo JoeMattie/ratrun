@@ -19,8 +19,8 @@ use crate::math::Vec2;
 use crate::render::minimap::{MarkerKind, PickupTag};
 use crate::render::minimap_source;
 use crate::render::hud::{
-    boss_codename_kind, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, TRAIL_GOLD,
-    WARN_AMBER,
+    boss_codename_kind, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, LEVEL_BANNER_SECS,
+    LEVEL_FLASH, LEVEL_GOLD, TRAIL_GOLD, WARN_AMBER,
 };
 use crate::render::palette::{self, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
@@ -33,12 +33,20 @@ pub fn draw_overlays(frame: &mut Frame, game: Rect, world: &World, state: &mut H
     draw_damage_and_low_hp(frame, game, world, state);
     let top_reserved = draw_boss_ui(frame, game, world, state);
     let miniboss_reserved = draw_miniboss_ui(frame, game, world, state, top_reserved);
+    let level_reserved =
+        draw_level_banner(frame, game, world, state, top_reserved + miniboss_reserved);
     // The compass goes first and hands its label rectangle to the edge arrows:
     // a badge that would land on the label is skipped, never stamped half over
     // it (the arrows are drawn later and used to overwrite ` ◄ BOSS `).
     let compass = draw_boss_compass(frame, game, world, state);
     draw_poi_arrows(frame, game, world, state, compass);
-    draw_callouts(frame, game, world, state, top_reserved + miniboss_reserved);
+    draw_callouts(
+        frame,
+        game,
+        world,
+        state,
+        top_reserved + miniboss_reserved + level_reserved,
+    );
 }
 
 // ---- Point-of-interest edge arrows -----------------------------------------
@@ -861,6 +869,152 @@ fn draw_miniboss_ui(
     0
 }
 
+/// Short centered level-up banner (`◆ LEVEL 8 · +28% DMG ◆`), tucked cleanly
+/// below any active boss/miniboss bar and pushing transient callout pills down
+/// so nothing overlaps even at `57×20` and `80×24`.
+fn draw_level_banner(
+    frame: &mut Frame,
+    game: Rect,
+    world: &World,
+    state: &mut HudState,
+    top: u16,
+) -> u16 {
+    let rem = state.level_banner_timer;
+    if rem <= 0.0 || game.width < 20 || game.height < 8 {
+        return 0;
+    }
+    let lead = u16::from(top == 0);
+    let y = game.y + top + lead;
+    // Never cover the centre of the playfield where the rat stands, even if
+    // boss + miniboss chrome is already stacked above on a short viewport.
+    if y + 2 > game.y + game.height / 2 {
+        return 0;
+    }
+
+    let lvl = state.level_banner_level.max(world.player.level).max(1);
+    let bonus = crate::game::player::level_damage_percent_with(lvl, world.tuning().xp.damage_per_level);
+
+    state.level_banner.clear();
+    if game.width >= 38 && bonus > 0 {
+        let _ = write!(state.level_banner, " ◆ LEVEL {lvl}  ·  +{bonus}% DMG ◆ ");
+    } else {
+        let _ = write!(state.level_banner, " ◆ LEVEL {lvl} ◆ ");
+    }
+    let text_w = state.level_banner.chars().count() as u16;
+    // Two extra cells for the crisp `▌` / `▐` end-caps when space permits.
+    let caps = game.width >= text_w + 4;
+    let total_w = (text_w + if caps { 2 } else { 0 }).min(game.width);
+    let bx = game.x + (game.width - total_w) / 2;
+
+    let pop = rem > LEVEL_BANNER_SECS - 0.22;
+    let fade = (rem / 0.40).clamp(0.0, 1.0);
+    let buf = frame.buffer_mut();
+
+    if pop {
+        // High-contrast gold arrival flash (`Black` on `LightYellow` in 16c).
+        let cap_style = Style::default()
+            .fg(LEVEL_FLASH)
+            .bg(LEVEL_GOLD)
+            .add_modifier(Modifier::BOLD);
+        let body_style = Style::default()
+            .fg(PLATE)
+            .bg(LEVEL_GOLD)
+            .add_modifier(Modifier::BOLD);
+        let mut cx = bx;
+        if caps {
+            buf[(cx, y)].set_char('▌').set_style(cap_style);
+            cx += 1;
+        }
+        (cx, _) = buf.set_stringn(cx, y, &state.level_banner, text_w as usize, body_style);
+        if caps && cx < game.right() {
+            buf[(cx, y)].set_char('▐').set_style(cap_style);
+        }
+    } else {
+        let cap_fg = fade_color(LEVEL_GOLD, fade);
+        let main_fg = fade_color(LEVEL_GOLD, fade);
+        let bonus_fg = fade_color(COAT, fade);
+        buf.set_style(Rect::new(bx, y, total_w, 1), Style::default().bg(PLATE));
+        let mut cx = bx;
+        if caps {
+            buf[(cx, y)].set_char('▌').set_fg(cap_fg).set_bg(PLATE);
+            cx += 1;
+        }
+        // Split on `·` so `LEVEL N` shines in gold and `+{bonus}% DMG` in crisp coat-white.
+        if let Some((head, tail)) = state.level_banner.split_once('·') {
+            let limit = bx + total_w - u16::from(caps);
+            (cx, _) = buf.set_stringn(
+                cx,
+                y,
+                head,
+                limit.saturating_sub(cx) as usize,
+                Style::default()
+                    .fg(main_fg)
+                    .bg(PLATE)
+                    .add_modifier(Modifier::BOLD),
+            );
+            (cx, _) = buf.set_stringn(
+                cx,
+                y,
+                "·",
+                limit.saturating_sub(cx) as usize,
+                Style::default().fg(fade_color(EDGE, fade)).bg(PLATE),
+            );
+            // Trailing `◆ ` keeps the gold frame symmetry.
+            let (mid, end_gem) = tail
+                .rsplit_once('◆')
+                .map_or((tail, ""), |(m, g)| (m, g));
+            (cx, _) = buf.set_stringn(
+                cx,
+                y,
+                mid,
+                limit.saturating_sub(cx) as usize,
+                Style::default()
+                    .fg(bonus_fg)
+                    .bg(PLATE)
+                    .add_modifier(Modifier::BOLD),
+            );
+            if !end_gem.is_empty() || tail.contains('◆') {
+                (cx, _) = buf.set_stringn(
+                    cx,
+                    y,
+                    "◆",
+                    limit.saturating_sub(cx) as usize,
+                    Style::default()
+                        .fg(main_fg)
+                        .bg(PLATE)
+                        .add_modifier(Modifier::BOLD),
+                );
+                buf.set_stringn(
+                    cx,
+                    y,
+                    end_gem,
+                    limit.saturating_sub(cx) as usize,
+                    Style::default().fg(main_fg).bg(PLATE),
+                );
+            }
+        } else {
+            buf.set_stringn(
+                cx,
+                y,
+                &state.level_banner,
+                text_w as usize,
+                Style::default()
+                    .fg(main_fg)
+                    .bg(PLATE)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+        if caps {
+            let rx = (bx + total_w).saturating_sub(1);
+            if rx < game.right() {
+                buf[(rx, y)].set_char('▐').set_fg(cap_fg).set_bg(PLATE);
+            }
+        }
+    }
+
+    1 + lead
+}
+
 /// Draw a compact directional edge pointer at the living boss when it is
 /// off-screen.
 ///
@@ -1490,6 +1644,40 @@ mod tests {
             if tw >= 57 && th >= 20 {
                 let text = buf_text(&terminal);
                 assert!(text.contains("+MEDKIT") || text.contains("WARNING"));
+            }
+        }
+    }
+
+    #[test]
+    fn level_banner_shows_new_level_and_never_collides_with_callouts() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.player.level = 8;
+        let mut hud = HudState::default();
+        hud.level_banner_timer = LEVEL_BANNER_SECS;
+        hud.level_banner_level = 8;
+        hud.push_callout(CalloutKind::Upgrade, "EQUIPPED", "Squeak Nova Lv3→4", 2.5);
+
+        for rem in [LEVEL_BANNER_SECS, 0.60] {
+            hud.level_banner_timer = rem;
+            for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40), (180, 55)] {
+                let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+                terminal
+                    .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+                    .unwrap();
+                let banner_row = row_text(&terminal, 1);
+                assert!(
+                    banner_row.contains("LEVEL 8") && banner_row.contains("+28% DMG"),
+                    "{tw}x{th} rem={rem}: missing LEVEL 8 banner on row 1: {banner_row:?}"
+                );
+                assert!(
+                    !banner_row.contains("EQUIPPED"),
+                    "{tw}x{th} rem={rem}: callout collided with level banner on row 1: {banner_row:?}"
+                );
+                let full = buf_text(&terminal);
+                assert!(
+                    full.contains("EQUIPPED"),
+                    "{tw}x{th} rem={rem}: callout lost below level banner: {full:?}"
+                );
             }
         }
     }
