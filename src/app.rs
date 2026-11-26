@@ -539,9 +539,9 @@ pub struct App {
     /// one. A pinned row is never written back over the save; changing the row
     /// drops the pin (see [`App::set_smooth_level`]).
     smooth_env: Option<crate::render::subcell::Smooth>,
-    /// The parallax foreground layer (overhead pipes, lines, proofs). Off by
+    /// The parallax foreground layer (overhead pipes, lines, proofs). On by
     /// default; the Graphics page's FOREGROUND row and the console `foreground`
-    /// command A/B it live (`RATRUN_FOREGROUND=1` pins it on for a session).
+    /// command A/B it live (`RATRUN_FOREGROUND=0|1` pins it for a session).
     /// Render-only, like `smooth`.
     foreground: bool,
     /// The `RATRUN_FOREGROUND` session pin (see `smooth_env`).
@@ -10674,8 +10674,8 @@ mod tests {
                     .capture_items()
                     .filter(|(i, _, corridor)| match want.as_str() {
                         "" | "band" | "span" => true,
-                        "horizontal" => i.horizontal,
-                        "vertical" => !i.horizontal,
+                        "horizontal" => i.axis.y == 0.0,
+                        "vertical" => i.axis.x == 0.0,
                         "room-span" => !*corridor,
                         "corridor-span" => *corridor,
                         _ => kind_filter == Some(i.kind),
@@ -10685,11 +10685,7 @@ mod tests {
                 if let Some((item, at, _)) = items.get(n).copied() {
                     eprintln!("dump fore: {item:?}");
                     w.clear_enemies();
-                    let rat_off = rat_off.unwrap_or(if item.horizontal {
-                        Vec2::new(0.0, 50.0)
-                    } else {
-                        Vec2::new(50.0, 0.0)
-                    });
+                    let rat_off = rat_off.unwrap_or(item.normal() * 50.0);
                     w.player.pos = w
                         .level
                         .tiles
@@ -11743,7 +11739,7 @@ mod tests {
         h.app.world.as_mut().unwrap().smoke_enabled = false;
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 3, "the smoke toggle must redraw");
-        h.app.set_foreground(true);
+        h.app.set_foreground(false);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 4, "the foreground toggle must redraw");
         // The Graphics page's SCREEN SHAKE row moves the camera the frozen
@@ -15598,11 +15594,11 @@ mod tests {
         let text = h.frame(&[KeyCode::Char('g')]);
         assert!(matches!(h.app.screen, Screen::Graphics));
         assert!(text.contains("S smoothing · G or Esc back"));
-        for row in [graphics::SMOOTH_ROW, graphics::FOREGROUND_ROW] {
+        for (row, label) in [(graphics::SMOOTH_ROW, "‹ OFF ›"), (graphics::FOREGROUND_ROW, "‹ ON ›")] {
             let rect = h.app.hits.rect_for(Target::GraphicsRow(row)).unwrap();
             let buffer = h.terminal.backend().buffer();
             let line: String = (rect.x..rect.right()).map(|x| buffer[(x, rect.y)].symbol()).collect();
-            assert!(line.contains("‹ OFF ›"), "{line}");
+            assert!(line.contains(label), "{line}");
         }
         h.frame(&[]);
         assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
@@ -15735,12 +15731,12 @@ mod tests {
         assert_eq!(h.app.smooth_level(), Smooth::default());
 
         // FOREGROUND: the parallax layer.
-        assert!(!h.app.foreground_enabled());
+        assert!(h.app.foreground_enabled());
         h.app.graphics_row = graphics::FOREGROUND_ROW;
         h.frame(&[KeyCode::Right]);
-        assert!(h.app.foreground_enabled());
-        assert!(h.app.world.as_ref().unwrap().foreground);
-        assert!(h.app.scores.graphics.foreground);
+        assert!(!h.app.foreground_enabled());
+        assert!(!h.app.world.as_ref().unwrap().foreground);
+        assert!(!h.app.scores.graphics.foreground);
 
         // GLYPH PARTICLES: the particle layer (never in the picture key).
         assert!(h.app.glyphfx_enabled());
@@ -15844,7 +15840,7 @@ mod tests {
         table.graphics.set_lighting(LightingMode::Coarse);
         table.graphics.set_smooth(Smooth::Xbr);
         table.graphics.fx = false;
-        table.graphics.foreground = true;
+        table.graphics.foreground = false;
         table.graphics.glyphfx = false;
         table.graphics.set_shake(1.0);
 
@@ -15858,7 +15854,7 @@ mod tests {
         assert_eq!(app.lighting_mode(), LightingMode::Coarse);
         assert_eq!(app.smooth_level(), Smooth::Xbr);
         assert!(!app.fx_enabled());
-        assert!(app.foreground_enabled());
+        assert!(!app.foreground_enabled());
         assert!(!app.glyphfx_enabled());
         assert_eq!(app.shake_scale(), 1.0);
 
@@ -15882,7 +15878,7 @@ mod tests {
         assert_eq!(table.graphics, crate::scores::GraphicsFile::default());
         assert_eq!(table.graphics.lighting_mode(), None, "no lighting choice yet");
         assert_eq!(table.graphics.smooth(), Smooth::default());
-        assert!(!table.graphics.foreground);
+        assert!(table.graphics.foreground);
         assert!(table.graphics.fx && table.graphics.glyphfx);
         assert_eq!(table.graphics.shake(), crate::game::world::SHAKE_SCALE);
 
@@ -16828,8 +16824,8 @@ mod tests {
         let mut h = paused_harness();
         let drawn = h.app.world_draws;
         let ticks = h.app.world.as_ref().unwrap().ticks;
-        assert!(!h.app.foreground_enabled(), "off by default");
-        h.app.set_foreground(true);
+        assert!(h.app.foreground_enabled(), "on by default");
+        h.app.set_foreground(false);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "a foreground change redraws the field");
         assert_eq!(
@@ -16837,10 +16833,10 @@ mod tests {
             ticks,
             "the foreground layer is render-only: no tick"
         );
-        assert!(h.app.world.as_ref().unwrap().foreground, "the world was not told");
+        assert!(!h.app.world.as_ref().unwrap().foreground, "the world was not told");
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 1, "and then the picture is cached again");
-        h.app.set_foreground(false);
+        h.app.set_foreground(true);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 2);
     }

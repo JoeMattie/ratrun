@@ -108,11 +108,12 @@ pub fn thickness(item: &ForeItem) -> f32 {
 /// around `d.screen_cross`).
 ///
 /// Every coordinate in `d` (`from`, `to`, `screen_cross`, `shadow_cross`) is in
-/// art pixels; the layer upscales the result nearest-neighbour.
+/// art pixels; the layer filters and projects the local raster.
 pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
     if d.alpha == 0 || d.from > d.to {
         return;
     }
+    let horizontal = item.axis.y == 0.0;
     let scale = d.scale.max(0.25);
     let th = base_thickness(item.kind) * scale;
     let ht = th * 0.5;
@@ -157,9 +158,9 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
         // Common 1x path: entire band fits in one stack tile -> paint once,
         // flush shadow pass completely before body pass.
         paint_kind(item.kind, &mut tile, &ctx);
-        tile.flush_shadow(pb, item.horizontal, d.shadow_cross, max_shadow);
+        tile.flush_shadow(pb, horizontal, d.shadow_cross, max_shadow);
         if item.kind != ForeKind::CloudBand {
-            tile.flush_body(pb, item.horizontal, d.screen_cross, body_alpha);
+            tile.flush_body(pb, horizontal, d.screen_cross, body_alpha);
         }
     } else {
         // Wide extent (zoomed out / large terminal): two chunked passes so
@@ -169,7 +170,7 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
             let uw = ((d.to - u0 + 1) as usize).min(TILE_U);
             tile.reset(u0, uw, dv0, vh, v_c, ht);
             paint_kind(item.kind, &mut tile, &ctx);
-            tile.flush_shadow(pb, item.horizontal, d.shadow_cross, max_shadow);
+            tile.flush_shadow(pb, horizontal, d.shadow_cross, max_shadow);
             u0 += uw as i32;
         }
         if item.kind != ForeKind::CloudBand {
@@ -178,7 +179,7 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
                 let uw = ((d.to - u0 + 1) as usize).min(TILE_U);
                 tile.reset(u0, uw, dv0, vh, v_c, ht);
                 paint_kind(item.kind, &mut tile, &ctx);
-                tile.flush_body(pb, item.horizontal, d.screen_cross, body_alpha);
+                tile.flush_body(pb, horizontal, d.screen_cross, body_alpha);
                 u0 += uw as i32;
             }
         }
@@ -3064,7 +3065,7 @@ mod tests {
     fn make_item(kind: ForeKind, horizontal: bool, scale: f32, seed: u32) -> ForeItem {
         ForeItem {
             kind,
-            horizontal,
+            axis: if horizontal { crate::math::Vec2::new(1.0, 0.0) } else { crate::math::Vec2::new(0.0, 1.0) },
             cross: 60.0,
             depth: 2.2,
             scale,

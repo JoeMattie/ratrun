@@ -2953,7 +2953,7 @@ mod tests {
     #[test]
     fn the_foreground_command_a_bs_the_layer_without_flagging() {
         let mut app = fresh_app();
-        assert!(!app.foreground_enabled(), "off by default");
+        assert!(app.foreground_enabled(), "on by default");
         run_command(&mut app, "foreground off").expect("foreground off");
         assert!(!app.foreground_enabled());
         assert!(!app.console_cheat, "a render-only toggle must not flag the run");
