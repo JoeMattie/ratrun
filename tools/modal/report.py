@@ -167,6 +167,13 @@ def confirmation(lines, cohort, actual, prediction):
         rows.append((boss, percent(prediction["casual"][key]), f"{round(rate * n)}/{n}",
                      "Cleared" if rate > 0 else "No clear observed"))
     table(lines, ("Default route boss", "Predicted Casual clear given encounter", "Fresh Casual clears/encounters", "Result"), rows)
+    lines += ["Fight durations by boss below give predicted / measured seconds among completed encounters."]
+    rows = []
+    for boss in BOSSES:
+        key = f"boss_seconds_name_{boss}"
+        cells = [f"{number(prediction[s][key])} / {number(measured(actual[s], key))} ({actual[s][key][1]})" for s in SKILLS]
+        rows.append((boss, *cells))
+    table(lines, ("Boss", "Expert", "Skilled", "Casual"), rows)
     lines += ["### HP tension", "",
               "Each cell gives predicted / measured HP. Phase means include campaigns observed through "
               "the whole phase. Both dips require falls of five percentage points into each shaded window "
@@ -223,7 +230,8 @@ def design_and_fit(lines, result):
               "The optimizer searched within sampled bounds, with integer XP steps. Objective weights were "
               + ", ".join(f"{k.replace('_', ' ')} {w}%" for k, w in WEIGHTS.items()) + ". "
               "Death targets use a 40% concentration ceiling and a 5% minimum share per floor. "
-              "The Casual boss target is at least 5% clears per encounter, and the close-call target is 55% of wins.", "",
+              "Boss timing uses the floor estimate when fewer than twelve clears support a named-boss estimate. "
+              "The Casual clear target is 5% per encounter, and the close-call target is 55% of wins.", "",
               f"The weighted objective loss is {result['loss']:.3f}. "
               + " ".join(f"{k.replace('_', ' ').capitalize()} contributed {v:.3f}." for k, v in result["loss_by_target"].items()),
               "", "Candidate knobs within 2% of a final search edge "

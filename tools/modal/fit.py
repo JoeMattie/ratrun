@@ -56,6 +56,9 @@ def observe(runs):
     """Return means and denominators. Missing cohorts have zero observations."""
     groups = [*PROBABILITY_GROUPS]
     samples = {key: [] for group in groups for key in group}
+    for boss in BOSSES:
+        samples[f"boss_seconds_name_{boss}"] = []
+        samples[f"boss_hp_lost_name_{boss}"] = []
     for f in range(1, 5):
         samples.update({f"{key}_{f}": [] for key in (
             "reach", "boss_reach", "boss_seconds", "boss_hp_lost", "min_hp", "hp_lost",
@@ -90,8 +93,11 @@ def observe(runs):
                 group = [f"clear_{boss}", f"fall_{boss}"]
                 category(group, group[0 if cleared else 1])
                 samples[f"boss_hp_lost_{f}"].append(floor["boss_hp_lost"])
+                samples[f"boss_hp_lost_name_{boss}"].append(floor["boss_hp_lost"])
             if cleared:
                 samples[f"boss_seconds_{f}"].append(floor["boss_seconds"])
+                if boss is not None:
+                    samples[f"boss_seconds_name_{boss}"].append(floor["boss_seconds"])
             samples[f"hp_lost_{f}"].append(floor["hp_lost"])
             samples[f"min_hp_{f}"].append(floor["min_hp_fraction"])
             hp = floor["hp_samples_10s"]
@@ -255,8 +261,10 @@ def objective(models, values):
             cards = np.nan_to_num(p[f"cards_15m_{f}"], nan=0.)
             result["level_ups"].append(penalty_band(first, 15., 21., 10.)
                                        + penalty_band(cards, 13., 17., 5.))
-            boss = np.nan_to_num(p[f"boss_seconds_{f}"], nan=120.)
-            result["bosses"].append(penalty_band(boss, 40., 80., 40.))
+        for j, name in enumerate(BOSSES):
+            key = f"boss_seconds_name_{name}"
+            duration = p[key] if model.support[key] >= 12 else p[f"boss_seconds_{j // 2 + 1}"]
+            result["bosses"].append(penalty_band(np.nan_to_num(duration, nan=120.), 40., 80., 40.))
         if SKILLS[i] == "casual":
             result["bosses"].append(mean([
                 penalty_band(p[f"clear_{boss}"], .05, 1., .05) for boss in BOSSES
