@@ -95,3 +95,7 @@ pub mod art_roster_outfall;
 // Decorative Outfall seabed plants (kelp, seagrass, anemones).
 #[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod art_seabed;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+pub mod art_crabpot;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
+pub mod art_crab;
