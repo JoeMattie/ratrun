@@ -69,9 +69,11 @@ fn boss_spawns_out_of_sight_when_due() {
 #[test]
 fn every_boss_arrives_out_of_sight_around_the_rat() {
     use crate::game::ecs::systems::spawn::widest_view;
+    let legacy = [Theme::Sewer, Theme::Kitchen, Theme::Laundry, Theme::Lab, Theme::Printworks, Theme::Trailer];
     for (i, kind) in BossKind::all().iter().copied().enumerate() {
         // A different seed per kind so no pool, map or rng state is shared.
-        let mut w = World::new(Theme::playable()[i % Theme::playable().len()], 100 + i as u64);
+        let theme = if kind == BossKind::Lantern { Theme::Outfall } else { legacy[i % legacy.len()] };
+        let mut w = World::new(theme, 100 + i as u64);
         // A known viewport: the App's own default, so the widest view is the
         // same rectangle a real run measures.
         w.viewport = crate::math::Vec2::new(120.0, 74.0);
@@ -642,7 +644,7 @@ fn walled_pocket_world() -> World {
 fn a_rejoin_never_teleports_the_boss_into_a_wall() {
     let w = walled_pocket_world();
     let radius = BossKind::Cat.body_radius();
-    if let Some(spot) = rejoin_spot(&w.level, w.player.pos, radius) {
+    if let Some(spot) = rejoin_spot(&w.level, w.player.pos, radius, false) {
         assert!(
             w.level.tiles.circle_clear(spot, radius, SizeClass::Large),
             "a rejoin spot must be body-clear ({spot:?})"
@@ -1687,6 +1689,7 @@ fn theme_for_boss(kind: BossKind) -> Theme {
         BossKind::Mangle => Theme::Laundry,
         BossKind::NightEdition => Theme::Printworks,
         BossKind::Magpie | BossKind::Hawk => Theme::Trailer,
+        BossKind::Lantern => Theme::Outfall,
     }
 }
 
@@ -1879,7 +1882,7 @@ fn other_bosses_attack_under_every_weapon_script() {
     }
 }
 
-/// **All ten kinds**, with the two weapons that were locking the cat firing
+/// All kinds, with the two weapons that were locking the cat firing
 /// together: a boss may be staggered, never taken out of the fight.
 #[test]
 fn every_boss_starts_and_fires_attacks_under_the_heaviest_build() {
@@ -1902,6 +1905,193 @@ fn every_boss_starts_and_fires_attacks_under_the_heaviest_build() {
             tally.controlled
         );
     }
+}
+
+fn lantern_world() -> World {
+    let mut w = World::new(Theme::Sewer, 17);
+    w.level = Level::empty(Theme::Outfall);
+    w.flow = FlowField::new(&w.level.tiles);
+    w.player.pos = Vec2::new(860.0, 800.0);
+    w.player.god = true;
+    spawn_boss_at(&mut w, BossKind::Lantern, Vec2::new(800.0, 800.0), 1000.0);
+    w
+}
+
+fn set_lantern_hp(w: &mut World, hp: f32) {
+    let mut bosses = w.ecs.query::<&mut Boss>();
+    bosses.iter_mut(&mut w.ecs).next().unwrap().hp = hp;
+}
+
+fn update_lantern(w: &mut World, dt: f32) {
+    w.begin_tick(dt, Vec2::ZERO, false);
+    w.ecs.run_system_cached(boss_update_system).unwrap();
+    w.ecs.run_system_cached(lantern::lantern_gape_system).unwrap();
+    w.end_tick();
+}
+
+fn advance_lantern_to(w: &mut World, state: LanternState, dt: f32) -> Boss {
+    for _ in 0..720 {
+        if let Some(boss) = boss_of(w) {
+            if boss.state == BossState::Lantern(state) {
+                return boss;
+            }
+        }
+        update_lantern(w, dt);
+    }
+    panic!("Lantern did not reach {state:?}");
+}
+
+#[test]
+fn lantern_keeps_its_locked_jaw_when_hp_crosses_both_thresholds() {
+    let mut w = lantern_world();
+    let arrival = boss_of(&mut w).unwrap();
+    assert_eq!(arrival.target_points().len(), 1);
+    assert_eq!(arrival.target_points().first(), Some(arrival.pos));
+    w.player.god = false;
+    w.player.pos = arrival.pos;
+    let hp = w.player.hp;
+    update_lantern(&mut w, DT);
+    assert_eq!(w.player.hp, hp, "the arrival is harmless");
+
+    w.player.pos = arrival.pos + Vec2::new(64.0, 0.0);
+    w.player.god = true;
+    advance_lantern_to(&mut w, LanternState::FeintTell, DT);
+    for _ in 0..32 {
+        update_lantern(&mut w, DT);
+    }
+    let told = boss_of(&mut w).unwrap();
+    assert_eq!(told.state, BossState::Lantern(LanternState::FeintTell));
+    assert_eq!(told.target_points().first(), Some(told.pos));
+    let facing = told.facing;
+    set_lantern_hp(&mut w, 250.0);
+    w.player.pos = told.pos + Vec2::new(0.0, 50.0);
+    let snap = advance_lantern_to(&mut w, LanternState::JawSnap, DT);
+    assert_eq!(snap.phase, 3);
+    assert_eq!(snap.facing, facing);
+    assert!(snap.hazards.iter().any(BossHazard::is_active));
+    let recover = advance_lantern_to(&mut w, LanternState::FeintRecover, DT);
+    assert_eq!(recover.incoming_multiplier(-facing, recover.pos), 0.5);
+    assert_eq!(recover.incoming_multiplier(facing.perp(), recover.pos), 1.0);
+    let dropped = advance_lantern_to(&mut w, LanternState::DropLamp, DT);
+    assert_eq!(dropped.lantern_view().unwrap().real_bulb.unwrap().radius, 52.0);
+    assert!(w.level.objects.outfall_boss_snuff.is_none());
+}
+
+#[test]
+fn lantern_decoy_takes_one_ordered_projectile_and_death_restores_the_sconce() {
+    use crate::game::level::{LightFixture, LightFixtureKind};
+    let mut w = lantern_world();
+    let lamp = Vec2::new(790.0, 715.0);
+    w.level.objects.lights.push(LightFixture {
+        pos: lamp,
+        kind: LightFixtureKind::Sconce,
+        radius: 110.0,
+        seed: 1,
+    });
+    set_lantern_hp(&mut w, 500.0);
+    let boss = (0..700)
+        .find_map(|_| {
+            update_lantern(&mut w, DT);
+            boss_of(&mut w).filter(|boss| boss.lantern.decoy.is_some())
+        })
+        .expect("the phase-two snuff released a decoy");
+    assert_eq!(w.level.objects.outfall_boss_snuff, Some(0));
+    assert_eq!(boss.target_points().first(), Some(boss.pos));
+    let bulb = boss.lantern.decoy.unwrap().pos;
+    assert_eq!(bulb, lamp);
+    w.player.pos = boss.pos + Vec2::new(0.0, 80.0);
+
+    let sweep = |from, to| {
+        let mut bullet = dart_at(from, 10.0, WeaponKind::CheeseSpray);
+        bullet.pos = to;
+        bullet
+    };
+    let head_first = w.spawn_bullet(sweep(boss.pos, bulb));
+    let mut piercing = sweep(bulb, boss.pos);
+    piercing.pierce = 1;
+    let decoy_first = w.spawn_bullet(piercing);
+    let after_pop = w.spawn_bullet(sweep(bulb, bulb));
+    tick_boss_damage(&mut w);
+    let after = boss_of(&mut w).unwrap();
+    assert_eq!(after.hp, boss.hp - 10.0);
+    assert!(after.lantern.decoy.is_none());
+    assert!(w.ecs.get::<Bullet>(head_first).unwrap().hit_cd > 0.0);
+    let piercing = w.ecs.get::<Bullet>(decoy_first).unwrap();
+    assert!(piercing.hit_cd > 0.0 && piercing.life > 0.0 && piercing.pierce == 0);
+    assert_eq!(w.ecs.get::<Bullet>(after_pop).unwrap().hit_cd, 0.0);
+
+    let leap_tell = advance_lantern_to(&mut w, LanternState::DecoyLeapTell, DT);
+    assert!(leap_tell.committed());
+    advance_lantern_to(&mut w, LanternState::DecoyLeap, DT);
+    set_lantern_hp(&mut w, 0.0);
+    update_lantern(&mut w, DT);
+    let dead = boss_of(&mut w).unwrap();
+    assert!(dead.dead && dead.hazards.is_empty());
+    assert!(dead.lantern_view().unwrap().real_bulb.is_some());
+    assert!(!w.level.sconce_snuffed(0));
+}
+
+#[test]
+fn lantern_gape_preserves_the_final_pull_slice_and_centres_the_stamp() {
+    use crate::game::gem::Gem;
+    let dt = 0.037;
+    for (giant, dash, scale) in [(false, false, 1.0), (true, false, 0.5), (false, true, 0.0)] {
+        let mut w = lantern_world();
+        set_lantern_hp(&mut w, 300.0);
+        advance_lantern_to(&mut w, LanternState::GapeTell, dt);
+        // Enter the frozen footprint before the tell ends.
+        for _ in 0..15 {
+            update_lantern(&mut w, dt);
+        }
+        let tell = boss_of(&mut w).unwrap();
+        assert_eq!(tell.state, BossState::Lantern(LanternState::GapeTell));
+        let mouth = art_boss_lantern::mouth_pos(&tell.lantern_view().unwrap());
+        let start = mouth + tell.facing * 65.0;
+        w.player.pos = start;
+        w.player.buffs.giant = if giant { 10.0 } else { 0.0 };
+        w.player.dash_active = if dash { 10.0 } else { 0.0 };
+        let gem = w.spawn_gem(Gem::new(start, 1));
+        let mut held = Gem::new(start, 1);
+        held.magnetized = true;
+        let held = w.spawn_gem(held);
+        let stamp = advance_lantern_to(&mut w, LanternState::GapeStamp, dt);
+        assert!((w.player.pos.dist(start) - 39.2 * scale).abs() < 0.005);
+        assert!((w.ecs.get::<Gem>(gem).unwrap().pos.dist(start) - 39.2).abs() < 0.005);
+        assert_eq!(w.ecs.get::<Gem>(held).unwrap().pos, start);
+        assert_eq!(w.player.iframes, 0.0);
+
+        if !giant && !dash {
+            // At 13 px across the 12 px half-width, the rat body overlaps
+            // the rect, but its centre is out. One pixel inward should hit.
+            w.player.god = false;
+            w.player.pos = mouth + stamp.facing.perp() * 13.0;
+            let hp = w.player.hp;
+            update_lantern(&mut w, dt);
+            assert_eq!(w.player.hp, hp);
+            w.player.pos = mouth;
+            update_lantern(&mut w, dt);
+            assert!(w.player.hp < hp);
+            let hit_hp = w.player.hp;
+            w.player.iframes = 0.0;
+            update_lantern(&mut w, dt);
+            assert_eq!(w.player.hp, hit_hp, "one hit per stamp");
+        }
+    }
+}
+
+#[test]
+fn lantern_death_mid_pull_stops_moving_even_through_the_scheduled_afterpass() {
+    let mut w = lantern_world();
+    set_lantern_hp(&mut w, 300.0);
+    let pull = advance_lantern_to(&mut w, LanternState::GapePull, DT);
+    let bulb = pull.lantern_view().unwrap().real_bulb.unwrap().pos;
+    let before = w.player.pos;
+    set_lantern_hp(&mut w, 0.0);
+    update_lantern(&mut w, DT);
+    let dead = boss_of(&mut w).unwrap();
+    assert_eq!(w.player.pos, before);
+    assert!(dead.dead && dead.hazards.is_empty());
+    assert_eq!(dead.lantern_view().unwrap().real_bulb.unwrap().pos, bulb);
 }
 
 /// The budget itself, on the API every controller uses.
