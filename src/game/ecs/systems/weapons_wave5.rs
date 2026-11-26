@@ -1,11 +1,17 @@
 //! Deterministic ricochet, chain swing, and stillness pulse.
+//!
+//! Plumb Bob uses a cosine swing over each 150° pass. The weight leaves each
+//! extreme at rest and peaks in speed on the aim line. Hit sweeps and art share
+//! the wall-stopped endpoint. Out and back share a hit set to preserve damage.
 
 use std::collections::BTreeSet;
+use std::f32::consts::PI;
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::art_wave5::HOLD_RADIUS;
 use crate::game::collision::{segment_circle_hit, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
@@ -39,10 +45,10 @@ const WALL_GAP: f32 = 0.01;
 
 const BOB: WeaponKind = WeaponKind::PlumbBob;
 const BOB_RADIUS: f32 = 2.5;
-const BOB_HALF: f32 = 75.0 * std::f32::consts::PI / 180.0;
-const BOB_PASS: f32 = 0.55;
+const BOB_HALF: f32 = 75.0 * PI / 180.0;
+pub(crate) const BOB_PASS: f32 = 0.55;
 const SHED_REACH: f32 = 48.0;
-const SHED_PASS: f32 = 0.30;
+pub(crate) const SHED_PASS: f32 = 0.30;
 
 const HOLD: WeaponKind = WeaponKind::HoldPoint;
 const HOLD_SPEED: f32 = 10.0;
@@ -73,9 +79,46 @@ pub(crate) struct PlumbBob {
     pub evolved: bool,
     facing: f32,
     reach: f32,
-    age: f32,
+    age: f64,
     damage: f32,
     hits: BTreeSet<u64>,
+}
+
+impl PlumbBob {
+    pub(crate) fn age(&self) -> f32 {
+        self.age as f32
+    }
+
+    pub(crate) fn turn_end(&self) -> f32 {
+        BOB_PASS + if self.evolved { 2.0 * SHED_PASS } else { 0.0 }
+    }
+
+    /// Normalized time over both passes, held at 1 while Shed Bob rolls.
+    pub(crate) fn swing_phase(&self, age: f32) -> f32 {
+        if age <= BOB_PASS {
+            age / BOB_PASS
+        } else {
+            1.0 + ((age - self.turn_end()) / BOB_PASS).clamp(0.0, 1.0)
+        }
+    }
+
+    pub(crate) fn angle_at(&self, age: f32) -> f32 {
+        self.facing - BOB_HALF * (PI * self.swing_phase(age)).dcos()
+    }
+
+    pub(crate) fn offsets_at(&self, age: f32) -> (Vec2, Vec2) {
+        let dir = Vec2::from_angle(self.angle_at(age));
+        let roll = if self.evolved {
+            (1.0 - ((age - BOB_PASS) / SHED_PASS - 1.0).abs()).max(0.0)
+        } else {
+            0.0
+        };
+        (dir * self.reach, dir.perp() * (roll * SHED_REACH))
+    }
+
+    pub(crate) fn endpoint_at(&self, level: &Level, age: f32) -> Vec2 {
+        bob_endpoint(level, self, self.pivot, age)
+    }
 }
 
 impl HoldPointFx {
@@ -344,17 +387,10 @@ pub(crate) fn plumb_bob_system(
 }
 
 fn bob_endpoint(level: &Level, bob: &PlumbBob, pivot: Vec2, age: f32) -> Vec2 {
-    let turn_end = BOB_PASS + if bob.evolved { 2.0 * SHED_PASS } else { 0.0 };
-    let swing = if age <= BOB_PASS {
-        age / BOB_PASS
-    } else {
-        (1.0 - (age - turn_end).max(0.0) / BOB_PASS).max(0.0)
-    };
-    let dir = Vec2::from_angle(bob.facing + (2.0 * swing - 1.0) * BOB_HALF);
-    let swing_tip = bob_clear_step(level, pivot, pivot + dir * bob.reach);
-    if bob.evolved && age > BOB_PASS && age < turn_end {
-        let roll = (1.0 - ((age - BOB_PASS) / SHED_PASS - 1.0).abs()).max(0.0);
-        bob_clear_step(level, swing_tip, swing_tip + dir.perp() * (roll * SHED_REACH))
+    let (swing, roll) = bob.offsets_at(age);
+    let swing_tip = bob_clear_step(level, pivot, pivot + swing);
+    if roll != Vec2::ZERO {
+        bob_clear_step(level, swing_tip, swing_tip + roll)
     } else {
         swing_tip
     }
@@ -367,19 +403,24 @@ fn bob_clear_step(level: &Level, from: Vec2, to: Vec2) -> Vec2 {
 }
 
 fn advance_bob(bob: &mut PlumbBob, pivot: Vec2, dt: f32, hits: &mut Wave5Hits) -> bool {
-    let turn_end = BOB_PASS + if bob.evolved { 2.0 * SHED_PASS } else { 0.0 };
-    let end = turn_end + BOB_PASS;
+    let turn_end = bob.turn_end();
+    let end = f64::from(turn_end + BOB_PASS);
     let start = bob.age;
-    let target = (start + dt).min(end);
+    // Accumulate frame time in f64, then snap only at the cast's final
+    // boundary to absorb rounding in f32 inputs like BOB_PASS / 33.
+    let target = start + f64::from(dt);
+    let target = if target + 1e-7 >= end { end } else { target };
     let previous_pivot = bob.pivot;
     while bob.age < target {
         // Sample short chords, including the exact reversal of the swing or roll.
-        let boundary = [BOB_PASS, BOB_PASS + SHED_PASS, turn_end, end].into_iter()
+        let boundary = [BOB_PASS, BOB_PASS + SHED_PASS, turn_end].into_iter()
+            .map(f64::from)
             .filter(|&t| t > bob.age)
-            .fold(end, f32::min);
-        bob.age = (bob.age + 1.0 / 60.0).min(boundary).min(target);
-        bob.pivot = previous_pivot + (pivot - previous_pivot) * ((bob.age - start) / dt);
-        let next = bob_endpoint(&hits.level, bob, bob.pivot, bob.age);
+            .fold(end, f64::min);
+        bob.age = (bob.age + f64::from(1.0_f32 / 60.0)).min(boundary).min(target);
+        let tick_progress = ((bob.age - start) / f64::from(dt)).min(1.0) as f32;
+        bob.pivot = previous_pivot + (pivot - previous_pivot) * tick_progress;
+        let next = bob_endpoint(&hits.level, bob, bob.pivot, bob.age as f32);
         let clear = bob_clear_step(&hits.level, bob.pos, next);
         hits.sweep(bob.pos, clear, BOB_RADIUS, bob.damage, BOB, |key| bob.hits.insert(key));
         bob.pos = next;
@@ -668,6 +709,49 @@ mod tests {
     }
 
     #[test]
+    fn bob_arc_starts_at_rest_and_moves_fastest_through_the_middle() {
+        let mut world = arena(BOB, 1, false);
+        step_bob(&mut world, 0.0);
+        let mut query = world.ecs.query::<&PlumbBob>();
+        let bob = query.single(&world.ecs).unwrap();
+
+        let arc = |a, b| (bob.angle_at(b * BOB_PASS) - bob.angle_at(a * BOB_PASS)).abs();
+        let middle = arc(0.45, 0.55);
+        assert!(middle > arc(0.25, 0.35));
+        assert!(middle > arc(0.0, 0.1) * 5.0);
+        assert!(middle > arc(0.9, 1.0) * 5.0);
+        assert!((arc(0.0, 0.1) - arc(0.9, 1.0)).abs() < 1e-6);
+        assert_eq!(bob.angle_at(0.0), -BOB_HALF);
+        assert_eq!(bob.angle_at(BOB_PASS), BOB_HALF);
+        assert_eq!(bob.angle_at(2.0 * BOB_PASS), -BOB_HALF);
+    }
+
+    #[test]
+    fn bob_reaches_each_extreme_on_time_across_tick_splits() {
+        for steps in [1, 3, 11, 33, 61] {
+            let mut world = arena(BOB, 1, false);
+            let dt = BOB_PASS / steps as f32;
+            let end = ORIGIN + Vec2::from_angle(BOB_HALF) * 34.0;
+            let start = ORIGIN + Vec2::from_angle(-BOB_HALF) * 34.0;
+            step_bob(&mut world, 0.0);
+            let mut query = world.ecs.query::<&PlumbBob>();
+            assert_eq!(query.single(&world.ecs).unwrap().pos, start);
+            for _ in 0..steps {
+                step_bob(&mut world, dt);
+            }
+            let bob = query.single(&world.ecs).unwrap();
+            assert!((bob.age() - BOB_PASS).abs() < 1e-7);
+            assert_eq!(bob.pos, end);
+            for _ in 1..steps {
+                step_bob(&mut world, dt);
+            }
+            assert!(query.single(&world.ecs).is_ok());
+            step_bob(&mut world, dt);
+            assert!(query.iter(&world.ecs).next().is_none());
+        }
+    }
+
+    #[test]
     fn only_the_bob_hits_and_the_cooldown_follows_both_passes() {
         let mut world = arena(BOB, 1, false);
         let chain = world.spawn_enemy(EnemyKind::Skitterer, ORIGIN + Vec2::new(17.0, 0.0), 10.0);
@@ -682,6 +766,81 @@ mod tests {
         assert_eq!(query.iter(&world.ecs).len(), 0);
         assert_eq!(world.ecs.get::<Enemy>(tip).unwrap().hp, hp - 11.0);
         assert_eq!(world.player.loadout.weapons[0].timer, 0.85);
+    }
+
+    #[test]
+    fn bob_chain_bows_under_acceleration_and_draws_a_still_frame_identically() {
+        use crate::game::art_wave5::bob_chain;
+        use crate::render::framebuffer::PixelBuffer;
+        let mut world = arena(BOB, 1, false);
+        step_bob(&mut world, 0.0);
+        step_bob(&mut world, BOB_PASS / 6.0);
+        let mut query = world.ecs.query::<&PlumbBob>();
+        let slack = |world: &World, bob: &PlumbBob| {
+            let nodes = bob_chain(bob, world.player.face);
+            assert_eq!(nodes[nodes.len() - 1], bob.pos);
+            assert_ne!(nodes[0], bob.pivot);
+            let length: f32 = nodes.windows(2).map(|pair| pair[0].dist(pair[1])).sum();
+            length - nodes[0].dist(bob.pos)
+        };
+        assert!(slack(&world, query.single(&world.ecs).unwrap()) > 0.5);
+        step_bob(&mut world, BOB_PASS / 3.0);
+        assert!(slack(&world, query.single(&world.ecs).unwrap()) < 0.05);
+        for zoom in [1.0, 2.0] {
+            world.zoom_view = zoom;
+            let mut first = PixelBuffer::new(96, 92);
+            let mut second = PixelBuffer::new(96, 92);
+            world.draw(&mut first);
+            world.draw(&mut second);
+            assert_eq!(first.pixels(), second.pixels());
+        }
+    }
+
+    /// Optional headless capture of both passes at normal and widest zoom.
+    #[test]
+    fn capture_bob_swing() {
+        use crate::render::framebuffer::PixelBuffer;
+        let Ok(dir) = std::env::var("RATRUN_BOB_CAPTURE_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut world = World::new(Theme::Sewer, 84);
+        world.configure_testbed();
+        world.clear_enemies();
+        let hall = world.level.largest_hall().unwrap().rect;
+        world.player.pos = hall.cells()
+            .map(|(x, y)| TileMap::tile_rect(x, y).center())
+            .filter(|&pos| world.level.tiles.circle_clear(pos, 48.0, SizeClass::Small))
+            .min_by(|a, b| a.dist_sq(hall.center_world()).total_cmp(&b.dist_sq(hall.center_world())))
+            .expect("clear space for the full arc");
+        world.player.face = Vec2::new(1.0, 0.0);
+        world.player.loadout.weapons = vec![Weapon { kind: BOB, level: 5, evolved: false, timer: 0.0 }];
+        world.cam_focus = Some(world.player.pos + Vec2::new(12.0, 0.0));
+        step_bob(&mut world, 0.0);
+        let mut query = world.ecs.query::<&PlumbBob>();
+        let mut frame = PixelBuffer::new(100, 96);
+        let mut last = 0.0;
+        let phases = [0.0, 0.12, 0.30, 0.50, 0.78, 1.0, 1.12, 1.30, 1.50, 1.78, 2.0];
+        for (i, phase) in phases.into_iter().enumerate() {
+            let age = (phase * BOB_PASS).min(2.0 * BOB_PASS - 0.001);
+            world.elapsed = age;
+            step_bob(&mut world, age - last);
+            last = age;
+            let bob = query.single(&world.ecs).unwrap();
+            assert!((bob.pos.dist(bob.pivot) - 42.0).abs() < 1e-3, "capture arc clips a wall");
+            for zoom in [1, 2] {
+                world.zoom_view = zoom as f32;
+                world.draw(&mut frame);
+                let rgb: Vec<_> = frame.pixels().iter().flat_map(|&(r, g, b)| [r, g, b]).collect();
+                image::save_buffer(
+                    dir.join(format!("plumb-bob-{zoom}x-{i:02}.png")),
+                    &rgb,
+                    frame.w as u32,
+                    frame.h as u32,
+                    image::ColorType::Rgb8,
+                ).unwrap();
+            }
+        }
     }
 
     #[test]

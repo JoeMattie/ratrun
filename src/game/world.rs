@@ -2881,7 +2881,7 @@ impl World {
             }
         }
 
-        {
+        let bob_lean = {
             use super::ecs::systems::weapons_wave5::{GlassBead, PlumbBob};
             let mut beads = self.ecs.query::<(&SpawnId, &GlassBead)>();
             for (_, bead) in beads.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
@@ -2892,14 +2892,23 @@ impl World {
                 }
             }
             let mut bobs = self.ecs.query::<(&SpawnId, &PlumbBob)>();
+            let mut lean = Vec2::ZERO;
             for (_, bob) in bobs.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 if on_screen(self.w2s(bob.pivot, cam), 96.0, viewport) {
-                    super::art_wave5::draw_bob(pb, bob.pivot, bob.pos, cam, bob.evolved);
+                    lean = super::art_wave5::draw_bob(
+                        pb,
+                        &mut self.light_map,
+                        &self.level,
+                        bob,
+                        self.player.face,
+                        cam,
+                    );
                     let s = self.w2s(bob.pos, cam);
                     self.light_map.mark_emissive_highlights(pb, s, 3);
                 }
             }
-        }
+            lean
+        };
 
         // Fondue Fork outer tines in flight (before both plant their CheeseString).
         {
@@ -2940,7 +2949,7 @@ impl World {
         }
 
         // Player rat.
-        self.draw_player(pb, cam);
+        self.draw_player(pb, cam, bob_lean);
 
         // Instant melee weapon visuals anchored to the rat: Gnaw's closing white
         // tooth crescents (`BiteSnap`) and Tail Whip's frontal pink half-circle
@@ -3643,7 +3652,7 @@ impl World {
         &mut self.smoke
     }
 
-    fn draw_player(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+    fn draw_player(&mut self, pb: &mut PixelBuffer, cam: Vec2, bob_lean: Vec2) {
         // A card plate with no rat (`World::hide_rat`): the simulation still
         // has one, the picture does not.
         if self.hide_rat {
@@ -3727,12 +3736,12 @@ impl World {
             crate::render::lighting::rat_pen()
         });
         match scale {
-            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash),
+            Some(scale) => self.draw_scaled_rat(pb, cam, scale, flash, bob_lean),
             None => art_rat::draw_rat_with_whip(
                 pb,
                 &self.player,
                 self.elapsed,
-                cam,
+                cam - bob_lean,
                 flash,
                 lash,
                 Some(&self.whip_chain),
@@ -3740,7 +3749,7 @@ impl World {
         }
         if self.player.buffs.collar > 0.0 {
             let face = self.player.face.normalized();
-            let neck = self.player.pos + face * (2.0 * scale.unwrap_or(1.0));
+            let neck = self.player.pos + bob_lean + face * (2.0 * scale.unwrap_or(1.0));
             let (x, y) = self.w2s(neck, cam);
             let glint = if (self.elapsed * 6.0) as i32 % 3 == 0 {
                 (255, 240, 180)
@@ -3796,8 +3805,15 @@ impl World {
     ///
     /// Render-only: it reads the player, the frame clock and the render-only
     /// whip chain, and writes pixels.
-    fn draw_scaled_rat(&self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
-        art_rat_giant::draw_giant_rat(pb, &self.player, self.elapsed, cam, scale, tail_flash);
+    fn draw_scaled_rat(
+        &self,
+        pb: &mut PixelBuffer,
+        cam: Vec2,
+        scale: f32,
+        tail_flash: f32,
+        lean: Vec2,
+    ) {
+        art_rat_giant::draw_giant_rat(pb, &self.player, self.elapsed, cam - lean, scale, tail_flash);
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
             art_rat::draw_live_whip(

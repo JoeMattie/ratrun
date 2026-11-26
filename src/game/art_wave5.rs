@@ -2,17 +2,20 @@
 //! **Glass Bead**, **Plumb Bob**, and **Hold Point**.
 //!
 //! Pure render-only drawing from continuous inputs — zero simulation state,
-//! zero rng, zero allocation, and no time-stepped animation. World-space
+//! zero rng and zero allocation. World-space
 //! coordinates map through [`w2s`] with the same `(p - cam).round()` rule as
 //! `art_wave3a` and `art_rat`.
 
 #![allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::game::art_wave3a::RingDedup;
+use crate::game::ecs::systems::weapons_wave5::{BOB_PASS, PlumbBob, SHED_PASS};
+use crate::game::level::Level;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::lighting::LightMap;
 use crate::render::palette::{self, Rgb};
 
 /// Hit and drawn radius (px) of **Hold Point**'s floor circle.
@@ -28,7 +31,7 @@ const BEAD_SPARK_WARM: Rgb = (255, 182, 82);
 
 // --- Plumb Bob palette -----------------------------------------------------
 const CHAIN_DARK: Rgb = (4, 4, 5);
-const CHAIN_LINK: Rgb = (10, 9, 8);
+const CHAIN_LINK: Rgb = (93, 83, 69);
 const BOB_ARC: Rgb = (224, 186, 94);
 const BRASS_HI: Rgb = (255, 246, 196);
 const BRASS_HI_EVO: Rgb = (255, 252, 224);
@@ -213,67 +216,166 @@ pub fn draw_bead(pb: &mut PixelBuffer, pos: Vec2, vel: Vec2, cam: Vec2, bounces:
     pb.plot(c.0, c.1, BEAD_CORE);
 }
 
-/// **Plumb Bob**: a dim 1-px iron chain from `pivot` to `bob` (drawn dimmer
-/// than floor grout so only the weight reads as a hitbox) and a machined 5-px
-/// brass bob at `bob`. Evolved **Shed Bob** (`evolved = true`) adds a faint
-/// brass motion arc sweeping along the pendulum circle through `bob`.
-pub fn draw_bob(pb: &mut PixelBuffer, pivot: Vec2, bob: Vec2, cam: Vec2, evolved: bool) {
-    if !pivot.x.is_finite()
-        || !pivot.y.is_finite()
-        || !bob.x.is_finite()
-        || !bob.y.is_finite()
-        || !cam.x.is_finite()
-        || !cam.y.is_finite()
-    {
-        return;
-    }
-    let p0 = w2s(pivot, cam);
-    let p1 = w2s(bob, cam);
-    let rel = bob - pivot;
-    let radius = rel.len();
+const BOB_LINKS: usize = 8;
+const CHAIN_DT: f32 = 1.0 / 240.0;
 
-    // 1. Evolved faint motion arc along the pendulum circle around `pivot`.
-    if evolved && radius >= 6.0 {
-        let base_angle = rel.y.atan2(rel.x);
-        let half_span = (15.0 / radius).clamp(0.25, 0.56);
-        let steps = (radius * half_span * 3.5).ceil().clamp(18.0, 84.0) as usize;
-        let mut seen = RingDedup::new();
-        let denom = steps as f32;
-        for i in 0..=steps {
-            let u = (i as f32 / denom) * 2.0 - 1.0;
-            let a = base_angle + u * half_span;
-            let (sa, ca) = a.sin_cos();
-            let ap = pivot + Vec2::new(ca * radius, sa * radius);
-            let s = w2s(ap, cam);
-            if seen.repeat(s) {
-                continue;
-            }
-            let ddx = s.0 - p1.0;
-            let ddy = s.1 - p1.1;
-            if ddx * ddx + ddy * ddy <= 8 {
-                continue;
-            }
-            let falloff = (1.0 - u.abs()).clamp(0.0, 1.0);
-            let gain = 0.36 * falloff * (0.40 + 0.60 * falloff);
-            pb.plot_add(s.0, s.1, palette::scale(BOB_ARC, gain));
-        }
-    }
+/// Replay the pinned Verlet chain relative to the rat at fixed substeps.
+/// The cast clock determines the whole pose, including fractional substeps,
+/// so a repeated or skipped draw has no effect on the picture.
+pub(crate) fn bob_chain(bob: &PlumbBob, face: Vec2) -> [Vec2; BOB_LINKS + 1] {
+    let age = bob.age();
+    let (swing, roll) = bob.offsets_at(age);
+    let tip = bob.pos - bob.pivot;
+    let reach_scale = (tip.len() / (swing + roll).len()).min(1.0);
+    let face = face.normalized();
+    let sample = |t| {
+        let (swing, roll) = bob.offsets_at(t);
+        (swing + roll) * reach_scale
+    };
 
-    // 2. Dim 1-px chain from `pivot` to `bob`: darkens floor pixels below floor
-    //    grout on every theme while writing subtle alternating link texture.
-    walk_line(p0, p1, |idx, x, y| {
-        if idx.is_multiple_of(2) {
-            blend_px(pb, x, y, CHAIN_DARK, 0.64);
-        } else {
-            blend_px(pb, x, y, CHAIN_LINK, 0.48);
-        }
+    let first_tip = sample(0.0);
+    let first_paw = bob_paw(face, first_tip, 0.0);
+    let mut nodes = std::array::from_fn(|i| {
+        let u = i as f32 / BOB_LINKS as f32;
+        // Seed a loose curve behind the weight at release.
+        first_paw + (first_tip - first_paw) * u
+            - first_tip.normalized().perp() * (20.0 * reach_scale * u * (1.0 - u))
     });
+    let mut previous = nodes;
+    let steps = age / CHAIN_DT;
+    for step in 1..=steps.ceil() as usize {
+        let t = step as f32 * CHAIN_DT;
+        let next_tip = sample(t);
+        let speed = bob_speed(bob, t);
+        let next_paw = bob_paw(face, next_tip, speed);
+        let chord = next_tip - next_paw;
+        let slack = 3.4 * (1.0 - speed.abs()) * reach_scale;
+        let link_len = (chord.len() + slack) / BOB_LINKS as f32;
+        let drag = -chord.normalized().perp() * (420.0 * speed);
+        let force = (drag + Vec2::new(0.0, 120.0)) * (CHAIN_DT * CHAIN_DT);
+        let before = nodes;
+        for i in 1..BOB_LINKS {
+            nodes[i] += (before[i] - previous[i]) * 0.91 + force;
+        }
+        previous = before;
+        for _ in 0..6 {
+            nodes[0] = next_paw;
+            nodes[BOB_LINKS] = next_tip;
+            for i in 0..BOB_LINKS {
+                let delta = nodes[i + 1] - nodes[i];
+                let correction = delta - delta.normalized() * link_len;
+                let left = if i == 0 { 0.0 } else if i + 1 == BOB_LINKS { 1.0 } else { 0.5 };
+                nodes[i] += correction * left;
+                nodes[i + 1] -= correction * (1.0 - left);
+            }
+        }
+    }
 
-    // 3. 5-px machined brass bob at `p1` (rounded 21-px 5×5 weight with top-left
-    //    specular gleam, dark bronze lower-right rim, and subtle drop shadow).
-    let (cx, cy) = p1;
+    let speed = bob_speed(bob, age);
+    let paw = bob_paw(face, tip, speed);
+    let fraction = steps.fract();
+    let taut = speed.abs().powi(6);
+    for (i, node) in nodes.iter_mut().enumerate() {
+        let u = i as f32 / BOB_LINKS as f32;
+        let straight = paw + (tip - paw) * u;
+        if fraction > 0.0 {
+            *node = previous[i] + (*node - previous[i]) * fraction;
+        }
+        *node = bob.pivot + (*node + (straight - *node) * taut);
+    }
+    nodes[0] = bob.pivot + paw;
+    nodes[BOB_LINKS] = bob.pos;
+    nodes
+}
+
+/// Signed fraction of peak swing speed. Ease the smear at the ends of
+/// Shed Bob’s linear extension while preserving the path of the weight.
+fn bob_speed(bob: &PlumbBob, age: f32) -> f32 {
+    let phase = bob.swing_phase(age);
+    if phase.fract() != 0.0 {
+        (PI * phase).sin()
+    } else if bob.evolved {
+        let roll = ((age - BOB_PASS) / SHED_PASS).clamp(0.0, 2.0);
+        if roll.fract() == 0.0 { 0.0 } else { (PI * roll).sin() * 0.65 }
+    } else {
+        0.0
+    }
+}
+
+fn bob_paw(face: Vec2, tip: Vec2, speed: f32) -> Vec2 {
+    let reach = tip.normalized();
+    let paw = face * 2.5 + reach * (1.25 + speed.abs());
+    paw.clamp_len(tip.len() * 0.5)
+}
+
+/// Draw the flexible iron chain and its machined brass weight. Returns the
+/// rat’s render-only lean in world pixels.
+pub(crate) fn draw_bob(
+    pb: &mut PixelBuffer,
+    lights: &mut LightMap,
+    level: &Level,
+    bob: &PlumbBob,
+    face: Vec2,
+    cam: Vec2,
+) -> Vec2 {
+    let age = bob.age();
+    let speed = bob_speed(bob, age);
+    let tip = w2s(bob.pos, cam);
+
+    // Trace only behind the bob on its current leg. Read the same wall-stopped
+    // endpoint as the hits so the smear follows the swing and the Shed roll.
+    let leg_start = if bob.swing_phase(age) > 1.0 {
+        bob.turn_end()
+    } else if bob.evolved && age > BOB_PASS + SHED_PASS {
+        BOB_PASS + SHED_PASS
+    } else if age > BOB_PASS {
+        BOB_PASS
+    } else {
+        0.0
+    };
+    let span = (0.072 * speed.abs()).min(age - leg_start);
+    if span > 0.0 {
+        let mut seen = RingDedup::new();
+        for i in 1..=16 {
+            let u = i as f32 / 16.0;
+            let (x, y) = w2s(bob.endpoint_at(level, age - u * span), cam);
+            let (dx, dy) = (x - tip.0, y - tip.1);
+            if dx * dx + dy * dy > 8 && !seen.repeat((x, y)) {
+                pb.plot_add(x, y, palette::scale(BOB_ARC, 0.32 * speed.abs() * (1.0 - u)));
+            }
+        }
+    }
+
+    let nodes = bob_chain(bob, face);
+    let mut index = 0usize;
+    for link in nodes.windows(2) {
+        walk_line(w2s(link[0], cam), w2s(link[1], cam), |step, x, y| {
+            if step > 0 || index == 0 {
+                if index.is_multiple_of(2) {
+                    blend_px(pb, x, y, CHAIN_DARK, 0.64);
+                } else {
+                    blend_px(pb, x, y, CHAIN_LINK, 0.82);
+                    // Keep a muted iron edge visible on a dark floor and
+                    // through the widest zoom's box filter.
+                    lights.mark_glint(pb, x, y, CHAIN_LINK);
+                }
+                index += 1;
+            }
+        });
+    }
+
+    let swing = bob.angle_at(age) - bob.angle_at(BOB_PASS * 0.5);
+    let (_, roll) = bob.offsets_at(age);
+    paint_bob(pb, tip, bob.evolved, swing * 0.9 + roll.len() / 3.0);
+    (bob.pos - bob.pivot).normalized() * speed.abs()
+}
+
+/// Brass stays inside the 5 px silhouette. The highlight slides across the
+/// metal as it rotates, with fractional coverage between pixels.
+fn paint_bob(pb: &mut PixelBuffer, (cx, cy): (i32, i32), evolved: bool, turn: f32) {
     let hi = if evolved { BRASS_HI_EVO } else { BRASS_HI };
     let lit = if evolved { BRASS_LIT_EVO } else { BRASS_LIT };
+    let glint = Vec2::new(-0.95, -0.90).rotate(turn);
 
     shade_px(pb, cx - 1, cy + 3, 0.24);
     shade_px(pb, cx, cy + 3, 0.38);
@@ -285,7 +387,7 @@ pub fn draw_bob(pb: &mut PixelBuffer, pivot: Vec2, bob: Vec2, cam: Vec2, evolved
         (0, -2, BRASS_MID),
         (1, -2, BRASS_SHADE),
         (-2, -1, BRASS_RIM_HI),
-        (-1, -1, hi),
+        (-1, -1, lit),
         (0, -1, lit),
         (1, -1, BRASS_MID),
         (2, -1, BRASS_RIM_LO),
@@ -304,7 +406,8 @@ pub fn draw_bob(pb: &mut PixelBuffer, pivot: Vec2, bob: Vec2, cam: Vec2, evolved
         (1, 2, BRASS_RIM_LO),
     ];
     for (ox, oy, col) in pattern {
-        pb.plot(cx + ox, cy + oy, col);
+        let glint_gain = (1.0 - glint.dist(Vec2::new(ox as f32, oy as f32)) * 0.82).max(0.0);
+        pb.plot(cx + ox, cy + oy, palette::mix(col, hi, glint_gain));
     }
 }
 
@@ -586,58 +689,22 @@ mod tests {
     }
 
     #[test]
-    fn bob_paints_inside_expected_box_with_dim_chain_and_evolved_arc() {
-        // Authentic Sewer brick albedo (16, 24, 22); mortar is (10, 16, 15).
+    fn bob_glint_rolls_inside_the_brass_silhouette() {
         let floor = (16, 24, 22);
-        let cam = Vec2::new(40.0, 20.0);
-        let pivot = Vec2::new(56.0, 52.0); // screen (16, 32)
-        let bob = Vec2::new(90.0, 44.0); // screen (50, 24)
-
-        let mut base = PixelBuffer::new(80, 64);
+        let mut base = PixelBuffer::new(16, 16);
         base.clear(floor);
-        draw_bob(&mut base, pivot, bob, cam, false);
+        paint_bob(&mut base, (8, 8), false, 0.0);
+        assert!(luma(base.pixel_at(7, 7)) > 180);
 
-        let base_pts = painted_pixels(&base, floor);
-        assert!(base_pts.len() >= 45, "chain + 5-px brass bob should paint clearly");
-        for &(x, y, _) in &base_pts {
-            assert!(
-                (15..=53).contains(&x) && (21..=35).contains(&y),
-                "base bob pixel ({x}, {y}) escaped expected pivot..bob box"
-            );
-        }
-
-        // Mid-chain pixel is strictly dimmer than the floor tile (dimmer than grout).
-        let mid = base.pixel_at(33, 28);
-        assert!(
-            luma(mid) < luma(floor),
-            "chain pixel {mid:?} must be dimmer than floor {floor:?}"
-        );
-        // 5-px brass bob highlight reads brightly above the floor.
-        let bob_hi = base.pixel_at(49, 23);
-        assert!(
-            luma(bob_hi) > 180,
-            "brass bob highlight {bob_hi:?} should read clearly"
-        );
-
-        // Evolved Shed Bob adds a faint motion arc inside the pendulum radius box.
-        let mut evo = PixelBuffer::new(80, 64);
-        evo.clear(floor);
-        draw_bob(&mut evo, pivot, bob, cam, true);
-        let evo_pts = painted_pixels(&evo, floor);
-        assert!(
-            evo_pts.len() > base_pts.len(),
-            "evolved bob ({}) must paint faint motion arc beyond base ({})",
-            evo_pts.len(),
-            base_pts.len()
-        );
-        let r = pivot.dist(bob) + 4.0;
-        for &(x, y, _) in &evo_pts {
-            let d = Vec2::new((x - 16) as f32, (y - 32) as f32).len();
-            assert!(
-                d <= r,
-                "evolved bob pixel ({x}, {y}) at dist {d:.1} exceeded pendulum box {r:.1}"
-            );
-        }
+        let mut turned = PixelBuffer::new(16, 16);
+        turned.clear(floor);
+        paint_bob(&mut turned, (8, 8), false, FRAC_PI_2);
+        assert!(luma(turned.pixel_at(9, 7)) > 180);
+        assert_ne!(base.pixels(), turned.pixels());
+        let mask = |pb: &PixelBuffer| {
+            painted_pixels(pb, floor).into_iter().map(|(x, y, _)| (x, y)).collect::<Vec<_>>()
+        };
+        assert_eq!(mask(&base), mask(&turned));
     }
 
     #[test]
@@ -737,14 +804,14 @@ mod tests {
         let mut zero = PixelBuffer::new(0, 0);
         draw_bead(&mut zero, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, 0);
         draw_bead(&mut zero, Vec2::new(5.0, 5.0), Vec2::new(1.0, 0.0), Vec2::ZERO, 4);
-        draw_bob(&mut zero, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, false);
-        draw_bob(&mut zero, Vec2::ZERO, Vec2::new(34.0, 0.0), Vec2::ZERO, true);
+        paint_bob(&mut zero, (0, 0), false, 0.0);
+        paint_bob(&mut zero, (34, 0), true, 0.0);
         draw_hold(&mut zero, Vec2::ZERO, Vec2::ZERO, 0.5, 0.5, false);
         draw_hold(&mut zero, Vec2::ZERO, Vec2::ZERO, f32::NAN, f32::INFINITY, true);
 
         let mut pb = PixelBuffer::new(16, 16);
         draw_bead(&mut pb, Vec2::new(8.0, 8.0), Vec2::ZERO, Vec2::ZERO, 2);
-        draw_bob(&mut pb, Vec2::new(8.0, 8.0), Vec2::new(8.0, 8.0), Vec2::ZERO, true);
+        paint_bob(&mut pb, (8, 8), true, 0.0);
         draw_hold(&mut pb, Vec2::new(8.0, 8.0), Vec2::ZERO, -1.0, 2.0, false);
         draw_hold(&mut pb, Vec2::new(f32::NAN, 8.0), Vec2::ZERO, 1.0, 0.0, true);
     }
