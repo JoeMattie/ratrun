@@ -1147,6 +1147,7 @@ mod tests {
             player_pos: w.player.pos,
             player_vel: Vec2::ZERO,
             player_radius: PLAYER_RADIUS,
+            player_hurt_radius: PLAYER_RADIUS,
             arena: boss.arena,
             level: &w.level,
             flow: &w.flow,

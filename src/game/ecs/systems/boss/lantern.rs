@@ -10,7 +10,6 @@ use crate::game::art_boss_lantern::{
 };
 use crate::game::bullet::Bullet;
 use crate::game::collision::{self, SizeClass};
-use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::gem::Gem;
 use crate::game::hazards::{clamp_outfall_displacement, outfall_sand_clear};
 use crate::game::level::{Level, Theme};
@@ -775,13 +774,20 @@ fn record_pull(boss: &mut Boss, secs: f32) {
     }
 }
 
-fn pull_point(level: &Level, cone: HazardShape, pos: Vec2, reach: f32, radius: f32) -> Vec2 {
+fn pull_point(
+    level: &Level,
+    cone: HazardShape,
+    pos: Vec2,
+    reach: f32,
+    radius: f32,
+    class: SizeClass,
+) -> Vec2 {
     let mouth = cone.center();
     if !cone.contains(pos, 0.0) {
         return pos;
     }
     let step = (mouth - pos).clamp_len(reach);
-    path_end(level, pos, step, radius, SizeClass::Small)
+    path_end(level, pos, step, radius, class)
 }
 
 /// Runs immediately after the boss controller. It consumes the frozen cone's
@@ -802,11 +808,12 @@ pub fn lantern_gape_system(
         let reach = art::GAPE_PULL_SPEED * pull.secs;
         if player.dash_active <= 0.0 && !level.objects.rat_in_crab_pot() {
             let scale = if player.buffs.is_giant() { 0.5 } else { 1.0 };
-            player.pos = pull_point(&level, pull.cone, player.pos, reach * scale, PLAYER_RADIUS);
+            let (radius, class) = player.movement_body(&level.tiles);
+            player.pos = pull_point(&level, pull.cone, player.pos, reach * scale, radius, class);
         }
         for mut gem in &mut gems {
             if !gem.magnetized {
-                gem.pos = pull_point(&level, pull.cone, gem.pos, reach, 1.0);
+                gem.pos = pull_point(&level, pull.cone, gem.pos, reach, 1.0, SizeClass::Small);
             }
         }
     }
@@ -874,6 +881,7 @@ mod tests {
     use super::*;
     use crate::game::art_walls::WallKind;
     use crate::game::collision::TileKind;
+    use crate::game::ecs::constants::PLAYER_RADIUS;
     use crate::game::level::{Pit, PitKind, TileRect};
     use crate::game::nav::FlowField;
     use rand::{rngs::StdRng, SeedableRng};
@@ -930,7 +938,7 @@ mod tests {
             outer: art::GAPE_CONE_RANGE,
             half_angle: art::GAPE_CONE_HALF_ANGLE,
         };
-        let to = pull_point(&level, cone, from, art::GAPE_PULL_SPEED, PLAYER_RADIUS);
+        let to = pull_point(&level, cone, from, art::GAPE_PULL_SPEED, PLAYER_RADIUS, SizeClass::Small);
         assert!(from.x > to.x && to.x > 816.0);
         assert!(outfall_sand_clear(&level, to, PLAYER_RADIUS, SizeClass::Small));
         assert!(!head_fits(&level, from), "the head overlaps the pit edge");
@@ -959,6 +967,7 @@ mod tests {
                 player_pos: head + facing * 60.0,
                 player_vel: Vec2::ZERO,
                 player_radius: PLAYER_RADIUS,
+                player_hurt_radius: PLAYER_RADIUS,
                 arena,
                 level: &level,
                 flow: &flow,

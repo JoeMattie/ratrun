@@ -718,10 +718,11 @@ impl Bot {
     /// magnet), so the bot creeps in that band and only sprints to escape.
     fn graze_throttle(&self, w: &World) -> f32 {
         let p = w.player.pos;
+        let hurt = w.player.buffs.hurt_radius().max(R);
         let mut gap = f32::INFINITY;
         for t in &self.threats {
             if let Threat::Enemy { pos, radius, .. } = *t {
-                gap = gap.min(pos.dist(p) - radius - R);
+                gap = gap.min(pos.dist(p) - radius - hurt);
             }
             // Anything that can land *this* tick means sprint, not graze.
             if let Threat::Bullet { pos, vel, radius, .. }
@@ -731,7 +732,7 @@ impl Bot {
                 let denom = vel.len_sq();
                 if denom > 1.0 {
                     let t_hit = (rel.dot(vel) / denom).clamp(0.0, 0.25);
-                    if (rel - vel * t_hit).len() < radius + R + 1.5 && t_hit < 0.2 {
+                    if (rel - vel * t_hit).len() < radius + hurt + 1.5 && t_hit < 0.2 {
                         return 1.0;
                     }
                 }
@@ -743,7 +744,7 @@ impl Bot {
                 ..
             } = *t
             {
-                if active_left > 0.0 && shape.contains(p, R) && warn_left < 0.25 {
+                if active_left > 0.0 && shape.contains(p, hurt) && warn_left < 0.25 {
                     return 1.0;
                 }
             }
@@ -926,11 +927,13 @@ impl Bot {
     /// screen-only skill trusts the minimap: explored walls block, unexplored
     /// cells are assumed open (it discovers a wall by bumping into it).
     fn clear(&self, w: &World, q: Vec2, r: f32) -> bool {
+        let class = w.player.buffs.size_class();
+        let r = r + (w.player.buffs.desired_body_radius() - R);
         match self.params.vision {
             Vision::Full => {
-                w.level.tiles.circle_clear(q, r, SizeClass::Small) && pit_clear(w, q, r)
+                w.level.tiles.circle_clear(q, r, class) && pit_clear(w, q, r)
             }
-            Vision::Screen => explored_clear(w, q, r),
+            Vision::Screen => explored_clear(w, q, r, class),
         }
     }
 
@@ -1802,6 +1805,7 @@ impl Bot {
         // rat can cross a pack, so the field must know.
         let invuln = (w.player.iframes / 0.6).clamp(0.0, 1.0);
         let contact_scale = 1.0 - 0.85 * invuln;
+        let hurt = w.player.buffs.hurt_radius().max(R);
 
         for (i, &t) in TIMES.iter().enumerate() {
             let t = t * reach;
@@ -1816,7 +1820,7 @@ impl Bot {
             }
 
             for threat in &self.threats {
-                danger += wt * threat_cost(&self.miniboss_shapes, *threat, q, t, contact_scale);
+                danger += wt * threat_cost(&self.miniboss_shapes, *threat, q, t, contact_scale, hurt);
             }
         }
 
@@ -2021,8 +2025,9 @@ impl Bot {
     /// (`self.threats` is this decision's snapshot.)
     fn body_on_rat(&self, w: &World) -> bool {
         let p = w.player.pos;
+        let hurt = w.player.buffs.hurt_radius().max(R);
         self.threats.iter().any(|t| match *t {
-            Threat::Enemy { pos, radius, .. } => pos.dist(p) < radius + R + FOE_ON_RAT_PX,
+            Threat::Enemy { pos, radius, .. } => pos.dist(p) < radius + hurt + FOE_ON_RAT_PX,
             _ => false,
         })
     }
@@ -2042,6 +2047,7 @@ impl Bot {
                 && self.rng.random::<f32>() < 0.05;
         }
         let p = w.player.pos;
+        let hurt = w.player.buffs.hurt_radius().max(R);
         let mut imminent = false;
         let mut close = 0u32;
         for t in &self.threats {
@@ -2060,7 +2066,7 @@ impl Bot {
                     // covers Skilled's 0.25 s reaction gap and its 0.2 s
                     // timer quantum; the walk out of a longer tell is the
                     // danger field's job.
-                    if active_left > 0.0 && shape.contains(p, R + 1.0) && warn_left <= 0.30 {
+                    if active_left > 0.0 && shape.contains(p, hurt + 1.0) && warn_left <= 0.30 {
                         imminent = true;
                     }
                 }
@@ -2075,13 +2081,14 @@ impl Bot {
                     use crate::game::art_traps::{
                         MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
                     };
+                    let padding = w.player.buffs.point_hit_radius();
                     if crate::game::art_traps::local_box_contains(
                         pos,
                         facing,
                         p,
-                        MOUSETRAP_KILL_U_MIN,
-                        MOUSETRAP_KILL_U_MAX,
-                        MOUSETRAP_KILL_HALF_V,
+                        MOUSETRAP_KILL_U_MIN - padding,
+                        MOUSETRAP_KILL_U_MAX + padding,
+                        MOUSETRAP_KILL_HALF_V + padding,
                     ) {
                         imminent = true;
                     }
@@ -2090,7 +2097,7 @@ impl Bot {
                     let shape = &self.miniboss_shapes[shape_index];
                     // A readable slot or lens can be only a little wider
                     // than the rat. Use its true radius for these footprints.
-                    let radius = if shape.signature_bounds().is_some() { R } else { R + 1.5 };
+                    let radius = if shape.signature_bounds().is_some() { hurt } else { hurt + 1.5 };
                     if active_left > 0.0 && shape.contains(p, radius) {
                         imminent = true;
                     }
@@ -2108,7 +2115,7 @@ impl Bot {
                     if denom > 1.0 {
                         let t_hit = (rel.dot(rv) / denom).clamp(0.0, 0.30);
                         let miss = (rel - rv * t_hit).len();
-                        if t_hit < 0.22 && miss < radius + R + 2.0 {
+                        if t_hit < 0.22 && miss < radius + hurt + 2.0 {
                             imminent = true;
                         }
                     }
@@ -2122,13 +2129,13 @@ impl Bot {
                     // Dash to break out before the ring closes: one body on
                     // the rat (Cat/Brute are the `damage >= 10` kinds), or a
                     // tight pack around it.
-                    if damage >= 10.0 && pos.dist(p) < radius + R + 2.0 {
+                    if damage >= 10.0 && pos.dist(p) < radius + hurt + 2.0 {
                         imminent = true;
                     }
                     // 14 px is ~0.4 s at a Cat's 38 px/s chase, the fastest
                     // melee body; the count and the `damage >= 10` contact
                     // test above are what make a Cat on the rat spend the dash.
-                    if pos.dist(p) < radius + R + 14.0 {
+                    if pos.dist(p) < radius + hurt + 14.0 {
                         close += 1;
                     }
                 }
@@ -2152,7 +2159,7 @@ impl Bot {
                     continue;
                 }
                 let to_rat = p - pos;
-                if to_rat.len() < radius + R + 16.0 && vel.dot(to_rat) > 0.5 * kind.speed() {
+                if to_rat.len() < radius + hurt + 16.0 && vel.dot(to_rat) > 0.5 * kind.speed() {
                     return true;
                 }
             }
@@ -2163,7 +2170,7 @@ impl Bot {
         if self.params.boss_counters {
             if let Some(BossCounter::DodgeRing { center, radius }) = self.boss_counter(w) {
                 let away = (p - center).normalized();
-                if center.dist(p) < radius + R + 6.0 {
+                if center.dist(p) < radius + hurt + 6.0 {
                     let _ = away;
                     imminent = true;
                 }
@@ -2310,7 +2317,8 @@ impl Bot {
             if let BossState::Cat(state) = b.state {
                 if state == BossCatState::Crouch
                     && b.progress() >= CROUCH_LOCK_PROGRESS
-                    && b.target.dist(w.player.pos) < POUNCE_LAND_RADIUS + R + 4.0
+                    && b.target.dist(w.player.pos)
+                        < POUNCE_LAND_RADIUS + w.player.buffs.hurt_radius().max(R) + 4.0
                 {
                     return Some(BossCounter::DodgeRing {
                         center: b.target,
@@ -2324,19 +2332,21 @@ impl Bot {
 
     /// Where a shop leg heads next from `p`: a stride along the route to the
     /// threshold, or the threshold itself for the last steps.
-    fn shop_waypoint(&self, p: Vec2) -> Vec2 {
+    fn shop_waypoint(&self, w: &World, p: Vec2) -> Option<Vec2> {
         let face = self.shop_face;
-        if p.dist(face) < 40.0 {
-            return face;
+        let class = w.player.buffs.size_class();
+        let direct = || class == SizeClass::Small || self.path_clear(w, p, face);
+        if p.dist(face) < 40.0 && direct() {
+            return Some(face);
         }
         let dir = self
             .shop_flow
             .as_ref()
-            .map_or(Vec2::ZERO, |f| f.dir_at(SizeClass::Small, p));
+            .map_or(Vec2::ZERO, |f| f.dir_at(class, p));
         if dir.len_sq() < 0.25 {
-            face
+            direct().then_some(face)
         } else {
-            p + dir * 64.0
+            Some(p + dir * 64.0)
         }
     }
 
@@ -2354,7 +2364,12 @@ impl Bot {
             // Follow the route, not the straight line: the next waypoint is a
             // stride along the flow field (the threshold itself once it is
             // close or the field has no opinion, i.e. inside its own room).
-            self.goal = self.shop_waypoint(p);
+            if let Some(goal) = self.shop_waypoint(w, p) {
+                self.goal = goal;
+            } else {
+                self.shop_leg = false;
+                self.goal_timer = 0.0;
+            }
         }
         // A shop leg ends on the threshold itself (`pending_shop`), not 40 px
         // short of it, so only its timer re-plans it.
@@ -2430,10 +2445,12 @@ impl Bot {
                     // The same goal cell again costs nothing.
                     flow.update(tiles, face, crate::game::nav::NavBudget::FULL);
                     self.shop_face = face;
-                    self.goal = self.shop_waypoint(p);
-                    self.goal_timer = 1.4;
-                    self.shop_leg = true;
-                    return;
+                    if let Some(goal) = self.shop_waypoint(w, p) {
+                        self.goal = goal;
+                        self.goal_timer = 1.4;
+                        self.shop_leg = true;
+                        return;
+                    }
                 }
             }
         }
@@ -2517,7 +2534,7 @@ impl Bot {
             let s = p + (q - p) * (k as f32 / 5.0);
             for trap in &w.level.objects.sticky_traps {
                 if matches!(trap.state, StickyTrapState::Idle | StickyTrapState::Stuck)
-                    && on_pad(trap.pos, trap.facing, s)
+                    && on_pad(trap.pos, trap.facing, s, R)
                 {
                     best = best.max(1.0);
                 }
@@ -2688,7 +2705,7 @@ fn bullet_danger(pos: Vec2, vel: Vec2, radius: f32, damage: f32, q: Vec2, horizo
 
 /// Is `q` on the glue pad of the board at `pos`/`facing`? (Art's oriented
 /// rectangle `STICKY_TRAP_PAD_HALF`.)
-fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
+fn on_pad(pos: Vec2, facing: Vec2, q: Vec2, hurt: f32) -> bool {
     let d = q - pos;
     let f = if facing.len_sq() > 0.0 {
         facing.normalized()
@@ -2696,7 +2713,7 @@ fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
         Vec2::new(1.0, 0.0)
     };
     let pad = crate::game::art_traps::STICKY_TRAP_PAD_HALF;
-    d.dot(f).abs() <= pad.x + R && d.dot(f.perp()).abs() <= pad.y + R
+    d.dot(f).abs() <= pad.x + hurt && d.dot(f.perp()).abs() <= pad.y + hurt
 }
 
 /// Growth Serum (batch 13): how much of its ordinary-body contact danger the
@@ -2712,6 +2729,7 @@ fn threat_cost(
     q: Vec2,
     t: f32,
     contact_scale: f32,
+    hurt: f32,
 ) -> f32 {
     match threat {
         Threat::Enemy {
@@ -2730,16 +2748,15 @@ fn threat_cost(
             // better than a kind-speed chase model (the A/B lost 60 s of
             // median survival), so the kind only decides the weight below.
             // Growth Serum: a body the giant crushes is almost free to walk
-            // into (`STOMP_FREE_CONTACT`). This is the one place the giant
-            // changes the bot's reading of the floor, and it applies to
-            // ordinary bodies only (see the flag's doc).
+            // into (`STOMP_FREE_CONTACT`). The reprieve applies to ordinary
+            // bodies only (see the flag's doc).
             let stomp_scale = if stomp_free { STOMP_FREE_CONTACT } else { 1.0 };
             let pred = pos + vel * t;
             // Faster kinds are read a moment earlier: 0.9 x their own speed
             // (34 px for the 30-38 px/s crawlers and cats, 38 px for the
             // 42 px/s bat).
             let reach = 34.0f32.max(speed * 0.9);
-            let near = pred.dist(q) - radius - R;
+            let near = pred.dist(q) - radius - hurt;
             if near > reach {
                 0.0
             } else {
@@ -2760,7 +2777,7 @@ fn threat_cost(
             damage,
         } => {
             let pred = pos + vel * t;
-            let reach = radius + R + 3.0;
+            let reach = radius + hurt + 3.0;
             let d = pred.dist(q);
             if d > reach {
                 0.0
@@ -2773,7 +2790,7 @@ fn threat_cost(
             radius,
             damage,
         } => {
-            let near = pos.dist(q) - radius - R;
+            let near = pos.dist(q) - radius - hurt;
             if near > 26.0 {
                 0.0
             } else {
@@ -2787,7 +2804,7 @@ fn threat_cost(
             active_left,
             damage,
         } => {
-            if active_left <= 0.0 || !shape.contains(q, R) {
+            if active_left <= 0.0 || !shape.contains(q, hurt) {
                 0.0
             } else {
                 // Only worth avoiding if it fires inside the lookahead.
@@ -2808,7 +2825,7 @@ fn threat_cost(
             // the lookahead gate below only ever delays Casual's read.
             if active_left <= 0.0
                 || warn_left > t + 0.12
-                || !miniboss_shapes[shape_index].contains(q, R)
+                || !miniboss_shapes[shape_index].contains(q, hurt)
             {
                 0.0
             } else {
@@ -2821,7 +2838,7 @@ fn threat_cost(
             load,
             stuck,
         } => {
-            if !on_pad(pos, facing, q) {
+            if !on_pad(pos, facing, q, hurt) {
                 return 0.0;
             }
             // Standing on a live board is a 0.9 s hold for the rat; crossing it
@@ -2841,8 +2858,8 @@ fn threat_cost(
             // The plume covers one 16 px cell; a rat in the cell takes 8. Read
             // it like a hazard: leave the cell before the puffs stop, and never
             // walk in while the plume is up.
-            let near = (q.x - pos.x).abs() <= crate::game::hazards::STEAM_HALF + R
-                && (q.y - pos.y).abs() <= crate::game::hazards::STEAM_HALF + R;
+            let near = (q.x - pos.x).abs() <= crate::game::hazards::STEAM_HALF + hurt
+                && (q.y - pos.y).abs() <= crate::game::hazards::STEAM_HALF + hurt;
             if !near {
                 0.0
             } else if active_left > 0.0 {
@@ -2855,7 +2872,7 @@ fn threat_cost(
             }
         }
         Threat::Ink { pos, half } => {
-            let on = (q.x - pos.x).abs() <= half.x + R && (q.y - pos.y).abs() <= half.y + R;
+            let on = (q.x - pos.x).abs() <= half.x + hurt && (q.y - pos.y).abs() <= half.y + hurt;
             if on {
                 2.5
             } else {
@@ -2881,10 +2898,10 @@ fn threat_cost(
             };
             let d = q - pos;
             let (u, v) = (d.dot(f), d.dot(f.perp()));
-            let in_kill = (MOUSETRAP_KILL_U_MIN - R..=MOUSETRAP_KILL_U_MAX + R).contains(&u)
-                && v.abs() <= MOUSETRAP_KILL_HALF_V + R;
+            let in_kill = (MOUSETRAP_KILL_U_MIN - hurt..=MOUSETRAP_KILL_U_MAX + hurt).contains(&u)
+                && v.abs() <= MOUSETRAP_KILL_HALF_V + hurt;
             let on_plate = (q - pos - f * MOUSETRAP_TRIGGER_OFFSET_U).len()
-                < MOUSETRAP_TRIGGER_RADIUS + R;
+                < MOUSETRAP_TRIGGER_RADIUS + hurt;
             if committed {
                 // The plate has been touched (by the rat or by the horde): the
                 // bar lands inside ~0.26 s for a third of the rat's health, so
@@ -2938,9 +2955,9 @@ fn threat_cost(
             let inside = if dir.len_sq() > 0.5 {
                 // A crossbar: the line `pos ± dir * radius`, 1 px thick.
                 let half = dir * radius;
-                crate::game::collision::segment_circle_hit(pos - half, pos + half, 1.0, q, R)
+                crate::game::collision::segment_circle_hit(pos - half, pos + half, 1.0, q, hurt)
             } else {
-                pos.dist(q) <= radius + R
+                pos.dist(q) <= radius + hurt
             };
             if !inside {
                 0.0
@@ -2958,12 +2975,12 @@ fn threat_cost(
 
 /// A screen-only skill's map knowledge: explored walls block; unexplored cells
 /// are assumed open (the bot finds them the way a player does).
-fn explored_clear(w: &World, q: Vec2, r: f32) -> bool {
+fn explored_clear(w: &World, q: Vec2, r: f32, class: SizeClass) -> bool {
     let (x0, y0) = cell_of(q - Vec2::splat(r));
     let (x1, y1) = cell_of(q + Vec2::splat(r));
     for cy in y0..=y1 {
         for cx in x0..=x1 {
-            if w.explored(cx, cy) && !w.level.tiles.get(cx, cy).passable(SizeClass::Small) {
+            if w.explored(cx, cy) && !w.level.tiles.get(cx, cy).passable(class) {
                 return false;
             }
         }
@@ -3237,6 +3254,30 @@ mod tests {
         let mut bot = Bot::new(skill, seed);
         bot.on_new_level(0);
         bot
+    }
+
+    #[test]
+    fn a_giant_bot_avoids_rat_hole_routes_and_respects_pellet_grazes() {
+        use crate::game::art_walls::{WallAxis, WallKind};
+        use crate::game::collision::{TileKind, TileMap};
+        use crate::game::ecs::systems::powerups::GROWTH_SECS;
+
+        let mut w = World::new(Theme::Sewer, 11);
+        w.level.tiles = TileMap::new(200, 160, Theme::Sewer, 0);
+        let hole = Vec2::new(104.0, 104.0);
+        w.level.tiles.set(6, 6, TileKind::Wall(WallKind::RatHole { axis: WallAxis::Vertical }));
+        w.level.tiles.rebuild_masks();
+        let start = hole - Vec2::new(24.0, 0.0);
+        let end = hole + Vec2::new(24.0, 0.0);
+        let bot = seeded_bot(Skill::Expert, 3);
+        assert!(bot.path_clear(&w, start, end));
+        w.player.buffs.giant = GROWTH_SECS - 1.0;
+        assert!(!bot.path_clear(&w, start, end));
+
+        let threat = Threat::Bullet { pos: hole, vel: Vec2::ZERO, radius: 1.0, damage: 10.0 };
+        let graze = hole + Vec2::new(12.0, 0.0);
+        assert_eq!(threat_cost(&[], threat, graze, 0.12, 1.0, R), 0.0);
+        assert!(threat_cost(&[], threat, graze, 0.12, 1.0, w.player.buffs.hurt_radius()) > 0.0);
     }
 
     /// Gold in the purse and a shelf within reach: the bot's waypoint moves to
@@ -3790,7 +3831,7 @@ mod tests {
             hair,
             bait_good: false,
         };
-        let cost = |t: Threat, q: Vec2| threat_cost(&[], t, q, 0.12, 1.0);
+        let cost = |t: Threat, q: Vec2| threat_cost(&[], t, q, 0.12, 1.0, R);
 
         let ordinary = trap(true, false, false);
         assert!(cost(ordinary, plate) >= 30.0, "the plate must outweigh any loot pull");
@@ -4020,7 +4061,7 @@ mod tests {
     fn floor_cost(threats: &[Threat], q: Vec2) -> f32 {
         threats
             .iter()
-            .map(|t| threat_cost(&[], *t, q, 2.0, 1.0))
+            .map(|t| threat_cost(&[], *t, q, 2.0, 1.0, R))
             .sum()
     }
 

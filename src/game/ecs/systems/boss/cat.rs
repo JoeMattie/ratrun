@@ -656,7 +656,7 @@ impl BossController for CatController {
                         out.cue(BossCue::CatLand);
                         // The home move: the rat left the ring in time.
                         let caught = target.dist(ctx.player_pos)
-                            <= art_boss_cat::POUNCE_LAND_RADIUS + PLAYER_RADIUS;
+                            <= art_boss_cat::POUNCE_LAND_RADIUS + ctx.player_hurt_radius;
                         set_flag(boss, F_MISS, !caught);
                     }
                 }

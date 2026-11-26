@@ -296,6 +296,7 @@ fn leech_tick(
     aim: Vec2,
     rat: Vec2,
     rat_alive: bool,
+    hurt_radius: f32,
     level: &Level,
     sfx: &mut SfxQueue,
 ) -> bool {
@@ -327,7 +328,7 @@ fn leech_tick(
             let mut touched = false;
             if !s.spent
                 && rat_alive
-                && tongue_touches(e.pos, e.radius, s.dir, rat, PLAYER_RADIUS)
+                && tongue_touches(e.pos, e.radius, s.dir, rat, hurt_radius)
                 && crate::game::ecs::systems::projectiles::los_clear(
                     level,
                     e.pos,
@@ -473,7 +474,8 @@ pub fn floor_sewer_system(
         // The tongue is aimed at whatever the body is chasing: the key while
         // the key lures it. Only the rat can be touched (and slowed).
         let aim = lure_target(&e, rat, decoy, &level);
-        if leech_tick(&mut e, &mut state, dt, aim, rat, rat_alive, &level, &mut sfx) {
+        let hurt_radius = PLAYER_RADIUS + player.buffs.giant_hit_padding();
+        if leech_tick(&mut e, &mut state, dt, aim, rat, rat_alive, hurt_radius, &level, &mut sfx) {
             touched = true;
         }
         mirror(&mut e, &state);

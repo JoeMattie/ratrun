@@ -74,8 +74,9 @@ pub fn outfall_motion_system(
     };
 
     if player.alive() && !level.objects.rat_in_crab_pot() {
+        let (radius, class) = player.movement_body(&level.tiles);
         if level.pit_at(player.pos).is_some() {
-            if let Some(safe) = recover(&level, player.pos, Some(input.previous_pos), PLAYER_RADIUS, SizeClass::Small) {
+            if let Some(safe) = recover(&level, player.pos, Some(input.previous_pos), radius, class) {
                 let damaged = player.take_damage(FALL_PLAYER_DAMAGE);
                 player.pos = safe;
                 player.vel = Vec2::ZERO;
@@ -86,7 +87,7 @@ pub fn outfall_motion_system(
             }
         } else if player.dash_active <= 0.0 && dash.segment.is_none() {
             let step = if player.buffs.is_giant() { shove * 0.5 } else { shove };
-            player.pos = clamp_outfall_displacement(&level, player.pos, step, PLAYER_RADIUS, SizeClass::Small);
+            player.pos = clamp_outfall_displacement(&level, player.pos, step, radius, class);
         }
     }
 

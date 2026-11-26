@@ -127,14 +127,24 @@ pub fn hazards_system(
         let shaft = &mut opening.drip_shaft;
         let offset = player_pos - shaft.pos;
         shaft.tick(dt, player_alive && offset.len_sq() <= DRIP_ARM_PX * DRIP_ARM_PX);
-        // Test the rat's centre against the exact square drawn for the tell.
+        let pad = player.buffs.point_hit_radius();
+        // Test the rat against the square drawn for the tell.
+        let covers_rat = if pad > 0.0 {
+            let excess = Vec2::new(
+                (offset.x.abs() - DRIP_HALF).max(0.0),
+                (offset.y.abs() - DRIP_HALF).max(0.0),
+            );
+            excess.len_sq() <= pad * pad
+        } else {
+            (-DRIP_HALF..DRIP_HALF).contains(&offset.x)
+                && (-DRIP_HALF..DRIP_HALF).contains(&offset.y)
+        };
         if shaft.phase == DripPhase::Splash
             && !shaft.player_struck
             && player_alive
             && !player_dashing
             && !player_dash_now
-            && (-DRIP_HALF..DRIP_HALF).contains(&offset.x)
-            && (-DRIP_HALF..DRIP_HALF).contains(&offset.y)
+            && covers_rat
             && player.take_damage(DRIP_DAMAGE)
         {
             shaft.player_struck = true;
@@ -153,7 +163,7 @@ pub fn hazards_system(
             .objects
             .ink_pads
             .iter()
-            .any(|pad| pad.covers(player_pos, PLAYER_RADIUS));
+            .any(|pad| pad.covers(player_pos, PLAYER_RADIUS + player.buffs.giant_hit_padding()));
         if on_ink {
             apply_player_slow(&mut input, &mut player, INK_SLOW);
         }

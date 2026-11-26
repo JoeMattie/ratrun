@@ -407,7 +407,10 @@ fn tick_attack(
     }
     let mut landed = false;
     if e.w4.phase == PINCH {
-        if e.w4.role == 0 && player.alive() && claw_box(e).contains(player.pos, 0.0) {
+        if e.w4.role == 0
+            && player.alive()
+            && claw_box(e).contains(player.pos, player.buffs.point_hit_radius())
+        {
             e.w4.role = 1;
             landed = player.take_damage(pinch_damage(e));
             if landed {
@@ -648,6 +651,30 @@ mod tests {
         let body = w.ecs.get::<Enemy>(crab).unwrap();
         assert_eq!(crab_view(body).state, CrabState::Scuttle);
         assert!(!body.position_locked);
+    }
+
+    #[test]
+    fn a_shore_crab_can_pinch_the_edge_of_a_giant() {
+        use crate::game::ecs::systems::powerups::GROWTH_SECS;
+
+        for giant in [false, true] {
+            let mut w = open_world(Theme::Outfall);
+            let start = w.player.pos;
+            let crab = w.spawn_enemy(KIND, start, 1.0);
+            {
+                let mut body = w.ecs.get_mut::<Enemy>(crab).unwrap();
+                body.facing = NORTH;
+                body.w4.phase = PINCH;
+                body.w4.t = PINCH_SECS;
+            }
+            w.player.pos = start + NORTH * (CLAW_REACH + 10.0);
+            if giant {
+                w.player.buffs.giant = GROWTH_SECS - 1.0;
+            }
+            let hp = w.player.hp;
+            fight_tick(&mut w);
+            assert_eq!(w.player.hp < hp, giant);
+        }
     }
 
     #[test]

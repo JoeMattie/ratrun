@@ -85,9 +85,7 @@ pub const CLEAN_SOCKS_SECS: f32 = 6.0;
 /// Growth Serum (batch 13): how long the rat stays giant.
 pub const GROWTH_SECS: f32 = 20.0;
 
-/// Growth Serum: how much bigger than life the rat is drawn. The stomp disc
-/// and the picture grow; the **collision** radius does not
-/// ([`GIANT_STOMP_RADIUS`] is a damage disc, never a body).
+/// Growth Serum: full draw scale and uncapped hurt-radius multiplier.
 pub const GIANT_SCALE: f32 = 5.0;
 
 /// Growth Serum: seconds the rat takes to grow from 1x to [`GIANT_SCALE`]
@@ -101,6 +99,34 @@ pub const GIANT_SHRINK_SECS: f32 = 0.6;
 /// about to end.
 pub const GIANT_BLINK_SECS: f32 = 3.0;
 pub const GIANT_BLINK_SCALE: f32 = 4.5;
+
+/// Growth Serum's shared draw and size multiplier, if active.
+///
+/// Three phases, all read straight off the buff clock so there is no render
+/// state to keep: the rat **grows** from 1x to [`GIANT_SCALE`] over
+/// [`GIANT_GROW_SECS`], holds, then **blinks** between 5x and 4.5x
+/// for the last [`GIANT_BLINK_SECS`] while it shrinks back over
+/// [`GIANT_SHRINK_SECS`]. Never below 1x, so the first and last frames
+/// of the find are exactly the rat the player always has.
+pub fn giant_draw_scale(buff_left: f32) -> Option<f32> {
+    if buff_left <= 0.0 {
+        return None;
+    }
+    let elapsed = (GROWTH_SECS - buff_left).max(0.0);
+    let grow = (elapsed / GIANT_GROW_SECS).clamp(0.0, 1.0);
+    let shrink = (buff_left / GIANT_SHRINK_SECS).clamp(0.0, 1.0);
+    let mut scale = GIANT_SCALE * grow.min(shrink).max(0.0);
+    // The warning blink: about three blinks a second over the last seconds, at
+    // the smaller of the two sizes so the picture never grows past its hold.
+    if buff_left <= GIANT_BLINK_SECS {
+        let blink = (buff_left * 6.0) as i32;
+        if blink % 2 == 0 {
+            scale = scale.min(GIANT_BLINK_SCALE);
+        }
+    }
+    Some(scale.max(1.0))
+}
+
 
 /// Growth Serum: the radius (world px) of the stomp disc under the giant rat.
 /// Six tiles wide — the rat's ordinary body is three pixels across.
@@ -1505,52 +1531,167 @@ mod tests {
         );
     }
 
-    /// The giant grows the picture and the stomp disc, never the body: its
-    /// collision is still `PLAYER_RADIUS` as a `SizeClass::Small` circle, so a
-    /// corridor (and a rat-hole) the rat fits, the giant fits.
-    #[test]
-    fn the_giant_keeps_the_ordinary_rats_collision() {
-        use crate::game::art_walls::WallKind;
-        use crate::game::collision::{SizeClass, TileKind};
-        use crate::game::ecs::constants::PLAYER_RADIUS;
-        let mut w = open_arena(415);
-        w.player.buffs.giant = GROWTH_SECS;
-        // Two solid walls with one floor cell between them, straight ahead:
-        // only a small-class body fits the gap, and only at its own radius.
-        w.level
-            .tiles
-            .fill_cells(6, 6, 1, 6, TileKind::Wall(WallKind::Solid));
-        w.level
-            .tiles
-            .fill_cells(8, 6, 1, 6, TileKind::Wall(WallKind::Solid));
-        w.level.tiles.rebuild_masks();
-        let gap = Vec2::new(7.0 * 16.0 + 8.0, w.player.pos.y);
-        w.player.pos = Vec2::new(gap.x, 4.0 * 16.0);
-        for _ in 0..90 {
-            w.begin_tick(DT, Vec2::new(0.0, 1.0), false);
+    fn walk_with_buffs(w: &mut World, dir: Vec2, ticks: usize) {
+        for _ in 0..ticks {
+            w.begin_tick(DT, dir, false);
+            w.ecs.run_system_cached(powerups_system).expect("buffs age");
             w.ecs
                 .run_system_cached(crate::game::ecs::systems::player::player_system)
                 .expect("the rat moves");
             w.end_tick();
         }
-        // It walked down the one-cell corridor and never left it: the giant's
-        // collision is the ordinary rat's, so the walls are 16 px apart around a
-        // 3 px body rather than around a 30 px one.
-        assert!(
-            (w.player.pos.x - gap.x).abs() <= 1.0,
-            "the giant was pushed out of a corridor it fits: {:?}",
-            w.player.pos
-        );
-        assert!(
-            w.player.pos.y > 4.0 * 16.0 + 16.0,
-            "the giant never walked down the corridor: {:?}",
-            w.player.pos
-        );
-        assert_eq!(
-            SizeClass::of_radius(PLAYER_RADIUS),
-            SizeClass::Small,
-            "the rat's own class is what a rat-hole passes"
-        );
+    }
+
+    fn narrow_passage(opening: crate::game::art_walls::WallKind) -> World {
+        use crate::game::art_walls::WallKind;
+        use crate::game::collision::TileKind;
+
+        let mut w = open_arena(415);
+        w.level.tiles.fill_cells(6, 1, 1, 20, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.set(6, 6, TileKind::Wall(opening));
+        w.level.tiles.rebuild_masks();
+        w.player.pos = Vec2::new(72.0, 104.0);
+        w
+    }
+
+    #[test]
+    fn the_rat_hole_and_one_way_leaf_block_the_giant() {
+        use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
+
+        for opening in [
+            WallKind::RatHole { axis: WallAxis::Vertical },
+            WallKind::OneWayDoor { dir: Cardinal::East },
+        ] {
+            let mut ordinary = narrow_passage(opening);
+            let mut giant = narrow_passage(opening);
+            let east = Vec2::new(1.0, 0.0);
+            collect(&mut giant, PickupKind::GrowthSerum);
+            walk_with_buffs(&mut giant, Vec2::ZERO, 30);
+            walk_with_buffs(&mut ordinary, east, 100);
+            walk_with_buffs(&mut giant, east, 100);
+            assert!(ordinary.player.pos.x > 112.0, "ordinary: {:?}", ordinary.player.pos);
+            assert!(giant.player.pos.x < 104.0, "giant: {:?}", giant.player.pos);
+        }
+    }
+
+    #[test]
+    fn the_giant_fits_a_one_cell_corridor_with_jambs() {
+        use crate::game::art_walls::{WallAxis, WallKind};
+        use crate::game::collision::{SizeClass, TileKind};
+        use crate::game::player::GIANT_BODY_MAX_RADIUS;
+
+        let mut w = open_arena(415);
+        w.level.tiles.fill_cells(6, 3, 1, 10, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.fill_cells(8, 3, 1, 10, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.set(7, 7, TileKind::Wall(WallKind::Doorway { axis: WallAxis::Horizontal }));
+        w.level.tiles.rebuild_masks();
+        w.player.pos = Vec2::new(120.0, 56.0);
+        collect(&mut w, PickupKind::GrowthSerum);
+        walk_with_buffs(&mut w, Vec2::ZERO, 30);
+        assert_eq!(w.player.movement_body(&w.level.tiles), (GIANT_BODY_MAX_RADIUS, SizeClass::Large));
+
+        walk_with_buffs(&mut w, Vec2::new(0.0, 1.0), 115);
+        assert_eq!(w.player.pos.x, 120.0);
+        assert!(w.player.pos.y > 128.0, "walked through the jambs: {:?}", w.player.pos);
+    }
+
+    #[test]
+    fn growth_in_a_rat_hole_waits_for_clearance_even_after_a_size_swap() {
+        use crate::game::art_walls::{WallAxis, WallKind};
+        use crate::game::collision::SizeClass;
+        use crate::game::ecs::constants::PLAYER_RADIUS;
+        use crate::game::player::GIANT_BODY_MAX_RADIUS;
+
+        let mut w = narrow_passage(WallKind::RatHole { axis: WallAxis::Vertical });
+        w.player.pos.x = 104.0;
+        let origin = w.player.pos;
+        collect(&mut w, PickupKind::ShrinkDraught);
+        assert_eq!(w.player.movement_body(&w.level.tiles), (PLAYER_RADIUS, SizeClass::Small));
+        assert_eq!(w.player.buffs.hurt_radius(), SHRINK_HURT_RADIUS);
+        collect(&mut w, PickupKind::GrowthSerum);
+        walk_with_buffs(&mut w, Vec2::ZERO, 30);
+        assert_eq!(w.player.pos, origin);
+        assert_eq!(w.player.buffs.tiny, 0.0);
+        assert_eq!(w.player.movement_body(&w.level.tiles), (PLAYER_RADIUS, SizeClass::Small));
+
+        walk_with_buffs(&mut w, Vec2::new(1.0, 0.0), 30);
+        assert!(w.player.pos.x > 112.0 + GIANT_BODY_MAX_RADIUS);
+        assert_eq!(w.player.movement_body(&w.level.tiles), (GIANT_BODY_MAX_RADIUS, SizeClass::Large));
+
+        collect(&mut w, PickupKind::ShrinkDraught);
+        assert_eq!(w.player.buffs.giant, 0.0);
+        assert_eq!(w.player.buffs.hurt_radius(), SHRINK_HURT_RADIUS);
+        assert_eq!(w.player.movement_body(&w.level.tiles), (PLAYER_RADIUS, SizeClass::Small));
+    }
+
+    #[test]
+    fn giant_body_and_hurt_radii_follow_grow_in_and_shrink_out() {
+        use crate::game::ecs::constants::PLAYER_RADIUS;
+        use crate::game::player::GIANT_BODY_MAX_RADIUS;
+
+        let mut w = open_arena(415);
+        collect(&mut w, PickupKind::GrowthSerum);
+        assert_eq!(w.player.buffs.hurt_radius(), PLAYER_RADIUS);
+        assert_eq!(w.player.movement_body(&w.level.tiles).0, PLAYER_RADIUS);
+        walk_with_buffs(&mut w, Vec2::ZERO, 9);
+        let midway = w.player.movement_body(&w.level.tiles).0;
+        assert!(midway > PLAYER_RADIUS && midway < GIANT_BODY_MAX_RADIUS);
+        assert_eq!(midway, w.player.buffs.hurt_radius());
+        walk_with_buffs(&mut w, Vec2::ZERO, 30);
+        assert_eq!(w.player.movement_body(&w.level.tiles).0, GIANT_BODY_MAX_RADIUS);
+        assert_eq!(w.player.buffs.hurt_radius(), PLAYER_RADIUS * GIANT_SCALE);
+        w.player.buffs.giant = GIANT_SHRINK_SECS / 3.0;
+        let shrinking = w.player.movement_body(&w.level.tiles).0;
+        assert!(shrinking > PLAYER_RADIUS && shrinking < GIANT_BODY_MAX_RADIUS);
+        assert_eq!(shrinking, w.player.buffs.hurt_radius());
+        walk_with_buffs(&mut w, Vec2::ZERO, 15);
+        assert_eq!(w.player.buffs.hurt_radius(), PLAYER_RADIUS);
+        assert_eq!(w.player.movement_body(&w.level.tiles).0, PLAYER_RADIUS);
+    }
+
+    #[test]
+    fn growing_flush_with_a_wall_waits_until_the_rat_steps_away() {
+        use crate::game::art_walls::{WallAxis, WallKind};
+        use crate::game::collision::SizeClass;
+        use crate::game::ecs::constants::PLAYER_RADIUS;
+        use crate::game::player::GIANT_BODY_MAX_RADIUS;
+
+        let mut w = narrow_passage(WallKind::RatHole { axis: WallAxis::Vertical });
+        w.player.pos = Vec2::new(96.0 - PLAYER_RADIUS, 136.0);
+        let origin = w.player.pos;
+        collect(&mut w, PickupKind::GrowthSerum);
+        walk_with_buffs(&mut w, Vec2::ZERO, 30);
+        assert_eq!(w.player.pos, origin);
+        assert_eq!(w.player.movement_body(&w.level.tiles), (PLAYER_RADIUS, SizeClass::Large));
+        walk_with_buffs(&mut w, Vec2::new(-1.0, 0.0), 30);
+        assert!(w.player.pos.x < origin.x - 10.0);
+        assert_eq!(w.player.movement_body(&w.level.tiles).0, GIANT_BODY_MAX_RADIUS);
+    }
+
+    #[test]
+    fn pellets_and_elite_contact_can_graze_the_giant() {
+        for giant in [false, true] {
+            let mut w = open_arena(419);
+            if giant {
+                collect(&mut w, PickupKind::GrowthSerum);
+                walk_with_buffs(&mut w, Vec2::ZERO, 30);
+            }
+            let offset = w.player.pos + Vec2::new(13.0, 0.0);
+            let hp = w.player.hp;
+            w.spawn_bullet(Bullet::new(offset, Vec2::ZERO, 20.0, Faction::Enemy, (255, 0, 0)));
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(combat::enemy_bullet_hits_system).unwrap();
+            w.end_tick();
+            assert_eq!(w.player.hp < hp, giant, "pellet graze");
+            w.player.iframes = 0.0;
+            let hp = w.player.hp;
+            let elite = w.spawn_enemy(EnemyKind::Brute, offset, 1.0);
+            w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(combat::contact_system).unwrap();
+            w.end_tick();
+            assert_eq!(w.player.hp < hp, giant, "elite contact graze");
+        }
     }
 
     /// The drop table still spends exactly one word, and every bucket still

@@ -204,7 +204,11 @@ pub fn egg_ring_radius(t: f32) -> f32 {
 /// hazard all use it.
 #[inline]
 pub fn egg_ring_hits(center: Vec2, radius: f32, p: Vec2) -> bool {
-    (center.dist(p) - radius).abs() <= EGG_RING_WIDTH * 0.5
+    egg_ring_hits_with_padding(center, radius, p, 0.0)
+}
+
+fn egg_ring_hits_with_padding(center: Vec2, radius: f32, p: Vec2, padding: f32) -> bool {
+    (center.dist(p) - radius).abs() <= EGG_RING_WIDTH * 0.5 + padding
 }
 
 /// The live ring of an Egg Timer, read from the body alone: `(centre, radius)`.
@@ -342,7 +346,9 @@ fn egg_tick(
             // A wall shadows the hit (not the drawn circle): the ring cannot
             // reach a rat with no clear line to the dial.
             if !dial.hit
-                && egg_ring_hits(dial.anchor, radius, player.pos)
+                && egg_ring_hits_with_padding(
+                    dial.anchor, radius, player.pos, player.buffs.point_hit_radius(),
+                )
                 && crate::game::ecs::systems::projectiles::los_clear(
                     level,
                     dial.anchor,
