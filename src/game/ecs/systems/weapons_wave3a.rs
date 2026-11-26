@@ -410,6 +410,7 @@ pub(crate) fn fire_hantavirus(
     reach: f32,
     radius: f32,
     cap: u8,
+    weapon_rank: u8,
     droppings: &Query<(Entity, &SpawnId, &Dropping)>,
     next_id: &mut NextSpawnId,
 ) -> bool {
@@ -456,6 +457,7 @@ pub(crate) fn fire_hantavirus(
             // The drop's own spawn id: unique, ordered and free, so the art has
             // a stable variation seed without a single rng draw.
             seed: id.0 as u32,
+            level: weapon_rank,
         },
         id,
     ));
@@ -1598,6 +1600,10 @@ mod tests {
                 drop.pos
             );
             assert_eq!(drop.age, 0.0, "a fresh dropping is unarmed");
+            assert_eq!(
+                drop.level, level,
+                "the dropping keeps the weapon rank at fire time"
+            );
             let stats = w.player.loadout.stats;
             let mult = w.player.damage_mult();
             assert!(

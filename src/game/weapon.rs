@@ -218,6 +218,10 @@ pub const DROPPING_ARM: f32 = 0.25;
 /// Hantavirus: how far behind the rat's facing a dropping lands, in px (the
 /// rat's centre, less its back). Inside a wall it lands under the rat instead.
 pub const DROPPING_BACK: f32 = 5.0;
+/// Hantavirus: the dropping light's radius in px, L1 → L5.
+pub const DROPPING_LIGHT_RADIUS: [f32; 5] = [10.0, 12.0, 14.0, 17.0, 20.0];
+/// Hantavirus: the armed dropping light's energy, L1 → L5.
+pub const DROPPING_LIGHT_ENERGY: [f32; 5] = [0.45, 0.6, 0.75, 0.9, 1.1];
 /// Damage ticks per host (three pips, one lost per tick).
 pub const VIRUS_TICKS: u8 = 3;
 /// Seconds between ticks.

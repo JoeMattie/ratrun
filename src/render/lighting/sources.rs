@@ -9,7 +9,7 @@ use crate::game::art_traps::MazeRewardState;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::ecs::components::{
     AcidDrop, CheeseString, CorrosiveChannel, DeadLetterPacket, EchoSpoke, FairyRing, Infection,
-    MilkTooth, Pool,
+    MilkTooth, Pool, Dropping, SpawnId,
 };
 use crate::game::ecs::resources::{ActiveFx, DashTrack, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
@@ -18,6 +18,7 @@ use crate::game::ecs::systems::powerups::Decoy;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Chest, Gem, Gold, Pickup};
 use crate::game::level::PropKind;
+use crate::game::weapon::{DROPPING_ARM, DROPPING_LIFE, DROPPING_LIGHT_ENERGY, DROPPING_LIGHT_RADIUS};
 use crate::math::Vec2;
 
 use super::*;
@@ -25,6 +26,30 @@ use super::*;
 /// Enemy rim glints kept per frame: one pixel per visible body. Past this the
 /// crowd is past what the eye separates anyway.
 const MAX_RIMS: usize = 512;
+const MAX_DROPPING_LIGHTS: usize = 12;
+const DROPPING_DRY_SECS: f32 = 2.0;
+const GLOW_RGB: Rgb = (110, 255, 120);
+
+fn dropping_light(drop: &Dropping) -> Option<Light> {
+    let left = DROPPING_LIFE - drop.age;
+    if left <= 0.0 {
+        return None;
+    }
+    let rank = usize::from(drop.level.clamp(1, 5) - 1);
+    let arm = if drop.age < DROPPING_ARM { 0.5 } else { 1.0 };
+    let fade = (left / DROPPING_DRY_SECS).min(1.0);
+    let mut light = Light::radial(
+        drop.pos,
+        DROPPING_LIGHT_RADIUS[rank],
+        GLOW_RGB,
+        DROPPING_LIGHT_ENERGY[rank] * arm * fade,
+    );
+    light.falloff = Falloff::Small;
+    light.height = 2.0;
+    light.scatter = 0.0;
+    light.casts_shadow = false;
+    Some(light)
+}
 
 impl LightMap {
     /// Gather all lights from world state; returns the active boss phase if any.
@@ -403,6 +428,7 @@ impl LightMap {
 
         // 5. ECS entities: pools, pickups, gems, bullets, enemies (bats/boss), bosses, boss projectiles.
         let mut boss_phase: Option<u8> = None;
+        let mut dropping_lights = [None; MAX_DROPPING_LIGHTS];
         for entity in scene.ecs.iter_entities() {
             // Acid pools (glowing toxic green).
             if let Some(p) = entity.get::<Pool>() {
@@ -912,6 +938,23 @@ impl LightMap {
                 }
             }
 
+            // Hantavirus droppings: steady green floor light.
+            if let Some(drop) = entity.get::<Dropping>() {
+                if let Some((light, id)) = dropping_light(drop).zip(entity.get::<SpawnId>()) {
+                    let pos = light.pos - cam;
+                    if in_range(pos.x, pos.y, light.shape.extent()) {
+                        // Keep the newest visible lights in a fixed-size list.
+                        let slot = dropping_lights.partition_point(|entry| {
+                            entry.is_some_and(|(prior, _)| prior > id.0)
+                        });
+                        if slot < MAX_DROPPING_LIGHTS {
+                            dropping_lights[slot..].rotate_right(1);
+                            dropping_lights[slot] = Some((id.0, light));
+                        }
+                    }
+                }
+            }
+
             // Hantavirus infected hosts: sickly plum-magenta glow.
             if let (Some(e), Some(inf)) = (entity.get::<Enemy>(), entity.get::<Infection>()) {
                 if e.alive() && inf.active() {
@@ -1096,6 +1139,9 @@ impl LightMap {
             }
         }
 
+        for (_, light) in dropping_lights.into_iter().flatten() {
+            self.push_ground(light, 2);
+        }
         boss_phase
     }
 

@@ -2167,6 +2167,7 @@ fn fire_one(
                 stats.ranged_reach(crate::game::weapon::VIRUS_REACH[i]),
                 stats.ranged_reach(crate::game::weapon::DROPPING_RADIUS),
                 crate::game::weapon::DROPPING_CAP[i],
+                wlevel.clamp(1, 5),
                 // The cap's victims: the oldest live dropping goes first.
                 droppings,
                 next_id,

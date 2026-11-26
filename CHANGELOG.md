@@ -20,6 +20,7 @@ first time.
 - **Hantavirus is deployed by droppings.** The rat leaves one behind it every
   cycle; the first enemy to step in one takes the infection, which then jumps
   down the pack as before.
+- **Hantavirus droppings cast green light.** Higher ranks shine brighter, and the glow fades as they dry.
 - **The Drake.** A big duck wanders into the Sewers from 2:30. It winds up,
   shows you the lane, and pecks three times. It is slow to recover.
 - **The giant rat is drawn properly** at every size, instead of the small

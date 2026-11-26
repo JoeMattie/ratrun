@@ -119,6 +119,8 @@ pub struct Dropping {
     /// Art variation seed. The drop's own `SpawnId` truncated — a drop draws
     /// no rng, so the picture cannot move a golden.
     pub seed: u32,
+    /// Hantavirus weapon rank at drop time (1–5), used by art and lighting.
+    pub level: u8,
 }
 
 /// Longest Hantavirus chain the visit history can record. The design's largest
