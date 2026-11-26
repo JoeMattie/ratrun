@@ -15,6 +15,7 @@ pub mod vfx;
 
 use std::collections::VecDeque;
 
+use crate::detmath::DetF32;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
@@ -550,8 +551,8 @@ impl Particles {
                 let h2 = stain_hash(st.seed.wrapping_add(k as u16 * 71), 17, k + 5);
                 let ang = (h1 as f32 / 255.0) * std::f32::consts::TAU;
                 let dist = r * (1.15 + (h2 as f32 / 255.0) * 0.85);
-                let px = sx + (ang.cos() * dist).round() as i32;
-                let py = sy + (ang.sin() * dist).round() as i32;
+                let px = sx + (ang.dcos() * dist).round() as i32;
+                let py = sy + (ang.dsin() * dist).round() as i32;
                 if px >= 0 && px < bw && py >= 0 && py < bh {
                     let bg = pb.pixel_at(px as usize, py as usize);
                     pb.plot(px, py, palette::mix(bg, st.color, base_alpha * 0.75));
@@ -609,7 +610,8 @@ impl Particles {
                             let tx = (p.pos.x + back.x * s as f32 - cam.x).round() as i32;
                             let ty = (p.pos.y + back.y * s as f32 - cam.y).round() as i32;
                             if (tx, ty) != prev {
-                                let atten = (1.0 - s as f32 / (steps as f32 + 1.0)).powi(2);
+                                let fall = 1.0 - s as f32 / (steps as f32 + 1.0);
+                                let atten = fall * fall;
                                 plot_mode(pb, tx, ty, palette::scale(c, atten * 0.85), p.additive);
                                 prev = (tx, ty);
                             }
@@ -642,14 +644,14 @@ impl Particles {
                 }
                 Shape::Ember => {
                     // Subtle phase flicker tied deterministically to remaining life + pos.
-                    let phase = (p.life * 26.0 + p.pos.x * 0.37 + p.pos.y * 0.23).sin();
+                    let phase = (p.life * 26.0 + p.pos.x * 0.37 + p.pos.y * 0.23).dsin();
                     let flicker = 0.62 + 0.38 * (phase * 0.5 + 0.5);
                     c = palette::scale(c, flicker);
                     plot_mode(pb, x, y, c, p.additive);
                 }
                 Shape::Puff => {
                     // Soft alpha-blended billowing dust/smoke/steam cloud with top-left cel highlight.
-                    let alpha = (1.0 - t).powf(1.20) * 0.88;
+                    let alpha = (1.0 - t).dpowf(1.20) * 0.88;
                     if alpha > 0.02 {
                         let hi = palette::mix(c, (255, 255, 255), 0.26);
                         let lo = palette::scale(c, 0.70);
@@ -785,8 +787,8 @@ fn draw_crack_stain(pb: &mut PixelBuffer, bw: i32, bh: i32, sx: i32, sy: i32, st
                 ang += kink;
             }
             let step_len = ray_len / steps as f32;
-            cx += ang.cos() * step_len;
-            cy += ang.sin() * step_len;
+            cx += ang.dcos() * step_len;
+            cy += ang.dsin() * step_len;
             let px = cx.round() as i32;
             let py = cy.round() as i32;
             let w_alpha = (1.0 - frac * 0.48) * 0.90 * fade;
@@ -805,8 +807,8 @@ fn draw_crack_stain(pb: &mut PixelBuffer, bw: i32, bh: i32, sx: i32, sy: i32, st
                 let mut fy = cy;
                 let fsteps = (steps / 2).clamp(2, 8);
                 for fs in 1..=fsteps {
-                    fx += fa.cos() * step_len * 0.92;
-                    fy += fa.sin() * step_len * 0.92;
+                    fx += fa.dcos() * step_len * 0.92;
+                    fy += fa.dsin() * step_len * 0.92;
                     let fpx = fx.round() as i32;
                     let fpy = fy.round() as i32;
                     let falpha = (1.0 - fs as f32 / (fsteps as f32 + 1.0)) * 0.74 * fade;
@@ -868,7 +870,7 @@ fn draw_dent_stain(pb: &mut PixelBuffer, bw: i32, bh: i32, sx: i32, sy: i32, st:
     // 4 short radial stress ticks around the dent rim.
     for k in 0..4 {
         let a = (stain_hash(st.seed, k * 23 + 7, 13) as f32 / 255.0) * std::f32::consts::TAU;
-        let (sa, ca) = a.sin_cos();
+        let (sa, ca) = a.dsin_cos();
         for step in 0..3 {
             let dist = r * 0.90 + step as f32 * 0.95;
             let px = sx + (ca * dist).round() as i32;
@@ -891,7 +893,8 @@ fn stain_hash(seed: u16, dx: i32, dy: i32) -> u8 {
 fn draw_shockwave(pb: &mut PixelBuffer, cam: Vec2, bw: i32, bh: i32, sw: &Shockwave) {
     let t = 1.0 - (sw.life / sw.max_life.max(1e-4)).clamp(0.0, 1.0);
     // Ease-out cubic so shockwaves snap outward with punch and decelerate smoothly.
-    let ease = 1.0 - (1.0 - t).powi(3);
+    let u = 1.0 - t;
+    let ease = 1.0 - u * u * u;
     let r = sw.start_r + (sw.end_r - sw.start_r) * ease;
     if r < 0.8 {
         return;
@@ -904,7 +907,7 @@ fn draw_shockwave(pb: &mut PixelBuffer, cam: Vec2, bw: i32, bh: i32, sw: &Shockw
         return;
     }
 
-    let fade = (1.0 - t).powf(1.45);
+    let fade = (1.0 - t).dpowf(1.45);
     if fade <= 0.02 {
         return;
     }
@@ -929,7 +932,7 @@ fn draw_shockwave(pb: &mut PixelBuffer, cam: Vec2, bw: i32, bh: i32, sw: &Shockw
     for i in 0..=steps {
         let frac = i as f32 / steps as f32;
         let a = start_a + frac * span_a;
-        let (sa, ca) = a.sin_cos();
+        let (sa, ca) = a.dsin_cos();
         let px = cx + (ca * r).round() as i32;
         let py = cy + (sa * r).round() as i32;
         if (px, py) == last_px {

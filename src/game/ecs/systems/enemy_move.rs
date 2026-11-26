@@ -226,9 +226,9 @@ pub fn enemy_steering_system(
         // question `los_clear` answers for shots and pounces.
         let mut target = ppos;
         if let Some(key) = decoy {
+            let decoy_r = crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS;
             if crate::game::ecs::systems::powerups::decoy_lures_body(&e)
-                && e.pos.dist_sq(key)
-                    <= crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2)
+                && e.pos.dist_sq(key) <= decoy_r * decoy_r
                 && crate::game::ecs::systems::projectiles::los_clear(
                     &level, e.pos, key, e.radius,
                 )

@@ -1,5 +1,14 @@
 //! Top-level application state machine: menus, the active run, and the
 //! transitions between them.
+//!
+//! **Not simulation, so its maths stays on `std`.** The App drives a run by
+//! calling `World::update`/`World::draw`; every trigonometric call in this file
+//! is capture-scene staging (`RATRUN_DUMP`'s posed plates: where to put the
+//! horde, the lamps, the rat) and never feeds a tick, an rng draw, the shop
+//! roll or a save. Silenced here once rather than per capture function.
+
+// Not simulation: platform maths is fine in the capture scenes (see above).
+#![allow(clippy::disallowed_methods)]
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

@@ -97,6 +97,7 @@ use crate::game::art_miniboss;
 use crate::game::art_props;
 use crate::game::art_traps::{self, MousetrapView, RatHoleView, StickyTrapView};
 
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod scene;
 
 const VIAL: Color = Color::Rgb(196, 202, 214);

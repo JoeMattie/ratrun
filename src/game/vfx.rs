@@ -6,6 +6,7 @@
 
 use rand::{Rng, RngExt};
 
+use crate::detmath::DetF32;
 use crate::game::enemy::EnemyKind;
 use crate::game::gem::PickupKind;
 use crate::game::particle::{Particle, Particles, Ramp, Shape, Shockwave, Stain, StainKind};
@@ -3225,7 +3226,7 @@ pub fn emit_maze_cache_open(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, a
         let life = rng.random_range(0.60..0.92);
         ps.push(Particle {
             pos: base + Vec2::from_angle(a) * rng.random_range(5.0..9.0),
-            vel: Vec2::new(a.cos() * horiz, a.sin() * horiz * 0.45 - up),
+            vel: Vec2::new(a.dcos() * horiz, a.dsin() * horiz * 0.45 - up),
             life,
             max_life: life,
             drag: 1.5,
@@ -5338,7 +5339,7 @@ pub fn emit_virus_jump(ps: &mut Particles, rng: &mut impl Rng, from: Vec2, to: V
     let bow_side = if rng.random_range(0..2) == 0 { 1.0 } else { -1.0 };
     for i in 0..n {
         let t = (i as f32 + 0.5) / n.max(1) as f32;
-        let arch = (t * std::f32::consts::PI).sin();
+        let arch = (t * std::f32::consts::PI).dsin();
         let bow = perp * (bow_side * arch * 2.2);
         let life = rng.random_range(0.24..0.34);
         ps.push(Particle {
@@ -6639,7 +6640,7 @@ pub fn emit_dead_letter_sealed(
     let lf = life_frac.clamp(0.0, 1.0);
     // Subtle pulse speeding up as the 2 s fuse nears expiry.
     let urgency = 1.0 - lf;
-    let pulse = 0.82 + 0.18 * (lf * (18.0 + 24.0 * urgency)).sin().abs();
+    let pulse = 0.82 + 0.18 * (lf * (18.0 + 24.0 * urgency)).dsin().abs();
     let bright = (0.72 + 0.28 * lf) * pulse;
 
     // 1. Crisp 10×6 shut envelope: 9 RNG-timed structural blocks (exact original
@@ -7454,7 +7455,7 @@ pub fn emit_boss_magpie_death(ps: &mut Particles, rng: &mut impl Rng, at: Vec2, 
         let speed = rng.random_range(30.0..140.0);
         ps.push(Particle {
             pos: at + facing * rng.random_range(-6.0..6.0),
-            vel: Vec2::new(a.cos(), a.sin() * 0.8) * speed,
+            vel: Vec2::new(a.dcos(), a.dsin() * 0.8) * speed,
             life,
             max_life: life,
             drag: 3.4,

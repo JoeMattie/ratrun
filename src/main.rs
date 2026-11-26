@@ -14,6 +14,9 @@ mod console;
 mod input;
 mod lore;
 mod meta;
+// Platform-independent maths for the simulation (libm instead of the
+// platform maths library); see the module docs and `clippy.toml`.
+mod detmath;
 mod math;
 mod music;
 mod present;

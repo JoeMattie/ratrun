@@ -106,7 +106,7 @@ mod tests {
         const DT: f32 = 1.0 / 60.0;
         fn dir_at(tick: u64) -> Vec2 {
             let phase = tick as f32 * 0.013;
-            Vec2::new(phase.sin(), (phase * 0.7).cos())
+            Vec2::new(crate::detmath::sin(phase), crate::detmath::cos(phase * 0.7))
         }
         let mut on = World::new(Theme::Sewer, 11);
         let mut off = World::new(Theme::Sewer, 11);

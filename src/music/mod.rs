@@ -38,6 +38,7 @@
 //! that reach into its fields — meaningful without editing them.
 
 pub mod render;
+#[allow(clippy::disallowed_methods)] // audio-only: platform maths is fine
 pub mod synth;
 
 mod flatbed;

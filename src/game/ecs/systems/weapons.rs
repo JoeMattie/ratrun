@@ -115,6 +115,7 @@ use std::cmp::Ordering;
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::bullet::{Bullet, Faction, Lob, Orbit};
 // Wave 3: Counterweight's melee nudge keeps its body on legal floor.
 use crate::game::collision::SizeClass;
@@ -488,8 +489,8 @@ pub fn cone_hits_circle(
     if dist <= r + 0.5 {
         return true;
     }
-    let angle = rel.normalized().dot(dir).clamp(-1.0, 1.0).acos();
-    let slack = (r / dist).clamp(0.0, 1.0).asin();
+    let angle = rel.normalized().dot(dir).clamp(-1.0, 1.0).dacos();
+    let slack = (r / dist).clamp(0.0, 1.0).dasin();
     angle <= half + slack
 }
 

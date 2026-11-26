@@ -402,7 +402,8 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
     if !crate::game::ecs::systems::powerups::decoy_lures_body(e) {
         return ppos;
     }
-    if e.pos.dist_sq(key) > crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2) {
+    let decoy_r = crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS;
+    if e.pos.dist_sq(key) > decoy_r * decoy_r {
         return ppos;
     }
     if !los_clear(level, e.pos, key, e.radius) {

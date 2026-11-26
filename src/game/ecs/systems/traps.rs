@@ -1862,7 +1862,7 @@ mod tests {
         for wave in 0..6 {
             for k in 0..4 {
                 let a = (wave * 4 + k) as f32 * 1.4;
-                let at = c + Vec2::new(a.cos() * 6.0, a.sin() * 5.0);
+                let at = c + Vec2::new(crate::detmath::cos(a) * 6.0, crate::detmath::sin(a) * 5.0);
                 add_enemy(&mut w, EnemyKind::Skitterer, at, 40.0);
             }
             traps_tick(&mut w, Vec2::ZERO, false);

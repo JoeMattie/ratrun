@@ -27,6 +27,9 @@
 //! [`MIN_TILE_H`]) does not fit, it falls back to showing as many tiles as
 //! possible and reports the rest as hidden.
 
+// Wall-only: the platform maths is fine here (a tile-size fit, no simulation).
+#![allow(clippy::disallowed_methods)]
+
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};

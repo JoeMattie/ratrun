@@ -882,7 +882,7 @@ pub fn runs_for_half_width(p: f32, half_width: f32) -> usize {
 pub fn runs_to_resolve(p: f32, margin: f32) -> usize {
     let p = p.clamp(0.001, 0.999);
     let (z_a, z_b) = (1.96f32, 0.8416f32);
-    let n = 2.0 * p * (1.0 - p) * (z_a + z_b).powi(2) / (margin * margin);
+    let n = 2.0 * p * (1.0 - p) * (z_a + z_b) * (z_a + z_b) / (margin * margin);
     n.ceil() as usize
 }
 

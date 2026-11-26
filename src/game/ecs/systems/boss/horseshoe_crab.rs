@@ -62,6 +62,7 @@
 //! window by this fight.
 
 use super::*;
+use crate::detmath::DetF32;
 use crate::game::art_boss_horseshoe_crab as art;
 use crate::game::art_boss_horseshoe_crab::CrabState;
 
@@ -495,7 +496,7 @@ fn turn_towards(from: Vec2, to: Vec2, max_step: f32) -> Vec2 {
     }
     let cross = a.perp().dot(b);
     let dot = a.dot(b).clamp(-1.0, 1.0);
-    let angle = cross.atan2(dot);
+    let angle = cross.datan2(dot);
     if angle.abs() <= max_step {
         b
     } else {
@@ -719,7 +720,7 @@ fn clear_of_arc(center: Vec2, af: Vec2, half: f32, p: Vec2) -> bool {
     if dist <= 1e-4 {
         return false;
     }
-    d.normalized().dot(af) < half.cos()
+    d.normalized().dot(af) < half.dcos()
 }
 
 /// Is there a walkable way **out of the telson arc** from `at` within the tell's

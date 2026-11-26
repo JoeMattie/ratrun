@@ -1,0 +1,43 @@
+# Clippy configuration for Rat Run.
+#
+# ## Why: the determinism goldens are platform-independent only if the maths is
+#
+# Rust's `f32::sin`, `cos`, `powf`, … are not specified bit-for-bit: they call
+# the platform's maths library, and macOS, Linux and Windows disagree in the
+# last bit. One such call in simulation code makes a run diverge a tick later,
+# which is what made every one of `game/ecs/harness.rs`'s six golden traces
+# differ between the macOS/arm64 recording and Linux/Windows CI.
+#
+# Simulation code must therefore route these calls through `src/detmath.rs`
+# (the pure-Rust `libm` crate, or a written-out multiplication for a literal
+# `powi` exponent). Render-only code (`src/render/**`, `src/game/art_*.rs`,
+# `src/audio.rs`, `src/music/**`, `src/app.rs`'s capture scenes, `smoke.rs`) may
+# keep the platform maths, and silences this lint where a module tree is
+# declared (`#[allow(clippy::disallowed_methods)]` on the `mod` line) or at the
+# top of the file.
+#
+# Adding a std maths call to a simulation file is a lint error on purpose: use
+# `crate::detmath::DetF32` (`a.sin()` -> `a.dsin()`).
+#
+# `sqrt`, `abs`, `floor`/`ceil`/`round`/`trunc`, `min`/`max`/`clamp` and the
+# arithmetic operators are IEEE-exact on every target and stay on `std`.
+
+disallowed-methods = [
+  { path = "f32::sin", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::cos", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::sin_cos", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::tan", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::atan2", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::acos", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::asin", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::atan", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::powf", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::powi", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::exp", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::ln", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::log2", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::log10", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::hypot", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::tanh", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+  { path = "f32::cbrt", reason = "platform-dependent rounding: use crate::detmath (DetF32) in simulation code" },
+]

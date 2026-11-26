@@ -60,6 +60,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::art_duck::{self, DuckPose, DuckView};
 use crate::game::ecs::components::{Drake, DrakeState, SpawnId};
 use crate::game::ecs::resources::{
@@ -259,7 +260,7 @@ fn rotate_toward(from: Vec2, to: Vec2, max: f32) -> Vec2 {
     }
     let (from, to) = (from.normalized(), to.normalized());
     let dot = from.dot(to).clamp(-1.0, 1.0);
-    let angle = dot.acos();
+    let angle = dot.dacos();
     if angle <= max {
         return to;
     }
@@ -379,7 +380,7 @@ fn lure_target(e: &Enemy, rat: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec2
     if !powerups::decoy_lures_body(e) {
         return rat;
     }
-    if e.pos.dist_sq(key) > powerups::WINDUP_MOUSE_RADIUS.powi(2) {
+    if e.pos.dist_sq(key) > powerups::WINDUP_MOUSE_RADIUS * powerups::WINDUP_MOUSE_RADIUS {
         return rat;
     }
     if !projectiles::los_clear(level, e.pos, key, e.radius) {
@@ -920,7 +921,7 @@ mod tests {
         // Beyond it: exactly the cap, on the short side.
         let far = Vec2::from_angle(2.0);
         let out = rotate_toward(from, far, REAIM_MAX_RAD);
-        let turn = out.dot(from).clamp(-1.0, 1.0).acos();
+        let turn = out.dot(from).clamp(-1.0, 1.0).dacos();
         assert!((turn - REAIM_MAX_RAD).abs() < 1e-4, "turned {turn}");
         assert!(out.y > 0.0, "it turned the wrong way round: {out:?}");
         // Degenerate inputs are not a panic and never move the aim.

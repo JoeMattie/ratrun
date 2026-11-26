@@ -3,6 +3,13 @@
 //! Everything is generated from scratch — no audio assets. The whole module
 //! degrades to silent if no output device is available (headless, no server),
 //! so the game never fails because of audio.
+//!
+//! **Audio-only, so its maths stays on `std`**: no sample can reach the
+//! simulation or an rng draw, so the platform maths library is fine here and
+//! the `disallowed_methods` lint is silenced (see `src/detmath.rs`).
+
+// Audio-only: platform maths is fine here (see the module docs).
+#![allow(clippy::disallowed_methods)]
 
 use std::f32::consts::{PI, TAU};
 use std::num::NonZero;

@@ -150,6 +150,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
 use crate::game::art_boss_hawk::{self, HawkState, HawkView};
 use crate::game::art_boss_cobra::{self, CobraState, CobraView};
@@ -1340,7 +1341,7 @@ impl HazardShape {
                     return true;
                 }
                 let cos = d.normalized().dot(f).clamp(-1.0, 1.0);
-                cos >= half_angle.cos()
+                cos >= half_angle.dcos()
             }
             HazardShape::Rect {
                 center,
@@ -3929,7 +3930,8 @@ pub fn boss_spawn_system(
 fn arrival_beside(level: &Level, rat: Vec2, radius: f32, arena: &TileRect) -> Vec2 {
     for k in 0..8 {
         let angle = k as f32 * (std::f32::consts::TAU / 8.0);
-        let p = rat + Vec2::new(angle.cos(), angle.sin()) * 48.0;
+        let (s, c) = angle.dsin_cos();
+        let p = rat + Vec2::new(c, s) * 48.0;
         if level.tiles.circle_clear(p, radius, SizeClass::Large) {
             return p;
         }

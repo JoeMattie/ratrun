@@ -71,6 +71,7 @@ use bevy_ecs::prelude::*;
 use rand::rngs::StdRng;
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::collision::SizeClass;
 use crate::game::ecs::components::SpawnId;
 use crate::game::director::MINIBOSS_TIMES;
@@ -625,7 +626,7 @@ impl MinibossKind {
             SignatureShape::Cord { len, half, sweep } => MinibossShape::Cone {
                 origin: mb.origin,
                 aim: mb.aim,
-                half_angle: sweep * 0.5 + (half / len.max(1.0)).clamp(0.0, 1.0).asin(),
+                half_angle: sweep * 0.5 + (half / len.max(1.0)).clamp(0.0, 1.0).dasin(),
                 len: len + half,
             },
             SignatureShape::Ring {
@@ -962,8 +963,8 @@ impl MinibossShape {
                 }
                 // Widen the angular test by the circle's angular radius so a
                 // rat-sized body is hit when its edge grazes the cone.
-                let ang = v.normalized().dot(aim.normalized()).clamp(-1.0, 1.0).acos();
-                let margin = (radius / d).clamp(0.0, 1.0).asin();
+                let ang = v.normalized().dot(aim.normalized()).clamp(-1.0, 1.0).dacos();
+                let margin = (radius / d).clamp(0.0, 1.0).dasin();
                 ang <= half_angle + margin
             }
             MinibossShape::Cord { spool, tip, half } => segment_dist(p, spool, tip) <= half + radius,
@@ -986,7 +987,11 @@ impl MinibossShape {
                     // stands still inside the Late Plate's closing ring.
                     return true;
                 }
-                let ang = v.normalized().dot(gap_dir.normalized()).clamp(-1.0, 1.0).acos();
+                let ang = v
+                    .normalized()
+                    .dot(gap_dir.normalized())
+                    .clamp(-1.0, 1.0)
+                    .dacos();
                 ang > gap_half
             }
             MinibossShape::Stamps { centers, half } => centers.iter().any(|&c| {
@@ -1557,7 +1562,7 @@ fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &
             seam_half, half, ..
         } => {
             let d = at.dist(body).max(1.0);
-            aim.rotate(((seam_half + half) / d).clamp(0.0, 0.7).asin())
+            aim.rotate(((seam_half + half) / d).clamp(0.0, 0.7).dasin())
         }
         _ => aim,
     };

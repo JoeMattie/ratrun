@@ -13,6 +13,15 @@
 //!   its own tiny deterministic hash/PRNG (`u64` state seeded from level seed
 //!   + theme), so zero heap allocations occur per frame.
 //! - Smoke and lighting quality never alter simulation state.
+//! - **Render-only, so its maths stays on `std`.** Checked: the only callers of
+//!   [`SmokeLayer::sync_and_draw`] are `World::draw_smoke` (the draw half) and
+//!   the lighting gallery capture, and [`SmokeLayer::step`] is reached only
+//!   from there — no tick system touches it. Its `sin` therefore never has to
+//!   be bit-identical across platforms, and the `disallowed_methods` lint is
+//!   silenced for the file (see `src/detmath.rs`).
+
+// Render-only: the platform maths library is fine here (see the module docs).
+#![allow(clippy::disallowed_methods)]
 
 use bevy_ecs::world::World as EcsWorld;
 

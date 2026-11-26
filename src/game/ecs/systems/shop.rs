@@ -253,7 +253,8 @@ mod tests {
         // so nothing here is about the shop opening.
         for i in 0..5 {
             let a = i as f32 * 0.7;
-            let at = hole.face() + Vec2::new(a.cos(), a.sin()) * 6.0;
+            let at = hole.face()
+                + Vec2::new(crate::detmath::cos(a), crate::detmath::sin(a)) * 6.0;
             w.spawn_enemy(EnemyKind::Skitterer, at, 1.0);
         }
         w.player.pos = hole.face() + hole.facing * 220.0;

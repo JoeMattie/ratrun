@@ -1471,7 +1471,8 @@ mod tests {
                 // fires and the hazards matter.
                 let a = i as f32 * DT * 2.2;
                 let boss = boss_of(&mut w).expect("alive");
-                w.player.pos = boss.pos + Vec2::new(a.cos(), a.sin()) * 44.0;
+                w.player.pos = boss.pos
+                    + Vec2::new(crate::detmath::cos(a), crate::detmath::sin(a)) * 44.0;
                 w.player.pos = w.player.pos.clamp_box(vec2_min(), w.level.arena - vec2_min());
                 let _ = rng.random::<u32>();
                 tick(&mut w);

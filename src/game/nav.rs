@@ -2490,7 +2490,11 @@ mod tests {
             // ~75 px/s: a realistic rat speed, so the field can keep up.
             let a = k as f32 / 720.0;
             let p = level.start
-                + Vec2::new(a.cos() * 900.0, (a * 0.8).sin() * 700.0).clamp_len(1_100.0);
+                + Vec2::new(
+                    crate::detmath::cos(a) * 900.0,
+                    crate::detmath::sin(a * 0.8) * 700.0,
+                )
+                .clamp_len(1_100.0);
             let one = Instant::now();
             let upd = walker.update(&level.tiles, p, budget);
             worst = worst.max(one.elapsed().as_secs_f64() * 1000.0);

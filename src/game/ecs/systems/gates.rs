@@ -1648,7 +1648,7 @@ mod tests {
         fn script(w: &mut World) {
             for step in 0..900u64 {
                 let phase = step as f32 * 0.021;
-                let dir = Vec2::new(phase.sin(), (phase * 0.7).cos());
+                let dir = Vec2::new(crate::detmath::sin(phase), crate::detmath::cos(phase * 0.7));
                 w.update(DT, dir, step % 211 == 0);
             }
         }

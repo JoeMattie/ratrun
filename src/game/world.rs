@@ -56,6 +56,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{draw_ambience, draw_fixtures, LightMap, LightScene, LightingMode};
@@ -1964,7 +1965,8 @@ impl World {
             let mut best: Option<(f32, Vec2)> = None;
             for step in 0..STEPS {
                 let angle = step as f32 * std::f32::consts::TAU / STEPS as f32;
-                let dir = Vec2::new(angle.cos(), angle.sin());
+                let (s, c) = angle.dsin_cos();
+                let dir = Vec2::new(c, s);
                 for d in DISTANCES {
                     let p = rat + dir * d;
                     if self.level.pit_at(p).is_some() {
@@ -2252,6 +2254,11 @@ impl World {
 
     /// Draw the world itself into `pb` (whose size *is* the world rectangle it
     /// must cover), setting [`World::cam`] and [`World::render_viewport`] for it.
+    ///
+    /// Render-only: the bob pulses and glow falloffs below stay on `std`'s
+    /// maths library on purpose (see `src/detmath.rs`), so here and only here
+    /// the `disallowed_methods` lint is silenced.
+    #[allow(clippy::disallowed_methods)]
     fn draw_scene(&mut self, pb: &mut PixelBuffer) {
         let vw = pb.w as f32;
         let vh = pb.h as f32;

@@ -1230,7 +1230,10 @@ fn twin_runs_with_a_boss_and_weapons_match() {
         w.player.pos = centre + Vec2::new(40.0, 0.0);
         let mut trace = Vec::with_capacity(240 * 10);
         for k in 0..240 {
-            let dir = Vec2::new((k as f32 * 0.13).sin(), (k as f32 * 0.09).cos());
+            let dir = Vec2::new(
+                crate::detmath::sin(k as f32 * 0.13),
+                crate::detmath::cos(k as f32 * 0.09),
+            );
             w.update(DT, dir, k % 70 == 0);
             let (hp, _) = w.boss_hp().expect("boss alive");
             let boss = boss_of(&mut w).expect("boss alive");
@@ -1282,7 +1285,7 @@ fn measure_campaign_boss_dps() {
     fn script(w: &mut World, tick: u64) -> (Vec2, bool) {
         let t = tick as f32;
         let phase = t * 0.013;
-        let bias = Vec2::new(phase.sin(), (phase * 0.7).cos());
+        let bias = Vec2::new(crate::detmath::sin(phase), crate::detmath::cos(phase * 0.7));
         let p = w.player.pos;
         let enemies = w.enemies();
         let (mut fx, mut fy) = (0.0f32, 0.0f32);

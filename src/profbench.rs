@@ -21,6 +21,9 @@
 //! * `--sample FILE:SECS` — run the **last** config for `SECS + 2` wall seconds
 //!   and attach `/usr/bin/sample` to this process for `SECS`.
 
+// Dev-only benchmark scenery: the platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 

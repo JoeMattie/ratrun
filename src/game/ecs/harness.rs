@@ -61,7 +61,7 @@ impl Script {
 fn script(w: &mut World, tick: u64, mode: Script) -> (Vec2, bool) {
     let t = tick as f32;
     let phase = t * 0.013;
-    let bias = Vec2::new(phase.sin(), (phase * 0.7).cos());
+    let bias = Vec2::new(crate::detmath::sin(phase), crate::detmath::cos(phase * 0.7));
     let dash = tick.is_multiple_of(157);
     match mode {
         Script::Wander => {

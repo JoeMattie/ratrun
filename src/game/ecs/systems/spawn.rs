@@ -91,6 +91,7 @@ use bevy_ecs::system::SystemParam;
 use rand::rngs::StdRng;
 use rand::RngExt;
 
+use crate::detmath::DetF32;
 use crate::game::collision::{SizeClass, TileMap};
 use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
@@ -1806,7 +1807,7 @@ fn angle_between(a: Vec2, b: Vec2) -> f32 {
     if la < 1e-3 || lb < 1e-3 {
         return 0.0;
     }
-    (a.dot(b) / (la * lb)).clamp(-1.0, 1.0).acos()
+    (a.dot(b) / (la * lb)).clamp(-1.0, 1.0).dacos()
 }
 
 /// Clearance a room spawn keeps from any wall, per size class (a boss-sized

@@ -1916,7 +1916,8 @@ mod tests {
                 // every hazard matters.
                 let a = i as f32 * DT * 1.9;
                 let boss = boss_of(&mut w).expect("alive");
-                w.player.pos = boss.pos + Vec2::new(a.cos(), a.sin()) * 50.0;
+                w.player.pos = boss.pos
+                    + Vec2::new(crate::detmath::cos(a), crate::detmath::sin(a)) * 50.0;
                 w.player.pos = w.player
                     .pos
                     .clamp_box(Vec2::splat(24.0), w.level.arena - Vec2::splat(24.0));

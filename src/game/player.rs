@@ -1,5 +1,6 @@
 //! The player rat: movement, dash, health, XP/leveling, and loadout.
 
+use crate::detmath::DetF64;
 use crate::math::Vec2;
 
 use super::loadout::Loadout;
@@ -195,7 +196,7 @@ pub const OLD_LEVELS_PER_LEVEL: u32 = 4;
 /// [`xp_to_reach`], so the old level a run would have reached stays readable.
 pub fn base_xp_for_level(level: u32) -> u32 {
     let n = level.max(1).saturating_sub(1) as i32;
-    let cost = XP_BASE * XP_GROWTH.powi(n);
+    let cost = XP_BASE * XP_GROWTH.dpowi(n);
     cost.round().clamp(1.0, u32::MAX as f64) as u32
 }
 

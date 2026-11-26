@@ -23,21 +23,31 @@ pub mod campaign;
 pub mod controls;
 pub mod console;
 pub mod cursor;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod framebuffer;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod hazard_outline;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod hud;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod ink;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod library;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod menu;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod overlay;
 pub mod shop;
 pub mod subcell;
 pub mod palette;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod minimap;
 pub mod nest;
 pub mod minimap_source;
 pub mod options;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod lighting;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 pub mod zoom;
 pub mod foreground;
 pub mod glyphfx;

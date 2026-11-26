@@ -1556,7 +1556,7 @@ mod tests {
             );
             prev = lo.stats.move_speed;
         }
-        assert!((lo.stats.move_speed / base - 1.12f32.powi(6)).abs() < 1e-3);
+        assert!((lo.stats.move_speed / base - crate::detmath::powi(1.12f32, 6)).abs() < 1e-3);
         // A seventh pick is the capped bandage: no more speed, no extra stack.
         lo.apply(&Upgrade::Passive(PassiveKind::MoveSpeed));
         assert_eq!(lo.stacks(PassiveKind::MoveSpeed), 6);

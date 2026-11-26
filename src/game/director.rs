@@ -58,6 +58,7 @@
 
 use rand::Rng;
 
+use crate::detmath::DetF32;
 use super::enemy::EnemyKind;
 use crate::game::ecs::resources::BossDue;
 use crate::game::level::Theme;
@@ -807,7 +808,7 @@ const LEVEL_RAMP_EXP: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMods {
     use crate::game::enemy::EnemyMods;
     let slot = level_slot(level);
-    let t = (elapsed / BOSS_TIME).clamp(0.0, 1.0).powf(LEVEL_RAMP_EXP[slot]);
+    let t = (elapsed / BOSS_TIME).clamp(0.0, 1.0).dpowf(LEVEL_RAMP_EXP[slot]);
     EnemyMods {
         damage: 1.0 + (LEVEL_DAMAGE_TOP[slot] - 1.0) * t,
         speed: 1.0 + (LEVEL_SPEED_TOP[slot] - 1.0) * t,

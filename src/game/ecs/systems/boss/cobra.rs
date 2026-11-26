@@ -1828,7 +1828,7 @@ mod tests {
                 assert!(r <= last + 1e-3, "the loop must not loosen off the clock");
                 let half = art::coil_gap_half(&view);
                 assert!(
-                    2.0 * r * half.sin() >= art::COIL_GAP_ARC * 0.85,
+                    2.0 * r * crate::detmath::sin(half) >= art::COIL_GAP_ARC * 0.85,
                     "the doorway must stay walkable at r={r}"
                 );
                 last = r;

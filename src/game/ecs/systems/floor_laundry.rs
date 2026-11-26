@@ -301,7 +301,8 @@ fn lure_target(e: &Enemy, rat: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec2
         return rat;
     };
     if !powerups::decoy_lures_body(e)
-        || e.pos.dist_sq(key) > powerups::WINDUP_MOUSE_RADIUS.powi(2)
+        || e.pos.dist_sq(key)
+            > powerups::WINDUP_MOUSE_RADIUS * powerups::WINDUP_MOUSE_RADIUS
         || !projectiles::los_clear(level, e.pos, key, e.radius)
     {
         return rat;

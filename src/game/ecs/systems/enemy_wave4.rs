@@ -68,6 +68,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{self, SizeClass};
 use crate::game::ecs::components::SpawnId;
@@ -563,7 +564,8 @@ pub fn wave4_system(
             }
             if e.w4.role == LILLI_ROLE_ROPE
                 && e.w4.phase == LILLI_PHASE_ACTION
-                && e.pos.dist_sq(player.pos) <= (ROPE_REACH + PLAYER_RADIUS).powi(2)
+                && e.pos.dist_sq(player.pos)
+                    <= (ROPE_REACH + PLAYER_RADIUS) * (ROPE_REACH + PLAYER_RADIUS)
             {
                 tied += 1;
                 knot += e.pos;
@@ -626,7 +628,8 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
     if !crate::game::ecs::systems::powerups::decoy_lures_body(e) {
         return ppos;
     }
-    if e.pos.dist_sq(key) > crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2) {
+    let decoy_r = crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS;
+    if e.pos.dist_sq(key) > decoy_r * decoy_r {
         return ppos;
     }
     if !crate::game::ecs::systems::projectiles::los_clear(level, e.pos, key, e.radius) {
@@ -769,7 +772,7 @@ fn snake_tick(
                 e.facing
             };
             e.anim += dt * 3.0;
-            let sway = base.perp() * e.anim.sin() * SNAKE_SLITHER_SWAY;
+            let sway = base.perp() * e.anim.dsin() * SNAKE_SLITHER_SWAY;
             let dir = (base + sway).normalized();
             e.facing += (dir - e.facing) * (5.0 * dt).min(1.0);
             let speed = e.kind.speed() * e.speed_scale * e.slow_mult * speed_mult;

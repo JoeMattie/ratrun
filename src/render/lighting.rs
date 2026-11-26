@@ -14,17 +14,24 @@
 //! Fog and the minimap use their existing sight and maze rules. Lighting only
 //! shades the playfield, so a distant lamp cannot reveal a route.
 
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod air;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod ambience;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod engine;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod fixtures;
 mod fx;
 mod material;
 mod motes;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod overhead;
 mod shadow;
 mod softshadow;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod sources;
+#[allow(clippy::disallowed_methods)] // render-only: platform maths is fine
 mod specular;
 mod surface;
 mod upsample;

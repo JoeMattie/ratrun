@@ -24,6 +24,7 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
+use crate::detmath::DetF32;
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
@@ -1109,7 +1110,7 @@ impl Puddle {
         let d = p - self.pos;
         let nx = d.x / self.rx;
         let ny = d.y / self.ry;
-        let edge = self.edge_factor(d.y.atan2(d.x));
+        let edge = self.edge_factor(d.y.datan2(d.x));
         nx * nx + ny * ny <= edge * edge
     }
 
@@ -1120,7 +1121,7 @@ impl Puddle {
             return 0.0;
         }
         let d = p - self.pos;
-        let edge = self.edge_factor(d.y.atan2(d.x));
+        let edge = self.edge_factor(d.y.datan2(d.x));
         let nx = d.x / (self.rx * edge);
         let ny = d.y / (self.ry * edge);
         let nr = (nx * nx + ny * ny).sqrt();
@@ -1660,14 +1661,15 @@ mod tests {
                 let angle = i as f32 * (std::f32::consts::TAU / 360.0);
                 // `contains` reads the rim at the point's *geometric* bearing,
                 // which is not the ellipse parameter unless `rx == ry`.
-                let bearing = (angle.sin() * p.ry).atan2(angle.cos() * p.rx);
+                let bearing = (angle.dsin() * p.ry).datan2(angle.dcos() * p.rx);
                 // Just outside the blob at that angle must be outside.
                 let r = p.edge_factor(bearing) + 0.01;
-                let on = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
+                let (s, c) = angle.dsin_cos();
+                let on = p.pos + Vec2::new(c * p.rx * r, s * p.ry * r);
                 assert!(!p.contains(on), "seed {seed}: a point outside the edge is wet");
                 // And just inside must be inside.
                 let r = p.edge_factor(bearing) * 0.99;
-                let inside = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
+                let inside = p.pos + Vec2::new(c * p.rx * r, s * p.ry * r);
                 assert!(p.contains(inside), "seed {seed}: a point inside the edge is dry");
                 // The bounding ellipse holds every blob.
                 assert!(r <= 1.0);
@@ -1694,7 +1696,8 @@ mod tests {
         for i in 0..200 {
             let angle = i as f32 * 0.37;
             let r = (i as f32 / 200.0) * 1.3;
-            let q = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
+            let (s, c) = angle.dsin_cos();
+            let q = p.pos + Vec2::new(c * p.rx * r, s * p.ry * r);
             assert_eq!(p.contains(q), p.depth(q) > 0.0, "contains and depth disagree");
         }
         // A degenerate puddle is not water anywhere.

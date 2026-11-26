@@ -113,7 +113,7 @@ pub const PEPPER_MILL_SHOT_LIFE: f32 = 4.0;
 /// the aim line turned by −10° and by +10°, in that order.
 pub fn pepper_mill_rays(from: Vec2, ppos: Vec2) -> [Vec2; 2] {
     let aim = (ppos - from).normalized();
-    let (s, c) = PEPPER_MILL_SPLIT_DEG.to_radians().sin_cos();
+    let (s, c) = PEPPER_MILL_SPLIT_DEG.to_radians().dsin_cos();
     let turn = |sin: f32| Vec2::new(aim.x * c - aim.y * sin, aim.x * sin + aim.y * c);
     [
         turn(-s) * PEPPER_MILL_SHOT_SPEED,
@@ -302,7 +302,8 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
     if !crate::game::ecs::systems::powerups::decoy_lures_body(e) {
         return ppos;
     }
-    if e.pos.dist_sq(key) > crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2) {
+    let decoy_r = crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS;
+    if e.pos.dist_sq(key) > decoy_r * decoy_r {
         return ppos;
     }
     if !crate::game::ecs::systems::projectiles::los_clear(level, e.pos, key, e.radius) {
@@ -427,7 +428,7 @@ mod tests {
         for v in [a, b] {
             assert!((v.len() - PEPPER_MILL_SHOT_SPEED).abs() < 1e-3);
             let cos = v.normalized().dot(aim);
-            assert!((cos - PEPPER_MILL_SPLIT_DEG.to_radians().cos()).abs() < 1e-4);
+            assert!((cos - PEPPER_MILL_SPLIT_DEG.to_radians().dcos()).abs() < 1e-4);
         }
         // One ray each side of the seam.
         assert!(a.y < 0.0 && b.y > 0.0);

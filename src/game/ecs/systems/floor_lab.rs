@@ -61,6 +61,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
+use crate::detmath::DetF32;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
@@ -105,7 +106,7 @@ pub fn lid_weave(e: &mut Enemy, wander_before: f32, dt: f32) {
 #[inline]
 pub fn lid_face(e: &Enemy) -> f32 {
     let x = (e.w4.t.max(0.0) / LID_FLIP_SECS).fract();
-    (x * std::f32::consts::PI).sin().clamp(0.0, 1.0)
+    (x * std::f32::consts::PI).dsin().clamp(0.0, 1.0)
 }
 
 // ---- Walking Syringe --------------------------------------------------------
@@ -266,7 +267,8 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
     if !crate::game::ecs::systems::powerups::decoy_lures_body(e) {
         return ppos;
     }
-    if e.pos.dist_sq(key) > crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2) {
+    let decoy_r = crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS;
+    if e.pos.dist_sq(key) > decoy_r * decoy_r {
         return ppos;
     }
     if !crate::game::ecs::systems::projectiles::los_clear(level, e.pos, key, e.radius) {

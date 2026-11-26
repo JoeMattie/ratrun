@@ -1686,7 +1686,8 @@ impl Bot {
         let door = self.shop_leg && p.dist(self.shop_face) < SHOP_DOOR_RADIUS;
         if moving && !door {
             let runway = self.runway(w, p, dir, 140.0);
-            danger += (1.0 - runway / 140.0).powi(2) * 9.0;
+            let tight = 1.0 - runway / 140.0;
+            danger += tight * tight * 9.0;
         }
 
         // Invulnerability makes contact free: dash-frames are the one moment a
@@ -1723,7 +1724,8 @@ impl Bot {
                 if let Threat::Enemy { pos, radius, .. } = *t {
                     let d = pos.dist(probe) - radius;
                     if d < 65.0 {
-                        thin += weight * (1.0 - (d.max(0.0) / 65.0)).powi(2);
+                        let close = 1.0 - (d.max(0.0) / 65.0);
+                        thin += weight * close * close;
                     }
                 }
             }

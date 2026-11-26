@@ -1,5 +1,13 @@
 //! Small 2D vector + scalar helpers used across the game.
+//!
+//! This is simulation code (movement, aim, spawn angles all read it), so every
+//! trigonometry call here goes through [`crate::detmath`] instead of `std`'s
+//! platform maths library: `Vec2::angle`, `from_angle` and `rotate` are the
+//! funnel most of the simulation's trig flows through, so routing them here
+//! makes those paths bit-identical on every target. `sqrt` (in `len`) and the
+//! arithmetic are IEEE-exact and stay as they are.
 
+use crate::detmath::DetF32;
 use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -62,15 +70,16 @@ impl Vec2 {
     }
 
     pub fn angle(self) -> f32 {
-        self.y.atan2(self.x)
+        self.y.datan2(self.x)
     }
 
     pub fn from_angle(a: f32) -> Vec2 {
-        Vec2::new(a.cos(), a.sin())
+        let (s, c) = a.dsin_cos();
+        Vec2::new(c, s)
     }
 
     pub fn rotate(self, a: f32) -> Vec2 {
-        let (s, c) = a.sin_cos();
+        let (s, c) = a.dsin_cos();
         Vec2::new(self.x * c - self.y * s, self.x * s + self.y * c)
     }
 
