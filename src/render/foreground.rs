@@ -42,8 +42,8 @@ const MIN_SCREEN_SPACING: f32 = 48.0;
 const PIXEL_SCALE: i32 = 2;
 const PIXEL_SCALE_NEAR: i32 = 3;
 const PIXEL_SCALE_NEAR_DEPTH: f32 = 2.6;
-const SCRATCH_MARGIN: i32 = 12;
-const ART_ORIGIN: i32 = 2048;
+// Cache whole sections of the along-axis art lattice, with room for the blur.
+const RASTER_PAGE: i32 = 32;
 
 const START_CLEAR_PX: f32 = 96.0;
 const MIN_SPACING: f32 = 160.0;
@@ -122,6 +122,10 @@ impl ForeKind {
         ]
     }
 
+    fn organic(self) -> bool {
+        matches!(self, Self::Kelp | Self::BubbleChain | Self::BranchCanopy)
+    }
+
     fn sways(self) -> bool {
         matches!(
             self,
@@ -140,12 +144,38 @@ impl ForeKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForeItem {
     pub kind: ForeKind,
-    pub horizontal: bool,
-    /// World y for a horizontal band, world x for a vertical band.
+    /// Unit tangent of the band, pointing in the direction of the art.
+    pub axis: Vec2,
+    /// World line offset along the unit normal.
     pub cross: f32,
     pub depth: f32,
     pub scale: f32,
     pub seed: u32,
+}
+
+const HORIZONTAL: Vec2 = Vec2 { x: 1.0, y: 0.0 };
+const VERTICAL: Vec2 = Vec2 { x: 0.0, y: 1.0 };
+
+impl ForeItem {
+    pub(crate) fn normal(self) -> Vec2 {
+        // Keep the original positive cross direction of the vertical art.
+        if self.axis == VERTICAL {
+            HORIZONTAL
+        } else {
+            self.axis.perp()
+        }
+    }
+}
+
+fn placement_axis(kind: ForeKind, horizontal: bool, seed: u32) -> Vec2 {
+    if kind.organic() {
+        let turn = hash01(u64::from(seed), 0xA961) - 0.5;
+        Vec2::from_angle(turn * std::f32::consts::PI).normalized()
+    } else if horizontal {
+        HORIZONTAL
+    } else {
+        VERTICAL
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -222,14 +252,8 @@ fn pixel_scale(item: &ForeItem) -> i32 {
     }
 }
 
-/// Return the along and cross components in that order. Applying this twice
-/// converts back to x and y for a vertical band.
-fn axes<T>(horizontal: bool, x: T, y: T) -> (T, T) {
-    if horizontal { (x, y) } else { (y, x) }
-}
-
-/// The foreground layer defaults to off. `RATRUN_FOREGROUND=1` enables it
-/// for a session, and `0` (or `off`/`false`/`no`) pins it off.
+/// Standalone worlds can enable this layer with `RATRUN_FOREGROUND=1`.
+/// The App uses the saved graphics preference and honours either env pin.
 pub fn enabled_from_env() -> bool {
     match std::env::var("RATRUN_FOREGROUND") {
         Ok(v) => !matches!(
@@ -269,8 +293,8 @@ struct Scratch {
     y0: i32,
     w: i32,
     h: i32,
-    rgb: Vec<Rgb>,
-    alpha: Vec<u8>,
+    body: Vec<[u32; 4]>,
+    filtered_rows: Vec<[u32; 4]>,
     shade: Vec<u8>,
 }
 
@@ -283,10 +307,8 @@ impl Scratch {
         self.y0 = y0;
         self.w = w.max(0);
         self.h = h.max(0);
-        self.rgb.clear();
-        self.rgb.resize(n, (0, 0, 0));
-        self.alpha.clear();
-        self.alpha.resize(n, 0);
+        self.body.clear();
+        self.body.resize(n, [0; 4]);
         self.shade.clear();
         self.shade.resize(n, 0);
     }
@@ -305,8 +327,9 @@ impl Scratch {
     #[inline]
     fn put(&mut self, x: i32, y: i32, rgb: Rgb, alpha: u8) {
         if let Some(i) = self.index(x, y) {
-            self.rgb[i] = rgb;
-            self.alpha[i] = alpha;
+            let a = u32::from(alpha);
+            self.body[i] = [u32::from(rgb.0) * a, u32::from(rgb.1) * a,
+                u32::from(rgb.2) * a, a];
         }
     }
 
@@ -324,7 +347,7 @@ impl Scratch {
     /// The buffers' combined capacity (tests: nothing grows once warm).
     #[cfg(test)]
     fn capacity(&self) -> usize {
-        self.rgb.capacity() + self.alpha.capacity() + self.shade.capacity()
+        self.body.capacity() + self.filtered_rows.capacity() + self.shade.capacity()
     }
 }
 
@@ -420,8 +443,7 @@ fn in_rat_core(x: i32, y: i32) -> bool {
 ///   past it the write is dropped, so the cap holds whatever the art paints.
 ///
 /// While [`draw`] is rasterising an item the write goes to the item's scratch
-/// instead (see [`TARGET`]); the scratch is then blitted as `k x k` blocks
-/// through [`blend_screen`], which applies all of the above per screen pixel.
+/// instead (see [`TARGET`]); its filtered raster is then composited per pixel.
 #[inline]
 pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     if alpha == 0 {
@@ -510,27 +532,72 @@ fn shadow_screen(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
 #[derive(Clone, Copy, Debug)]
 struct Plan {
     item: ForeItem,
+    normal: Vec2,
     screen_cross: i32,
     shadow_cross: i32,
-    cross_size: f32,
-    along_size: f32,
+    centre_cross: f32,
+    along: (f32, f32),
     half_thickness: f32,
+    rat_distance: f32,
     alpha: u8,
     k: i32,
+    radius: i32,
+    crossing_rat: bool,
 }
 
 impl Plan {
-    fn body_area(&self) -> f32 {
+    fn body_area(&self, size: Vec2) -> f32 {
         let cross = self.screen_cross as f32;
-        let start = (cross - self.half_thickness).floor().max(0.0);
-        let end = (cross + self.half_thickness).ceil().min(self.cross_size);
-        (end - start).max(0.0) * self.along_size
+        let (lo, hi) = project(size, self.normal);
+        let start = (cross - self.half_thickness).max(lo);
+        let end = (cross + self.half_thickness).min(hi);
+        if end <= start {
+            return 0.0;
+        }
+        let width_at = |v| {
+            let origin = self.normal * v;
+            let (lo, hi) = line_span(origin, self.item.axis, size);
+            (hi - lo).max(0.0)
+        };
+        // Three slices estimate the visible strip area, including bands
+        // passing through a corner of the view.
+        (end - start) * (width_at(start) + 4.0 * width_at((start + end) * 0.5)
+            + width_at(end)) / 6.0
     }
+
+    fn centre_distance(&self) -> f32 {
+        (self.screen_cross as f32 - self.centre_cross).abs()
+    }
+}
+
+/// The projection of the viewport corners onto one of the band's axes.
+fn project(size: Vec2, axis: Vec2) -> (f32, f32) {
+    let x = size.x * axis.x;
+    let y = size.y * axis.y;
+    (x.min(0.0) + y.min(0.0), x.max(0.0) + y.max(0.0))
+}
+
+/// Inclusive parameter range for a line intersecting the view rectangle.
+fn line_span(origin: Vec2, axis: Vec2, size: Vec2) -> (f32, f32) {
+    let slab = |at: f32, dir: f32, edge: f32| {
+        if dir == 0.0 {
+            return if (0.0..=edge).contains(&at) {
+                (f32::NEG_INFINITY, f32::INFINITY)
+            } else {
+                (f32::INFINITY, f32::NEG_INFINITY)
+            };
+        }
+        let a = -at / dir;
+        let b = (edge - at) / dir;
+        (a.min(b), a.max(b))
+    };
+    let x = slab(origin.x, axis.x, size.x);
+    let y = slab(origin.y, axis.y, size.y);
+    (x.0.max(y.0), x.1.min(y.1))
 }
 
 struct PlacedBand {
     item: ForeItem,
-    #[cfg(test)]
     anchor: Vec2,
     #[cfg(test)]
     corridor: bool,
@@ -543,6 +610,7 @@ pub struct ForeLayer {
     key: Option<(Theme, u64)>,
     frame: Vec<Plan>,
     scratch: Scratch,
+    rasters: [Focus; MAX_BANDS_IN_VIEW],
 }
 
 impl Default for ForeLayer {
@@ -558,6 +626,7 @@ impl ForeLayer {
             key: None,
             frame: Vec::with_capacity(MAX_BANDS_IN_VIEW),
             scratch: Scratch::default(),
+            rasters: std::array::from_fn(|_| Focus::default()),
         }
     }
 
@@ -597,22 +666,19 @@ impl ForeLayer {
                 .filter_map(|item| plan_band(view, item, rat, threats))
                 .filter(|p| {
                     self.frame.iter().all(|other| {
-                        p.item.horizontal != other.item.horizontal
+                        p.item.axis != other.item.axis
                             || (p.screen_cross - other.screen_cross).abs() as f32
                                 >= MIN_SCREEN_SPACING * view.zoom
                     })
                 })
-                .min_by(|a, b| {
-                    let distance = |p: &Plan| (p.screen_cross as f32 - p.cross_size * 0.5).abs();
-                    distance(a).total_cmp(&distance(b))
-                });
+                .min_by(|a, b| a.centre_distance().total_cmp(&b.centre_distance()));
             let Some(next) = next else { break };
             self.frame.push(next);
         }
         let fill = coverage_fill(level.theme);
         let covered: f32 = self.frame.iter()
             .filter(|p| !matches!(p.item.kind, ForeKind::CloudBand | ForeKind::PowerLines))
-            .map(|p| p.body_area() * fill)
+            .map(|p| p.body_area(view.size) * fill)
             .sum();
         let cap = view.size.x * view.size.y * coverage_pct(level.theme) as f32 / 100.0;
         if covered > cap {
@@ -628,6 +694,15 @@ impl ForeLayer {
         if self.frame.len() == 2 && self.frame[0].item.depth > self.frame[1].item.depth {
             self.frame.swap(0, 1);
         }
+        if let [back, front] = self.frame.as_mut_slice() {
+            let near_rat = |p: &Plan| {
+                p.rat_distance <= p.half_thickness + CLEAR_DISC_IN_PX * view.zoom
+            };
+            front.crossing_rat = back.item.axis != front.item.axis
+                && back.item.kind != ForeKind::CloudBand
+                && near_rat(back)
+                && near_rat(front);
+        }
     }
 }
 
@@ -641,24 +716,26 @@ struct View {
 }
 
 fn plan_band(view: View, item: ForeItem, rat: Vec2, threats: &[(Vec2, f32)]) -> Option<Plan> {
-    let (along_size, cross_size) = axes(item.horizontal, view.size.x, view.size.y);
-    let (_, cam_cross) = axes(item.horizontal, view.cam.x, view.cam.y);
-    let centre = cross_size * 0.5;
+    let normal = item.normal();
+    let cam_cross = view.cam.dot(normal);
+    let (lo, hi) = project(view.size, normal);
+    let centre_cross = (lo + hi) * 0.5;
     let world_cross = item.cross - cam_cross;
-    let screen_cross = (centre + (world_cross - centre) * item.depth).round() as i32;
+    let screen_cross = (centre_cross + (world_cross - centre_cross) * item.depth).round() as i32;
     let k = pixel_scale(&item);
-    let half_thickness = art_foreground::thickness(&item) * 0.5 * k as f32;
+    // Depth is 1.8–3.0. Keep the radius in screen pixels as the view eases.
+    let radius = (((item.depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN) * 2.0 + 2.0)
+        * view.zoom).round().max(1.0) as i32;
+    let half_thickness = art_foreground::thickness(&item) * 0.5 * k as f32 + radius as f32;
     let cross = screen_cross as f32;
-    if cross + half_thickness < 0.0 || cross - half_thickness >= cross_size {
+    if cross + half_thickness < lo || cross - half_thickness >= hi {
         return None;
     }
 
-    let line_distance = |body: Vec2| {
-        let (_, body_cross) = axes(item.horizontal, body.x, body.y);
-        (body_cross - cam_cross - cross).abs()
-    };
+    let line_distance = |body: Vec2| ((body - view.cam).dot(normal) - cross).abs();
+    let rat_distance = line_distance(rat);
     let mut alpha = proximity_alpha(
-        ALPHA_MAX as f32, line_distance(rat) / view.zoom, FADE_RAT_PX, ALPHA_FLOOR_RAT,
+        ALPHA_MAX as f32, rat_distance / view.zoom, FADE_RAT_PX, ALPHA_FLOOR_RAT,
     );
     for &(body, radius) in threats {
         let distance = (line_distance(body) - half_thickness - radius.max(0.0)).max(0.0);
@@ -669,10 +746,11 @@ fn plan_band(view: View, item: ForeItem, rat: Vec2, threats: &[(Vec2, f32)]) -> 
     if item.kind == ForeKind::CloudBand {
         alpha = alpha.min(CLOUD_ALPHA_MAX as f32);
     }
-    let shadow_cross = world_cross + if item.horizontal { 14.0 } else { 10.0 };
+    let shadow_cross = world_cross + 10.0 + 4.0 * item.axis.x.abs();
     Some(Plan {
-        item, screen_cross, shadow_cross: shadow_cross.round() as i32,
-        cross_size, along_size, half_thickness, alpha: alpha.round() as u8, k,
+        item, normal, screen_cross, shadow_cross: shadow_cross.round() as i32,
+        centre_cross, along: project(view.size, item.axis), half_thickness, rat_distance,
+        alpha: alpha.round() as u8, k, radius, crossing_rat: false,
     })
 }
 
@@ -720,12 +798,12 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
     let cap_skip = total * coverage_skip_pct(scene.level.theme) / 100;
     budget_start(cap_skip);
     clear_disc_set(scene.rat - scene.cam, view.zoom);
-    for plan in &layer.frame {
+    for (plan, raster) in layer.frame.iter().zip(&mut layer.rasters) {
         let painted = writes_so_far();
         let est_writes = if scene.level.theme == Theme::Outfall {
-            plan.body_area() * OUTFALL_COVERAGE_FILL
+            plan.body_area(view.size) * OUTFALL_COVERAGE_FILL
         } else {
-            plan.body_area()
+            plan.body_area(view.size)
         };
         let alpha = if est_writes > cap_skip.saturating_sub(painted) as f32 {
             // Keep the whole run visible as haze when it might exceed the
@@ -734,101 +812,272 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
         } else {
             coverage_alpha(plan.alpha, painted, cap_full)
         };
-        draw_band(pb, &mut layer.scratch, view, plan, alpha, scene);
+        raster.draw(pb, &mut layer.scratch, view, plan, alpha, scene);
     }
     clear_disc_reset();
     budget_finish()
 }
 
-/// The art grid has a world-fixed phase along the band. Split the camera
-/// coordinate into a whole art-pixel offset and the residual translation of
-/// the whole raster. Even a one-pixel camera step moves the chunky blocks
-/// with the floor, including when the origin passes a block boundary.
-fn draw_band(
-    pb: &mut PixelBuffer,
-    scratch: &mut Scratch,
-    view: View,
-    plan: &Plan,
-    alpha: u8,
-    scene: &ForeScene,
-) {
-    if alpha == 0 {
-        return;
-    }
-    let item = &plan.item;
-    let block = plan.k;
-    let (cam_along, _) = axes(item.horizontal, view.cam.x, view.cam.y);
-    let cam_along = cam_along.round() as i32;
-    let world_art_offset = cam_along.div_euclid(block);
-    let origin = -cam_along.rem_euclid(block);
-    let overhang = (BAND_OVERHANG as f32 * view.zoom).ceil() as i32;
-    let from = (-overhang - origin).div_euclid(block);
-    let to = (plan.along_size as i32 - 1 + overhang - origin).div_euclid(block);
-    let half = (plan.half_thickness / block as f32).ceil() as i32 + SCRATCH_MARGIN;
-    let (x0, y0) = axes(item.horizontal, from, ART_ORIGIN - half);
-    let (w, h) = axes(item.horizontal, to - from + 1, 2 * half + 1);
-    scratch.reset(x0, y0, w, h);
-    let d = ForeDraw {
-        screen_cross: ART_ORIGIN,
-        shadow_cross: ART_ORIGIN,
-        from,
-        to,
-        scale: item.scale,
-        alpha,
-        sway: sway_of(item, scene.elapsed),
-        theme: scene.level.theme,
-        along_offset: world_art_offset,
-        elapsed_step: (scene.elapsed.max(0.0) * SWAY_HZ).floor() as u32,
-        toward_centre: if plan.screen_cross as f32 <= plan.cross_size * 0.5 { 1 } else { -1 },
-    };
-    TARGET.with(|t| *t.borrow_mut() = Some(std::mem::take(scratch)));
-    art_foreground::draw(pb, item, &d);
-    *scratch = TARGET.with(|t| t.borrow_mut().take()).unwrap_or_default();
+#[derive(Clone, Copy, PartialEq)]
+struct RasterKey {
+    kind: ForeKind,
+    seed: u32,
+    scale: f32,
+    theme: Theme,
+    sway: f32,
+    toward_centre: i8,
+    block: i32,
+    radius: i32,
+}
 
-    for (cross, shade) in [(plan.shadow_cross, true), (plan.screen_cross, false)] {
-        let (x, y) = axes(item.horizontal, origin, cross - ART_ORIGIN * block);
-        blit(pb, scratch, (x, y), block, shade);
+#[derive(Default)]
+struct Focus {
+    key: Option<RasterKey>,
+    /// The extent is on the world-fixed, along-axis art lattice.
+    first: i32,
+    last: i32,
+    width: i32,
+    top: i32,
+    bottom: i32,
+    body: Vec<[u8; 4]>,
+    shadow: Vec<u8>,
+}
+
+impl Focus {
+    fn draw(
+        &mut self,
+        pb: &mut PixelBuffer,
+        scratch: &mut Scratch,
+        view: View,
+        plan: &Plan,
+        alpha: u8,
+        scene: &ForeScene,
+    ) {
+        let item = plan.item;
+        let block = plan.k;
+        let cam_along = view.cam.dot(item.axis);
+        let pad = BAND_OVERHANG as f32 * view.zoom + plan.radius as f32 + 1.0;
+        let (lo, hi) = plan.along;
+        let first = ((cam_along + lo - pad) / block as f32).floor() as i32;
+        let last = ((cam_along + hi + pad) / block as f32).ceil() as i32;
+        let key = RasterKey {
+            kind: item.kind,
+            seed: item.seed,
+            scale: item.scale,
+            theme: scene.level.theme,
+            sway: sway_of(&item, scene.elapsed),
+            toward_centre: if plan.screen_cross as f32 <= plan.centre_cross { 1 } else { -1 },
+            block,
+            radius: plan.radius,
+        };
+        if self.key != Some(key) || first < self.first || last > self.last {
+            self.first = first.div_euclid(RASTER_PAGE) * RASTER_PAGE;
+            self.last = last.div_euclid(RASTER_PAGE) * RASTER_PAGE + RASTER_PAGE;
+            let width = self.last - self.first;
+            let art_half = (plan.half_thickness / block as f32).ceil() as i32 + 2;
+            scratch.reset(0, -art_half, width, 2 * art_half + 1);
+            let d = ForeDraw {
+                screen_cross: 0,
+                shadow_cross: 0,
+                from: 0,
+                to: width - 1,
+                scale: key.scale,
+                alpha: ALPHA_MAX,
+                sway: key.sway,
+                theme: key.theme,
+                along_offset: self.first,
+                elapsed_step: 0,
+                toward_centre: key.toward_centre,
+            };
+            TARGET.with(|t| *t.borrow_mut() = Some(std::mem::take(scratch)));
+            art_foreground::draw(pb, &ForeItem { axis: HORIZONTAL, ..item }, &d);
+            *scratch = TARGET.with(|t| t.borrow_mut().take()).unwrap_or_default();
+            self.filter(scratch, key);
+            self.key = Some(key);
+        }
+
+        let along_origin = (self.first * block) as f32 - cam_along;
+        let opacity = u32::from(alpha);
+        let shadow_opacity = if item.kind == ForeKind::CloudBand {
+            opacity * 256 / u32::from(ALPHA_MAX)
+        } else {
+            141 + opacity * 115 / u32::from(ALPHA_MAX)
+        };
+        self.blit(pb, plan, along_origin, shadow_opacity, true);
+        if item.kind != ForeKind::CloudBand {
+            self.blit(pb, plan, along_origin, opacity, false);
+        }
+    }
+
+    /// Filter the expanded art with a tent kernel in each direction. Each
+    /// pass carries premultiplied RGB so empty samples soften the silhouette
+    /// without adding a dark fringe. Normalize and quantize once per rebuild.
+    fn filter(&mut self, scratch: &mut Scratch, key: RasterKey) {
+        let block = key.block;
+        let radius = key.radius;
+        let divisor = ((radius + 1) * (radius + 1)) as u32;
+        self.width = scratch.w * block;
+        self.top = scratch.y0 * block;
+        self.bottom = self.top + scratch.h * block;
+        let width = self.width as usize;
+        let rows = scratch.h as usize;
+        let len = width * (self.bottom - self.top) as usize;
+        self.body.resize(len, [0; 4]);
+        self.shadow.resize(len, 0);
+
+        let ambient = crate::render::lighting::theme_ambient(key.theme).mul;
+        let ambient = (ambient[0] as u8 / 2, ambient[1] as u8 / 2, ambient[2] as u8 / 2);
+        if key.kind != ForeKind::CloudBand {
+            scratch.filtered_rows.resize(width * rows, [0; 4]);
+            for (source, row) in scratch.body.chunks_exact(scratch.w as usize)
+                .zip(scratch.filtered_rows.chunks_exact_mut(width))
+            {
+                for (x, dst) in row.iter_mut().enumerate() {
+                    *dst = tent(x as i32, block, radius, divisor, |i| {
+                        source.get(i as usize).copied().unwrap_or_default()
+                    });
+                }
+            }
+            for (y, row) in self.body.chunks_exact_mut(width).enumerate() {
+                for (x, dst) in row.iter_mut().enumerate() {
+                    let [r, g, b, a] = tent(y as i32, block, radius, divisor, |i| {
+                        if (0..scratch.h).contains(&i) {
+                            scratch.filtered_rows[i as usize * width + x]
+                        } else {
+                            [0; 4]
+                        }
+                    });
+                    *dst = if a < 6 {
+                        [0; 4]
+                    } else {
+                        let rgb = ((r / a) as u8, (g / a) as u8, (b / a) as u8);
+                        let gray = crate::render::lighting::luminance(rgb);
+                        let muted = palette::mix(palette::scale(rgb, DARKEN), (gray, gray, gray), 0.18);
+                        let tint = palette::mix(muted, ambient, 0.16);
+                        [stepped(tint.0 as u32, 8, 255), stepped(tint.1 as u32, 8, 255),
+                            stepped(tint.2 as u32, 8, 255), stepped(a, 12, ALPHA_MAX)]
+                    };
+                }
+            }
+        }
+        // The floor shadow is sharper. Interpolate between the art sample
+        // centres, giving it only half an art pixel of softness per side.
+        for (y, row) in self.shadow.chunks_exact_mut(width).enumerate() {
+            let (v, fy) = shadow_phase(y as i32, block);
+            for (x, dst) in row.iter_mut().enumerate() {
+                let (u, fx) = shadow_phase(x as i32, block);
+                let sample = |x, y| {
+                    scratch.index(x, y + scratch.y0).map_or(0, |i| u32::from(scratch.shade[i]))
+                };
+                let a = sample(u, v) * (256 - fx) + sample(u + 1, v) * fx;
+                let b = sample(u, v + 1) * (256 - fx) + sample(u + 1, v + 1) * fx;
+                *dst = stepped((a * (256 - fy) + b * fy + 32768) / 65536, 8, 255);
+            }
+        }
+    }
+
+    fn blit(&self, pb: &mut PixelBuffer, plan: &Plan, along_origin: f32, opacity: u32, shade: bool) {
+        let axis = plan.item.axis;
+        let normal = plan.normal;
+        let cross = if shade { plan.shadow_cross } else { plan.screen_cross } as f32;
+        let (width, height) = (pb.w, pb.h);
+        let (cx, cy, zoom, disc) = CLEAR_DISC.with(|c| c.get());
+        let disc_active = disc && (!shade || plan.crossing_rat);
+        let fade_width = 12.0;
+        let limit = (CLEAR_DISC_OUT_PX + if plan.crossing_rat { fade_width } else { 0.0 }) * zoom;
+        let limit2 = limit * limit;
+        let rows = pb.pixels_mut().chunks_exact_mut(width);
+        // Invert the band's basis per scanline. Only visit the strip, even if
+        // its angled bounding box covers the whole framebuffer.
+        for (y, row) in rows.enumerate().take(height) {
+            let cross_at_x0 = y as f32 * normal.y - cross;
+            let top = self.top as f32;
+            let bottom = self.bottom as f32;
+            let (from, to) = if normal.x == 0.0 {
+                if cross_at_x0 < top || cross_at_x0 >= bottom {
+                    continue;
+                }
+                (0, width)
+            } else {
+                let lo = (top - cross_at_x0) / normal.x;
+                let hi = (bottom - cross_at_x0) / normal.x;
+                ((lo.min(hi).floor().max(0.0) as usize).min(width),
+                 (lo.max(hi).ceil().max(0.0) as usize).min(width))
+            };
+            let along_at_x0 = y as f32 * axis.y - along_origin;
+            let dy = y as f32 - cy as f32;
+            for (x, pixel) in row.iter_mut().enumerate().take(to).skip(from) {
+                let u = along_at_x0 + x as f32 * axis.x;
+                let v = cross_at_x0 + x as f32 * normal.x - top;
+                if u < 0.0 || u >= self.width as f32 || v < 0.0 || v >= bottom - top {
+                    continue;
+                }
+                let i = v as usize * self.width as usize + u as usize;
+                let [r, g, b, a] = if shade { [0, 0, 0, self.shadow[i]] } else { self.body[i] };
+                if a == 0 {
+                    continue;
+                }
+                let mut a = u32::from(a) * opacity;
+                if disc_active {
+                    let dx = x as f32 - cx as f32;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < limit2 {
+                        let d = d2.sqrt() / zoom;
+                        let factor = if plan.crossing_rat {
+                            ((d - CLEAR_DISC_OUT_PX) / fade_width).clamp(0.0, 1.0)
+                        } else if d <= RAT_SKIP_PX {
+                            0.0
+                        } else {
+                            let t = ((d - CLEAR_DISC_IN_PX) / (CLEAR_DISC_OUT_PX - CLEAR_DISC_IN_PX))
+                                .clamp(0.0, 1.0);
+                            CLEAR_DISC_MIN + (1.0 - CLEAR_DISC_MIN) * t
+                        };
+                        a = (a as f32 * factor) as u32;
+                    }
+                }
+                let a = if shade { a / 256 } else { a / u32::from(ALPHA_MAX) };
+                if a > u32::from(CLOUD_ALPHA_MAX) && !shade && !take_budget() {
+                    continue;
+                }
+                if a != 0 {
+                    let mix = |src: u8, dst: u8| {
+                        ((u32::from(src) * a + u32::from(dst) * (255 - a) + 127) / 255) as u8
+                    };
+                    *pixel = (mix(r, pixel.0), mix(g, pixel.1), mix(b, pixel.2));
+                }
+            }
+        }
     }
 }
 
-/// Project an art plane into the world buffer. Its integer lattice stays
-/// fixed in the world when the zoom changes.
-fn blit(pb: &mut PixelBuffer, sc: &Scratch, origin: (i32, i32), block: i32, shade: bool) {
-    let (bw, bh) = (pb.w as i32, pb.h as i32);
-    for j in 0..sc.h {
-        let y = origin.1 + (sc.y0 + j) * block;
-        let (ya, yb) = (y.max(0), (y + block).min(bh));
-        if ya >= yb {
-            continue;
+/// Collapse the tent taps that land in the same art sample.
+#[inline]
+fn tent(
+    at: i32, block: i32, radius: i32, divisor: u32, mut get: impl FnMut(i32) -> [u32; 4],
+) -> [u32; 4] {
+    let mut sum = [0; 4];
+    let mut p = at - radius;
+    let last = at + radius;
+    while p <= last {
+        let sample = p.div_euclid(block);
+        let end = ((sample + 1) * block - 1).min(last);
+        let weight = (p..=end).map(|q| radius + 1 - (q - at).abs()).sum::<i32>() as u32;
+        let rgba = get(sample);
+        for i in 0..4 {
+            sum[i] += weight * rgba[i];
         }
-        for i in 0..sc.w {
-            let x = origin.0 + (sc.x0 + i) * block;
-            let (xa, xb) = (x.max(0), (x + block).min(bw));
-            if xa >= xb {
-                continue;
-            }
-            let idx = (j * sc.w + i) as usize;
-            if shade {
-                let strength = sc.shade[idx];
-                if strength != 0 {
-                    for y in ya..yb {
-                        for x in xa..xb {
-                            shadow_screen(pb, x, y, strength as f32 / 255.0);
-                        }
-                    }
-                }
-            } else {
-                let alpha = sc.alpha[idx];
-                if alpha != 0 {
-                    for y in ya..yb {
-                        for x in xa..xb {
-                            blend_screen(pb, x, y, sc.rgb[idx], alpha);
-                        }
-                    }
-                }
-            }
-        }
+        p = end + 1;
     }
+    sum.map(|v| (v + divisor / 2) / divisor)
+}
+
+fn shadow_phase(at: i32, block: i32) -> (i32, u32) {
+    let shifted = 2 * at - (block - 1);
+    (shifted.div_euclid(2 * block), (shifted.rem_euclid(2 * block) * 128 / block) as u32)
+}
+
+fn stepped(value: u32, step: u32, max: u8) -> u8 {
+    ((value + step / 2) / step * step).min(u32::from(max)) as u8
 }
 
 #[inline]
@@ -911,102 +1160,117 @@ impl Gen {
 }
 
 
-// Placement rolls each band's cross position independently of the simulation.
-// Large rooms go first so they can claim space before corridor lines. Each
-// eligible run gets one slot, with retries for blocked or crowded positions.
+// Roll candidates from the usual wide rooms and long corridor runs, then
+// spread a small, seeded selection across the level.
 fn generate(level: &Level, out: &mut Vec<PlacedBand>) {
     if level.theme == Theme::Trailer {
         return;
     }
     let mut rng = Gen::new(crate::game::level::level_seed(level.theme, level.seed, GEN_SALT));
+    let count = 2 + rng.u32() % 3;
     let kinds = kinds_for(level.theme);
-    for corridor in [false, true] {
-        for room in &level.rooms {
-            if (room.kind == RoomKind::Corridor) != corridor || room.kind == RoomKind::Maze {
+    let start = level.rooms.iter().find(|room| room.kind == RoomKind::Start);
+    let mut candidates = Vec::new();
+    for room in &level.rooms {
+        if matches!(room.kind, RoomKind::Start | RoomKind::Maze) {
+            continue;
+        }
+        let rect = room.rect;
+        let short = rect.w.min(rect.h);
+        let long = rect.w.max(rect.h);
+        let corridor = room.kind == RoomKind::Corridor;
+        let slots = if corridor {
+            if long < CORRIDOR_MIN_TILES {
                 continue;
             }
-            let rect = room.rect;
-            let short = rect.w.min(rect.h);
-            let long = rect.w.max(rect.h);
-            let slots = if corridor {
-                if long < CORRIDOR_MIN_TILES {
+            1
+        } else {
+            if short < ROOM_MIN_SHORT || long < ROOM_MIN_LONG {
+                continue;
+            }
+            (rect.w * rect.h / ROOM_TILES2_PER_BAND).clamp(1, 2)
+        };
+        let centre = rect.center_world();
+        let size = Vec2::new(rect.w as f32, rect.h as f32);
+        let quality = if corridor {
+            (long as f32 / 30.0).min(1.0)
+        } else {
+            (size.x * size.y / 320.0).min(1.0)
+        };
+        let mut room_has_rib = false;
+        for _ in 0..slots {
+            for attempt in 0..PLACE_ATTEMPTS {
+                // Corridors always sample their centre line. Later room
+                // attempts try a perpendicular axis for the rigid kinds.
+                let horizontal = (rect.w < rect.h) ^ (!corridor && attempt >= PLACE_ATTEMPTS / 2);
+                let extent = if !corridor {
+                    size * 0.5 - Vec2::splat(1.0)
+                } else if horizontal {
+                    Vec2::new(0.0, (size.y - 1.0) * 0.5)
+                } else {
+                    Vec2::new((size.x - 1.0) * 0.5, 0.0)
+                };
+                let at = centre + Vec2::new(
+                    rng.range(-extent.x, extent.x),
+                    rng.range(-extent.y, extent.y),
+                ) * TILE_F;
+                if !level.tiles.get_at(at).is_open() {
                     continue;
                 }
-                1
-            } else {
-                if short < ROOM_MIN_SHORT || long < ROOM_MIN_LONG {
+
+                let mut kind = kinds[(rng.u32() % kinds.len() as u32) as usize];
+                let depth = if level.theme == Theme::Outfall {
+                    rng.range(OUTFALL_DEPTH_MIN, OUTFALL_DEPTH_MAX)
+                } else {
+                    rng.range(DEPTH_MIN, DEPTH_MAX)
+                };
+                let scale = rng.range(SCALE_MIN, SCALE_MAX);
+                let seed = rng.u32();
+                if !corridor && kind == ForeKind::HullRib && room_has_rib {
+                    kind = if seed & 1 == 0 { ForeKind::Kelp } else { ForeKind::BubbleChain };
+                }
+                let axis = placement_axis(kind, horizontal, seed);
+                let mut item = ForeItem { kind, axis, cross: 0.0, depth, scale, seed };
+                let normal = item.normal();
+                item.cross = at.dot(normal);
+                if (item.cross - level.start.dot(normal)).abs() < START_CLEAR_PX
+                    || start.is_some_and(|r| {
+                        let half_size = Vec2::new(r.rect.w as f32, r.rect.h as f32) * (TILE_F * 0.5);
+                        let reach = half_size.x * normal.x.abs() + half_size.y * normal.y.abs();
+                        (item.cross - r.rect.center_world().dot(normal)).abs() <= reach
+                    })
+                {
                     continue;
                 }
-                (rect.w * rect.h / ROOM_TILES2_PER_BAND).clamp(1, 2)
-            };
-            let centre = rect.center_world();
-            let mut room_has_rib = false;
-            for _ in 0..slots {
-                for attempt in 0..PLACE_ATTEMPTS {
-                    // Cross the short axis. If the room is crowded, try a
-                    // perpendicular band; a corridor always stays transverse.
-                    let mut horizontal = rect.w < rect.h;
-                    if !corridor && attempt >= PLACE_ATTEMPTS / 2 {
-                        horizontal = !horizontal;
-                    }
-                    // Corridors may be only one tile wide, so sample on their
-                    // centre line. Rooms sample over their open interior.
-                    let (x_margin, y_margin) = if corridor {
-                        if horizontal { (rect.w as f32 * 0.5, 0.5) }
-                        else { (0.5, rect.h as f32 * 0.5) }
-                    } else {
-                        (1.0, 1.0)
-                    };
-                    let at = centre + Vec2::new(
-                        rng.range(x_margin - rect.w as f32 * 0.5, rect.w as f32 * 0.5 - x_margin),
-                        rng.range(y_margin - rect.h as f32 * 0.5, rect.h as f32 * 0.5 - y_margin),
-                    ) * TILE_F;
-                    let (_, cross) = axes(horizontal, at.x, at.y);
-                    let (_, start_cross) = axes(horizontal, level.start.x, level.start.y);
-                    if (cross - start_cross).abs() < START_CLEAR_PX
-                        || !level.tiles.get_at(at).is_open()
-                        || out.iter().any(|p| {
-                            p.item.horizontal == horizontal && (p.item.cross - cross).abs() < MIN_SPACING
-                        })
-                    {
-                        continue;
-                    }
-                    let mut kind = kinds[(rng.u32() % kinds.len() as u32) as usize];
-                    let depth = if level.theme == Theme::Outfall {
-                        rng.range(OUTFALL_DEPTH_MIN, OUTFALL_DEPTH_MAX)
-                    } else {
-                        rng.range(DEPTH_MIN, DEPTH_MAX)
-                    };
-                    let scale = rng.range(SCALE_MIN, SCALE_MAX);
-                    let seed = rng.u32();
-                    if level.theme == Theme::Outfall && !corridor && kind == ForeKind::HullRib {
-                        if room_has_rib {
-                            kind = if (seed & 1) == 0 {
-                                ForeKind::Kelp
-                            } else {
-                                ForeKind::BubbleChain
-                            };
-                        } else {
-                            room_has_rib = true;
-                        }
-                    }
-                    let item = ForeItem {
-                        kind, horizontal, cross,
-                        depth,
-                        scale,
-                        seed,
-                    };
-                    out.push(PlacedBand {
-                        item: fit_scale(item),
-                        #[cfg(test)]
-                        anchor: at,
-                        #[cfg(test)]
-                        corridor,
-                    });
-                    break;
-                }
+                room_has_rib |= kind == ForeKind::HullRib;
+                candidates.push((PlacedBand {
+                    item: fit_scale(item),
+                    anchor: at,
+                    #[cfg(test)]
+                    corridor,
+                }, quality));
+                break;
             }
         }
+    }
+
+    for _ in 0..count {
+        let best = candidates.iter().enumerate().filter_map(|(i, (band, quality))| {
+            let mut spacing = band.anchor.dist_sq(level.start);
+            for placed in out.iter() {
+                if band.item.axis == placed.item.axis
+                    && (band.item.cross - placed.item.cross).abs() < MIN_SPACING
+                {
+                    return None;
+                }
+                spacing = spacing.min(placed.anchor.dist_sq(band.anchor));
+            }
+            let fresh_organic = band.item.kind.organic()
+                && out.iter().all(|p| p.item.kind != band.item.kind);
+            Some((i, fresh_organic, spacing * (1.0 + quality * 0.50)))
+        }).max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.total_cmp(&b.2)));
+        let Some((index, _, _)) = best else { break };
+        out.push(candidates.swap_remove(index).0);
     }
 }
 
@@ -1037,13 +1301,17 @@ fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeItem>; 3] {
     let seed = crate::game::level::level_seed(level.theme, level.seed, GEN_SALT);
     let t = (elapsed.max(0.0) * SKY_QUANT_HZ).floor() / SKY_QUANT_HZ;
     let at = |kind, horizontal, cross, depth, scale, seed| {
-        let (_, cam_cross) = axes(horizontal, view.cam.x, view.cam.y);
-        let (_, span) = axes(horizontal, view.size.x, view.size.y);
-        let centre = span * 0.5;
-        fit_scale(ForeItem {
-            kind, horizontal, depth, scale, seed,
-            cross: cam_cross + centre + (cross * view.zoom - centre) / depth,
-        })
+        let axis = placement_axis(kind, horizontal, seed);
+        let mut item = ForeItem { kind, axis, cross: 0.0, depth, scale, seed };
+        let normal = item.normal();
+        let centre = view.size * 0.5;
+        let point = if horizontal {
+            Vec2::new(centre.x, cross * view.zoom)
+        } else {
+            Vec2::new(cross * view.zoom, centre.y)
+        };
+        item.cross = (view.cam + centre + (point - centre) * (1.0 / depth)).dot(normal);
+        fit_scale(item)
     };
 
     // The centre line keeps the wires present even when both movers qualify.
@@ -1090,7 +1358,7 @@ pub(crate) fn sky_capture_time(
         let t = elapsed + step as f32 / SKY_QUANT_HZ;
         layer.plan_frame(view, level, cam + size * 0.5, t, &[]);
         if layer.frame.iter().any(|p| {
-            p.item.kind == kind && (p.screen_cross as f32 - p.cross_size * 0.5).abs() <= 12.0 * zoom
+            p.item.kind == kind && p.centre_distance() <= 12.0 * zoom
         }) {
             return Some(t);
         }
@@ -1107,7 +1375,12 @@ mod tests {
     const VIEW: (usize, usize) = (120, 80);
 
     fn pipe(horizontal: bool, cross: f32, depth: f32) -> ForeItem {
-        ForeItem { kind: ForeKind::MainPipe, horizontal, cross, depth, scale: 1.0, seed: 37 }
+        let axis = if horizontal { HORIZONTAL } else { VERTICAL };
+        ForeItem { kind: ForeKind::MainPipe, axis, cross, depth, scale: 1.0, seed: 37 }
+    }
+
+    fn axes<T>(horizontal: bool, x: T, y: T) -> (T, T) {
+        if horizontal { (x, y) } else { (y, x) }
     }
 
     fn force_items(layer: &mut ForeLayer, level: &Level, items: &[ForeItem]) {
@@ -1141,7 +1414,7 @@ mod tests {
     #[test]
     fn placement_is_seeded_and_every_item_is_a_clear_spaced_band() {
         for theme in Theme::all() {
-            for seed in [1, 2, 7] {
+            for seed in [0, 1, 2, 7, 11, 21, 54, 809] {
                 let world = World::new(theme, seed);
                 let mut a = ForeLayer::new();
                 let mut b = ForeLayer::new();
@@ -1149,25 +1422,32 @@ mod tests {
                 b.sync(&world.level);
                 let a: Vec<_> = a.capture_items().collect();
                 assert_eq!(a, b.capture_items().collect::<Vec<_>>());
-                assert!(!a.is_empty(), "{theme:?} seed {seed}");
+                assert!((2..=4).contains(&a.len()), "{theme:?} seed {seed}: {} bands", a.len());
                 for (i, &(item, anchor, corridor)) in a.iter().enumerate() {
-                    let (_, start_cross) = axes(item.horizontal, world.level.start.x, world.level.start.y);
-                    let (_, anchor_cross) = axes(item.horizontal, anchor.x, anchor.y);
-                    assert_eq!(item.cross, anchor_cross);
-                    assert!((item.cross - start_cross).abs() >= START_CLEAR_PX);
+                    let normal = item.normal();
+                    assert_eq!(item.cross, anchor.dot(normal));
+                    assert!((item.cross - world.level.start.dot(normal)).abs() >= START_CLEAR_PX);
                     assert!(world.level.tiles.get_at(anchor).is_open());
+                    if let Some(start) = world.level.rooms.iter().find(|r| r.kind == RoomKind::Start) {
+                        let half = Vec2::new(start.rect.w as f32, start.rect.h as f32) * (TILE_F * 0.5);
+                        let projected = half.x * normal.x.abs() + half.y * normal.y.abs();
+                        assert!((item.cross - start.rect.center_world().dot(normal)).abs() > projected);
+                    }
+                    if !item.kind.organic() {
+                        assert!(item.axis == HORIZONTAL || item.axis == VERTICAL);
+                    }
                     assert!(kinds_for(theme).contains(&item.kind));
                     assert!((DEPTH_MIN..=DEPTH_MAX).contains(&item.depth));
                     assert!((SCALE_MIN..=SCALE_MAX).contains(&item.scale));
                     assert!((9.999..=30.001).contains(&art_foreground::thickness(&item)));
                     assert!(a[..i].iter().all(|(other, _, _)| {
-                        other.horizontal != item.horizontal || (other.cross - item.cross).abs() >= MIN_SPACING
+                        other.axis != item.axis || (other.cross - item.cross).abs() >= MIN_SPACING
                     }));
                     if corridor {
                         let (cx, cy) = ((anchor.x / TILE_F) as i32, (anchor.y / TILE_F) as i32);
                         assert!(world.level.rooms.iter().any(|r| {
                             r.kind == RoomKind::Corridor
-                                && (r.rect.w < r.rect.h) == item.horizontal
+                                && (item.kind.organic() || (r.rect.w < r.rect.h) == (item.axis == HORIZONTAL))
                                 && r.rect.w.max(r.rect.h) >= CORRIDOR_MIN_TILES
                                 && (r.rect.x..r.rect.right()).contains(&cx)
                                 && (r.rect.y..r.rect.bottom()).contains(&cy)
@@ -1184,37 +1464,114 @@ mod tests {
         let mut layer = ForeLayer::new();
         let cam = Vec2::new(321.0, 401.0);
         for zoom in [0.5, 1.0, 1.35, 2.0] {
-            for horizontal in [true, false] {
-                let (_, cam_cross) = axes(horizontal, cam.x, cam.y);
-                let (_, span) = axes(horizontal, VIEW.0, VIEW.1);
-                let item = pipe(horizontal, cam_cross + span as f32 * zoom * 0.5, 2.0);
+            let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32) * zoom;
+            let centre = size * 0.5;
+            for axis in [HORIZONTAL, VERTICAL, Vec2::new(0.6, 0.8), Vec2::new(0.8, -0.6)] {
+                let mut item = ForeItem { axis, ..pipe(true, 0.0, 2.0) };
+                item.cross = (cam + centre).dot(item.normal());
                 force_items(&mut layer, &world.level, &[item]);
-                let (mut raster, used) = render(&mut world, &mut layer, cam, zoom, 0.0);
+                let (mut pb, used) = render(&mut world, &mut layer, cam, zoom, 0.0);
                 assert!(used > 0, "no body drawn");
-                let scratch = &layer.scratch;
+                let raster = &layer.rasters[0];
                 let plan = &layer.frame[0];
-                let (cam_along, _) = axes(horizontal, cam.x, cam.y);
-                let block = plan.k;
-                let phase = -(cam_along.round() as i32).rem_euclid(block);
-                let cross_origin = plan.screen_cross - ART_ORIGIN * block;
-                // Verify the body itself. Its separate shadow may reach both edges too.
-                raster.clear(FLOOR);
-                blit(&mut raster, scratch, axes(horizontal, phase, cross_origin), block, false);
-                let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
-                raster.resample_to(&mut pb);
-                let (length, width) = axes(horizontal, pb.w, pb.h);
-                for edge in [0, length - 1] {
-                    assert!((0..width).any(|cross| {
-                        let (x, y) = axes(horizontal, edge, cross);
-                        pb.pixel_at(x, y) != FLOOR
-                    }), "missing edge {edge} at {zoom}x, horizontal = {horizontal}");
+                let cam_along = cam.dot(axis);
+                let extent = |p| (p * plan.k) as f32 - cam_along;
+                let overhang = BAND_OVERHANG as f32 * zoom;
+                assert!(extent(raster.first) <= plan.along.0 - overhang);
+                assert!(extent(raster.last) >= plan.along.1 + overhang);
+
+                // The shadow is separately offset. Verify the body against
+                // each actual viewport edge that its centreline crosses.
+                pb.clear(FLOOR);
+                raster.blit(&mut pb, plan, extent(raster.first), u32::from(ALPHA_MAX), false);
+                let (first, last) = line_span(centre, axis, size);
+                for t in [first, last] {
+                    let edge = centre + axis * t;
+                    let x = edge.x.round().clamp(0.0, size.x - 1.0) as usize;
+                    let y = edge.y.round().clamp(0.0, size.y - 1.0) as usize;
+                    assert_ne!(pb.pixel_at(x, y), FLOOR, "missing edge {edge:?} at {zoom}x, axis {axis:?}");
                 }
-                let (from, _) = axes(horizontal, scratch.x0, scratch.y0);
-                let (len, _) = axes(horizontal, scratch.w, scratch.h);
-                assert!((phase + from * block) as f32 <= -(BAND_OVERHANG as f32) * zoom);
-                assert!((phase + (from + len) * block) as f32 >= plan.along_size + BAND_OVERHANG as f32 * zoom);
             }
         }
+    }
+
+    #[test]
+    fn soft_focus_replaces_hard_blocks_with_intermediate_coverage() {
+        let mut art = Scratch::default();
+        art.reset(0, -4, 8, 8);
+        for y in -2..2 {
+            for x in 2..6 {
+                art.put(x, y, (100, 60, 30), ALPHA_MAX);
+            }
+        }
+        let mut focus = Focus::default();
+        focus.filter(&mut art, RasterKey {
+            kind: ForeKind::MainPipe, seed: 0, scale: 1.0, theme: Theme::Sewer,
+            sway: 0.0, toward_centre: 1, block: 3, radius: 4,
+        });
+        let row = &focus.body[12 * focus.width as usize..13 * focus.width as usize];
+        let alpha = |x: usize| row[x][3];
+        // The left body edge was a hard 3x3 boundary at x=6. The sample
+        // immediately outside now has coverage and the inner ramp varies
+        // within the same original art pixel.
+        assert!(alpha(5) > 0 && alpha(5) < alpha(6));
+        assert!(alpha(6) < alpha(7) && alpha(7) < alpha(9));
+    }
+
+    #[test]
+    fn organic_angles_come_from_level_seeds() {
+        let mut angles = Vec::new();
+        for seed in [1, 2, 7, 11] {
+            let world = World::new(Theme::Outfall, seed);
+            let mut layer = ForeLayer::new();
+            layer.sync(&world.level);
+            for (item, _, _) in layer.capture_items().filter(|(i, _, _)| i.kind.organic()) {
+                assert!(item.axis.x.abs() > 0.001 && item.axis.y.abs() > 0.001);
+                if !angles.contains(&item.axis) {
+                    angles.push(item.axis);
+                }
+            }
+            let mut c = 0;
+            let world = World::new(Theme::Trailer, seed);
+            let view = View { cam: Vec2::ZERO, size: Vec2::new(120.0, 80.0), zoom: 1.0 };
+            for step in 0..(SKY_QUANT_HZ as u32 * 10) {
+                let sky = sky_items(&world.level, view, step as f32 / SKY_QUANT_HZ);
+                let kinds: Vec<_> = sky.into_iter().flatten().collect();
+                assert!((2..=4).contains(&kinds.len()));
+                if let Some(branch) = sky[2] {
+                    assert!(branch.axis.x.abs() > 0.001 && branch.axis.y.abs() > 0.001);
+                    c += 1;
+                }
+            }
+            assert!(c > 0, "no branch passed for seed {seed}");
+        }
+        assert!(angles.len() >= 4);
+    }
+
+    #[test]
+    fn angled_parallel_spacing_and_crossing_use_projected_distance() {
+        let world = World::new(Theme::Outfall, 7);
+        let mut layer = ForeLayer::new();
+        let view = View { cam: Vec2::ZERO, size: Vec2::new(180.0, 180.0), zoom: 1.0 };
+        let centre = view.size * 0.5;
+        let mut near = ForeItem { kind: ForeKind::Kelp, axis: Vec2::new(0.6, 0.8), ..pipe(true, 0.0, 2.0) };
+        near.cross = centre.dot(near.normal());
+        let close = ForeItem { cross: near.cross + 20.0, ..near };
+        let spaced = ForeItem { cross: near.cross - 25.0, ..near };
+        force_items(&mut layer, &world.level, &[close, spaced, near]);
+        layer.plan_frame(view, &world.level, centre, 0.0, &[]);
+        assert_eq!(layer.frame[0].item, near);
+        assert_eq!(layer.frame[1].item, spaced);
+
+        let crossing = ForeItem { axis: Vec2::new(0.8, -0.6), cross: 126.0, ..near };
+        force_items(&mut layer, &world.level, &[near, crossing]);
+        layer.plan_frame(view, &world.level, centre, 0.0, &[]);
+        assert_eq!(layer.frame.len(), 2);
+        assert!(layer.frame[1].crossing_rat);
+        let along = near.axis * 14.0;
+        let still = plan_band(view, near, centre, &[]).unwrap();
+        let slid = plan_band(View { cam: along, ..view }, near, centre, &[]).unwrap();
+        assert_eq!(still.screen_cross, slid.screen_cross);
     }
 
     #[test]
@@ -1247,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_and_chunky_pixels_are_world_anchored_along_the_band() {
+    fn filtered_detail_is_world_anchored_along_the_band() {
         let mut world = World::new(Theme::Sewer, 7);
         let mut layer = ForeLayer::new();
         // At 1x both origins cross an art block boundary, for k = 2 and 3.
@@ -1275,8 +1632,11 @@ mod tests {
                 }
                 // Once both phases have been drawn, identical frames don't grow the scratch.
                 let warm = layer.scratch.capacity();
-                render(&mut world, &mut layer, cam, 1.0, 0.0);
+                let raster = layer.rasters[0].body.as_ptr();
+                let (again, _) = render(&mut world, &mut layer, cam, 1.0, 0.0);
+                assert_eq!(again.pixels(), a.pixels());
                 assert_eq!(layer.scratch.capacity(), warm);
+                assert_eq!(layer.rasters[0].body.as_ptr(), raster);
             }
         }
     }
@@ -1389,7 +1749,7 @@ mod tests {
         for kind in kinds_for(Theme::Outfall) {
             let item = ForeItem {
                 kind,
-                horizontal: true,
+                axis: HORIZONTAL,
                 cross: 40.0,
                 depth: 2.1,
                 scale: 1.2,

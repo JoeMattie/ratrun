@@ -272,7 +272,7 @@ pub struct SavedSchemeFile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphicsFile {
-    /// Version 2 starts smoothing and foreground off for older saves.
+    /// Version 2 reset smoothing to off. Version 3 starts foreground on.
     #[serde(default)]
     pub graphics_version: u32,
     /// `full` | `hard` | `coarse` | `compact` — the lighting quality the console's
@@ -292,17 +292,17 @@ pub struct GraphicsFile {
     pub shake_scale: f32,
 }
 
-const GRAPHICS_VERSION: u32 = 2;
+const GRAPHICS_VERSION: u32 = 3;
 
 impl Default for GraphicsFile {
-    /// The terminal's own lighting tier, smoothing and foreground off, light
+    /// The terminal's own lighting tier, smoothing off, foreground, light
     /// effects and glyph particles on, and 65 % shake.
     fn default() -> Self {
         GraphicsFile {
             graphics_version: GRAPHICS_VERSION,
             lighting: None,
             smooth: crate::render::subcell::Smooth::default().as_str().to_string(),
-            foreground: false,
+            foreground: true,
             fx: true,
             glyphfx: true,
             shake_scale: crate::game::world::SHAKE_SCALE,
@@ -363,15 +363,16 @@ impl GraphicsFile {
         if self.lighting_mode().is_none() {
             self.lighting = None;
         }
-        // Earlier builds saved smoothing and foreground with every other row,
-        // so either could have carried the old default along with another edit.
-        let smooth = if self.graphics_version < GRAPHICS_VERSION {
-            self.graphics_version = GRAPHICS_VERSION;
-            self.foreground = false;
+        // Older builds saved defaults alongside any edited graphics row.
+        let smooth = if self.graphics_version < 2 {
             crate::render::subcell::Smooth::Off
         } else {
             self.smooth()
         };
+        if self.graphics_version < 3 {
+            self.foreground = true;
+            self.graphics_version = GRAPHICS_VERSION;
+        }
         self.set_smooth(smooth);
         self.set_shake(self.shake());
     }
@@ -964,36 +965,47 @@ mod tests {
     }
 
     #[test]
-    fn older_graphics_saves_reset_only_smoothing_and_foreground() {
+    fn graphics_before_v2_reset_smoothing_and_enable_foreground() {
         use crate::render::subcell::Smooth;
         let table = ScoreTable::parse(
-            r#"{"graphics":{"lighting":"coarse","smooth":"xbr","foreground":true,
+            r#"{"graphics":{"lighting":"coarse","smooth":"xbr","foreground":false,
                  "fx":false,"glyphfx":false,"shake_scale":0.5}}"#,
         );
         let graphics = table.graphics;
-        assert_eq!(graphics.graphics_version, 2);
+        assert_eq!(graphics.graphics_version, 3);
         assert_eq!(graphics.smooth(), Smooth::Off);
         assert_eq!(graphics.lighting.as_deref(), Some("coarse"));
-        assert!(!graphics.foreground && !graphics.fx && !graphics.glyphfx);
+        assert!(graphics.foreground && !graphics.fx && !graphics.glyphfx);
         assert_eq!(graphics.shake(), 0.5);
 
         let table = ScoreTable::parse(r#"{"graphics":{"graphics_version":1,"smooth":"wedge"}}"#);
-        assert_eq!(table.graphics.graphics_version, 2);
+        assert_eq!(table.graphics.graphics_version, 3);
         assert_eq!(table.graphics.smooth(), Smooth::Off);
     }
 
     #[test]
-    fn version_two_graphics_saves_keep_chosen_smoothing_and_foreground() {
+    fn version_two_graphics_saves_enable_foreground_and_keep_smoothing() {
+        use crate::render::subcell::Smooth;
+        let table = ScoreTable::parse(
+            r#"{"graphics":{"graphics_version":2,"smooth":"wedge","foreground":false}}"#,
+        );
+        assert_eq!(table.graphics.graphics_version, 3);
+        assert_eq!(table.graphics.smooth(), Smooth::Wedge);
+        assert!(table.graphics.foreground);
+    }
+
+    #[test]
+    fn version_three_graphics_saves_keep_chosen_smoothing_and_foreground() {
         use crate::render::subcell::Smooth;
         let mut table = ScoreTable::default();
         table.graphics.set_smooth(Smooth::Xbr);
-        table.graphics.foreground = true;
+        table.graphics.foreground = false;
         let json = table.to_json();
         let saved: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(saved["graphics"]["graphics_version"].as_u64(), Some(2));
+        assert_eq!(saved["graphics"]["graphics_version"].as_u64(), Some(3));
         let loaded = ScoreTable::parse(&json);
         assert_eq!(loaded.graphics.smooth(), Smooth::Xbr);
-        assert!(loaded.graphics.foreground);
+        assert!(!loaded.graphics.foreground);
     }
 
     #[test]
