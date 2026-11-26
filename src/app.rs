@@ -8446,16 +8446,33 @@ mod tests {
                 }
                 assert!(w.force_boss_here(BossKind::Lantern));
                 let boss = w.ecs.iter_entities().find(|e| e.contains::<Boss>()).unwrap().id();
+                let strip_frame = scene.strip_prefix("strip-")
+                    .map(|frame| frame.parse::<usize>().expect("Lantern strip frame number"));
+                let wall_scene = scene == "wall" || strip_frame.is_some();
+                if wall_scene {
+                    use crate::game::art_walls::{WallAxis, WallKind};
+                    use crate::game::collision::{cell_of, TileKind};
+
+                    let (x, y) = cell_of(w.player.pos + Vec2::new(92.0, 0.0));
+                    w.level.tiles.fill_cells(x - 7, y - 5, 14, 11, TileKind::Open);
+                    w.level.tiles.fill_cells(x, y - 5, 1, 11, TileKind::Wall(WallKind::Solid));
+                    // The lintel crosses the track to expose the overhang draw order.
+                    w.level.tiles.set(x, y, TileKind::Wall(WallKind::RatHole { axis: WallAxis::Horizontal }));
+                    w.level.tiles.rebuild_masks();
+                    w.shake_scale = 0.0;
+                }
                 let start_frames = match scene {
                     "arrival" => 45,
                     "body" | "swim" => 118,
+                    "wall" => 120,
+                    _ if wall_scene => 120 + [0, 20, 40, 60, 82][strip_frame.unwrap()],
                     _ => 150,
                 };
                 for _ in 0..start_frames {
                     w.update(1.0 / 60.0, Vec2::ZERO, false);
                 }
                 let hp = match scene {
-                    "decoy" | "dark" | "snuffed" => Some(0.60),
+                    "decoy" | "dark" | "lunge" | "submerge" | "snuffed" => Some(0.60),
                     "gape" | "stamp" | "death" => Some(0.30),
                     _ => None,
                 };
@@ -8463,7 +8480,7 @@ mod tests {
                     let mut body = w.ecs.get_mut::<Boss>(boss).unwrap();
                     body.hp = body.max_hp * hp;
                 }
-                if scene != "arrival" && scene != "body" {
+                if scene != "arrival" && scene != "body" && strip_frame.is_none() {
                     let mut captured = false;
                     for _ in 0..1200 {
                         w.update(1.0 / 60.0, Vec2::ZERO, false);
@@ -8476,6 +8493,9 @@ mod tests {
                         captured = match scene {
                             "feint" => view.state == LanternState::FeintTell && view.progress >= 0.7,
                             "dark" => view.state == LanternState::DarkTell && view.progress >= 0.55,
+                            "lunge" => view.state == LanternState::DarkLunge && view.progress >= 0.20,
+                            "submerge" => view.state == LanternState::PhaseShift && view.progress >= 0.4,
+                            "wall" => (view.pos.x - w.player.pos.x - 92.0).abs() < 5.0,
                             "decoy" => view.real_bulb.is_some()
                                 && view.decoy.is_some_and(|bulb| bulb.pos.dist(view.pos) <= 45.0 * art_boss_lantern::BODY_SCALE),
                             "snuffed" => w.level.objects.outfall_boss_snuff.is_some()
@@ -8497,8 +8517,11 @@ mod tests {
                 let zoom = std::env::var("RATRUN_DUMP_ZOOM").ok()
                     .and_then(|value| value.parse::<f32>().ok()).unwrap_or(1.0);
                 w.cam_focus = Some(match scene {
+                    "wall" | "submerge" => view.pos,
+                    _ if wall_scene => w.player.pos + Vec2::new(94.0, 0.0),
+                    "lunge" => (view.pos + w.player.pos) * 0.5,
                     "arrival" => view.real_bulb.map_or(view.pos, |bulb| (view.pos + bulb.pos) * 0.5),
-                    "body" | "swim" | "death" => view.floating_body().pos
+                    "body" | "swim" | "death" => view.pos
                         - view.facing * (12.0 + (zoom - 1.0) * 27.0),
                     "feint" => view.attack.map_or(view.pos, |shape| (view.pos + shape.center()) * 0.5),
                     "gape" | "stamp" => art_boss_lantern::mouth_pos(&view),

@@ -645,7 +645,7 @@ fn walled_pocket_world() -> World {
 fn a_rejoin_never_teleports_the_boss_into_a_wall() {
     let w = walled_pocket_world();
     let radius = BossKind::Cat.body_radius();
-    if let Some(spot) = rejoin_spot(&w.level, w.player.pos, radius, false) {
+    if let Some(spot) = rejoin_spot(&w.level, w.player.pos, radius) {
         assert!(
             w.level.tiles.circle_clear(spot, radius, SizeClass::Large),
             "a rejoin spot must be body-clear ({spot:?})"
@@ -1919,33 +1919,82 @@ fn lantern_world() -> World {
 }
 
 #[test]
-fn lantern_arrival_fits_outfall_halls_and_clears_the_widest_view() {
-    use crate::game::level::RoomKind;
-
+fn lantern_arrival_uses_map_bounds_and_clears_the_widest_view() {
     let viewport = Vec2::new(160.0, 76.0);
-    for seed in 0..16 {
-        let w = World::new(Theme::Outfall, seed);
-        let level = &w.level;
-        let hall = level.rooms.iter().filter(|r| r.kind == RoomKind::Hall)
-            .max_by_key(|r| r.rect.area()).unwrap();
-        assert!(
-            hall.rect.cells().any(|(x, y)| {
-                let p = collision::TileMap::tile_rect(x, y).center();
-                (0..8).any(|i| {
-                    let dir = Vec2::from_angle(i as f32 * std::f32::consts::TAU / 8.0);
-                    lantern::arrival_body_fits(level, p, dir)
-                })
-            }),
-            "seed {seed} largest hall {:?} cannot hold the Lantern",
-            hall.rect,
-        );
-        let mut rng = BossRng::for_run(seed, BossKind::Lantern).0;
-        let mut scratch = SpawnScratch::default();
-        let p = lantern_scheduled_landing(&mut rng, level, &w.player, viewport, &mut scratch)
-            .expect("generated Outfall has an off-screen landing");
-        assert!(lantern_arrival_hidden(level, w.player.pos, viewport, p));
-        assert!(lantern::arrival_body_fits(level, p, (w.player.pos - p).normalized()));
+    let mut level = Level::empty(Theme::Outfall);
+    level.tiles.fill_cells(0, 0, level.tiles.cols(), level.tiles.rows(), TileKind::Wall(crate::game::art_walls::WallKind::Solid));
+    level.tiles.rebuild_masks();
+    for rat in [level.start, Vec2::splat(24.0), level.arena - Vec2::splat(24.0)] {
+        let mut w = World::new(Theme::Outfall, 1);
+        w.player.pos = rat;
+        let mut rng = BossRng::for_run(1, BossKind::Lantern).0;
+        let p = lantern_scheduled_landing(&mut rng, &level, &w.player, viewport)
+            .expect("a wall-filled map still has an offscreen landing");
+        assert!(lantern_arrival_hidden(&level, rat, viewport, p));
+        assert!(lantern::arrival_body_fits(&level, p, (rat - p).normalized()));
     }
+}
+
+#[test]
+fn lantern_pursuit_and_weapon_shoves_cross_closed_walls() {
+    use crate::game::art_walls::WallKind;
+
+    let mut level = Level::empty(Theme::Outfall);
+    level.tiles.fill_cells(51, 45, 1, 11, TileKind::Wall(WallKind::Solid));
+    level.tiles.rebuild_masks();
+    let head = Vec2::new(814.0, 808.0);
+    let rat = Vec2::new(1100.0, 808.0);
+    let arena = level.fight_rect_around(rat);
+    let mut boss = Boss::new(BossKind::Lantern, head, 1600.0, arena, head, false);
+    boss.set_state(BossState::Lantern(LanternState::Swim), 1.0);
+    assert_eq!(boss.shove(&level, Vec2::new(1.0, 0.0), 4.0), 4.0);
+    assert_eq!(boss.pos.x, 818.0);
+
+    let flow = FlowField::new(&level.tiles);
+    let mut rng = StdRng::seed_from_u64(1);
+    let ctx = BossContext {
+        dt: DT,
+        time: 0.0,
+        player_pos: rat,
+        player_vel: Vec2::ZERO,
+        player_radius: PLAYER_RADIUS,
+        player_hurt_radius: PLAYER_RADIUS,
+        arena,
+        level: &level,
+        flow: &flow,
+        rng: &mut rng,
+    };
+    boss.out_of_reach = OUT_OF_REACH_SECS;
+    pursue(&ctx, &mut boss, DT);
+    assert!(boss.leap_t > 0.0);
+    while boss.leap_t > 0.0 {
+        pursue(&ctx, &mut boss, DT);
+    }
+    assert!(boss.pos.x > 832.0);
+    assert_eq!(boss.pos.y, head.y);
+    assert!(matches!(level.tiles.get(51, 50), TileKind::Wall(WallKind::Solid)));
+    assert!(boss.hit_shapes().circle_hits_grounded(boss.pos, PLAYER_RADIUS));
+
+    boss.pos = Vec2::new(art_boss_lantern::HEAD_RADIUS + 1.0, head.y);
+    boss.shove_window = 0.0;
+    assert_eq!(boss.shove(&level, Vec2::new(-1.0, 0.0), 4.0), 1.0);
+    assert_eq!(boss.pos.x, art_boss_lantern::HEAD_RADIUS);
+}
+
+#[test]
+fn lantern_campaign_pool_scales_for_two_max_rank_area_weapons() {
+    let kinds = [WeaponKind::SqueakNova, WeaponKind::SporeOrbit, WeaponKind::LaserEyes];
+    let mut weapons = kinds.map(|kind| {
+        let mut weapon = Weapon::new(kind);
+        weapon.level = kind.max_level();
+        weapon
+    });
+    let kind = BossKind::Lantern;
+    assert_eq!(kind.encounter_hp(1, &weapons), kind.hp_pool(1) * art_boss_lantern::BOSS_AREA_KIT_HP_MULT);
+    assert_eq!(kind.encounter_hp(0, &weapons), kind.hp_pool(0));
+    assert_eq!(BossKind::Cat.encounter_hp(1, &weapons), BossKind::Cat.hp_pool(1));
+    weapons[1].level -= 1;
+    assert_eq!(kind.encounter_hp(1, &weapons), kind.hp_pool(1));
 }
 
 fn set_lantern_hp(w: &mut World, hp: f32) {
@@ -1974,6 +2023,25 @@ fn advance_lantern_to(w: &mut World, state: LanternState, dt: f32) -> Boss {
 }
 
 #[test]
+fn lantern_dark_lunge_hits_the_rat_across_a_solid_wall() {
+    use crate::game::art_walls::WallKind;
+
+    let mut w = lantern_world();
+    set_lantern_hp(&mut w, 500.0);
+    let tell = advance_lantern_to(&mut w, LanternState::DarkTell, DT);
+    w.player.pos = tell.pos + Vec2::new(100.0, 0.0);
+    let wall = collision::cell_of(tell.pos + Vec2::new(70.0, 0.0));
+    w.level.tiles.set(wall.0, wall.1, TileKind::Wall(WallKind::Solid));
+    w.level.tiles.rebuild_masks();
+    w.player.god = false;
+    let hp = w.player.hp;
+    let lunge = advance_lantern_to(&mut w, LanternState::DarkLunge, DT);
+    assert!(w.player.hp < hp);
+    assert!(lunge.hazards.iter().any(|h| h.fired && !h.hit_enemies));
+    assert!(matches!(w.level.tiles.get(wall.0, wall.1), TileKind::Wall(WallKind::Solid)));
+}
+
+#[test]
 fn lantern_keeps_its_locked_jaw_when_hp_crosses_both_thresholds() {
     let mut w = lantern_world();
     let arrival = boss_of(&mut w).unwrap();
@@ -1995,6 +2063,8 @@ fn lantern_keeps_its_locked_jaw_when_hp_crosses_both_thresholds() {
     assert_eq!(told.state, BossState::Lantern(LanternState::FeintTell));
     assert_eq!(told.target_points().first(), Some(told.pos));
     let facing = told.facing;
+    let view = told.lantern_view().unwrap();
+    assert!(view.attack.unwrap().center().dist(art_boss_lantern::mouth_pos(&view)) < 0.001);
     set_lantern_hp(&mut w, 250.0);
     w.player.pos = told.pos + Vec2::new(0.0, 50.0);
     let snap = advance_lantern_to(&mut w, LanternState::JawSnap, DT);

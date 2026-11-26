@@ -27,14 +27,14 @@
 //! | 1 (`> 65%`) | `Swim`, `FeintApproach`, `FeintTell` (0.7 s, lock 0.5 s), `JawSnap` (0.12 s, 22 dmg), `FeintRecover` (0.8 s) | `48×24` jaw crescent turns with real bulb; 3 Hz flicker; flank full / front 120° half dmg |
 //! | 2 (`35..=65%`) | `DarkSwim`, `DecoyLeapTell` (0.5 s) → `DecoyLeap` (up to 240 px, 36 px trench, 20 dmg) → `DecoyRecover` (0.8 s); `DarkTell` (0.8 s, bulb out 1.6 s) → `DarkLunge` (168×36 trench, 0.3 s, 22 dmg) → `DarkRecover` (0.5 s) | steady r66 decoy bulb (hit r12, no stalk, no jaw); looming outlines visible at zero FX |
 //! | 3 (`<= 35%`) | `DropLamp`, `GapeSwim`, `GapeTell` (0.7 s, lock 0.5 s), `GapePull` (1.4 s, 28 px/s), `GapeStamp` (0.2 s, 24 dmg), `GapeRecover` (1.6 s) | real bulb planted on seabed (r312) with consistent anchor; 270 px × 50° pull cone with readable negative space; 72×72 mouth stamp |
-//! | Transition | `PhaseShift` | the head submerges and circles beneath the visible lure |
+//! | Transition | `PhaseShift` | 4.5 s submerged, opaque deep-water hull and a faint seabed shadow |
 //! | Death | `Death` (2.4 s) | eyes & teeth go dark first, hull sinks, planted bulb keeps glowing |
 //!
 //! # Layering contract for the renderer
 //! 1. **Ground layer** (`draw_ground`): seabed drop shadow (stamped with pen `0`
 //!    so the bump/specular pass never embosses it), planted bulb anchor cradle,
 //!    subtle cone edge wash, and death silt rings.
-//! 2. **Entity layer** (`draw`): the 264 px top-down anglerfish silhouette,
+//! 2. **Above wall overhangs, before lighting** (`draw`): the 264 px top-down anglerfish silhouette,
 //!    self-lit needle teeth (`>= 232` channel peaks for `mark_emissive_highlights`),
 //!    paired golden eyes, arched illicium stalk (or snapped stump), and both
 //!    world-space bulbs.
@@ -97,11 +97,14 @@ pub const CULL_MARGIN: f32 = 120.0 * BODY_SCALE;
 /// Base HP pool before per-kind scale and campaign/director curves.
 pub const BOSS_BASE_HP: f32 = 1600.0;
 
-/// Per-kind HP scale for the enlarged fight.
-pub const BOSS_HP_SCALE: f32 = 2.65;
+/// Campaign pool for a standard kit, before the director's stage multiplier.
+pub const BOSS_HP_SCALE: f32 = 2.7;
+/// Two max-rank automatic area weapons earn the larger campaign pool.
+pub const BOSS_AREA_KIT_WEAPONS: usize = 2;
+pub const BOSS_AREA_KIT_HP_MULT: f32 = 5.3 / BOSS_HP_SCALE;
 
 /// Per-kind HP scale on the first-floor difficulty row used by bare practice.
-pub const BOSS_PRACTICE_HP_SCALE: f32 = 2.9;
+pub const BOSS_PRACTICE_HP_SCALE: f32 = 4.5;
 
 /// Contact damage outside suppressed attack / recovery windows.
 pub const CONTACT_DAMAGE: f32 = 2.0;
@@ -138,7 +141,7 @@ pub const LURE_FLICKER_HZ: f32 = 3.0;
 pub const ARRIVAL_DURATION: f32 = 2.0;
 pub const ARRIVAL_LURE_LEAD: f32 = 36.0 * LURE_SCALE;
 
-pub const SWIM_SPEED: f32 = 40.0;
+pub const SWIM_SPEED: f32 = 62.0;
 pub const FEINT_LURE_SPEED: f32 = 30.0 * LURE_SCALE;
 pub const FEINT_STOP_SHORT: f32 = 36.0 * BODY_SCALE;
 pub const LURE_TETHER_MAX: f32 = 48.0 * LURE_SCALE;
@@ -148,18 +151,17 @@ pub const FEINT_LOCK_PROGRESS: f32 = FEINT_LOCK_TIME / FEINT_TELL_DURATION;
 /// The jaw crescent scales with the head, while the lure reaches farther ahead.
 pub const JAW_CRESCENT_LEN: f32 = 16.0 * BODY_SCALE;
 pub const JAW_CRESCENT_WIDTH: f32 = 8.0 * BODY_SCALE;
-pub const JAW_CRESCENT_BACK: f32 = 12.0 * BODY_SCALE;
 pub const JAW_SNAP_DURATION: f32 = 0.12;
 pub const JAW_SNAP_DAMAGE: f32 = 22.0;
 pub const FEINT_RECOVER_DURATION: f32 = 0.8;
 /// Frontal 120° arc (`±60°`) takes half damage during `FeintRecover`.
 pub const FEINT_FRONT_HALF_ANGLE: f32 = PI / 3.0;
 pub const FEINT_FRONT_DAMAGE_MULT: f32 = 0.5;
-pub const FEINT_COOLDOWN: f32 = 3.3;
+pub const FEINT_COOLDOWN: f32 = 2.6;
 
 // ---- Phase 2 (Snuff, Decoy & Dark Lunge) ----------------------------------
 
-pub const SNUFF_INTERVAL: f32 = 7.0;
+pub const SNUFF_INTERVAL: f32 = 4.8;
 pub const SNUFF_REACH: f32 = 160.0;
 pub const DECOY_SPEED: f32 = 24.0;
 pub const DECOY_LIFE: f32 = 3.0;
@@ -178,12 +180,12 @@ pub const DARK_LUNGE_WIDTH: f32 = 12.0 * BODY_SCALE;
 pub const DARK_LUNGE_DURATION: f32 = 0.3;
 pub const DARK_LUNGE_DAMAGE: f32 = 22.0;
 pub const DARK_RECOVER_DURATION: f32 = 0.5;
+pub const DARK_COOLDOWN: f32 = 7.5;
 
 // ---- Phase 3 (Planted Lamp & Gape) ----------------------------------------
 
 pub const DROP_LAMP_DURATION: f32 = 0.8;
-pub const GAPE_ORBIT_DIST: f32 = 40.0 * BODY_SCALE;
-pub const GAPE_SWIM_SPEED: f32 = 50.0;
+pub const GAPE_SWIM_SPEED: f32 = 66.0;
 pub const GAPE_TELL_DURATION: f32 = 0.7;
 pub const GAPE_LOCK_TIME: f32 = 0.5;
 pub const GAPE_LOCK_PROGRESS: f32 = GAPE_LOCK_TIME / GAPE_TELL_DURATION;
@@ -199,11 +201,11 @@ pub const GAPE_STAMP_DURATION: f32 = 0.2;
 pub const GAPE_STAMP_DAMAGE: f32 = 24.0;
 pub const GAPE_RECOVER_DURATION: f32 = 1.6;
 pub const GAPE_RECOVER_SPEED: f32 = 24.0;
-pub const GAPE_COOLDOWN: f32 = 6.8;
+pub const GAPE_COOLDOWN: f32 = 5.5;
 
 // ---- Transition & Death ---------------------------------------------------
 
-pub const PHASE_SHIFT_DURATION: f32 = 14.0;
+pub const PHASE_SHIFT_DURATION: f32 = 4.5;
 pub const DEATH_DURATION: f32 = 2.4;
 
 // ============================================================================
@@ -369,22 +371,13 @@ pub struct LanternView {
 }
 
 impl LanternView {
-    fn lift(&self) -> f32 {
+    /// Detach the seabed shadow while keeping the visible mouth on its
+    /// world-space attack anchor.
+    fn shadow_offset(&self) -> f32 {
         if self.state == LanternState::Death {
             return 0.0;
         }
         (7.0 + 1.4 * (self.anim * 1.4).sin()) * BODY_SCALE
-    }
-
-    /// Lift the visible hull and its attached lure. Planted bulbs, decoys and
-    /// locked attack footprints retain their world positions.
-    pub(crate) fn floating_body(mut self) -> Self {
-        let lift = self.lift();
-        self.pos.y -= lift;
-        if let Some(bulb) = self.real_bulb.as_mut().filter(|bulb| !bulb.planted) {
-            bulb.pos.y -= lift;
-        }
-        self
     }
 }
 
@@ -524,12 +517,9 @@ pub fn is_frontal_armored(view: &LanternView, toward_attacker: Vec2) -> bool {
     dir.dot(unit_facing(view)) >= FEINT_FRONT_HALF_ANGLE.cos()
 }
 
-/// The jaw follows the lure's bearing while keeping its original reach relative
-/// to the head. The extra stalk length only extends the light's reach.
-pub fn jaw_center(head: Vec2, bulb: Vec2, facing: Vec2) -> Vec2 {
-    let reach = ((bulb - head).dot(facing) / LURE_PROPORTION - JAW_CRESCENT_BACK)
-        .max(MOUTH_OFFSET);
-    head + facing * reach
+/// The bulb leads the aim while the jaw stays at the mouth.
+pub fn jaw_center(head: Vec2, facing: Vec2) -> Vec2 {
+    head + facing * MOUTH_OFFSET
 }
 
 /// Oriented rectangle `(center, facing, half_along, half_perp)` for the
@@ -546,9 +536,7 @@ pub fn jaw_crescent_rect(view: &LanternView) -> (Vec2, Vec2, f32, f32) {
         return (center, safe_unit(facing, unit_facing(view)), half, half_perp);
     }
     let af = unit_attack_facing(view);
-    let center = view.real_bulb.map_or(view.attack_origin, |bulb| {
-        jaw_center(view.pos, bulb.pos, af)
-    });
+    let center = jaw_center(view.pos, af);
     (center, af, JAW_CRESCENT_WIDTH * 0.5, JAW_CRESCENT_LEN * 0.5)
 }
 
@@ -738,17 +726,19 @@ fn jaw_open_factor(view: &LanternView) -> f32 {
     }
 }
 
-#[inline]
-fn head_visibility(view: &LanternView) -> f32 {
+fn hull_grade(view: &LanternView) -> (Rgb, f32) {
     let p = clamp01(view.progress);
     match view.state {
-        LanternState::ArrivalLure => smoothstep((p - 0.26) / 0.74),
-        LanternState::DarkTell | LanternState::DarkLunge => 0.28,
-        LanternState::PhaseShift => 0.06,
-        // Hull stays dimly visible while sinking after eye & teeth darken.
-        LanternState::Death => 1.0 - smoothstep((p - 0.28) / 0.56),
-        _ => 1.0,
+        LanternState::ArrivalLure => ((5, 15, 24), 0.40 + 0.60 * smoothstep(p)),
+        LanternState::DarkTell | LanternState::DarkLunge => ((4, 10, 17), 0.24),
+        LanternState::PhaseShift => ((7, 23, 39), 0.30),
+        LanternState::Death => ((3, 8, 14), 1.0 - smoothstep((p - 0.28) / 0.60)),
+        _ => ((0, 0, 0), 1.0),
     }
+}
+
+fn hull_present(view: &LanternView) -> bool {
+    view.state != LanternState::Death || view.progress < 0.95
 }
 
 #[inline]
@@ -936,20 +926,26 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent:
     }
     let f = unit_facing(view);
     let perp = body_perp(f);
-    let vis = head_visibility(view);
     let p = clamp01(view.progress);
     let sc = w2s(view.pos, cam);
 
     // Stamp seabed drop shadow with material pen 0 so surface bump never embosses it.
     let prev_pen = pb.set_pen(0);
-    if vis > 0.06 {
-        let shadow_alpha = (0.42 - view.lift() * (0.014 / BODY_SCALE)) * vis;
+    if hull_present(view) {
+        let (scale, gain) = match view.state {
+            LanternState::PhaseShift => (0.65, 0.40),
+            LanternState::Death => (1.0, 1.0 - smoothstep(p)),
+            _ => (1.0, 1.0),
+        };
+        let offset = view.shadow_offset();
+        let shadow_center = sc + Vec2::new(0.0, offset);
+        let shadow_alpha = (0.42 - offset * (0.014 / BODY_SCALE)) * gain;
         for i in 0..9 {
             let t = i as f32 / 8.0;
             let u = lerp(0.0, -58.0, t);
             let sway = (view.anim * 2.5 - t * 4.2).sin() * (5.6 * t * t);
-            let r = lerp(16.0, 4.0, t.powf(0.85));
-            let pos = sc + (f * u + perp * sway + Vec2::new(0.0, 3.0)) * BODY_SCALE;
+            let r = scale * lerp(16.0, 4.0, t.powf(0.85));
+            let pos = shadow_center + (f * u + perp * sway + Vec2::new(0.0, 3.0)) * BODY_SCALE;
             disc_blend(pb, pos, r * BODY_SCALE, SHADOW_COL, shadow_alpha * lerp(1.0, 0.55, t));
         }
     }
@@ -1062,7 +1058,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
     }
     let f = unit_facing(view);
     let p = body_perp(f);
-    let vis = head_visibility(view);
+    let (tint, light) = hull_grade(view);
     let gape = jaw_open_factor(view);
     let tglow = tooth_glow_factor(view);
     let hit = clamp01(view.hit_flash);
@@ -1101,7 +1097,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
     );
     let recover_pulse = 0.5 + 0.5 * (view.anim * 9.0).sin();
 
-    if vis > 0.03 && min_x <= max_x && min_y <= max_y {
+    if hull_present(view) && min_x <= max_x && min_y <= max_y {
         for sy in min_y..=max_y {
             let ry = sy as f32 - sc.y;
             for sx in min_x..=max_x {
@@ -1165,9 +1161,9 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
                             if hit > 0.0 {
                                 col = mix(col, (235, 246, 250), hit * 0.7);
                             }
-                            plot_blend(pb, sx, sy, col, vis);
+                            pb.plot(sx, sy, mix(tint, col, light));
                         } else {
-                            plot_blend(pb, sx, sy, MAW_BLACK, vis);
+                            pb.plot(sx, sy, mix(tint, MAW_BLACK, light));
                         }
                         continue;
                     }
@@ -1249,11 +1245,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, _accent: Rgb) {
                     col = mix(col, (238, 250, 255), hit * 0.78);
                 }
 
-                if vis >= 0.99 {
-                    pb.plot(sx, sy, col);
-                } else {
-                    plot_blend(pb, sx, sy, col, vis * 0.92);
-                }
+                pb.plot(sx, sy, mix(tint, col, light));
             }
         }
     }
@@ -1278,7 +1270,7 @@ fn draw_teeth(
     if tglow <= 0.02 && !dead {
         return;
     }
-    if dead && (overlay_only || head_visibility(view) <= 0.05) {
+    if dead && (overlay_only || !hull_present(view)) {
         return;
     }
 
@@ -1351,8 +1343,8 @@ fn draw_eyes(pb: &mut PixelBuffer, view: &LanternView, frame: BodyFrame, hit: f3
 
     for sign in [-1.0_f32, 1.0] {
         let ep = sc + (f * eye_u + p * (sign * eye_v)) * BODY_SCALE;
-        disc_blend(pb, ep, 2.3 * BODY_SCALE, HIDE_ABYSS, 0.75);
-        disc_blend(pb, ep, 1.75 * BODY_SCALE, col_ring, 0.72);
+        disc_blend(pb, ep, 2.3 * BODY_SCALE, HIDE_ABYSS, 1.0);
+        disc_blend(pb, ep, 1.75 * BODY_SCALE, col_ring, 1.0);
         disc_blend(pb, ep, 1.35 * BODY_SCALE, col_hi, 1.0);
         disc_blend(pb, ep, 0.55 * BODY_SCALE, EYE_PUPIL, 1.0);
     }
@@ -1435,16 +1427,16 @@ fn draw_stalk_and_bulbs(pb: &mut PixelBuffer, view: &LanternView, cam: Vec2, fra
                 let thickness = lerp(0.85, 0.36, t) * BODY_SCALE;
                 disc_blend(pb, Vec2::new(px, py), thickness, col, 1.0);
             }
-        } else if head_visibility(view) > 0.10 {
+        } else if hull_present(view) {
             // Snapped stalk stump on the brow once the bulb is planted on the seabed.
             let stump_end = brow_s + (f * 5.5 + up_perp * 3.0) * BODY_SCALE;
-            line_blend(pb, brow_s, stump_end, Stroke::solid(STALK_DARK, 0.90));
+            line_blend(pb, brow_s, stump_end, Stroke::solid(STALK_DARK, 1.0));
             plot_blend(
                 pb,
                 stump_end.x.round() as i32,
                 stump_end.y.round() as i32,
                 STALK_RIM,
-                0.60,
+                1.0,
             );
         }
 
@@ -2029,7 +2021,7 @@ mod tests {
         let (attack, stamp) = match state {
             LanternState::FeintTell | LanternState::JawSnap => (
                 Some(HazardShape::Rect {
-                    center: jaw_center(pos, bulb_pos, facing),
+                    center: jaw_center(pos, facing),
                     facing,
                     half: JAW_CRESCENT_WIDTH * 0.5,
                     half_perp: JAW_CRESCENT_LEN * 0.5,
@@ -2122,14 +2114,11 @@ mod tests {
         assert_eq!(ARRIVAL_LURE_LEAD, 216.0);
         const { assert!(CULL_MARGIN >= LURE_TETHER_MAX + BULB_RADIUS) };
         assert_eq!(BOSS_BASE_HP, 1600.0);
-        assert_eq!(BOSS_HP_SCALE, 2.65);
-        assert_eq!(BOSS_PRACTICE_HP_SCALE, 2.9);
         assert_eq!(CONTACT_DAMAGE, 2.0);
         assert_eq!(PHASE2_HP_FRAC, 0.65);
         assert_eq!(PHASE3_HP_FRAC, 0.35);
         assert_eq!(JAW_CRESCENT_LEN, 48.0);
         assert_eq!(JAW_CRESCENT_WIDTH, 24.0);
-        assert_eq!(JAW_CRESCENT_BACK, 36.0);
         assert_eq!(DARK_LUNGE_LEN, 168.0);
         assert_eq!(DARK_LUNGE_WIDTH, 36.0);
         assert_eq!(DECOY_LEAP_WIDTH, 36.0);
@@ -2435,6 +2424,37 @@ mod tests {
         }
         assert!(at_attack >= 24, "view.attack must draw at exact shape coords ({at_attack})");
         assert!(at_stamp >= 32, "view.stamp must draw at exact shape coords ({at_stamp})");
+    }
+
+    #[test]
+    fn lantern_hull_pixels_are_independent_of_the_floor_colour() {
+        const A: Rgb = (255, 0, 255);
+        const B: Rgb = (255, 255, 0);
+        for state in [LanternState::Swim, LanternState::DarkTell, LanternState::DarkLunge,
+            LanternState::PhaseShift, LanternState::ArrivalLure, LanternState::Death]
+        {
+            let mut view = sample_view(Vec2::new(230.0, 90.0), 0.0, state, 0.12);
+            view.real_bulb = None;
+            view.decoy = None;
+            let mut first = PixelBuffer::new(300, 90);
+            let mut second = PixelBuffer::new(300, 90);
+            first.clear(A);
+            second.clear(B);
+            draw(&mut first, &view, Vec2::ZERO, A);
+            draw(&mut second, &view, Vec2::ZERO, B);
+            let mut hull_pixels = 0;
+            for y in 0..first.h {
+                for x in 0..first.w {
+                    let pixel = first.pixel_at(x, y);
+                    let other = second.pixel_at(x, y);
+                    if (pixel, other) != (A, B) {
+                        assert_eq!(pixel, other, "{state:?} at {x},{y} shows the floor");
+                        hull_pixels += 1;
+                    }
+                }
+            }
+            assert!(hull_pixels > 1000, "{state:?} must draw an opaque silhouette");
+        }
     }
 
     #[test]
