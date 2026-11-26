@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn wave3_campaign_carries_remaining_gold_and_evolved_weapons() {
         let mut campaign = CampaignState::new(42);
-        let mut sewer = campaign.world();
+        let mut sewer = carry_world(&campaign);
         sewer.gold = 37;
         assert!(!sewer.spend_gold(38));
         assert!(sewer.spend_gold(7));
@@ -1100,13 +1100,13 @@ mod tests {
         let keep = sewer.keepables();
         sewer.mark_level_complete();
         campaign.complete_level(&sewer, &keep[..1]).unwrap();
-        let mut kitchen = campaign.world();
+        let mut kitchen = carry_world(&campaign);
         assert_eq!(kitchen.gold, 30);
         assert!(kitchen.player.loadout.weapons[0].evolved);
         assert!(kitchen.spend_gold(30));
         kitchen.mark_level_complete();
         campaign.complete_level(&kitchen, &[]).unwrap();
-        assert_eq!(campaign.world().gold, 0);
+        assert_eq!(carry_world(&campaign).gold, 0);
     }
 
     #[test]
