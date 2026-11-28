@@ -8850,7 +8850,7 @@ mod tests {
                 match target.as_str() {
                     "outfall-pit" => {
                         let pit = w.level.objects.tidal_pits.first().expect("tidal drop");
-                        let edge = pit.rect.to_world();
+                        let edge = pit.bounds().to_world();
                         use crate::game::collision::SizeClass;
                         use crate::game::hazards::outfall_sand_clear;
                         let centre = pit.center_world();

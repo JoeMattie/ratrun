@@ -433,22 +433,39 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         dotted_rect(pb, (s.0 - half, s.1 - half, s.0 + half, s.1 + half), c, 2);
     }
     for pit in v.level.trailer.pits.iter().chain(&v.level.objects.tidal_pits) {
-        let a = screen(pit.rect.center_world(), v.cam, v.scale);
-        let w = (pit.rect.w as f32 * crate::game::collision::TILE_F / v.scale.x).round() as i32;
-        let h = (pit.rect.h as f32 * crate::game::collision::TILE_F / v.scale.y).round() as i32;
-        if !on(a, w.max(h) + 1) {
+        let colour = if pit.kind == crate::game::level::PitKind::TidalDrop {
+            (143, 211, 220)
+        } else {
+            (246, 226, 178)
+        };
+        if pit.lobes().is_empty() {
+            // A rectangular hole (the Outfall's tidal pockets): its bounds are
+            // its outline, so the dotted box still reads true.
+            let a = screen(pit.center_world(), v.cam, v.scale);
+            let b = pit.bounds();
+            let w = (b.w as f32 * crate::game::collision::TILE_F / v.scale.x).round() as i32;
+            let h = (b.h as f32 * crate::game::collision::TILE_F / v.scale.y).round() as i32;
+            if !on(a, w.max(h) + 1) {
+                continue;
+            }
+            dotted_rect(pb, (a.0 - w / 2, a.1 - h / 2, a.0 + w / 2, a.1 + h / 2), colour, 2);
             continue;
         }
-        dotted_rect(
-            pb,
-            (a.0 - w / 2, a.1 - h / 2, a.0 + w / 2, a.1 + h / 2),
-            if pit.kind == crate::game::level::PitKind::TidalDrop {
-                (143, 211, 220)
-            } else {
-                (246, 226, 178)
-            },
-            2,
-        );
+        // A torn hole: dot the rim cells, so the warning follows the ragged
+        // outline the sim falls through rather than its bounding box.
+        for (cx, cy) in pit.rim_cells() {
+            let s = screen(
+                crate::math::Vec2::new(
+                    (cx as f32 + 0.5) * crate::game::collision::TILE_F,
+                    (cy as f32 + 0.5) * crate::game::collision::TILE_F,
+                ),
+                v.cam,
+                v.scale,
+            );
+            if on(s, 1) {
+                pb.plot(s.0, s.1, colour);
+            }
+        }
     }
 
     // 8. The rat itself keeps a minimum screen size so "where am I" survives a

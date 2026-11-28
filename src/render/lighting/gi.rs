@@ -651,7 +651,7 @@ impl LevelCache {
         }
         let mut pit_cells = vec![0u8; n_tiles];
         for pit in level.trailer.pits.iter().chain(level.objects.tidal_pits.iter()) {
-            for (x, y) in pit.rect.cells() {
+            for (x, y) in pit.cells() {
                 if x >= 0 && y >= 0 && x < cols && y < rows {
                     pit_cells[(y * cols + x) as usize] = 1;
                 }

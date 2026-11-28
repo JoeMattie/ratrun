@@ -19,7 +19,9 @@
 //!   one-cell-thick walls are recorded as [`Layout::partitions`], so the shared
 //!   placement stage pierces them with rat-holes the big enemies cannot follow.
 //! * **Hazards are part of the bed.** Broken planks and missing rail sections
-//!   are [`Pit`]s, the slipstream pulls light things tailward in [`wind`]
+//!   are [`Pit`]s — the broken planks are seeded, torn blobs about twice the
+//!   old punched plank's area, each keeping a ring of intact deck — the
+//!   slipstream pulls light things tailward in [`wind`]
 //!   stretches, and crates walk along their straps on the trailer's bumps
 //!   ([`SlidingCargo`]). The hazards live in [`Level::trailer`]; the systems in
 //!   `ecs::systems::trailer` read them and `art_trailer` draws them.
@@ -41,8 +43,8 @@ use rand::RngExt;
 use crate::game::art_walls::{WallAxis, WallKind};
 use crate::game::collision::{cardinal_of, SizeClass, TileKind, TileMap};
 use crate::game::level::{
-    BossArena, Level, Palette, Pit, PitKind, Prop, Room, RoomKind, SlidingCargo, Theme, TileRect,
-    TrailerDeck,
+    BossArena, Level, Palette, Pit, PitKind, PitLobe, Prop, Room, RoomKind, SlidingCargo, Theme,
+    TileRect, TrailerDeck,
 };
 use crate::game::nav::NavGrid;
 use crate::math::Vec2;
@@ -96,25 +98,34 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
 
     // A pit under a rat-hole or a trap's pad would stack two hazards on one
     // cell; drop any that ended up there (the maze warren is carved after the
-    // pits, so it can also have covered one).
+    // pits, so it can also have covered one). A rat-hole is pierced through a
+    // cargo partition, so the hole's ring of planks already keeps it clear;
+    // the prune below is the belt to that braces. [`PIT_CLEAR - 1`] measures to
+    // the mouth's cell, so the brief's "never within 3 cells" holds from the
+    // outline (the ring's own 2 cells plus this one).
     deck.pits.retain(|pit| {
-        pit.rect
-            .cells()
+        pit.cells()
             .all(|(cx, cy)| matches!(tiles.get(cx, cy), TileKind::Open))
+            && !holes.iter().any(|hole| {
+                pit.bounds()
+                    .inflate(PIT_CLEAR - 1)
+                    .contains(hole.cell.0, hole.cell.1)
+            })
     });
 
     // The tile test above cannot see a trap: a trap is a floor object and
     // never paints a cell, so a glue board or a set trap could still sit on a
     // hole in the planks (the rat would fall through the pad it is standing
     // on). The trap goes, not the pit: the pits are the bed's own hazard and
-    // carry a minimum count, the traps are only capped. One cell of margin
-    // covers a snap trap's 3 x 3 footprint.
+    // carry a minimum count, the traps are only capped. [`PIT_CLEAR`] cells of
+    // margin covers a snap trap's 3 x 3 footprint and the brief's "never
+    // within 3 cells of a trap pad".
     traps.retain(|trap| {
         let (cx, cy) = validate_cell(trap.pos);
         !deck
             .pits
             .iter()
-            .any(|pit| pit.rect.inflate(1).contains(cx, cy))
+            .any(|pit| pit.bounds().inflate(PIT_CLEAR).contains(cx, cy))
     });
 
     // The mouse-hole shops (no rng, tiles untouched). On the flatbed a hole
@@ -179,8 +190,14 @@ fn validate_cell(p: Vec2) -> (i32, i32) {
 /// hole**: a 4-connected flood over open cells that are in no [`Pit`]. Row
 /// major, `cols` wide.
 fn dry_deck(tiles: &TileMap, deck: &TrailerDeck, start: (i32, i32)) -> Vec<bool> {
+    flood_from(tiles, &deck.pits, start)
+}
+
+/// [`dry_deck`] over an arbitrary set of holes, so a candidate pit can be
+/// flood-tested before it is committed.
+fn flood_from(tiles: &TileMap, pits: &[Pit], start: (i32, i32)) -> Vec<bool> {
     let (cols, rows) = (tiles.cols(), tiles.rows());
-    let in_pit = |cx: i32, cy: i32| deck.pits.iter().any(|pit| pit.rect.contains(cx, cy));
+    let in_pit = |cx: i32, cy: i32| pits.iter().any(|pit| pit.contains_cell(cx, cy));
     let walkable = |cx: i32, cy: i32| {
         cx >= 0
             && cy >= 0
@@ -207,12 +224,39 @@ fn dry_deck(tiles: &TileMap, deck: &TrailerDeck, start: (i32, i32)) -> Vec<bool>
     seen
 }
 
+/// Does the flood from `start` still reach every cell the deck reached with
+/// **no holes at all**? The brief's hardest rule — *"never let a pit cut the
+/// deck"* — proved at placement time, so a torn hole in a tight lane is
+/// dropped rather than shipped.
+///
+/// The comparison is against `base`, the flood with no holes in it, not against
+/// "every open cell": the cab's hold sits behind a `Doorway` tile that the
+/// flood's `TileKind::Open` walk cannot cross, so a raw open-cell test would
+/// reject every candidate on every seed. Cells the bed's own walls already wall
+/// off are not the hole's business; cells the hole itself strands are.
+fn deck_spans(base: &[bool], tiles: &TileMap, pits: &[Pit], start: (i32, i32)) -> bool {
+    let seen = flood_from(tiles, pits, start);
+    let cols = tiles.cols();
+    base.iter().enumerate().all(|(i, &was)| {
+        !was
+            || seen[i]
+            || {
+                let (cx, cy) = ((i as i32) % cols, (i as i32) / cols);
+                pits.iter().any(|pit| pit.contains_cell(cx, cy))
+            }
+    })
+}
+
 /// Is a shop threshold at `mouth` clear of the bed's hazards? No hole in the
 /// planks on it or on any of its eight neighbours, and no sliding crate's
 /// lane (its box swept from rest to the end of its straps) over the cell.
 pub(super) fn shop_threshold_clear(deck: &TrailerDeck, mouth: (i32, i32)) -> bool {
     let near = TileRect::new(mouth.0 - 1, mouth.1 - 1, 3, 3);
-    if deck.pits.iter().any(|pit| pit.rect.intersects(&near)) {
+    if deck
+        .pits
+        .iter()
+        .any(|pit| pit.bounds().inflate(PIT_CLEAR - 1).intersects(&near))
+    {
         return false;
     }
     let t = crate::game::collision::TILE_F;
@@ -223,6 +267,134 @@ pub(super) fn shop_threshold_clear(deck: &TrailerDeck, mouth: (i32, i32)) -> boo
         let (lo_x, hi_x) = (slide.rest.x.min(end.x) - slide.half.x, slide.rest.x.max(end.x) + slide.half.x);
         let (lo_y, hi_y) = (slide.rest.y.min(end.y) - slide.half.y, slide.rest.y.max(end.y) + slide.half.y);
         x0 < hi_x && x1 > lo_x && y0 < hi_y && y1 > lo_y
+    })
+}
+
+// ---- The torn holes --------------------------------------------------------
+
+/// Cells of intact deck a hole keeps all round its outline. The owner's
+/// "bigger and randomly shaped" holes still have to be fair: the deck flood
+/// proves a route past every one of them, and the contract asks for a 2-cell
+/// plank path. The ring is measured to the ragged edge, not to the bounds, so
+/// a torn corner does not cost the walkway a cell it never needed.
+const PIT_RING: i32 = 2;
+
+/// Cells of clearance a hole keeps from everything else that lives on the
+/// deck: a trap's pad, a rat-hole, a shop threshold, a loose prop. Nothing may
+/// sit within this many cells of a hole's bounds.
+const PIT_CLEAR: i32 = 3;
+
+/// The area of the old one-cell punched plank, in cells: 1 or 2, mean 1.5.
+/// The new holes are 1.4x..3.0x this (mean ~2.2x), per the brief.
+const PIT_OLD_AREA: f32 = 1.5;
+/// Lowest area multiplier a torn hole may draw.
+const PIT_AREA_MIN: f32 = 1.4;
+/// Highest area multiplier a torn hole may draw.
+const PIT_AREA_MAX: f32 = 3.0;
+
+/// Build one torn hole of about `target` cells, centred on `centre` (world
+/// px), from one to three overlapping lobes.
+///
+/// The shape is the puddle's own rule ([`PitLobe::contains`]): an ellipse with
+/// a hashed multi-lobe rim wobble. The rng draws in the generator's existing
+/// slot (the same `StdRng` in call order, no salted sub-stream), so a seed
+/// still reproduces its bed exactly.
+///
+/// The area is *measured*, not hoped for: the lobes are built from the target,
+/// then scaled by `sqrt(target / measured)` up to four times, so the mean area
+/// the tests read is the mean area the generator aimed at.
+fn torn_pit(centre: Vec2, target: f32, kind: PitKind, rng: &mut StdRng) -> Pit {
+    // Mostly one lobe, sometimes two, occasionally three overlapping blobs
+    // for a ragged, torn shape.
+    let lobe_count: usize = match rng.random_range(0..10u32) {
+        0..=4 => 1,
+        5..=7 => 2,
+        _ => 3,
+    };
+    // A lone lobe's half-axis: the wobble's mean edge factor is ~0.89, so the
+    // area is ~0.8 of the bounding ellipse's.
+    let base = (target / (std::f32::consts::PI * 0.8)).sqrt()
+        * crate::game::collision::TILE_F;
+    let mut spec: Vec<(Vec2, f32, f32, u32)> = Vec::with_capacity(lobe_count);
+    // Every lobe is drawn off-centre by up to 60 % of the base radius, so the
+    // union never collapses onto one point and the draw never asks for an
+    // empty range.
+    let spread = base * 0.6;
+    for _ in 0..lobe_count {
+        let offset = Vec2::new(
+            rng.random_range(-spread..spread),
+            rng.random_range(-spread..spread),
+        );
+        let rx = base * rng.random_range(0.75..1.25);
+        let ry = base * rng.random_range(0.75..1.25);
+        let seed = rng.random_range(0..u32::MAX);
+        spec.push((centre + offset, rx, ry, seed));
+    }
+    // The loop always runs at least once (`lobe_count >= 1`), so the returned
+    // pit is the last measured shape.
+    let mut pit = Pit::torn(TileRect::new(0, 0, 0, 0), kind, &[]);
+    let mut scale = 1.0f32;
+    for _ in 0..4 {
+        let lobes: Vec<PitLobe> = spec
+            .iter()
+            .map(|&(pos, rx, ry, seed)| PitLobe {
+                pos: centre + (pos - centre) * scale,
+                rx: rx * scale,
+                ry: ry * scale,
+                seed,
+            })
+            .collect();
+        pit = Pit::torn(pit_bounds(&lobes), kind, &lobes);
+        let area = pit.area_cells().max(1) as f32;
+        if (area - target).abs() <= target * 0.12 {
+            break;
+        }
+        scale *= (target / area).sqrt();
+    }
+    pit
+}
+
+/// The cell rectangle a lobe union reaches: the lobes' bounding ellipses,
+/// rounded out to whole cells. Always contains the outline (the rim wobble only
+/// ever pulls the edge inward from the bounding ellipse).
+fn pit_bounds(lobes: &[PitLobe]) -> TileRect {
+    let t = crate::game::collision::TILE_F;
+    let mut x0 = f32::INFINITY;
+    let mut y0 = f32::INFINITY;
+    let mut x1 = f32::NEG_INFINITY;
+    let mut y1 = f32::NEG_INFINITY;
+    for lobe in lobes {
+        x0 = x0.min(lobe.pos.x - lobe.rx);
+        y0 = y0.min(lobe.pos.y - lobe.ry);
+        x1 = x1.max(lobe.pos.x + lobe.rx);
+        y1 = y1.max(lobe.pos.y + lobe.ry);
+    }
+    if !x0.is_finite() || !y0.is_finite() {
+        return TileRect::new(0, 0, 0, 0);
+    }
+    let x = (x0 / t).floor() as i32;
+    let y = (y0 / t).floor() as i32;
+    let w = ((x1 / t).ceil() as i32 - x).max(1);
+    let h = ((y1 / t).ceil() as i32 - y).max(1);
+    TileRect::new(x, y, w, h)
+}
+
+/// Is the whole ring of deck round the hole's **outline** intact, and clear of
+/// every other hole? The "2-cell plank path around it" contract, measured to
+/// the ragged edge rather than to the bounds, so a torn corner does not cost
+/// the walkway a cell it never needed.
+fn pit_ring_is_plank(tiles: &TileMap, pit: &Pit, placed: &[Pit]) -> bool {
+    let t = crate::game::collision::TILE_F;
+    pit.bounds().inflate(PIT_RING).cells().all(|(cx, cy)| {
+        let centre = Vec2::new((cx as f32 + 0.5) * t, (cy as f32 + 0.5) * t);
+        // Only the cells the hole or its ring touches have to be plank.
+        if !pit.contains(centre) && pit.gap(centre) > PIT_RING as f32 * t {
+            return true;
+        }
+        matches!(tiles.get(cx, cy), TileKind::Open)
+            && !placed
+                .iter()
+                .any(|other| other.bounds().inflate(1).contains(cx, cy))
     })
 }
 
@@ -394,38 +566,98 @@ fn build_layout(tiles: &mut TileMap, rng: &mut StdRng) -> (Layout, TrailerDeck) 
         ..TrailerDeck::default()
     };
 
-    // Broken planks: one-cell holes in the middle of a lane, never in the
-    // tailgate's first corridor, the cab hold or on a maze walkway.
+    // Broken planks: torn holes in the middle of a lane, never in the
+    // tailgate's first corridor, the cab hold or on a maze walkway. The
+    // owner's brief was *"the holes in the truck are cool but they should be
+    // bigger and randomly shaped"*, so a hole is a seeded blob — one to three
+    // overlapping lobes with the puddle's hashed rim wobble — about twice the
+    // area of the old one-cell punched plank, and every hole keeps a ring of
+    // intact deck all round it (see [`PIT_RING`]).
+    // The flood with no holes in it: the set of cells a hole may not strand.
+    // Computed once, before the candidate loop, so each draw costs one flood.
+    let base = flood_from(tiles, &[], validate_cell(start));
     let mut pit_cells: Vec<(i32, i32)> = Vec::new();
-    for cy in DECK_TOP + 2..DECK_TOP + DECK_ROWS - 2 {
-        for cx in FIRST_CARGO_X + 10..run_end {
-            let near_maze = slot.is_some_and(|slot| slot.inflate(1).contains(cx, cy));
+    let mut first_candidate: Option<(i32, i32)> = None;
+    for cy in DECK_TOP + 4..DECK_TOP + DECK_ROWS - 4 {
+        for cx in FIRST_CARGO_X + 12..run_end {
+            let near_maze = slot.is_some_and(|slot| slot.inflate(2).contains(cx, cy));
             if near_maze || !matches!(tiles.get(cx, cy), TileKind::Open) {
                 continue;
             }
-            // Away from every cargo face by two cells, so the hole is a hole
-            // in the middle of the deck and not a chipped crate corner.
+            // A candidate needs open deck all round it before it is even
+            // tried; the ring check below is the precise guard, so this only
+            // keeps the pool free of chipped crate corners.
             let crowded = (-2..=2).any(|dy| {
                 (-2..=2).any(|dx| tiles.is_full_solid(cx + dx, cy + dy))
             });
             if crowded {
                 continue;
             }
+            first_candidate.get_or_insert((cx, cy));
             pit_cells.push((cx, cy));
         }
     }
     if !pit_cells.is_empty() {
-        let holes = rng.random_range(2..=4).min(pit_cells.len());
-        for _ in 0..holes {
+        // Slightly fewer holes than the old 2..=4: each is about twice the
+        // area, so the deck's total hazard stays about the same. Draw
+        // candidates until the map has its holes or the pool runs dry: a
+        // candidate whose ring of planks is not intact is skipped, so a big
+        // torn hole in a tight lane cannot chip a crate corner.
+        let want = rng.random_range(2..=3);
+        let mut made = 0;
+        // Bounded: each try costs a flood, and a bed that refuses every draw
+        // must not stall the generator.
+        let mut tries = 0;
+        while made < want && !pit_cells.is_empty() && tries < 32 {
+            tries += 1;
             let pick = rng.random_range(0..pit_cells.len());
             let cell = pit_cells.remove(pick);
-            // A two-cell hole reads better than a single punched plank.
-            let wide = rng.random_range(0..2) == 0
-                && pit_cells.iter().any(|&(x, y)| x == cell.0 + 1 && y == cell.1);
-            let (w, h) = if wide { (2, 1) } else { (1, 1) };
-            let rect = TileRect::new(cell.0, cell.1, w, h);
-            deck.pits.push(Pit::new(rect, PitKind::BrokenPlank));
-            pit_cells.retain(|&(x, y)| !rect.contains(x, y));
+            let centre = TileMap::tile_rect(cell.0, cell.1).center();
+            // 1.4x..3.0x the old plank's area (one or two cells; mean 1.5),
+            // and never outside that band: a lane too tight for one draw gets
+            // a fresh draw in the same band, not a smaller hole.
+            let mut accepted: Option<Pit> = None;
+            for _ in 0..3 {
+                let target = PIT_OLD_AREA * rng.random_range(PIT_AREA_MIN..PIT_AREA_MAX);
+                let pit = torn_pit(centre, target, PitKind::BrokenPlank, rng);
+                let b = pit.bounds();
+                // Stay in the cargo run: never in the first corridor or the cab.
+                if b.x < FIRST_CARGO_X + 8 || b.right() > run_end - 3 {
+                    continue;
+                }
+                // The maze fills its whole slot with partitions, so the hole's
+                // ring of planks must stay clear of the slot: nothing may be
+                // carved under the hole after the flood has been promised.
+                if slot.is_some_and(|slot| b.inflate(PIT_RING).intersects(&slot)) {
+                    continue;
+                }
+                if !pit_ring_is_plank(tiles, &pit, &deck.pits) {
+                    continue;
+                }
+                // And the flood must still prove a route the full length of
+                // the bed with this hole in it.
+                let mut with_pit: Vec<Pit> = deck.pits.clone();
+                with_pit.push(pit);
+                if !deck_spans(&base, tiles, &with_pit, validate_cell(start)) {
+                    continue;
+                }
+                accepted = Some(pit);
+                break;
+            }
+            let Some(pit) = accepted else { continue };
+            let b = pit.bounds();
+            pit_cells.retain(|&(x, y)| !b.inflate(PIT_RING).contains(x, y));
+            deck.pits.push(pit);
+            made += 1;
+        }
+        // A bed this tight has no room for a torn hole: punch one plain
+        // plank rather than ship a map with no hazard at all. A single cell
+        // in a lane at least eleven wide can never cut the deck.
+        if made == 0 {
+            if let Some(cell) = first_candidate {
+                let rect = TileRect::new(cell.0, cell.1, 1, 1);
+                deck.pits.push(Pit::new(rect, PitKind::BrokenPlank));
+            }
         }
     }
     // Missing rail sections: a two-cell gap on one side rail, at least a few
@@ -575,7 +807,10 @@ fn furnish(
             if !matches!(tiles.get(cx, cy), TileKind::Open) {
                 continue;
             }
-            if deck.pits.iter().any(|p| p.rect.inflate(1).contains(cx, cy))
+            if deck
+                .pits
+                .iter()
+                .any(|p| p.bounds().inflate(PIT_CLEAR).contains(cx, cy))
                 || layout.maze_slots.iter().any(|s| s.inflate(2).contains(cx, cy))
             {
                 continue;
@@ -805,9 +1040,9 @@ mod tests {
                 let (cx, cy) = validate_cell(pos);
                 for pit in &level.trailer.pits {
                     assert!(
-                        !pit.rect.inflate(1).contains(cx, cy),
-                        "seed {seed}: trap at ({cx}, {cy}) touches the pit {:?}",
-                        pit.rect
+                        !pit.bounds().inflate(PIT_RING).contains(cx, cy),
+                        "seed {seed}: trap at ({cx}, {cy}) is within {PIT_RING} of {:?}",
+                        pit.bounds()
                     );
                 }
             }
@@ -842,14 +1077,14 @@ mod tests {
             let deck = &level.trailer;
             for pit in &deck.pits {
                 assert!(
-                    pit.rect.x >= FIRST_CARGO_X + 8,
+                    pit.bounds().x >= FIRST_CARGO_X + 8,
                     "seed {seed}: a pit sits in the first corridor"
                 );
                 assert!(
-                    pit.rect.right() <= cab_x,
+                    pit.bounds().right() <= cab_x,
                     "seed {seed}: a pit sits in the cab hold"
                 );
-                for (cx, cy) in pit.rect.cells() {
+                for (cx, cy) in pit.cells() {
                     assert!(
                         matches!(level.tiles.get(cx, cy), TileKind::Open),
                         "seed {seed}: pit cell ({cx}, {cy}) is not open floor"
@@ -879,10 +1114,13 @@ mod tests {
             assert!(pits >= 1, "seed {seed}: no holes at all");
             assert!(slides >= 1, "seed {seed}: no sliding cargo");
             assert!(!deck.wind.is_empty(), "seed {seed}: no slipstream stretch");
-            // Holes are never on top of each other (a pit cell is spent once).
+            // Holes are never on top of each other (each keeps its ring).
             for (i, a) in deck.pits.iter().enumerate() {
                 for b in &deck.pits[i + 1..] {
-                    assert!(!a.rect.intersects(&b.rect), "seed {seed}: holes overlap");
+                    assert!(
+                        !a.bounds().intersects(&b.bounds()),
+                        "seed {seed}: holes overlap"
+                    );
                 }
             }
             min_pits = min_pits.min(pits);
@@ -941,6 +1179,287 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The owner's brief: bigger holes. The mean area of the bed's torn
+    /// holes is 1.8–2.4x the old punched plank's 1.5 cells, over 20 seeds.
+    #[test]
+    fn the_mean_pit_area_is_about_twice_the_old() {
+        let mut sum = 0.0f32;
+        let mut count = 0;
+        for seed in 0..20u64 {
+            let level = level_for(seed);
+            for pit in &level.trailer.pits {
+                // Rail gaps are sheared steel, not punched planks: they are
+                // unchanged and not part of the "bigger holes" comparison.
+                if !matches!(pit.kind, PitKind::BrokenPlank) {
+                    continue;
+                }
+                sum += pit.area_cells() as f32;
+                count += 1;
+            }
+        }
+        assert!(count > 0, "20 seeds drew no torn hole at all");
+        let mean = sum / count as f32;
+        let ratio = mean / PIT_OLD_AREA;
+        assert!(
+            (1.8..=2.4).contains(&ratio),
+            "mean torn-hole area {mean:.2} cells is {ratio:.2}x the old {PIT_OLD_AREA}"
+        );
+    }
+
+    /// Nothing else lives within [`PIT_CLEAR`] cells of a hole: not the start,
+    /// not a rat-hole, not a trap's pad, not a shop's threshold, not the cab.
+    #[test]
+    fn no_pit_is_within_three_cells_of_anything_else() {
+        for seed in 0..20u64 {
+            let level = level_for(seed);
+            let start = validate_cell(level.start);
+            for pit in &level.trailer.pits {
+                let near = pit.bounds().inflate(PIT_CLEAR);
+                assert!(
+                    !near.contains(start.0, start.1),
+                    "seed {seed}: a pit is within {PIT_CLEAR} of the start"
+                );
+                // A rat-hole's cell is guarded at `PIT_CLEAR - 1`: the ring's
+                // own 2 cells of plank are the rest of the 3.
+                let hole_near = pit.bounds().inflate(PIT_CLEAR - 1);
+                for hole in &level.objects.rat_holes {
+                    assert!(
+                        !hole_near.contains(hole.cell.0, hole.cell.1),
+                        "seed {seed}: a pit is within {PIT_CLEAR} of a rat-hole"
+                    );
+                }
+                for trap in level
+                    .objects
+                    .sticky_traps
+                    .iter()
+                    .map(|t| t.pos)
+                    .chain(level.objects.mousetraps.iter().map(|t| t.pos))
+                {
+                    let (tx, ty) = validate_cell(trap);
+                    assert!(
+                        !near.contains(tx, ty),
+                        "seed {seed}: a pit is within {PIT_CLEAR} of a trap pad"
+                    );
+                }
+                // A shop's threshold is a 3 x 3 face, so the generator's guard
+                // is `inflate(PIT_CLEAR - 1)` on the mouth's cell: the mouth
+                // itself is `PIT_CLEAR` cells from the hole's bounds.
+                let mouth_near = pit.bounds().inflate(PIT_CLEAR - 1);
+                for shop in &level.objects.shop_holes {
+                    assert!(
+                        !mouth_near.contains(shop.mouth.0, shop.mouth.1),
+                        "seed {seed}: a pit is within {PIT_CLEAR} of a shop hole"
+                    );
+                }
+                assert!(
+                    pit.bounds().right() <= CAB_X,
+                    "seed {seed}: a pit is within {PIT_CLEAR} of the cab"
+                );
+            }
+        }
+    }
+
+    /// The art fills exactly the outline's pixels: [`art_trailer::hole_pixel`]
+    /// is the same test as [`Pit::contains`], and the drawn road only covers
+    /// the outline's interior.
+    #[test]
+    fn the_drawn_hole_matches_the_outline() {
+        use crate::game::art_trailer::hole_pixel;
+        use crate::render::framebuffer::PixelBuffer;
+        for seed in 0..20u64 {
+            let mut level = level_for(seed);
+            let pits = std::mem::take(&mut level.trailer.pits);
+            for pit in &pits {
+                if pit.lobes().is_empty() {
+                    continue;
+                }
+                let b = pit.bounds();
+                let (w, h) = ((b.w * 16) as usize, (b.h * 16) as usize);
+                let x0 = b.x * 16;
+                let y0 = b.y * 16;
+                let xs = x0..(x0 + b.w * 16);
+                let ys = y0..(y0 + b.h * 16);
+                let cam = Vec2::new(x0 as f32, y0 as f32);
+                // With the hole, and without it: the same deck, same clock.
+                level.trailer.pits = vec![*pit];
+                let mut with = PixelBuffer::new(w, h);
+                crate::game::art_trailer::draw_floor(&mut with, &level, cam, 1.0, &xs, &ys);
+                level.trailer.pits.clear();
+                let mut without = PixelBuffer::new(w, h);
+                crate::game::art_trailer::draw_floor(&mut without, &level, cam, 1.0, &xs, &ys);
+                let mut inside_diff = 0;
+                let mut inside_all = 0;
+                let mut outside_same = 0;
+                let mut outside_all = 0;
+                for sy in 0..h {
+                    for sx in 0..w {
+                        let wx = x0 + sx as i32;
+                        let wy = y0 + sy as i32;
+                        let inside = hole_pixel(pit, wx, wy, 0);
+                        assert_eq!(
+                            inside,
+                            pit.contains(Vec2::new(wx as f32 + 0.5, wy as f32 + 0.5)),
+                            "seed {seed}: the art's mask and the outline disagree at ({wx}, {wy})"
+                        );
+                        // Within 3 px of the outline: the lip and the
+                        // splinters live in this band, so its pixels are not
+                        // compared (the band is drawn over either way).
+                        let rim = hole_pixel(pit, wx - 3, wy, 0) != inside
+                            || hole_pixel(pit, wx + 3, wy, 0) != inside
+                            || hole_pixel(pit, wx, wy - 3, 0) != inside
+                            || hole_pixel(pit, wx, wy + 3, 0) != inside;
+                        if rim {
+                            continue;
+                        }
+                        if inside {
+                            inside_all += 1;
+                            if with.pixel_at(sx, sy) != without.pixel_at(sx, sy) {
+                                inside_diff += 1;
+                            }
+                        } else {
+                            outside_all += 1;
+                            if with.pixel_at(sx, sy) == without.pixel_at(sx, sy) {
+                                outside_same += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(inside_all > 0, "seed {seed}: the outline drew no pixel");
+                assert!(
+                    inside_diff * 10 >= inside_all * 8,
+                    "seed {seed}: only {inside_diff}/{inside_all} outline pixels drew the road"
+                );
+                assert!(outside_all > 0, "seed {seed}: the bounds hold no plank");
+                assert!(
+                    outside_same * 100 >= outside_all * 99,
+                    "seed {seed}: the hole bled past its outline ({} of {outside_all} plank pixels changed)",
+                    outside_all - outside_same
+                );
+            }
+            level.trailer.pits = pits;
+        }
+    }
+
+    /// The rat only falls inside the outline. The bounds is a rectangle and
+    /// the outline is not: a fall test that read the rect would drop the rat
+    /// where the deck is solid. Every cell the fall query reports inside the
+    /// bounds is exactly a cell the outline holds, and no cell outside the
+    /// bounds falls at all.
+    #[test]
+    fn the_rat_falls_only_inside_the_outline() {
+        for seed in 0..20u64 {
+            let level = level_for(seed);
+            for pit in &level.trailer.pits {
+                if pit.lobes().is_empty() {
+                    continue;
+                }
+                let b = pit.bounds();
+                let centre = |cx: i32, cy: i32| {
+                    Vec2::new((cx as f32 + 0.5) * 16.0, (cy as f32 + 0.5) * 16.0)
+                };
+                // A single lobe's bounding ellipse is inscribed in its own
+                // bounds, so its four corners are guaranteed plank. A union's
+                // corners are not (one lobe can reach another's corner), so
+                // only the single-lobe geometry is asserted exactly.
+                if pit.lobes().len() == 1 {
+                    for (cx, cy) in [
+                        (b.x, b.y),
+                        (b.right() - 1, b.y),
+                        (b.x, b.bottom() - 1),
+                        (b.right() - 1, b.bottom() - 1),
+                    ] {
+                        let p = centre(cx, cy);
+                        assert!(
+                            !pit.contains(p),
+                            "seed {seed}: the bounds corner ({cx}, {cy}) is a hole"
+                        );
+                        assert!(
+                            level.trailer.pit_at(p).is_none(),
+                            "seed {seed}: the rat falls at the bounds corner ({cx}, {cy})"
+                        );
+                    }
+                }
+                // The fall query and the outline agree, cell by cell.
+                let mut holes = 0;
+                for cy in b.y..b.bottom() {
+                    for cx in b.x..b.right() {
+                        let p = centre(cx, cy);
+                        let falls = level.trailer.pit_at(p).is_some();
+                        assert_eq!(
+                            falls,
+                            pit.contains(p),
+                            "seed {seed}: the fall query and the outline disagree at ({cx}, {cy})"
+                        );
+                        holes += i32::from(falls);
+                    }
+                }
+                assert!(holes > 0, "seed {seed}: the hole holds no cell");
+                // And nothing outside the bounds falls.
+                for cx in b.x - 1..=b.right() {
+                    for cy in [b.y - 1, b.bottom()] {
+                        assert!(
+                            level.trailer.pit_at(centre(cx, cy)).is_none(),
+                            "seed {seed}: the rat falls outside the bounds at ({cx}, {cy})"
+                        );
+                    }
+                }
+                for cy in b.y..b.bottom() {
+                    for cx in [b.x - 1, b.right()] {
+                        assert!(
+                            level.trailer.pit_at(centre(cx, cy)).is_none(),
+                            "seed {seed}: the rat falls outside the bounds at ({cx}, {cy})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A body just outside the ragged rim is pushed away from it; a body well
+    /// clear of every hole is not steered at all. Single-lobe holes are the
+    /// ones the geometry is exact for, so the precise checks use those.
+    #[test]
+    fn enemies_steer_around_the_new_outline() {
+        let mut checked = 0;
+        for seed in 0..20u64 {
+            let level = level_for(seed);
+            let deck = &level.trailer;
+            for pit in &deck.pits {
+                if pit.lobes().len() != 1 {
+                    continue;
+                }
+                let c = pit.lobes()[0].pos;
+                let mut t = 0.0f32;
+                while t < 200.0 && pit.contains(c + Vec2::new(t, 0.0)) {
+                    t += 1.0;
+                }
+                assert!(t > 0.0, "seed {seed}: the lobe centre is not in the hole");
+                let near = c + Vec2::new(t + 2.0, 0.0);
+                let push = deck
+                    .pit_avoid(near, 6.0)
+                    .unwrap_or_else(|| panic!("seed {seed}: a body at the rim was not steered"));
+                assert!(
+                    push.x > 0.0,
+                    "seed {seed}: the push at the rim does not point away from the hole"
+                );
+                assert!(
+                    pit.gap(near + push * 2.0) > pit.gap(near),
+                    "seed {seed}: the push does not move away from the rim"
+                );
+                // Far from every hole: no steering at all.
+                let far = c + Vec2::new(0.0, 200.0);
+                if deck.pits.iter().all(|p| p.gap(far) > 40.0) {
+                    assert!(
+                        deck.pit_avoid(far, 6.0).is_none(),
+                        "seed {seed}: a body 200 px from the hole was still steered"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "20 seeds never drew a single-lobe hole");
     }
 
     #[test]

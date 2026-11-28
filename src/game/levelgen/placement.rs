@@ -3668,7 +3668,7 @@ mod tests {
                                 && cx < cols
                                 && cy < rows
                                 && level.tiles.get(cx, cy).is_open()
-                                && !deck.pits.iter().any(|pit| pit.rect.contains(cx, cy))
+                                && !deck.pits.iter().any(|pit| pit.contains_cell(cx, cy))
                         };
                         let start = validate::cell_of(level.start);
                         let mut seen = vec![false; (cols * rows) as usize];

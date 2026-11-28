@@ -942,25 +942,224 @@ pub enum PitKind {
     TidalDrop,
 }
 
+/// One lobe of a torn hole's outline, in world pixels.
+///
+/// The owner's brief for the flatbed's holes was *"bigger and randomly
+/// shaped"*, so a hole is not a rectangle of deck any more: it is one or more
+/// overlapping blobs. Each blob is an ellipse with a hashed multi-lobe rim
+/// wobble — the same rule as [`Puddle::contains`] — so the sim, the flood, the
+/// art and the lighting all read one edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PitLobe {
+    /// Centre, world px.
+    pub pos: Vec2,
+    /// Half-width, world px.
+    pub rx: f32,
+    /// Half-height, world px.
+    pub ry: f32,
+    /// Shape variation (the rim's lobes).
+    pub seed: u32,
+}
+
+/// Lobes a torn hole may be made of ("occasionally two or three overlapping
+/// blobs for ragged, torn shapes").
+pub const PIT_LOBES: usize = 3;
+
+impl PitLobe {
+    /// The rim factor at `angle`: `0.78` (pinched) to `1.0` (full).
+    pub fn edge_factor(&self, angle: f32) -> f32 {
+        0.78 + 0.22 * puddle_wobble(self.seed, angle)
+    }
+
+    /// Is `p` inside the lobe?
+    ///
+    /// Irregular by design: inside when `(dx/rx)² + (dy/ry)² <= edge(angle)²`,
+    /// where `edge` is [`Self::edge_factor`] at the direction of `p`. The
+    /// bounding ellipse (`edge = 1`) therefore always contains the lobe.
+    pub fn contains(&self, p: Vec2) -> bool {
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return false;
+        }
+        let d = p - self.pos;
+        let nx = d.x / self.rx;
+        let ny = d.y / self.ry;
+        let radial_sq = nx * nx + ny * ny;
+        if radial_sq > 1.0 {
+            return false;
+        }
+        let edge = self.edge_factor(d.y.datan2(d.x));
+        radial_sq <= edge * edge
+    }
+
+    /// Signed gap from the lobe's rim along the ray through `p`, in world px:
+    /// negative inside, positive outside. Exact for this shape, because the
+    /// rim is `radial = edge` in the ellipse's own metric.
+    pub fn gap(&self, p: Vec2) -> f32 {
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return f32::INFINITY;
+        }
+        let d = p - self.pos;
+        let len = d.len();
+        if len <= 1e-4 {
+            return -self.rx.min(self.ry);
+        }
+        let nx = d.x / self.rx;
+        let ny = d.y / self.ry;
+        let radial = (nx * nx + ny * ny).sqrt();
+        if radial <= 1e-4 {
+            return -self.rx.min(self.ry);
+        }
+        let edge = self.edge_factor(d.y.datan2(d.x));
+        len * (radial - edge) / radial
+    }
+}
+
 /// One fall hazard: the cells a body can drop through.
+///
+/// The **shape is the single source of truth**: [`Pit::contains`] is the hit
+/// test, the flood's cell test, the steering avoidance and the art's mask.
+/// [`Pit::bounds`] is only the cell rectangle the outline reaches (a handle for
+/// the grid, a culling box and a spacing measure), never a hit test.
+///
+/// A rectangular hole (the Outfall's tidal pockets) has no lobes and its
+/// outline is its bounds, exactly as before; the flatbed's holes are torn.
 #[derive(Clone, Copy, Debug)]
 pub struct Pit {
-    pub rect: TileRect,
+    bounds: TileRect,
     pub kind: PitKind,
+    lobes: [PitLobe; PIT_LOBES],
+    lobe_count: u8,
 }
 
 impl Pit {
-    pub fn new(rect: TileRect, kind: PitKind) -> Pit {
-        Pit { rect, kind }
+    /// A rectangular hole: the Outfall's tidal pockets, and the hand-built
+    /// holes in tests. Its outline is its bounds.
+    pub fn new(bounds: TileRect, kind: PitKind) -> Pit {
+        Pit {
+            bounds,
+            kind,
+            lobes: [PitLobe::default(); PIT_LOBES],
+            lobe_count: 0,
+        }
+    }
+
+    /// A torn hole: the union of one to three overlapping lobes.
+    pub fn torn(bounds: TileRect, kind: PitKind, lobes: &[PitLobe]) -> Pit {
+        let mut out = [PitLobe::default(); PIT_LOBES];
+        let n = lobes.len().min(PIT_LOBES);
+        out[..n].copy_from_slice(&lobes[..n]);
+        Pit {
+            bounds,
+            kind,
+            lobes: out,
+            lobe_count: n as u8,
+        }
+    }
+
+    /// The cell rectangle the outline reaches. A handle, not a hit test.
+    pub fn bounds(&self) -> TileRect {
+        self.bounds
+    }
+
+    /// The outline's lobes. Empty for a rectangular hole.
+    pub fn lobes(&self) -> &[PitLobe] {
+        &self.lobes[..self.lobe_count as usize]
     }
 
     pub fn center_world(&self) -> Vec2 {
-        self.rect.center_world()
+        self.bounds.center_world()
+    }
+
+    /// Is `p` inside the hole? The one hit test everything reads.
+    pub fn contains(&self, p: Vec2) -> bool {
+        if self.lobe_count == 0 {
+            return self.bounds.contains_world(p);
+        }
+        self.lobes().iter().any(|lobe| lobe.contains(p))
     }
 
     pub fn contains_world(&self, p: Vec2) -> bool {
-        self.rect.contains_world(p)
+        self.contains(p)
     }
+
+    /// Does the hole cover the cell containing `(cx, cy)`? A cell is a hole
+    /// when its centre is inside the outline, so the flood and the fall agree.
+    pub fn contains_cell(&self, cx: i32, cy: i32) -> bool {
+        self.contains(Vec2::new(
+            (cx as f32 + 0.5) * TILE_F,
+            (cy as f32 + 0.5) * TILE_F,
+        ))
+    }
+
+    /// Every cell whose centre is inside the outline.
+    pub fn cells(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        let b = self.bounds;
+        (b.y..b.bottom())
+            .flat_map(move |cy| (b.x..b.right()).map(move |cx| (cx, cy)))
+            .filter(move |&(cx, cy)| self.contains_cell(cx, cy))
+    }
+
+    /// The fall hazard's area in cells: the cells whose centre is inside.
+    pub fn area_cells(&self) -> i32 {
+        self.cells().count() as i32
+    }
+
+    /// The ragged rim, cell by cell: a cell whose centre is inside the outline
+    /// but which has a 4-neighbour whose centre is not. The ink overlay's
+    /// dotted edge and the art's splintered plank ends both read this, so the
+    /// drawn rim is the same edge the sim falls through.
+    pub fn rim_cells(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        let b = self.bounds;
+        (b.y..b.bottom())
+            .flat_map(move |cy| (b.x..b.right()).map(move |cx| (cx, cy)))
+            .filter(move |&(cx, cy)| {
+                self.contains_cell(cx, cy)
+                    && !(self.contains_cell(cx - 1, cy)
+                        && self.contains_cell(cx + 1, cy)
+                        && self.contains_cell(cx, cy - 1)
+                        && self.contains_cell(cx, cy + 1))
+            })
+    }
+
+    /// Signed gap to the outline in world px: negative inside, positive
+    /// outside. For a torn hole this is the nearest lobe's rim.
+    pub fn gap(&self, p: Vec2) -> f32 {
+        if self.lobe_count == 0 {
+            return rect_gap(self.bounds.to_world(), p);
+        }
+        self.lobes()
+            .iter()
+            .map(|lobe| lobe.gap(p))
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Does a body of `radius` at `p` touch the hole? The centre inside counts.
+    pub fn touches(&self, p: Vec2, radius: f32) -> bool {
+        self.gap(p) <= radius
+    }
+
+    /// The lobe centre nearest `p` (the bounds centre for a rectangular hole),
+    /// the anchor of the steering push away from the hole.
+    pub fn nearest_centre(&self, p: Vec2) -> Vec2 {
+        if self.lobe_count == 0 {
+            return self.bounds.center_world();
+        }
+        self.lobes()
+            .iter()
+            .map(|lobe| lobe.pos)
+            .min_by(|a, b| a.dist_sq(p).total_cmp(&b.dist_sq(p)))
+            .unwrap_or_else(|| self.bounds.center_world())
+    }
+}
+
+/// Signed distance from a world-pixel rectangle's edge: negative inside.
+fn rect_gap(r: Rectf, p: Vec2) -> f32 {
+    let cx = r.x + r.w * 0.5;
+    let cy = r.y + r.h * 0.5;
+    let dx = (p.x - cx).abs() - r.w * 0.5;
+    let dy = (p.y - cy).abs() - r.h * 0.5;
+    let outside = Vec2::new(dx.max(0.0), dy.max(0.0)).len();
+    outside + dx.max(dy).min(0.0)
 }
 
 /// A crate on ratchet straps that shifts along the deck whenever the trailer
@@ -1013,34 +1212,23 @@ impl TrailerDeck {
     /// its max HP), so a ground body has to treat them like walls. The flow
     /// field is built from the tile grid and does not know about the deck's
     /// pits, and rebuilding a per-level mask for the trailer's few holes is not
-    /// worth its own field, so this is the cheap local rule: a body whose own
-    /// cell is a hole (or whose step is one tile from one) is pushed straight
-    /// away from the nearest hole's centre. One linear scan over the deck's
-    /// 3-5 pits, and only on the flatbed.
+    /// worth its own field, so this is the cheap local rule: a body within a
+    /// tile of the outline is pushed straight away from the nearest lobe's
+    /// centre. The gap is measured to the **outline**, not to the bounds, so a
+    /// body only reacts to the ragged edge it is actually about to walk into.
+    /// One linear scan over the deck's 3-5 pits, and only on the flatbed.
     ///
     /// Returns `None` on every other theme (the caller checks
     /// [`TrailerDeck::is_empty`] first) and for a body clear of every hole.
     pub fn pit_avoid(&self, p: Vec2, radius: f32) -> Option<Vec2> {
         let mut best: Option<(f32, Vec2)> = None;
         for pit in &self.pits {
-            let c = pit.rect.center_world();
-            // Distance to the hole's inflated cell rectangle, not to its centre:
-            // a hole is a square of deck, so a body a few pixels off its lip is
-            // already "about to walk in".
-            let half = Vec2::new(
-                pit.rect.w as f32 * crate::game::collision::TILE_F * 0.5,
-                pit.rect.h as f32 * crate::game::collision::TILE_F * 0.5,
-            );
-            let d = Vec2::new(
-                (p.x - c.x).abs() - half.x,
-                (p.y - c.y).abs() - half.y,
-            );
-            let gap = d.x.max(d.y).max(0.0) - radius;
+            let gap = pit.gap(p) - radius;
             if gap > crate::game::collision::TILE_F {
                 continue;
             }
             if best.is_none_or(|(bg, _)| gap < bg) {
-                best = Some((gap, c));
+                best = Some((gap, pit.nearest_centre(p)));
             }
         }
         best.map(|(_, c)| {
@@ -1615,10 +1803,7 @@ impl Level {
     /// Whether a body footprint meets tidal water. Flatbed callers retain
     /// their existing deck-specific fall and recovery rules.
     pub fn touches_tidal_pit(&self, pos: Vec2, radius: f32) -> bool {
-        self.objects.tidal_pits.iter().any(|pit| {
-            pit.contains_world(pos)
-                || super::collision::circle_rect_overlap(pos, radius, &pit.rect.to_world())
-        })
+        self.objects.tidal_pits.iter().any(|pit| pit.touches(pos, radius))
     }
 
     /// Whether an Outfall owner currently holds this fixture dark.

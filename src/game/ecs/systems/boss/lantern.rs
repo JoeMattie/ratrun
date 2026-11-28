@@ -150,7 +150,7 @@ fn point_fits(level: &Level, pos: Vec2, radius: f32, class: SizeClass) -> bool {
             .trailer
             .pits
             .iter()
-            .any(|pit| collision::circle_rect_overlap(pos, radius, &pit.rect.to_world()))
+            .any(|pit| pit.touches(pos, radius))
 }
 
 fn pull_path_end(level: &Level, from: Vec2, step: Vec2, radius: f32, class: SizeClass) -> Vec2 {

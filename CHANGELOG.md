@@ -38,6 +38,13 @@
 - **Lost bosses walk back (the birds).** The Magpie no longer walks into the
   cargo it used to be stopped by, and it is not walled off from you while it
   flies: it is never called back into a fight it was already flying to.
+- **Flatbed holes.** The holes in the truck's bed are bigger and torn instead
+  of square. Each one is a seeded blob — one to three overlapping lobes with a
+  ragged rim — about twice the area of the old punched plank, with a dark lip
+  and splintered plank ends overhanging the edge. The outline is the hazard:
+  the fall, the steering, the lighting and the picture all read the same edge,
+  so a hole looks exactly as wide as it plays. Every hole still leaves a
+  two-cell plank path round it and the deck still walks end to end.
 
 ## 0.5.0 (2026-11-26)
 

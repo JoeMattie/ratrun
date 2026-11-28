@@ -239,7 +239,7 @@ impl Clip<'_> {
             return false;
         }
         for pit in self.pits.iter().chain(self.tidal_pits.iter()) {
-            if pit.rect.contains(cx, cy) {
+            if pit.contains_cell(cx, cy) {
                 return false;
             }
         }
