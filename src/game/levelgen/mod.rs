@@ -949,7 +949,7 @@ mod tests {
                 let (x, y) = validate::cell_of(pot.pos);
                 let clearance = TileRect::new(x - 1, y - 1, 3, 3);
                 assert!(!clearance.intersects(&entry), "seed {seed}: pot crowds the start");
-                assert!(objects.tidal_pits.iter().all(|pit| !pit.rect.intersects(&clearance)));
+                assert!(objects.tidal_pits.iter().all(|pit| !pit.bounds().intersects(&clearance)));
                 assert!(objects.rat_holes.iter().all(|hole| !clearance.contains(hole.cell.0, hole.cell.1)));
                 assert!(objects.one_way_doors.iter().all(|door| !clearance.contains(door.cell.0, door.cell.1)));
                 assert!(objects.shop_holes.iter().all(|shop| !clearance.contains(shop.mouth.0, shop.mouth.1)));

@@ -301,7 +301,7 @@ fn check_outfall(level: &Level, large: &[bool], errors: &mut Vec<String>) {
         errors.push(format!("Outfall: {} pits exceed the limit of 8", pits.len()));
     }
     for pit in pits {
-        let r = pit.rect;
+        let r = pit.bounds();
         if pit.kind != PitKind::TidalDrop
             || !((1..=2).contains(&r.w.min(r.h)) && (2..=4).contains(&r.w.max(r.h)))
             || !r.cells().all(|(x, y)| level.tiles.get(x, y).is_open())

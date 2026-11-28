@@ -1220,7 +1220,7 @@ pub fn draw_outfall_hazards(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elap
     let eddy_step = (elapsed.max(0.0) * 3.0).floor() as i32;
 
     for pit in &level.objects.tidal_pits {
-        let rect = pit.rect.to_world();
+        let rect = pit.bounds().to_world();
         let x0 = rect.x.round() as i32;
         let y0 = rect.y.round() as i32;
         let w = rect.w.round() as i32;

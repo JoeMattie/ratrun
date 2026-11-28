@@ -3025,10 +3025,7 @@ fn pit_clear(w: &World, q: Vec2, r: f32) -> bool {
         &w.level.trailer.pits
     };
     let m = r + 2.0;
-    !pits.iter().any(|pit| {
-        let rect = pit.rect.to_world();
-        q.x + m > rect.x && q.x - m < rect.right() && q.y + m > rect.y && q.y - m < rect.bottom()
-    })
+    !pits.iter().any(|pit| pit.touches(q, m))
 }
 
 /// Clamp the throttle vector into the simulation's contract: finite, and no

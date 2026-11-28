@@ -1841,11 +1841,7 @@ impl AutoRun {
         // floor). The snapshot is pre-tick, so a rat a step from the edge
         // counts: the fall lands on the tick its centre crosses.
         let deck = &w.level.trailer;
-        let near_pit = deck.pits.iter().any(|pit| {
-            let rect = pit.rect.to_world();
-            let m = 3.0;
-            p.x + m > rect.x && p.x - m < rect.right() && p.y + m > rect.y && p.y - m < rect.bottom()
-        });
+        let near_pit = deck.pits.iter().any(|pit| pit.touches(p, 3.0));
         if near_pit {
             use crate::game::ecs::systems::trailer::FALL_PLAYER_DAMAGE;
             self.threats.push((DamageCause::Pit, (FALL_PLAYER_DAMAGE - armor).max(1.0), 0.0));
