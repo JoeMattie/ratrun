@@ -1153,6 +1153,7 @@ mod tests {
             player_radius: PLAYER_RADIUS,
             player_hurt_radius: PLAYER_RADIUS,
             arena: boss.arena,
+            view: w.viewport,
             level: &w.level,
             flow: &w.flow,
             rng: &mut rng,

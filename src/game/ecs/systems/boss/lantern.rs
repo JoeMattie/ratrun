@@ -765,6 +765,8 @@ mod tests {
             player_radius: PLAYER_RADIUS,
             player_hurt_radius: PLAYER_RADIUS,
             arena,
+            // The App's 1x screen; this fixture reads no view.
+            view: Vec2::new(120.0, 74.0),
             level: &level,
             flow: &flow,
             rng: &mut rng,
@@ -810,6 +812,8 @@ mod tests {
             player_radius: PLAYER_RADIUS,
             player_hurt_radius: PLAYER_RADIUS,
             arena,
+            // The App's 1x screen; this fixture reads no view.
+            view: Vec2::new(120.0, 74.0),
             level: &level,
             flow: &flow,
             rng: &mut rng,

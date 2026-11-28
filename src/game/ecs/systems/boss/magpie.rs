@@ -14,13 +14,20 @@
 //! animal that *is* that motion — a magpie riding the wind over the cab.
 //!
 //! 1. **`Soar`** is the neutral beat and it is **flown**: the bird circles and
-//!    banks over the deck around the rat's live position, holding
-//!    [`art_boss_magpie::SOAR_RING`] px at [`art_boss_magpie::SOAR_SPEED`], over
-//!    cargo and holes, riding the slipstream tailward and flapping back upwind
-//!    for it. It is airborne: nothing grounded reaches it, and it does not touch
-//!    the rat. Now and then a beat ends in a low wing-over (`Swoop`) past the
-//!    rat. It only comes down to work: every attack begins with `Land`, a short
-//!    visible descent onto a perch spot in the pecking band.
+//!    banks over the deck around the rat's live position at
+//!    [`art_boss_magpie::SOAR_SPEED`], over cargo and holes, riding the
+//!    slipstream tailward and flapping back upwind for it. The orbit is an
+//!    **ellipse fitted to the tick's [`Viewport`](crate::game::ecs::resources::Viewport)**
+//!    ([`flight_radii`]: [`art_boss_magpie::SOAR_FIT_X`] of the width,
+//!    [`art_boss_magpie::SOAR_FIT_Y`] of the height, floored at
+//!    [`art_boss_magpie::SOAR_MIN_R`] and capped at
+//!    [`art_boss_magpie::SOAR_RING`]), so the whole beat is on screen at 1x and
+//!    a large terminal keeps the authored 56-84 px ring. The view is the
+//!    unzoomed screen, never the zoom, so the path is zoom-independent. It is
+//!    airborne: nothing grounded reaches it, and it does not touch the rat. Now
+//!    and then a beat ends in a low wing-over (`Swoop`) past the rat, scaled by
+//!    the same fit. It only comes down to work: every attack begins with
+//!    `Land`, a short visible descent onto a perch spot in the pecking band.
 //! 2. **Phase 1: the deck-peck.** `PeckWindup` paints the beak line from the
 //!    bill through the rat to a marked square and freezes it at
 //!    [`art_boss_magpie::PECK_LOCK_PROGRESS`]; `Peck` runs it (single hit);
@@ -64,6 +71,8 @@
 //! `Soar`, `Swoop` and `Land` move with [`fly`], **not** [`move_boss`]: a bird
 //! crosses cargo stacks and holes in the planks, so the flight is steered
 //! straight at a moving target point and clamped only to the map's own edge.
+//! The neutral ring is not a free orbit: its radii are the view's
+//! ([`flight_radii`]), so the bird is always flown back into the picture.
 //! Nothing is ever placed: every tick's step is bounded by
 //! [`art_boss_magpie::SOAR_SPEED`] (or [`art_boss_magpie::SWOOP_SPEED`]) times
 //! `dt`, so the bird is only ever where its own wings carried it.
@@ -293,25 +302,43 @@ fn tick_perch(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) 
 /// skimmed over cargo and holes because a bird does not care where the planks
 /// are. Nothing is remembered about where it started, and nothing steers home:
 /// the only position in the steering is `ctx.player_pos`.
+///
+/// The ring is an **ellipse fitted to the view** ([`flight_radii`]) rather than
+/// a circle, so the whole orbit is in the picture at 1x. The beat's drawn radius
+/// still varies (it drives the ellipse's size inside the fit) and the side still
+/// flips per beat, so the flight keeps the changing radius and direction the
+/// circle had.
 fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
     let slot = phase_slot(boss);
-    let r = boss.scratch[S_FLY_R]
+    let beat = boss.scratch[S_FLY_R]
         .clamp(art_boss_magpie::SOAR_RING[0], art_boss_magpie::SOAR_RING[1]);
+    // The ring is flown as an **ellipse fitted to the tick's simulation view**.
+    // A circle on the old 56-84 px ring was taller than the whole 1x picture,
+    // so the boss was mostly off screen; the ellipse keeps the same beats, the
+    // same speeds and the same variation inside the frame. The view is the
+    // unzoomed screen ([`BossContext::view`]), never the render zoom, so a run
+    // plays identically at every zoom.
+    let radii = flight_radii(ctx, beat);
     let sign = if boss.swipe_side < 0.0 { -1.0 } else { 1.0 };
     let speed = art_boss_magpie::SOAR_SPEED[slot];
     let to = ctx.player_pos - boss.pos;
     let dist = to.len();
     let bearing = if dist > 1e-3 { to * (1.0 / dist) } else { boss.facing };
 
-    // The carrot: the ring point one tick of arc ahead. Chasing a point that is
-    // always exactly `r` from the rat is what keeps the ring around the rat
-    // instead of a circle around the spot the bird spawned at.
-    let arc = if r > 1.0 {
-        (speed * ctx.dt / r).clamp(0.0, 0.6)
+    // The carrot: the ellipse point one tick of arc ahead. Chasing a point that
+    // is always exactly on the ellipse around the rat is what keeps the ring
+    // around the rat instead of a circle around the spot the bird spawned at.
+    // The step is divided by the ellipse's local radius so the carrot travels
+    // at the bird's own speed all the way round, not faster along the long
+    // axis than along the short one.
+    let phi = bearing.y.atan2(bearing.x);
+    let local = (radii.x * phi.sin()).hypot(radii.y * phi.cos());
+    let arc = if local > 1.0 {
+        (speed * ctx.dt / local).clamp(0.0, 0.6)
     } else {
         0.0
     };
-    let aim = if dist > r + art_boss_magpie::SOAR_CHASE_BAND {
+    let aim = if dist > beat + art_boss_magpie::SOAR_CHASE_BAND {
         // Out of the ring: come straight at the rat, at full flight speed,
         // until the ring has it again (the arrival from across the deck).
         ctx.player_pos
@@ -320,7 +347,8 @@ fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
         // bird's own side is the rat *minus* it (turned one step of arc). Added,
         // the carrot sat on the far side and the bird flew through the rat and
         // hovered on top of it.
-        ctx.player_pos - bearing.rotate(arc * sign) * r
+        let step = phi + arc * sign;
+        ctx.player_pos - Vec2::new(step.cos() * radii.x, step.sin() * radii.y)
     };
     // The wind, as a velocity: the slipstream drags everything tailward, so the
     // bird's ground track trails the carrot and it flies a little upwind for it.
@@ -360,9 +388,9 @@ fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
 ///
 /// Nothing is queued and nothing is dealt: it is a fly-by, not an attack. The
 /// pass is aimed at a point [`art_boss_magpie::SWOOP_PASS_OFFSET`] px off the
-/// rat's shoulder, which keeps the whole chord further from the rat than the
-/// art's own offset (the pass reads without ever being a hit the rat cannot
-/// explain).
+/// rat's shoulder (scaled by [`swoop_fit`], the same fit as the ring), which
+/// keeps the whole chord clear of the rat (the pass reads without ever being a
+/// hit the rat cannot explain).
 fn tick_swoop(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let slot = phase_slot(boss);
     let to = boss.target - boss.pos;
@@ -393,6 +421,50 @@ fn fly(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) {
     boss.pos = (boss.pos + step).clamp_box(Vec2::splat(FLY_MARGIN), max);
 }
 
+/// **The flight ellipse for a beat's drawn radius**, fitted to the tick's
+/// simulation view.
+///
+/// The horizontal radius takes at most [`art_boss_magpie::SOAR_FIT_X`] of the
+/// view's width and the vertical at most [`art_boss_magpie::SOAR_FIT_Y`] of its
+/// height, each held to the old ring's `56`-`84` px as an upper bound and to
+/// [`art_boss_magpie::SOAR_MIN_R`] as a floor. The band the beat's drawn radius
+/// sweeps maps onto the band between that floor and the fit, so the radius still
+/// varies beat to beat at every size: on a large terminal the fit clears the old
+/// ring and the pair is exactly `SOAR_RING`, and on a 1x screen it is the same
+/// beat squeezed into the frame.
+fn flight_radii(ctx: &BossContext<'_>, beat: f32) -> Vec2 {
+    let t = ((beat - art_boss_magpie::SOAR_RING[0])
+        / (art_boss_magpie::SOAR_RING[1] - art_boss_magpie::SOAR_RING[0]))
+        .clamp(0.0, 1.0);
+    let cap_x = (ctx.view.x * art_boss_magpie::SOAR_FIT_X)
+        .clamp(art_boss_magpie::SOAR_MIN_R[0], art_boss_magpie::SOAR_RING[1]);
+    let cap_y = (ctx.view.y * art_boss_magpie::SOAR_FIT_Y)
+        .clamp(art_boss_magpie::SOAR_MIN_R[1], art_boss_magpie::SOAR_RING[1]);
+    // Where the fit still clears the old ring's near radius the beat keeps that
+    // whole band; where it does not, the band starts at the floor.
+    let lo_x = if cap_x >= art_boss_magpie::SOAR_RING[0] {
+        art_boss_magpie::SOAR_RING[0]
+    } else {
+        art_boss_magpie::SOAR_MIN_R[0].min(cap_x)
+    };
+    let lo_y = if cap_y >= art_boss_magpie::SOAR_RING[0] {
+        art_boss_magpie::SOAR_RING[0]
+    } else {
+        art_boss_magpie::SOAR_MIN_R[1].min(cap_y)
+    };
+    Vec2::new(lo_x + (cap_x - lo_x) * t, lo_y + (cap_y - lo_y) * t)
+}
+
+/// How much of the old ring the fitted ellipse holds (`0.0`-`1.0`): the
+/// wing-over's abeam offset and run are scaled by it, so a fly-by at 1x is a
+/// pass across the picture instead of a line out of it.
+fn swoop_fit(ctx: &BossContext<'_>) -> f32 {
+    let r = flight_radii(ctx, art_boss_magpie::SOAR_RING[1]);
+    (r.x / art_boss_magpie::SOAR_RING[1])
+        .min(r.y / art_boss_magpie::SOAR_RING[1])
+        .clamp(0.0, 1.0)
+}
+
 /// Fly up into the neutral ring: draw this beat's radius and the side it will
 /// circle to, from the boss's own stream (never the run's).
 fn enter_soar(ctx: &mut BossContext<'_>, boss: &mut Boss) {
@@ -411,9 +483,11 @@ fn enter_swoop(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let sign = if boss.swipe_side < 0.0 { -1.0 } else { 1.0 };
     let to = ctx.player_pos - boss.pos;
     let bearing = if to.len_sq() > 1e-3 { to.normalized() } else { boss.facing };
-    // Abeam of the rat, a run further along the orbit's own direction.
-    let abeam = bearing.perp() * (sign * art_boss_magpie::SWOOP_PASS_OFFSET);
-    let ahead = bearing.perp() * (sign * art_boss_magpie::SWOOP_RUN);
+    // Abeam of the rat, a run further along the orbit's own direction, both
+    // scaled the way the ring was fitted to the view.
+    let fit = swoop_fit(ctx);
+    let abeam = bearing.perp() * (sign * art_boss_magpie::SWOOP_PASS_OFFSET * fit);
+    let ahead = bearing.perp() * (sign * art_boss_magpie::SWOOP_RUN * fit);
     boss.pounce_origin = boss.pos;
     boss.target = ctx.player_pos + abeam + ahead;
     boss.facing = (boss.target - boss.pos).normalized();
@@ -1222,6 +1296,7 @@ mod tests {
             player_radius: PLAYER_RADIUS,
             player_hurt_radius: PLAYER_RADIUS,
             arena: boss_arena,
+            view: w.viewport,
             level: &w.level,
             flow: &w.flow,
             rng,
@@ -1839,8 +1914,9 @@ mod tests {
     }
 
     /// **The neutral beat is flight.** Over 20 s the bird covers real ground,
-    /// and outside its attacks it holds the ring around the rat: `SOAR_RING`
-    /// (56-84 px) with the chase band's own ceiling.
+    /// and outside its attacks it holds the ring around the rat — the ellipse
+    /// fitted to this world's view ([`flight_radii`]), with the pursuit's few px
+    /// of lag as its band.
     ///
     /// The sample starts a moment into the beat (progress `>= 0.5`): after an
     /// attack the bird is where that attack left it — the peck's lunge parks it
@@ -1855,6 +1931,13 @@ mod tests {
         w.player.hp = 1.0e6;
         let centre = arena_centre(&w);
         place(&mut w, centre - Vec2::new(100.0, 0.0), centre);
+        // The fitted ring this world flies: the old circle is now an ellipse and
+        // the bands below are its own radii, not the old 56-84 px ring.
+        let ring = {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(2);
+            let ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
+            flight_radii(&ctx, art::SOAR_RING[1])
+        };
         let mut prev = boss_of(&mut w).expect("alive").pos;
         let mut flown = 0.0f32;
         let mut nearest = f32::MAX;
@@ -1875,14 +1958,114 @@ mod tests {
             }
         }
         assert!(flown >= 400.0, "the bird only covered {flown:.0} px in 20 s");
+        // The band is the fitted ellipse plus the pursuit's own lag (a few px):
+        // the ring may not drift past its long radius, and may not close inside
+        // its short one. Both are tighter than the old 140 / 40 px circle.
         assert!(
-            furthest <= 140.0,
-            "the ring drifted out to {furthest:.0} px from the rat"
+            furthest <= ring.x.max(ring.y) + 6.0,
+            "the ring drifted out to {furthest:.0} px from the rat (fitted ring {ring:?})"
         );
         assert!(
-            nearest >= 40.0,
-            "the ring closed to {nearest:.0} px from the rat"
+            nearest >= ring.x.min(ring.y) - 6.0,
+            "the ring closed to {nearest:.0} px from the rat (fitted ring {ring:?})"
         );
+    }
+
+    /// **The fit itself.** The radii are the view's own shares (never the zoom),
+    /// floored at [`art::SOAR_MIN_R`] and capped at the authored
+    /// [`art::SOAR_RING`], and the beat's drawn radius still moves them: a large
+    /// terminal keeps the 56-84 px ring pair unchanged.
+    #[test]
+    fn the_flight_ellipse_is_fitted_to_the_view() {
+        let mut w = trailer_world(57);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let samples = [(120.0f32, 74.0f32), (160.0, 94.0), (90.0, 40.0), (400.0, 400.0)];
+        let mut fits = Vec::new();
+        for (view_x, view_y) in samples {
+            w.viewport = Vec2::new(view_x, view_y);
+            let ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
+            let small = flight_radii(&ctx, art::SOAR_RING[0]);
+            let large = flight_radii(&ctx, art::SOAR_RING[1]);
+            let cap_x = (view_x * art::SOAR_FIT_X)
+                .min(art::SOAR_RING[1])
+                .max(art::SOAR_MIN_R[0]);
+            let cap_y = (view_y * art::SOAR_FIT_Y)
+                .min(art::SOAR_RING[1])
+                .max(art::SOAR_MIN_R[1]);
+            assert!(large.x <= cap_x + 1e-3, "{view_x}x{view_y}: x radius {} > {cap_x}", large.x);
+            assert!(large.y <= cap_y + 1e-3, "{view_x}x{view_y}: y radius {} > {cap_y}", large.y);
+            assert!(small.x >= art::SOAR_MIN_R[0] - 1e-3);
+            assert!(small.y >= art::SOAR_MIN_R[1] - 1e-3);
+            assert!(
+                small.x <= large.x && small.y <= large.y,
+                "{view_x}x{view_y}: the drawn radius must still size the ellipse"
+            );
+            fits.push((small, large));
+        }
+        // The App's 1x playfield: the ellipse is inside the 120 x 74 picture.
+        assert!(fits[0].1.x <= 48.0 + 1e-3 && fits[0].1.y <= 74.0 * 0.38 + 1e-3);
+        // A large terminal flies the authored ring, unchanged.
+        assert!((fits[3].1.x - art::SOAR_RING[1]).abs() < 1e-3);
+        assert!((fits[3].1.y - art::SOAR_RING[1]).abs() < 1e-3);
+        assert!((fits[3].0.x - art::SOAR_RING[0]).abs() < 1e-3);
+        assert!((fits[3].0.y - art::SOAR_RING[0]).abs() < 1e-3);
+    }
+
+    /// **The soaring bird stays on screen.** The 0.5.1 integration found the
+    /// boss mostly off screen at 1x: a 56-84 px circle around the rat is taller
+    /// than the whole 74 px playfield. The ring is fitted to the tick's
+    /// `Viewport` now, and this drives the real boss system on two terminal
+    /// sizes, sampling the flown neutral beat (`Soar`/`Swoop`) for 20 s: the
+    /// body centre is inside the view rectangle around the rat at least 90 % of
+    /// the samples.
+    ///
+    /// The attacks are not sampled: `Land` is the authored descent onto a perch
+    /// spot in the pecking band (up to 62 px from the rat, unchanged here and by
+    /// design), and it is not the soaring beat the owner was watching.
+    #[test]
+    fn the_soar_ellipse_keeps_the_magpie_on_screen() {
+        for (view_x, view_y) in [(120.0f32, 74.0f32), (160.0, 94.0)] {
+            let mut w = trailer_world(58);
+            w.viewport = Vec2::new(view_x, view_y);
+            spawn_magpie(&mut w);
+            w.clear_enemies();
+            w.player.loadout.stats.max_hp = 1.0e6;
+            w.player.hp = 1.0e6;
+            let centre = arena_centre(&w);
+            // On the fitted ring at its wide point: the window measures the
+            // orbit, not an arrival from across the deck.
+            let ring = {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+                let ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
+                flight_radii(&ctx, art::SOAR_RING[1])
+            };
+            place(&mut w, centre - Vec2::new(ring.x, 0.0), centre);
+            let half = Vec2::new(view_x, view_y) * 0.5;
+            let mut sampled = 0u32;
+            let mut inside = 0u32;
+            for _ in 0..(20.0 / DT) as usize {
+                tick(&mut w);
+                if !matches!(state_of(&mut w), MagpieState::Soar | MagpieState::Swoop) {
+                    continue;
+                }
+                let boss = boss_of(&mut w).expect("alive");
+                let d = boss.pos - w.player.pos;
+                sampled += 1;
+                if d.x.abs() <= half.x && d.y.abs() <= half.y {
+                    inside += 1;
+                }
+            }
+            assert!(
+                sampled > 240,
+                "{view_x}x{view_y}: only {sampled} flown samples in the 20 s window"
+            );
+            let frac = inside as f32 / sampled as f32;
+            assert!(
+                frac >= 0.90,
+                "{view_x}x{view_y}: the bird was inside the view rectangle for only {:.0} % of the soar window",
+                frac * 100.0
+            );
+        }
     }
 
     /// **A bird crosses cargo and holes.** The neutral beat used to walk: a
@@ -1931,8 +2114,8 @@ mod tests {
     }
 
     /// **The wing-over is a fly-by, not an attack.** It queues nothing, deals
-    /// nothing, and passes the rat no closer than [`art::SWOOP_PASS_OFFSET`] px
-    /// abeam, then climbs back into the ring.
+    /// nothing, and passes the rat no closer than the fitted abeam offset, then
+    /// climbs back into the ring.
     #[test]
     fn a_wing_over_passes_the_rat_and_deals_nothing() {
         let mut w = trailer_world(40);
@@ -1967,8 +2150,11 @@ mod tests {
         }
         assert!((t - art::SWOOP_DURATION).abs() < 0.08, "swoop beat {t}");
         assert!(!queued, "a wing-over must queue no hazard");
+        // The abeam offset scales with the fitted ring (a 160x80 view is not a
+        // large terminal), so the chord stands off by the fit's own reach
+        // instead of the authored 48 px. Still well clear of the rat.
         assert!(
-            nearest >= 40.0,
+            nearest >= 30.0,
             "the pass came within {nearest:.0} px of the rat"
         );
         assert_eq!(state_of(&mut w), MagpieState::Soar);

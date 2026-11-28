@@ -28,11 +28,13 @@
 //! ## The bird flies
 //!
 //! `Soar` is the neutral beat and it is **airborne**: the bird circles and
-//! banks over the deck around the rat, holding [`SOAR_RING`] px, riding the
-//! slipstream tailward and flapping back upwind for it, and it crosses cargo
-//! stacks and holes in the planks as if they were not there. Flight is
-//! [`SOAR_SPEED`] (110-140 px/s), faster than the rat's 58 px/s walk at every
-//! phase, so a bird that wants the rat always has it.
+//! banks over the deck around the rat on an ellipse **fitted to the playfield**
+//! ([`SOAR_FIT_X`] of the view's width, [`SOAR_FIT_Y`] of its height, floored at
+//! [`SOAR_MIN_R`], capped at [`SOAR_RING`] — the controller's `flight_radii`
+//! owns the arithmetic), riding the slipstream tailward and flapping back upwind
+//! for it, and it crosses cargo stacks and holes in the planks as if they were
+//! not there. Flight is [`SOAR_SPEED`] (110-140 px/s), faster than the rat's
+//! 58 px/s walk at every phase, so a bird that wants the rat always has it.
 //!
 //! It comes down only to work. A peck is preceded by `Land`: a short, visible
 //! descent onto a perch spot in the pecking band ([`DESCENT_MIN`]..
@@ -43,9 +45,10 @@
 //! the bird learned to fly.
 //!
 //! Now and then a soaring beat ends in [`MagpieState::Swoop`]: a low, fast
-//! wing-over that skims past the rat at [`SWOOP_PASS_OFFSET`] px and climbs back
-//! out. It deals nothing (the fly-by is not an attack), and it keeps the fight
-//! moving when the rat has learnt to read the ring.
+//! wing-over that skims past the rat at [`SWOOP_PASS_OFFSET`] px (scaled with
+//! the same view fit) and climbs back out. It deals nothing (the fly-by is not
+//! an attack), and it keeps the fight moving when the rat has learnt to read the
+//! ring.
 //!
 //! ## The deck-peck
 //!
@@ -210,7 +213,28 @@ pub const SOAR_SPEED: [f32; 3] = [110.0, 125.0, 140.0];
 /// The ring `Soar` holds the rat at, in px (`near`, `far`): the pecking band's
 /// flight equivalent, wide enough that the rat can read the shadow and always
 /// inside the bird's `PECK_REACH` after one more descent.
+///
+/// It is the **drawn** radius, and the upper bound on the flown one: the flight
+/// is an ellipse fitted to the tick's [`Viewport`](crate::game::ecs::resources::Viewport)
+/// (see [`SOAR_FIT_X`], [`SOAR_FIT_Y`], [`SOAR_MIN_R`]), so on a large terminal
+/// a beat still draws exactly this ring pair, and on a 1x screen the same pair
+/// maps onto the smaller ellipse the view has room for.
 pub const SOAR_RING: [f32; 2] = [56.0, 84.0];
+
+/// The share of the simulation view's **width** the flight ellipse's horizontal
+/// radius may take. The view is the unzoomed screen (120 px at the App's 1x
+/// 120x40 playfield), never the render zoom, so the same seed flies the same
+/// path at every zoom.
+pub const SOAR_FIT_X: f32 = 0.40;
+
+/// The share of the simulation view's **height** the flight ellipse's vertical
+/// radius may take (the screen is half-block: 74 px on a 120x40 terminal).
+pub const SOAR_FIT_Y: f32 = 0.38;
+
+/// The floor under the flight ellipse's radii, in px (`horizontal`, `vertical`):
+/// a view too small for the fit keeps a ring the rat can still read as flight
+/// rather than a jitter around its own body.
+pub const SOAR_MIN_R: [f32; 2] = [40.0, 22.0];
 
 /// Past the ring by more than this, the bird stops arcing and comes straight
 /// at the rat at full flight speed (the recovery from an arrival across the
@@ -404,9 +428,11 @@ const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MagpieState {
     /// **The bird in the air.** The neutral beat: it circles and banks over the
-    /// deck around the rat, holding [`SOAR_RING`] px, riding the slipstream
-    /// tailward and flapping back upwind for it, and crossing cargo and holes as
-    /// if they were not there — because, from up here, they are not.
+    /// deck around the rat on an ellipse fitted to the view (see [`SOAR_FIT_X`],
+    /// [`SOAR_FIT_Y`], [`SOAR_MIN_R`]; [`SOAR_RING`] is the upper bound), riding
+    /// the slipstream tailward and flapping back upwind for it, and crossing
+    /// cargo and holes as if they were not there — because, from up here, they
+    /// are not.
     ///
     /// It is **airborne**: nothing grounded reaches it (`Boss::hit_shapes`),
     /// and body contact is off. The counterplay is the descent: it lands to
@@ -419,7 +445,8 @@ pub enum MagpieState {
 
     /// **The wing-over.** Now and then a beat ends in a low, fast pass: the bird
     /// drops to the planks' height and skims past the rat at
-    /// [`SWOOP_PASS_OFFSET`] px, then climbs back out into the next `Soar`.
+    /// [`SWOOP_PASS_OFFSET`] px scaled by the view fit, then climbs back out into
+    /// the next `Soar`.
     ///
     /// - Duration: [`SWOOP_DURATION`] (0.55 s).
     /// - Warning: the shadow tightens onto the planks and the wings sweep back.
