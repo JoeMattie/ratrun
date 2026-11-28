@@ -316,9 +316,13 @@ pub fn boss_plate(world: &World) -> (&'static str, &'static str) {
         }
     });
     match live {
-        // Only the Redtail can be out of reach, and the plate must say so.
+        // The two birds can be out of reach, and the plate must say so: the
+        // Redtail above the deck, the Magpie between its attacks.
         Some((BossKind::Hawk, true)) => {
             (crate::lore::HAWK_NAME, crate::game::art_boss_hawk::OVERHEAD_TAG)
+        }
+        Some((BossKind::Magpie, true)) => {
+            ("THE MAGPIE", crate::game::art_boss_magpie::OVERHEAD_TAG)
         }
         Some((kind, _)) => boss_kind_codename(kind),
         None => {

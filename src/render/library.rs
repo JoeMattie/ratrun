@@ -952,6 +952,7 @@ fn pose_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
                 target: c + Vec2::new(24.0, 10.0),
                 lane_start: c - Vec2::new(20.0, 0.0),
                 sweep: 0.0,
+                bank: 0.0,
                 hunting: true,
             };
             art_boss_magpie::draw_magpie_ground(art, &v, Vec2::ZERO, accent);

@@ -2810,7 +2810,14 @@ mod tests {
             (BossKind::Mower, None, 1.0),
             (BossKind::Mangle, None, 1.0),
             (BossKind::NightEdition, None, 1.0),
-            (BossKind::Magpie, None, 1.0),
+            // The Magpie's beat is *flown* (`MagpieState::Soar`), and a bird in
+            // the air is out of reach of every grounded shape: its own damage
+            // window is the deck (the landed watch and the peck).
+            (
+                BossKind::Magpie,
+                Some((BossState::Magpie(MagpieState::Perch), 2.0, 0.5)),
+                1.0,
+            ),
             // The punish windows, each exposed its own way.
             (
                 BossKind::Mangle,
@@ -2855,10 +2862,12 @@ mod tests {
         }
         // States a bullet may or may not reach: the three effects must agree
         // with the shared grounded-shape rule either way. The cat mid-pounce is
-        // over the rat's head; the Magpie's strafe is flown belly-to-the-planks
-        // (`Boss::hit_shapes` keeps it grounded on purpose).
-        let either: [(BossKind, BossPose); 4] = [
+        // over the rat's head; the Magpie's airborne states (`Soar` and its
+        // relays) are flown above the planks, so each is ungrounded and out of
+        // a grounded weapon's reach.
+        let either: [(BossKind, BossPose); 5] = [
             (BossKind::Cat, (BossState::Cat(BossCatState::Pounce), 0.70, 0.35)),
+            (BossKind::Magpie, (BossState::Magpie(MagpieState::Soar), 1.0, 0.5)),
             (BossKind::Magpie, (BossState::Magpie(MagpieState::Takeoff), 1.0, 0.5)),
             (BossKind::Magpie, (BossState::Magpie(MagpieState::StrafePass), 1.0, 0.5)),
             (BossKind::Magpie, (BossState::Magpie(MagpieState::SnatchDrop), 1.0, 0.5)),
