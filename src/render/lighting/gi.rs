@@ -94,7 +94,8 @@ use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Pickup;
 use crate::game::level::{Level, LightFixtureKind, LightZoneKind, PropKind, Rectf, Theme};
-use crate::game::weapon::{DROPPING_ARM, DROPPING_LIFE, DROPPING_LIGHT_ENERGY, DROPPING_LIGHT_RADIUS};
+use crate::game::weapon::{DROPPING_LIGHT_ENERGY, DROPPING_LIGHT_RADIUS};
+use crate::render::dropping_fade::{self, DroppingFade};
 use crate::math::Vec2;
 use crate::render::palette::{self, Rgb};
 
@@ -1929,6 +1930,7 @@ pub(super) fn apply_indirect(
     scene: &LightScene<'_>,
     frame: &FxFrame<'_>,
     cap: f32,
+    ghosts: &DroppingFade,
 ) {
     if !scene.gi.gi_enabled(frame.mode) {
         return;
@@ -2354,22 +2356,21 @@ pub(super) fn apply_indirect(
         if !drops.is_empty() {
             drops.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
             for &(_, drop) in drops.iter().take(12) {
-                let left = DROPPING_LIFE - drop.age;
-                if left <= 0.0 {
+                let dry = dropping_fade::natural_fade(drop.age);
+                if dry <= 0.0 {
                     continue;
                 }
                 let rank = usize::from(drop.level.clamp(1, 5) - 1);
-                let arm = if drop.age < DROPPING_ARM { 0.5 } else { 1.0 };
-                let fade = (left / 2.0).min(1.0);
+                let arm = dropping_fade::arm_fade(drop.age);
                 let r = DROPPING_LIGHT_RADIUS[rank];
                 if overlaps_pad(drop.pos, r * super::TAIL_REACH) {
                     let mut l = Light::radial(
                         drop.pos,
                         r,
                         (110, 255, 120),
-                        DROPPING_LIGHT_ENERGY[rank] * arm * fade * 1.15,
+                        DROPPING_LIGHT_ENERGY[rank] * arm * dry * 1.15,
                     );
-                    l.scatter = 0.18 * arm * fade;
+                    l.scatter = 0.18 * arm * dry;
                     l.falloff = Falloff::Small;
                     l.height = 3.0;
                     splat_steady_light(
@@ -2385,6 +2386,41 @@ pub(super) fn apply_indirect(
                         &mut s.emit_dyn,
                     );
                 }
+            }
+        }
+
+        // 2c-ii. Droppings that left the floor early (the cap's eviction or a
+        // body stepping in one) are still emitting for `DROPPING_FADE_SECS`:
+        // the same emitter, on the same smoothstep to exactly zero, so the
+        // bounced light cannot cut out either. Render-only.
+        for ghost in ghosts.ghosts() {
+            let strength = ghost.strength(scene.elapsed);
+            if strength <= 0.0 {
+                continue;
+            }
+            let r = ghost.radius();
+            if overlaps_pad(ghost.drop().pos, r * super::TAIL_REACH) {
+                let mut l = Light::radial(
+                    ghost.drop().pos,
+                    r,
+                    (110, 255, 120),
+                    ghost.energy(scene.elapsed) * 1.15,
+                );
+                l.scatter = 0.18 * strength;
+                l.falloff = Falloff::Small;
+                l.height = 3.0;
+                splat_steady_light(
+                    l,
+                    None,
+                    true,
+                    geometry,
+                    pstart,
+                    (pw, ph),
+                    &s.is_wall,
+                    &s.facing,
+                    &s.albedo,
+                    &mut s.emit_dyn,
+                );
             }
         }
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Hantavirus lights go out smoothly.** When a poop leaves the floor before
+  its fifteen seconds — pushed out by the newest one, or stepped in and spent —
+  its green light, its floor glow and its bounced light now dim to nothing over
+  about half a second instead of cutting out in one frame, and the pellet
+  dissolves with them. A poop that simply dries out ends exactly at zero, so it
+  no longer blinks out on its last frame either.
+
 ## 0.5.0 (2026-11-26)
 
 - **Phones.** The web build plays on a phone. Landscape only: portrait shows
