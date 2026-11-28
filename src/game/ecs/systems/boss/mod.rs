@@ -4682,17 +4682,19 @@ pub fn boss_update_system(
     mut commands: Commands,
     mut fight: ResMut<BossFight>,
     mut counters: ResMut<RunCounters>,
-    (tick, tuning, sector): (
+    // `viewport` is the tick's unzoomed screen, for controllers that fit a
+    // shape to it (the Magpie's flight ellipse). Never the zoom: see
+    // [`BossContext::view`]. It rides in this tuple because a system takes at
+    // most sixteen parameters.
+    (tick, tuning, sector, viewport): (
         Res<TickInput>,
         Res<crate::tuning::RunTuning>,
         Res<DifficultyLevel>,
+        Res<Viewport>,
     ),
     mut level: ResMut<Level>,
     mut player: ResMut<Player>,
     flow: Res<FlowField>,
-    // The tick's unzoomed screen, for controllers that fit a shape to it (the
-    // Magpie's flight ellipse). Never the zoom: see [`BossContext::view`].
-    viewport: Res<Viewport>,
     mut particles: ResMut<Particles>,
     mut damage_numbers: ResMut<DamageNumbers>,
     mut shake: ResMut<Shake>,

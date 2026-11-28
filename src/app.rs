@@ -11205,6 +11205,128 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
+            // `magpie-<soar-left|soar-right|soar-level|swoop|land>`: the Magpie's
+            // flight poses, taken from a real fight on the Flatbed. The fight
+            // is played until the bird is in the named state, mid-beat and
+            // inside the picture around the standing rat; that frame is the
+            // capture. Soar banks to the side of its orbit (`swipe_side`, always
+            // -1 or +1 in play), so `soar-level` is the one staged pose: a real
+            // soar frame redrawn with the bank zeroed, nothing stepped after.
+            t if t.starts_with("magpie-") => {
+                use crate::game::art_boss_magpie::MagpieState;
+                use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
+                let pose = t.trim_start_matches("magpie-").to_string();
+                hh.app.start_practice(Theme::Trailer);
+                hh.frame(&[KeyCode::Enter]);
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let centre = w
+                        .level
+                        .largest_hall()
+                        .map(|r| r.rect.center_world())
+                        .expect("every floor has a hall");
+                    w.clear_enemies();
+                    w.player.pos = w
+                        .level
+                        .tiles
+                        .nearest_open_center(
+                            centre,
+                            crate::game::collision::SizeClass::Large,
+                            16,
+                        )
+                        .unwrap_or(centre);
+                    w.force_boss_here(BossKind::Magpie);
+                }
+                let trace = std::env::var("RATRUN_DUMP_TRACE").is_ok();
+                let mut found = false;
+                for i in 0..3600u32 {
+                    let text = hh.frame(&[]);
+                    if text.contains("LEVEL UP") {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.hp = w.player.max_hp();
+                    w.clear_enemies();
+                    let rat = w.player.pos;
+                    let half = w.viewport * 0.5;
+                    // `RATRUN_DUMP_TRACE=1` prints where the bird is every
+                    // sixth frame, to see the path a framing rule is choosing
+                    // from.
+                    if trace && i % 6 == 0 {
+                        if let Some(line) = w.ecs.iter_entities().find_map(|e| {
+                            let b = e.get::<Boss>()?;
+                            let d = b.pos - rat;
+                            Some(format!(
+                                "dump magpie trace: frame {i} {:?} p {:.2} side {:+.0} offset ({:.0}, {:.0})",
+                                b.state,
+                                b.progress(),
+                                b.swipe_side,
+                                d.x,
+                                d.y
+                            ))
+                        }) {
+                            eprintln!("{line}");
+                        }
+                    }
+                    let hit = w.ecs.iter_entities().find_map(|e| {
+                        let b = e.get::<Boss>()?;
+                        let BossState::Magpie(state) = b.state else {
+                            return None;
+                        };
+                        let d = b.pos - rat;
+                        // The whole bird in the picture: its wings clear of
+                        // the screen edge, its lifted body clear of the boss
+                        // bar above and the minimap at the bottom right, and
+                        // off the rat itself. The opening toasts are let go
+                        // first.
+                        let reach = if pose == "land" { 20.0 } else { 28.0 };
+                        let framed = i >= 240
+                            && d.x >= -(half.x - reach)
+                            && d.x <= 20.0
+                            && d.y >= -8.0
+                            && d.y <= half.y - 14.0
+                            && d.len() >= 18.0;
+                        let p = b.progress();
+                        let wanted = match pose.as_str() {
+                            "soar-left" => {
+                                state == MagpieState::Soar
+                                    && b.swipe_side < 0.0
+                                    && (0.4..=0.8).contains(&p)
+                            }
+                            "soar-right" | "soar-level" => {
+                                state == MagpieState::Soar
+                                    && b.swipe_side > 0.0
+                                    && (0.4..=0.8).contains(&p)
+                            }
+                            "swoop" => {
+                                state == MagpieState::Swoop && (0.35..=0.65).contains(&p)
+                            }
+                            "land" => state == MagpieState::Land && (0.35..=0.7).contains(&p),
+                            other => panic!("unknown magpie pose `{other}`"),
+                        };
+                        (wanted && framed).then_some((state, p, b.swipe_side, d))
+                    });
+                    if let Some((state, p, side, d)) = hit {
+                        eprintln!(
+                            "dump magpie-{pose}: frame {i} {state:?} progress {p:.2} side {side:+.0} \
+                             offset ({:.0}, {:.0}) px from the rat, view {:.0}x{:.0}",
+                            d.x, d.y, w.viewport.x, w.viewport.y
+                        );
+                        found = true;
+                        break;
+                    }
+                }
+                assert!(found, "magpie-{pose}: no framed frame in 60 s of the fight");
+                if pose == "soar-level" {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let mut q = w.ecs.query::<&mut Boss>();
+                    for mut b in q.iter_mut(&mut w.ecs) {
+                        b.swipe_side = 0.0;
+                    }
+                }
+                hh.app.picture_dirty = true;
+                hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+            }
             // `bossfight-<n>`: boss `n` of `BossKind::all()` on its own floor,
             // a few seconds into the fight, the rat standing off in the arena.
             t if t.starts_with("bossfight") => {

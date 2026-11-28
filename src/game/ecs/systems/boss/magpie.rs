@@ -331,8 +331,18 @@ fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
     // The step is divided by the ellipse's local radius so the carrot travels
     // at the bird's own speed all the way round, not faster along the long
     // axis than along the short one.
-    let phi = bearing.y.atan2(bearing.x);
-    let local = (radii.x * phi.sin()).hypot(radii.y * phi.cos());
+    //
+    // `phi` is the bird's **parameter** on the ellipse, not the polar angle of
+    // its bearing: the ellipse point in the bird's direction is
+    // `(cos phi * rx, sin phi * ry)`, so `tan phi = (y / ry) / (x / rx)`. Fed
+    // the polar angle instead, the carrot fell *behind* the bird wherever the
+    // two angles differ by more than a tick of arc (everywhere near the long
+    // axis of a 48 x 27 px ellipse), and the bird flew to the end of the long
+    // axis and hovered there for the whole beat. On a circle the two angles
+    // are the same angle.
+    let phi = crate::detmath::atan2(bearing.y * radii.x, bearing.x * radii.y);
+    let (phi_sin, phi_cos) = crate::detmath::sin_cos(phi);
+    let local = crate::detmath::hypot(radii.x * phi_sin, radii.y * phi_cos);
     let arc = if local > 1.0 {
         (speed * ctx.dt / local).clamp(0.0, 0.6)
     } else {
@@ -347,8 +357,8 @@ fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
         // bird's own side is the rat *minus* it (turned one step of arc). Added,
         // the carrot sat on the far side and the bird flew through the rat and
         // hovered on top of it.
-        let step = phi + arc * sign;
-        ctx.player_pos - Vec2::new(step.cos() * radii.x, step.sin() * radii.y)
+        let (step_sin, step_cos) = crate::detmath::sin_cos(phi + arc * sign);
+        ctx.player_pos - Vec2::new(step_cos * radii.x, step_sin * radii.y)
     };
     // The wind, as a velocity: the slipstream drags everything tailward, so the
     // bird's ground track trails the carrot and it flies a little upwind for it.
@@ -1959,15 +1969,23 @@ mod tests {
         }
         assert!(flown >= 400.0, "the bird only covered {flown:.0} px in 20 s");
         // The band is the fitted ellipse plus the pursuit's own lag (a few px):
-        // the ring may not drift past its long radius, and may not close inside
-        // its short one. Both are tighter than the old 140 / 40 px circle.
+        // the ring may not drift past the long radius of the widest beat, and
+        // may not close inside the short radius of the **narrowest** beat (the
+        // drawn radius sizes the ellipse, and a bird that really circles
+        // crosses the short axis of every one it flies). Both are tighter than
+        // the old 140 / 40 px circle.
+        let narrow = {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(2);
+            let ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
+            flight_radii(&ctx, art::SOAR_RING[0])
+        };
         assert!(
             furthest <= ring.x.max(ring.y) + 6.0,
             "the ring drifted out to {furthest:.0} px from the rat (fitted ring {ring:?})"
         );
         assert!(
-            nearest >= ring.x.min(ring.y) - 6.0,
-            "the ring closed to {nearest:.0} px from the rat (fitted ring {ring:?})"
+            nearest >= narrow.x.min(narrow.y) - 6.0,
+            "the ring closed to {nearest:.0} px from the rat (narrowest ring {narrow:?})"
         );
     }
 
@@ -1986,12 +2004,10 @@ mod tests {
             let ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
             let small = flight_radii(&ctx, art::SOAR_RING[0]);
             let large = flight_radii(&ctx, art::SOAR_RING[1]);
-            let cap_x = (view_x * art::SOAR_FIT_X)
-                .min(art::SOAR_RING[1])
-                .max(art::SOAR_MIN_R[0]);
-            let cap_y = (view_y * art::SOAR_FIT_Y)
-                .min(art::SOAR_RING[1])
-                .max(art::SOAR_MIN_R[1]);
+            let cap_x =
+                (view_x * art::SOAR_FIT_X).clamp(art::SOAR_MIN_R[0], art::SOAR_RING[1]);
+            let cap_y =
+                (view_y * art::SOAR_FIT_Y).clamp(art::SOAR_MIN_R[1], art::SOAR_RING[1]);
             assert!(large.x <= cap_x + 1e-3, "{view_x}x{view_y}: x radius {} > {cap_x}", large.x);
             assert!(large.y <= cap_y + 1e-3, "{view_x}x{view_y}: y radius {} > {cap_y}", large.y);
             assert!(small.x >= art::SOAR_MIN_R[0] - 1e-3);
@@ -2064,6 +2080,63 @@ mod tests {
                 frac >= 0.90,
                 "{view_x}x{view_y}: the bird was inside the view rectangle for only {:.0} % of the soar window",
                 frac * 100.0
+            );
+        }
+    }
+
+    /// **The soaring bird circles.** The 0.5.2 integration found the fitted
+    /// ellipse had stopped the orbit: the carrot was built from the polar angle
+    /// of the bird's bearing where the ellipse wants its parameter, so near the
+    /// long axis the carrot sat behind the bird and it hovered about 45 px west
+    /// of the rat for the whole beat. This sums the angle the bird sweeps
+    /// around a standing rat over every `Soar` tick of 20 s, on the two views
+    /// whose ellipses are squeezed and on one large enough to fly the circle.
+    /// A bird at 110 px/s on a ring of 30-80 px turns 1.4-3.7 rad a second; the
+    /// hover measured 0.31.
+    #[test]
+    fn the_soaring_magpie_circles_the_rat() {
+        for (view_x, view_y) in [(120.0f32, 74.0f32), (160.0, 94.0), (400.0, 400.0)] {
+            let mut w = trailer_world(58);
+            w.viewport = Vec2::new(view_x, view_y);
+            spawn_magpie(&mut w);
+            w.clear_enemies();
+            w.player.loadout.stats.max_hp = 1.0e6;
+            w.player.hp = 1.0e6;
+            let centre = arena_centre(&w);
+            place(&mut w, centre - Vec2::new(60.0, 0.0), centre);
+            let mut swept = 0.0f32;
+            let mut soar_secs = 0.0f32;
+            let mut last: Option<f32> = None;
+            for _ in 0..(20.0 / DT) as usize {
+                tick(&mut w);
+                if state_of(&mut w) != MagpieState::Soar {
+                    last = None;
+                    continue;
+                }
+                let boss = boss_of(&mut w).expect("alive");
+                let d = boss.pos - w.player.pos;
+                let angle = crate::detmath::atan2(d.y, d.x);
+                if let Some(prev) = last {
+                    let mut turn = angle - prev;
+                    if turn > std::f32::consts::PI {
+                        turn -= std::f32::consts::TAU;
+                    } else if turn < -std::f32::consts::PI {
+                        turn += std::f32::consts::TAU;
+                    }
+                    swept += turn.abs();
+                    soar_secs += DT;
+                }
+                last = Some(angle);
+            }
+            assert!(
+                soar_secs > 4.0,
+                "{view_x}x{view_y}: only {soar_secs:.1} s of soaring in the 20 s window"
+            );
+            let rate = swept / soar_secs;
+            assert!(
+                rate >= 1.0,
+                "{view_x}x{view_y}: the soaring bird turned only {rate:.2} rad/s around the rat \
+                 ({swept:.1} rad in {soar_secs:.1} s): it is hovering, not circling"
             );
         }
     }

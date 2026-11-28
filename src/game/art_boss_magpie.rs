@@ -1002,7 +1002,7 @@ impl Pose {
         let mut leg_drop = 0.0f32;
         let mut shade_bias = 0.0f32;
         let mut altitude = 0.0f32;
-        let mut head_lunge = 0.0f32;
+        let head_lunge: f32;
         let mut stretch = 0.0f32;
         let tail_lift: f32;
         let tail_fan: f32;
