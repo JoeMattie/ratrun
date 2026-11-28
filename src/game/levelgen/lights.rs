@@ -851,8 +851,8 @@ fn place_rail_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         let wall_ok = level.tiles.get(face.wall.0, face.wall.1) == TileKind::Wall(WallKind::Solid);
         let floor_ok = level.tiles.get(face.floor.0, face.floor.1) == TileKind::Open;
         let clear = !level.trailer.pits.iter().any(|pit| {
-            pit.rect.contains(face.wall.0, face.wall.1)
-                || pit.rect.contains(face.floor.0, face.floor.1)
+            pit.contains_cell(face.wall.0, face.wall.1)
+                || pit.contains_cell(face.floor.0, face.floor.1)
         });
         if wall_ok && floor_ok && clear {
             level.objects.lights.push(LightFixture {

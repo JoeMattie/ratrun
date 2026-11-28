@@ -560,7 +560,7 @@ pub(super) fn place_tidal_pits(level: &mut Level, seed: u64) {
         if level.objects.tidal_pits.len() == wanted {
             break;
         }
-        if level.objects.tidal_pits.iter().all(|pit| !pit.rect.inflate(8).intersects(&rect)) {
+        if level.objects.tidal_pits.iter().all(|pit| !pit.bounds().inflate(8).intersects(&rect)) {
             level.objects.tidal_pits.push(Pit::new(rect, PitKind::TidalDrop));
         }
     }
@@ -578,7 +578,7 @@ pub(super) fn dry_tiles(level: &Level) -> TileMap {
         dry.set(x, y, TileKind::Wall(kind));
     }
     for pit in &level.objects.tidal_pits {
-        let r = pit.rect;
+        let r = pit.bounds();
         dry.fill_cells(r.x, r.y, r.w, r.h, TileKind::Wall(WallKind::Solid));
     }
     dry

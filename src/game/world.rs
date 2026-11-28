@@ -2657,6 +2657,35 @@ impl World {
         // order so overlapping sprites stack in spawn order, under the default
         // (untagged floor) lighting pen. The sprite itself is
         // `art_droppings::draw_dropping`'s; the order and the cull are here.
+        //
+        // A dropping that left the floor early (the cap's eviction or a body
+        // stepping in it) becomes a **render-only ghost** this frame: its sprite
+        // dissolves and its light, bloom and GI contribution fade to exactly
+        // zero over `DROPPING_FADE_SECS` (`render::dropping_fade`). The
+        // simulation still despawned it on the same tick, and nothing below
+        // draws it as a live drop. Ghosts paint first: they are older litter.
+        self.light_map.sync_dropping_fade(&self.ecs, self.elapsed);
+        for (ghost, fade) in self
+            .light_map
+            .dropping_ghosts(self.elapsed)
+            .into_iter()
+            .flatten()
+        {
+            let s = self.w2s(ghost.pos, cam);
+            if !on_screen(s, ghost.radius + 4.0, viewport) {
+                continue;
+            }
+            let pen = pb.set_pen(0);
+            super::art_droppings::draw_dropping_fade(pb, &ghost, cam, fade);
+            pb.set_pen(pen);
+            super::art_droppings::mark_dropping_emissive_fade(
+                &mut self.light_map,
+                pb,
+                &ghost,
+                cam,
+                fade,
+            );
+        }
         {
             let mut query = self.ecs.query::<(&SpawnId, &Dropping)>();
             for (_, d) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {

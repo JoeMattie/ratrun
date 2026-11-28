@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.5.1 (2026-11-27, playtest build)
+
+- **Hantavirus lights go out smoothly.** When a poop leaves the floor before
+  its fifteen seconds — pushed out by the newest one, or stepped in and spent —
+  its green light, its floor glow and its bounced light now dim to nothing over
+  about half a second instead of cutting out in one frame, and the pellet
+  dissolves with them. A poop that simply dries out ends exactly at zero, so it
+  no longer blinks out on its last frame either.
+- **Flatbed foreground stops popping.** The truck level's overhead objects drew
+  their shadows on and off mid-screen because the wires, the cloud shadow and
+  the roadside item (tree, pole, sign) competed for the same two foreground
+  slots each frame and the nearest-to-centre pick flipped between them — the
+  roadside reach was often skipped while its shadow led in from the edge and
+  then appeared halfway across the frame. The three timed sky items now each
+  get their own slot, every one of them travels the whole crossing in from
+  off-screen and out the other side with margin for its shadow's offset, and an
+  item that has been drawn keeps its place until it has fully left. The
+  roadside ease across the screen edge is long enough to read as a fade (a
+  third of a second on the body, longer on the shadow) and the shadow still
+  leads its body into the frame from outside it. The Flatbed also lays nothing
+  horizontally any more: the power lines run up and down and its roadside
+  reaches enter only from the top or bottom edge, chosen where the items are
+  picked rather than hidden at draw time. Render-only; nothing the simulation
+  reads changed. `RATRUN_DUMP_SKY_AT=<seconds>` pins the sky clock for a
+  capture so a run of frames can be taken across one sweep.
 - **The Magpie flies.** The Flatbed's boss no longer paces the deck it
   arrived on: between attacks it circles you in the air at 56-84 px, banking
   around your live position, crossing cargo stacks and holes in the planks,
@@ -24,6 +49,13 @@
 - **Lost bosses walk back (the birds).** The Magpie no longer walks into the
   cargo it used to be stopped by, and it is not walled off from you while it
   flies: it is never called back into a fight it was already flying to.
+- **Flatbed holes.** The holes in the truck's bed are bigger and torn instead
+  of square. Each one is a seeded blob — one to three overlapping lobes with a
+  ragged rim — about twice the area of the old punched plank, with a dark lip
+  and splintered plank ends overhanging the edge. The outline is the hazard:
+  the fall, the steering, the lighting and the picture all read the same edge,
+  so a hole looks exactly as wide as it plays. Every hole still leaves a
+  two-cell plank path round it and the deck still walks end to end.
 
 ## 0.5.0 (2026-11-26)
 

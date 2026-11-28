@@ -51,13 +51,16 @@ use super::shadow::{Body, Geometry, HardShadows, ShadowProfile, Surface};
 use super::softshadow::SoftProfile;
 use super::{air, gi, motes, overhead, softshadow, specular, surface, underwater, upsample, water};
 use super::{fixtures, GlobalLight, LightScene, ThemeAmbient};
+use crate::game::ecs::components::Dropping;
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{LightFixtureKind, LightZoneKind, Theme};
 use crate::math::Vec2;
+use crate::render::dropping_fade::{self, DroppingFade};
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::Rgb;
 use crate::term::ColorDepth;
+use bevy_ecs::world::World as EcsWorld;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightingMode {
@@ -564,6 +567,11 @@ struct ShapedEntry {
 
 pub struct LightMap {
     pub(super) lights: Candidates,
+    /// Droppings that left the floor early and are still fading their light out
+    /// (`render::dropping_fade`). Render-only state that outlives a frame: it
+    /// lets the removal frame and the frames after it draw the same green pool
+    /// dimming to zero instead of a light that cuts out.
+    pub(super) dropping_fade: DroppingFade,
     shaped: Vec<ShapedEntry>,
     marks: Vec<Mark>,
     /// Screen-space enemy rim glints for this frame, filled by the gather and
@@ -607,6 +615,7 @@ impl LightMap {
                 weakest: 0,
                 rat: Vec2::ZERO,
             },
+            dropping_fade: DroppingFade::new(),
             shaped: Vec::with_capacity(MAX_SHAPED),
             marks: Vec::with_capacity(MAX_MARKS),
             rims: Vec::new(),
@@ -629,6 +638,28 @@ impl LightMap {
         self.shaped.clear();
         self.marks.clear();
         self.rims.clear();
+    }
+
+    /// Read this frame's live droppings and turn the ones that left the floor
+    /// into fading ghosts (`render::dropping_fade`): the cap's eviction and a
+    /// body stepping in one alike, without the simulation writing a record.
+    ///
+    /// Render-only, called from the scene draw **before** the floor art so the
+    /// ghost's sprite and its light appear on the very frame its dropping goes.
+    /// Calling it twice at the same `now` (a repaint of a frozen frame) makes no
+    /// extra ghost and changes nothing.
+    pub(crate) fn sync_dropping_fade(&mut self, ecs: &EcsWorld, now: f32) {
+        self.dropping_fade.update(ecs, now);
+    }
+
+    /// A stack copy of the fading ghosts (each dropping and its fade), for the
+    /// floor-art pass, which marks emissive pixels while it paints and so must
+    /// not hold a borrow of the list.
+    pub(crate) fn dropping_ghosts(
+        &self,
+        now: f32,
+    ) -> [Option<(Dropping, f32)>; dropping_fade::MAX_DROPPING_GHOSTS] {
+        self.dropping_fade.snapshot(now)
     }
 
     /// Submit a light for this frame. The list holds `MAX_SHAPED`; once full,
@@ -1059,6 +1090,7 @@ impl LightMap {
                     scene,
                     &frame,
                     self.ambient_cap.unwrap_or(1.0),
+                    &self.dropping_fade,
                 );
             }
         }
@@ -1080,6 +1112,7 @@ impl LightMap {
                 scene,
                 &frame,
                 self.ambient_cap.unwrap_or(1.0),
+                &self.dropping_fade,
             );
         }
         let hp = (scene.player.hp / scene.player.max_hp().max(1.0)).clamp(0.0, 1.0);
@@ -2144,6 +2177,103 @@ mod dropping_light_tests {
                 "frozen dropping light must render identically at elapsed={elapsed}"
             );
         }
+    }
+
+    /// A dropping that leaves the floor **early** — the cap's eviction or a body
+    /// stepping in it — keeps its green pool and fades it to exactly zero: the
+    /// real gathered ground light, frame by frame, with no step at the removal
+    /// and a frozen frame that draws identically.
+    #[test]
+    fn a_removed_dropping_fades_its_gathered_light_to_zero() {
+        use crate::render::dropping_fade::DROPPING_FADE_SECS;
+
+        const DT: f32 = 1.0 / 60.0;
+
+        let mut w = fx_world(Theme::Sewer);
+        let entity = w.ecs.spawn((
+            Dropping {
+                pos: Vec2::new(40.0, 40.0),
+                age: DROPPING_ARM,
+                damage: 3.0,
+                jumps: 1,
+                reach: 14.0,
+                radius: 7.0,
+                seed: 1,
+                level: 5,
+            },
+            SpawnId(1),
+        )).id();
+
+        // One drawn frame at `w.elapsed`: the scene draw syncs the ghost list
+        // before the floor art, then the lighting pass gathers. The two
+        // helpers are separate because `apply_scene` gathers for itself.
+        let mut map = LightMap::new();
+        let ground = |w: &World, map: &mut LightMap| -> f32 {
+            map.begin_frame();
+            map.sync_dropping_fade(&w.ecs, w.elapsed);
+            let scene = fx_scene(w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+            let _ = map.gather_lights(120, 80, &scene);
+            map.shaped
+                .iter()
+                .filter(|entry| entry.tag == LightTag::Ground)
+                .map(|entry| entry.light.energy)
+                .sum()
+        };
+        let pixels = |w: &World, map: &mut LightMap| -> Vec<Rgb> {
+            map.begin_frame();
+            map.sync_dropping_fade(&w.ecs, w.elapsed);
+            let scene = fx_scene(w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+            let mut pb = PixelBuffer::new(96, 64);
+            pb.clear((18, 28, 26));
+            map.apply_scene(&mut pb, &scene);
+            pb.pixels().to_vec()
+        };
+
+        w.elapsed = 0.0;
+        let live = ground(&w, &mut map);
+        assert!(live > 0.0, "the live dropping lights the floor");
+        // The drop goes (a body stepped in it) with the clock where it was.
+        let _ = w.ecs.despawn(entity);
+        let first = ground(&w, &mut map);
+        assert!(
+            (first - live).abs() < 1e-5,
+            "the removal frame must not step the light ({live} -> {first})"
+        );
+
+        // Frame by frame: never up, never a step, exactly zero at the end.
+        let frames = (DROPPING_FADE_SECS / DT).round() as u32;
+        let mut prev = first;
+        for i in 1..=frames {
+            w.elapsed = i as f32 * DT;
+            let energy = ground(&w, &mut map);
+            assert!(
+                energy <= prev + 1e-6,
+                "frame {i} of the fade went back up ({prev} -> {energy})"
+            );
+            assert!(
+                prev - energy <= 0.08 * first,
+                "frame {i} dropped {:.1}% of the light at once",
+                100.0 * (prev - energy) / first
+            );
+            prev = energy;
+            if i == 15 {
+                // A frozen frame draws the same pixels: the fade reads
+                // `World::elapsed`, and nothing else about a ghost moves.
+                let _warm = pixels(&w, &mut map);
+                let a = pixels(&w, &mut map);
+                let b = pixels(&w, &mut map);
+                assert_eq!(
+                    a, b,
+                    "a frozen frame with a fading dropping must draw identically"
+                );
+            }
+        }
+        w.elapsed = DROPPING_FADE_SECS;
+        assert_eq!(
+            ground(&w, &mut map),
+            0.0,
+            "the ghost's light lands on exactly zero"
+        );
     }
 
     #[test]

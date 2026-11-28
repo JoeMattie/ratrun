@@ -316,7 +316,11 @@ fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
         // until the ring has it again (the arrival from across the deck).
         ctx.player_pos
     } else {
-        ctx.player_pos + bearing.rotate(arc * sign) * r
+        // `bearing` points from the bird to the rat, so the ring point on the
+        // bird's own side is the rat *minus* it (turned one step of arc). Added,
+        // the carrot sat on the far side and the bird flew through the rat and
+        // hovered on top of it.
+        ctx.player_pos - bearing.rotate(arc * sign) * r
     };
     // The wind, as a velocity: the slipstream drags everything tailward, so the
     // bird's ground track trails the carrot and it flies a little upwind for it.
@@ -404,7 +408,6 @@ fn enter_soar(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 
 /// Plan and start the low pass.
 fn enter_swoop(ctx: &mut BossContext<'_>, boss: &mut Boss) {
-    let slot = phase_slot(boss);
     let sign = if boss.swipe_side < 0.0 { -1.0 } else { 1.0 };
     let to = ctx.player_pos - boss.pos;
     let bearing = if to.len_sq() > 1e-3 { to.normalized() } else { boss.facing };
@@ -427,7 +430,7 @@ fn perch_spot(ctx: &BossContext<'_>, boss: &Boss) -> Option<Vec2> {
     for dist in PERCH_SPOTS {
         for k in 0..PERCH_SPOKES {
             // 0, +1, -1, +2, -2 ... spokes: the short way down first.
-            let step = ((k + 1) / 2) as f32 * (std::f32::consts::TAU / PERCH_SPOKES as f32);
+            let step = k.div_ceil(2) as f32 * (std::f32::consts::TAU / PERCH_SPOKES as f32);
             let off = if k % 2 == 1 { step } else { -step };
             let spot = ctx.player_pos - base.rotate(off) * dist;
             if !ctx.footprint_fits(spot, art_boss_magpie::BODY_RADIUS) {
@@ -1802,7 +1805,10 @@ mod tests {
         // Down the bed from the tailgate: 300 px of the deck, straight through
         // whatever cargo the seed stacked on it.
         let start = centre - Vec2::new(150.0, 0.0);
-        place(&mut w, start - Vec2::new(180.0, 0.0), start);
+        // The bird starts 180 px off, across the bed: the fight rectangle is
+        // clamped to the map's west edge here, so 180 px *behind* the rat is
+        // off the map (and the flight's own map clamp would be the first step).
+        place(&mut w, start - Vec2::new(0.0, 180.0), start);
         let mut prev = boss_of(&mut w).expect("alive").pos;
         let step = 300.0 / (10.0 / DT);
         let mut flown = 0.0f32;

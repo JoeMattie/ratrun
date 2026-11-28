@@ -18,8 +18,9 @@ use crate::game::ecs::systems::powerups::{Decoy, HeadlampBeam, HEADLAMP_HALF_ANG
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Chest, Gem, Gold, Pickup};
 use crate::game::level::PropKind;
-use crate::game::weapon::{DROPPING_ARM, DROPPING_LIFE, DROPPING_LIGHT_ENERGY, DROPPING_LIGHT_RADIUS};
+use crate::game::weapon::{DROPPING_LIGHT_ENERGY, DROPPING_LIGHT_RADIUS};
 use crate::math::Vec2;
+use crate::render::dropping_fade::{self, DroppingGhost};
 
 use super::*;
 
@@ -27,7 +28,6 @@ use super::*;
 /// crowd is past what the eye separates anyway.
 const MAX_RIMS: usize = 512;
 const MAX_DROPPING_LIGHTS: usize = 12;
-const DROPPING_DRY_SECS: f32 = 2.0;
 // The green channel can reach the lighting ceiling when pools overlap. Keep
 // the other channels low so overlapping spills retain their colour.
 const GLOW_RGB: Rgb = (0, 255, 0);
@@ -35,18 +35,41 @@ const DROPPING_GLOW_REACH: f32 = 2.75;
 const DROPPING_GLOW_GAIN: f32 = 10.0;
 
 fn dropping_light(drop: &Dropping) -> Option<Light> {
-    let left = DROPPING_LIFE - drop.age;
-    if left <= 0.0 {
+    // The dry-out is exactly zero at `DROPPING_LIFE`, so the natural expiry
+    // has no last-frame step (`dropping_fade::natural_fade`).
+    let fade = dropping_fade::natural_fade(drop.age);
+    if fade <= 0.0 {
         return None;
     }
     let rank = usize::from(drop.level.clamp(1, 5) - 1);
-    let arm = if drop.age < DROPPING_ARM { 0.5 } else { 1.0 };
-    let fade = (left / DROPPING_DRY_SECS).min(1.0);
+    let arm = dropping_fade::arm_fade(drop.age);
     let mut light = Light::radial(
         drop.pos,
         DROPPING_LIGHT_RADIUS[rank] * DROPPING_GLOW_REACH,
         GLOW_RGB,
         DROPPING_LIGHT_ENERGY[rank] * DROPPING_GLOW_GAIN * arm * fade,
+    );
+    light.falloff = Falloff::Small;
+    light.height = 2.0;
+    light.scatter = 0.0;
+    light.casts_shadow = false;
+    Some(light)
+}
+
+/// The same green pool, from a dropping that left the floor early (evicted by
+/// the cap or spent on a body). It keeps the ghost's radius and falls on a
+/// smoothstep to exactly zero over `DROPPING_FADE_SECS`, so the light the floor
+/// saw on the removal frame is the light it sees on the next one.
+fn ghost_dropping_light(ghost: &DroppingGhost, now: f32) -> Option<Light> {
+    let energy = ghost.energy(now);
+    if energy <= 0.0 {
+        return None;
+    }
+    let mut light = Light::radial(
+        ghost.drop().pos,
+        ghost.radius() * DROPPING_GLOW_REACH,
+        GLOW_RGB,
+        energy * DROPPING_GLOW_GAIN,
     );
     light.falloff = Falloff::Small;
     light.height = 2.0;
@@ -1281,6 +1304,24 @@ impl LightMap {
                         });
                     }
                 }
+            }
+        }
+
+        // A dropping that left the floor this frame (the cap's eviction or a
+        // body stepping in it) keeps its green pool for `DROPPING_FADE_SECS`,
+        // in whatever slots the live drops left. Render-only: the entities are
+        // already gone and the simulation never sees this list. Its id is 0 so
+        // it sorts below every live drop.
+        for ghost in self.dropping_fade.ghosts() {
+            let Some(light) = ghost_dropping_light(ghost, elapsed) else {
+                continue;
+            };
+            let pos = light.pos - cam;
+            if !in_range(pos.x, pos.y, light.shape.extent()) {
+                continue;
+            }
+            if let Some(slot) = dropping_lights.iter().rposition(Option::is_none) {
+                dropping_lights[slot] = Some((0, light));
             }
         }
 

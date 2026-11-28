@@ -22,10 +22,12 @@
 //!    steel I-beam cross-members, chassis frame rails and tandem-axle shadow
 //!    bands sit *under* the gaps so the rushing road visibly streams behind
 //!    the trailer's own steel skeleton.
-//! 3. **The holes** ([`Pit`](crate::game::level::Pit)): broken planks showing
-//!    the full sunlit rushing highway below through ragged snapped timber ends
-//!    and deep drop shadows, plus sheared rail gaps where the highway streams
-//!    right past the deck lip.
+//! 3. **The holes** ([`Pit`](crate::game::level::Pit)): torn, irregular blobs
+//!    in the planks — not rectangles — showing the full sunlit rushing highway
+//!    below through ragged snapped timber ends and a dark lip, plus sheared
+//!    rail gaps where the highway streams right past the deck lip. The drawn
+//!    hole is the sim's own outline ([`hole_pixel`] is [`Pit::contains`]), so a
+//!    hole looks exactly as wide as it plays.
 //! 4. **The load**: heavy crates, pallets, tarped machinery, brushed-steel
 //!    pipe bundles, tyres, toolboxes and chain coils, plus sliding crates with
 //!    high-visibility ratchet straps that blaze taut before each shove.
@@ -40,7 +42,7 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale, Rgb};
 
-use super::level::{Level, Palette, PitKind, PropKind};
+use super::level::{Level, Palette, Pit, PitKind, PropKind};
 use super::levelgen::trailer::{DECK_LEFT, DECK_RIGHT, DECK_ROWS, DECK_TOP, RAIL_BOTTOM, RAIL_TOP};
 
 /// World pixels per grid cell (the wall-art cell size).
@@ -306,15 +308,19 @@ pub fn draw_floor(
     //    the rushing highway + static steel undercarriage underneath.
     planks(&mut c, deck_top, deck_bot, scroll_i, bump, pal);
 
-    // 3. The pits you can fall through: broken planks & sheared rail gaps.
+    // 3. The pits you can fall through: torn holes in the planks (the outline
+    //    is the sim's own [`Pit::contains`]) and sheared rail gaps.
     for pit in &level.trailer.pits {
-        let rect = pit.rect.to_world();
+        let rect = pit.bounds().to_world();
         let (px, py) = (rect.x.round() as i32, rect.y.round() as i32 + bump);
         let (pw, ph) = (rect.w.round() as i32, rect.h.round() as i32);
         if px + pw <= c.x0 || px >= c.x1 || py + ph <= c.y0 || py >= c.y1 {
             continue;
         }
         match pit.kind {
+            PitKind::BrokenPlank if !pit.lobes().is_empty() => {
+                torn_hole(&mut c, pit, scroll_i, bump)
+            }
             PitKind::BrokenPlank => broken_planks(&mut c, px, py, pw, ph, scroll_i, bump),
             PitKind::RailGap => rail_gap(&mut c, px, py, pw, ph, scroll_i, bump),
             PitKind::TidalDrop => {}
@@ -818,6 +824,135 @@ fn planks(
             }
         }
         let _ = pal;
+    }
+}
+
+/// Does the hole's art cover the world pixel `(wx, wy)`? The drawing fills
+/// exactly these pixels, and the predicate is [`Pit::contains`] on the pixel's
+/// centre — so the sim's fall test, the flood's cell test and the picture can
+/// never disagree. `bump` is the deck's one-pixel expansion-joint dip.
+pub fn hole_pixel(pit: &Pit, wx: i32, wy: i32, bump: i32) -> bool {
+    pit.contains(Vec2::new(wx as f32 + 0.5, (wy - bump) as f32 + 0.5))
+}
+
+/// A torn hole: the rushing highway seen through the pit's own irregular
+/// outline, exactly as the sim reads it ([`hole_pixel`] decides every pixel),
+/// a dark lip hugging the rim, splintered plank ends overhanging it, and the
+/// exposed undercarriage bar deep in the void.
+///
+/// The outline is the single source of truth: the deck planks are painted
+/// first, then the hole is punched out of them pixel by pixel, so the sim's
+/// fall test, the flood's cell test and the picture can never disagree.
+fn torn_hole(c: &mut Canvas<'_>, pit: &Pit, scroll_i: i32, bump: i32) {
+    let b = pit.bounds();
+    let px = b.x * PX;
+    let py = b.y * PX + bump;
+    let pw = b.w * PX;
+    let ph = b.h * PX;
+    if pw <= 0 || ph <= 0 {
+        return;
+    }
+    let road_top = DECK_TOP_PX - ROAD_STRIP * PX;
+    let road_bot = deck_bot_px() + ROAD_STRIP * PX;
+    let inside = |wx: i32, sy: i32| hole_pixel(pit, wx, sy, bump);
+
+    // 1) The rushing highway through the hole, row by row, run by run.
+    let y0 = py.max(c.y0);
+    let y1 = (py + ph).min(c.y1);
+    let x0 = px.max(c.x0);
+    let x1 = (px + pw).min(c.x1);
+    for sy in y0..y1 {
+        let wy = sy - bump;
+        let mut wx = x0;
+        while wx < x1 {
+            if !inside(wx, sy) {
+                wx += 1;
+                continue;
+            }
+            let run_start = wx;
+            while wx < x1 && inside(wx, sy) {
+                wx += 1;
+            }
+            // Shade by depth from the hole's north rim: the near lip is in
+            // shadow, the open middle catches full daylight.
+            let depth = sy - py;
+            let shade = match depth {
+                0 => 0.48,
+                1 => 0.72,
+                2 => 0.92,
+                _ => 1.14,
+            };
+            draw_road_scanline(
+                c, run_start, wx, sy, wy, scroll_i, road_top, road_bot, false, shade,
+            );
+        }
+    }
+
+    // 2) A rusted steel undercarriage rod running down the void, for scale.
+    //    Only the pixels the outline covers, so the rod never paints planks.
+    if pw >= 12 {
+        let bar_x = px + pw / 2 - 1;
+        for sy in y0..y1 {
+            for k in 0..2 {
+                let wx = bar_x + k;
+                if inside(wx, sy) {
+                    c.px(wx, sy, mix(STEEL_LO, RUST, 0.45));
+                }
+            }
+        }
+    }
+
+    // 3) The dark lip: one pixel just outside the outline all round, so the
+    //    edge reads as a drop at 1x as well as 2x.
+    for sy in y0.saturating_sub(1)..(y1 + 1).min(c.y1) {
+        for wx in x0.saturating_sub(1)..(x1 + 1).min(c.x1) {
+            if inside(wx, sy) {
+                continue;
+            }
+            let neighbour = inside(wx - 1, sy)
+                || inside(wx + 1, sy)
+                || inside(wx, sy - 1)
+                || inside(wx, sy + 1);
+            if neighbour {
+                c.px(wx, sy, RIP);
+            }
+        }
+    }
+
+    // 4) Splintered, broken plank ends overhanging the rim: a few jagged stubs
+    //    of fresh wood where the boards tore, stable frame to frame.
+    for (cx, cy) in pit.rim_cells() {
+        let mid = cy * PX + PX / 2 + bump;
+        if mid < c.y0 || mid >= c.y1 {
+            continue;
+        }
+        let h = hash(cx, cy);
+        if h.is_multiple_of(3) {
+            continue;
+        }
+        // Walk out from the cell's centre to the rim, then stub outward.
+        let centre = cx * PX + PX / 2;
+        let mut edge = centre;
+        let mut dir = 1;
+        while edge > cx * PX && edge < cx * PX + PX && inside(edge, mid) {
+            edge += dir;
+        }
+        if edge >= cx * PX + PX || edge < cx * PX {
+            dir = -1;
+            edge = centre;
+            while edge > cx * PX && edge < cx * PX + PX && inside(edge, mid) {
+                edge += dir;
+            }
+        }
+        let stub = 1 + (h % 3) as i32;
+        for k in 0..stub {
+            let wx = edge + dir * k;
+            if wx < cx * PX || wx >= cx * PX + PX {
+                break;
+            }
+            c.px(wx, mid, WOOD_END);
+            c.px(wx, mid + 1, SPLINTER);
+        }
     }
 }
 

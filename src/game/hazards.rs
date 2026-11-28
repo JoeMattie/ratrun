@@ -231,7 +231,7 @@ pub fn clamp_outfall_displacement(
     let to = from + step;
     let mut first = level.tiles.segment_hit(from, to, radius).unwrap_or(1.0);
     for pit in &level.objects.tidal_pits {
-        if let Some(hit) = segment_rect_hit(from, to, radius, &pit.rect.to_world()) {
+        if let Some(hit) = segment_rect_hit(from, to, radius, &pit.bounds().to_world()) {
             first = first.min(hit);
         }
     }

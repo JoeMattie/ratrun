@@ -495,7 +495,7 @@ fn near_hole(level: &Level, cx: i32, cy: i32, margin: i32) -> bool {
         .trailer
         .pits
         .iter()
-        .any(|pit| pit.rect.inflate(margin).contains(cx, cy))
+        .any(|pit| pit.bounds().inflate(margin).contains(cx, cy))
 }
 
 #[cfg(test)]

@@ -622,7 +622,7 @@ pub fn dump_ppm(level: &Level, path: &str, scale: i32) -> std::io::Result<()> {
             crate::game::level::PitKind::RailGap => [40, 40, 48],
             crate::game::level::PitKind::TidalDrop => [10, 24, 31],
         };
-        for (cx, cy) in pit.rect.cells() {
+        for (cx, cy) in pit.cells() {
             if cx >= 0 && cy >= 0 && cx < cols && cy < rows {
                 rgb[(cy * cols + cx) as usize] = colour;
             }
@@ -701,7 +701,7 @@ pub fn dump_ppm(level: &Level, path: &str, scale: i32) -> std::io::Result<()> {
         }
     }
     for pit in &level.objects.tidal_pits {
-        for (cx, cy) in inside(pit.rect) {
+        for (cx, cy) in inside(pit.bounds()) {
             rgb[(cy * cols + cx) as usize] = [10, 24, 31];
         }
     }

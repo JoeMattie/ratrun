@@ -8850,7 +8850,7 @@ mod tests {
                 match target.as_str() {
                     "outfall-pit" => {
                         let pit = w.level.objects.tidal_pits.first().expect("tidal drop");
-                        let edge = pit.rect.to_world();
+                        let edge = pit.bounds().to_world();
                         use crate::game::collision::SizeClass;
                         use crate::game::hazards::outfall_sand_clear;
                         let centre = pit.center_world();
@@ -9553,8 +9553,8 @@ mod tests {
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
             }
-            "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "laser-wet"
-            | "laser-moving" => {
+            "lava-volley" | "lava-pools" | "dropping-r1" | "dropping-r5" | "dropping-fade"
+            | "laser-wet" | "laser-moving" => {
                 use crate::game::weapon::{LASER_ARC_DEG, LASER_EYE_OFFSET, LASER_SWEEP_SECS};
                 if target.starts_with("dropping-")
                     && std::env::var("RATRUN_DUMP_FLOOR_THEME").as_deref() == Ok("outfall")
@@ -9573,6 +9573,8 @@ mod tests {
                     "lava-pools" => (WeaponKind::LavaBreath, 5, 137, true),
                     "dropping-r1" => (WeaponKind::Hantavirus, 1, 32, false),
                     "dropping-r5" => (WeaponKind::Hantavirus, 5, 32, false),
+                    // Two rank-5 drops a short walk apart (one cycle is 2.8 s).
+                    "dropping-fade" => (WeaponKind::Hantavirus, 5, 190, false),
                     _ => (WeaponKind::LaserEyes, 5, 9, false),
                 };
                 let pos = w.player.pos;
@@ -9600,7 +9602,10 @@ mod tests {
                 weapon.evolved = evolved;
                 let moving = target == "laser-moving";
                 for tick in 0..ticks {
-                    let dir = if (kind == WeaponKind::Hantavirus && tick >= 15)
+                    let fade_pose = target == "dropping-fade";
+                    let dir = if (kind == WeaponKind::Hantavirus
+                        && tick >= 15
+                        && (!fade_pose || tick < 50))
                         || (moving && tick > 0)
                     {
                         Vec2::new(1.0, 0.0)
@@ -9613,6 +9618,37 @@ mod tests {
                     let eye = w.player.pos + w.player.face * LASER_EYE_OFFSET;
                     assert!(w.player.pos.dist(pos) > LASER_EYE_OFFSET);
                     assert!(w.laser_visual().is_some_and(|beam| beam.origin.dist(eye) < 0.01));
+                }
+                // `dropping-fade`: draw the two live drops once (the ghost list
+                // is a diff between drawn frames), take the oldest off the
+                // floor as the cap's eviction does, draw that frame, and stop
+                // `RATRUN_DUMP_FRAMES` ticks (default 12 = 0.2 s) into its fade.
+                if target == "dropping-fade" {
+                    use crate::game::ecs::components::{Dropping, SpawnId};
+                    hh.app.picture_dirty = true;
+                    hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.loadout.weapons.clear();
+                    let oldest = w
+                        .ecs
+                        .query::<(bevy_ecs::entity::Entity, &SpawnId, &Dropping)>()
+                        .iter(&w.ecs)
+                        .min_by_key(|(_, id, _)| id.0)
+                        .map(|(e, _, _)| e)
+                        .expect("the pose left a dropping on the floor");
+                    w.ecs.despawn(oldest);
+                    // The removal is noticed by a drawn frame, as in play (one
+                    // is drawn every tick there): the ghost starts now.
+                    hh.app.picture_dirty = true;
+                    hh.terminal.draw(|f| hh.app.render(f)).unwrap();
+                    let w = hh.app.world.as_mut().unwrap();
+                    let frames = std::env::var("RATRUN_DUMP_FRAMES")
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(12);
+                    for _ in 0..frames {
+                        w.update_with_aim(1.0 / 60.0, Vec2::ZERO, false, false, None);
+                    }
                 }
                 hh.app.picture_dirty = true;
                 hh.terminal.draw(|f| hh.app.render(f)).unwrap();
@@ -11215,9 +11251,20 @@ mod tests {
                     .ok()
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(260);
-                for _ in 0..frames {
+                // Each state the boss enters is printed with its frame, so a
+                // capture can pick `RATRUN_DUMP_FRAMES` for a named beat.
+                let mut last_state = String::new();
+                for i in 0..frames {
                     if let Some(w) = hh.app.world.as_mut() {
                         w.player.hp = w.player.max_hp();
+                        let state = w.ecs.iter_entities().find_map(|e| {
+                            use crate::game::ecs::systems::boss::Boss;
+                            e.get::<Boss>().map(|b| format!("{:?}", b.state))
+                        });
+                        if let Some(state) = state.filter(|s| *s != last_state) {
+                            eprintln!("dump bossfight: frame {i} {state}");
+                            last_state = state;
+                        }
                     }
                     let text = hh.frame(&[]);
                     if text.contains("LEVEL UP") {

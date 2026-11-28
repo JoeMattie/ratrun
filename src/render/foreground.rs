@@ -55,6 +55,10 @@ const SWAY_HZ: f32 = 3.0;
 const REACH_SWAY_HZ: f32 = 8.0;
 const COVERAGE_PCT: u32 = 45;
 const COVERAGE_SKIP_PCT: u32 = 85;
+/// Coverage cap on the Flatbed, which places no static items: its whole
+/// foreground is the three analytic sky planes, each easing in and out at its
+/// own screen edge, so they are exempt from the static budget (`draw`).
+const FLATBED_SKY_COVERAGE_PCT: u32 = 200;
 const OUTFALL_COVERAGE_PCT: u32 = 14;
 const OUTFALL_COVERAGE_FILL: f32 = 0.36;
 const COVERAGE_ALPHA_MIN: f32 = 0.5;
@@ -70,6 +74,16 @@ const CLOUD_ALPHA_MAX: u8 = 60;
 
 pub const BAND_OVERHANG: i32 = 24;
 pub const MAX_BANDS_IN_VIEW: usize = 2;
+/// Slots in the frame plan. The two nearest static items keep
+/// [`MAX_BANDS_IN_VIEW`]; the Flatbed's analytic sky track is planned beside
+/// them (each sky item eases in and out at a screen edge of its own) instead
+/// of contesting their slots.
+const MAX_SKY_ITEMS: usize = 3;
+const MAX_FRAME_ITEMS: usize = if MAX_SKY_ITEMS > MAX_BANDS_IN_VIEW {
+    MAX_SKY_ITEMS
+} else {
+    MAX_BANDS_IN_VIEW
+};
 const MIN_SCREEN_SPACING: f32 = 48.0;
 const PIXEL_SCALE: i32 = 2;
 const PIXEL_SCALE_NEAR: i32 = 3;
@@ -102,6 +116,16 @@ const SKY_QUANT_HZ: f32 = 30.0;
 const SKY_BRANCH_PERIOD: f32 = 7.0;
 const SKY_BRANCH_SPEED: f32 = 220.0;
 const SKY_CLOUD_SPEED: f32 = 12.0;
+/// World-pixel margin past each end of a sky item's track: the whole crossing
+/// plus margin is covered, so the body and the shadow's offset rect are both
+/// completely outside the view when the track starts and when it ends. It also
+/// covers the art pad the shadow's soft edge paints past `cross_samples`.
+const SKY_TRACK_MARGIN: f32 = 12.0;
+/// Screen-pixel edge ramp for a sky reach. `SKY_BRANCH_SPEED` screen pixels a
+/// second would turn the default [`EDGE_FADE_PX`] ramp into a 0.18 s flick on
+/// the body; this is 0.33 s on the body and 0.65–0.79 s on the shadow (which
+/// travels `depth` times slower across).
+const SKY_EDGE_FADE_PX: f32 = 72.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForeKind {
@@ -342,6 +366,19 @@ impl ForeEntry {
 
     fn is_wires(self) -> bool {
         matches!(self.shape, ForeShape::Band(ForeKind::PowerLines))
+    }
+
+    /// A roadside reach of the Flatbed's analytic sky track (`sky_items`).
+    /// `TreeCanopy` is also placed statically on the Kitchen, where the wider
+    /// ease is equally wanted.
+    fn is_sky_reach(self) -> bool {
+        matches!(
+            self.shape,
+            ForeShape::Reach {
+                kind: ReachKind::LightPole | ReachKind::SignArm | ReachKind::TreeCanopy,
+                ..
+            }
+        )
     }
 
     fn art_thickness(self) -> f32 {
@@ -824,11 +861,11 @@ struct Plane {
 }
 
 impl Plane {
-    fn new_band(cross: f32, extent: (f32, f32), view_span: (f32, f32), zoom: f32) -> Self {
+    fn new_band(cross: f32, extent: (f32, f32), view_span: (f32, f32), fade_px: f32) -> Self {
         let cross = cross.round() as i32;
         let span = (cross as f32 + extent.0, cross as f32 + extent.1);
         let penetration = (span.1 - view_span.0).min(view_span.1 - span.0);
-        let fade = (penetration / (EDGE_FADE_PX * zoom)).clamp(0.0, 1.0);
+        let fade = (penetration / fade_px.max(1.0)).clamp(0.0, 1.0);
         Self { cross, span, tip_max: f32::INFINITY, fade }
     }
 
@@ -839,6 +876,7 @@ impl Plane {
         basis: (Vec2, Vec2),
         view: View,
         view_span: (f32, f32),
+        fade_px: f32,
     ) -> Self {
         let (axis, normal) = basis;
         let cross = cross.round() as i32;
@@ -848,7 +886,7 @@ impl Plane {
             0.0
         } else if let Some(min_along) = min_strip_along(span, axis, normal, view.size) {
             let along_pen = tip_max - min_along;
-            (cross_pen.min(along_pen) / (EDGE_FADE_PX * view.zoom)).clamp(0.0, 1.0)
+            (cross_pen.min(along_pen) / fade_px.max(1.0)).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -909,6 +947,34 @@ impl Plan {
             .filter_map(|plane| (plane.fade > 0.0).then_some(plane.cross))
     }
 
+    /// On-screen area of the shadow's offset rect, in screen pixels. Zero when
+    /// the shadow has faded out. Mirrors [`Plan::body_area`].
+    #[cfg(test)]
+    fn shadow_area(&self, size: Vec2) -> f32 {
+        if self.shadow.fade == 0.0 {
+            return 0.0;
+        }
+        let (lo, hi) = project(size, self.normal);
+        let start = self.shadow.span.0.max(lo);
+        let end = self.shadow.span.1.min(hi);
+        if end <= start {
+            return 0.0;
+        }
+        let width_at = |v| {
+            let origin = self.normal * v;
+            let (lo, hi) = line_span(origin, self.entry.axis, size);
+            (hi.min(self.shadow.tip_max) - lo).max(0.0)
+        };
+        let box_area = (end - start)
+            * (width_at(start) + 4.0 * width_at((start + end) * 0.5) + width_at(end))
+            / 6.0;
+        if self.entry.is_canopy() {
+            box_area * std::f32::consts::FRAC_PI_4
+        } else {
+            box_area
+        }
+    }
+
     fn centre_distance(&self) -> f32 {
         [self.body, self.shadow]
             .into_iter()
@@ -965,8 +1031,11 @@ pub struct ForeLayer {
     items: Vec<PlacedItem>,
     key: Option<(Theme, u64)>,
     frame: Vec<Plan>,
+    /// Static entries drawn last frame. An incumbent keeps its slot until it
+    /// has fully left the view, so a newcomer never evicts a visible item.
+    prev: Vec<ForeEntry>,
     bufs: RenderBuffers,
-    rasters: [Focus; MAX_BANDS_IN_VIEW],
+    rasters: [Focus; MAX_FRAME_ITEMS],
 }
 
 impl Default for ForeLayer {
@@ -980,7 +1049,8 @@ impl ForeLayer {
         Self {
             items: Vec::new(),
             key: None,
-            frame: Vec::with_capacity(MAX_BANDS_IN_VIEW),
+            frame: Vec::with_capacity(MAX_FRAME_ITEMS),
+            prev: Vec::with_capacity(MAX_FRAME_ITEMS),
             bufs: RenderBuffers::default(),
             rasters: std::array::from_fn(|_| Focus::default()),
         }
@@ -994,6 +1064,8 @@ impl ForeLayer {
         }
         self.key = Some(key);
         self.items.clear();
+        self.frame.clear();
+        self.prev.clear();
         generate(level, &mut self.items);
     }
 
@@ -1043,31 +1115,59 @@ impl ForeLayer {
     ) {
         self.frame.clear();
         let sky = sky_items(level, view, elapsed);
-        let items = sky.into_iter().flatten().chain(self.items.iter().map(|p| p.entry));
 
-        // Select by the nearest visible plane of each item, in screen pixels.
+        // The Flatbed's analytic sky track is the level's foreground design:
+        // wires, cloud shadow and the roadside reach each own a plane and ease
+        // in and out at a screen edge, so they are planned every frame and
+        // never contest a slot with each other or with a static placement.
+        // Selecting among them (three candidates, two slots, nearest to the
+        // view centre) is what switched a shadow on and off mid-screen.
+        for entry in sky.into_iter().flatten() {
+            if let Some(plan) = plan_entry(view, entry, rat, threats) {
+                self.frame.push(plan);
+            }
+        }
+
+        // Static placements keep the two closest visible items, but an item
+        // that was drawn last frame holds its slot until it has fully left.
         // Parallel lines keep 48 screen px between visible planes, and at most
         // one whole-tree canopy (`TreeCanopy`) may appear on screen at a time.
-        for _ in 0..MAX_BANDS_IN_VIEW {
+        let mut chosen = 0;
+        for &entry in &self.prev {
+            if chosen >= MAX_BANDS_IN_VIEW || self.frame.len() >= MAX_FRAME_ITEMS {
+                break;
+            }
+            if !self.items.iter().any(|p| p.entry == entry)
+                || self.frame.iter().any(|p| p.entry == entry)
+            {
+                continue;
+            }
+            let Some(plan) = plan_entry(view, entry, rat, threats) else { continue };
+            if !self.frame.iter().all(|other| frames_together(&plan, other, view)) {
+                continue;
+            }
+            self.frame.push(plan);
+            chosen += 1;
+        }
+        let items = self.items.iter().map(|p| p.entry);
+        while chosen < MAX_BANDS_IN_VIEW && self.frame.len() < MAX_FRAME_ITEMS {
             let next = items.clone()
                 .filter_map(|entry| plan_entry(view, entry, rat, threats))
-                .filter(|p| {
-                    self.frame.iter().all(|other| {
-                        if p.entry.is_canopy() && other.entry.is_canopy() {
-                            return false;
-                        }
-                        (p.normal - other.normal).len_sq() > 1e-4
-                            || p.visible_lines().all(|cross| {
-                                other.visible_lines().all(|other_cross| {
-                                    (cross - other_cross).abs() as f32 >= MIN_SCREEN_SPACING * view.zoom
-                                })
-                            })
-                    })
-                })
+                .filter(|p| !self.frame.iter().any(|other| other.entry == p.entry))
+                .filter(|p| self.frame.iter().all(|other| frames_together(p, other, view)))
                 .min_by(|a, b| a.centre_distance().total_cmp(&b.centre_distance()));
             let Some(next) = next else { break };
             self.frame.push(next);
+            chosen += 1;
         }
+        // Painter's order: the farthest plane first, so a nearer item covers a
+        // farther one. A larger depth is nearer the lens, and equal depths keep
+        // the selection order (`sort_by` is stable), which is the nearest-first
+        // contest order.
+        self.frame.sort_by(|a, b| a.entry.depth.total_cmp(&b.entry.depth));
+        self.prev.clear();
+        self.prev.extend(self.frame.iter().map(|p| p.entry));
+
         let fill = coverage_fill(level.theme);
         let covered: f32 = self.frame.iter()
             .filter(|p| !(p.entry.is_cloud() || p.entry.is_wires()))
@@ -1082,9 +1182,6 @@ impl ForeLayer {
                 }
             }
         }
-        if self.frame.len() == 2 && self.frame[0].entry.depth > self.frame[1].entry.depth {
-            self.frame.swap(0, 1);
-        }
         if let [back, front] = self.frame.as_mut_slice() {
             let near_rat = |p: &Plan| {
                 p.body.fade > 0.0
@@ -1096,6 +1193,21 @@ impl ForeLayer {
                 && near_rat(front);
         }
     }
+}
+
+/// Whether `p` may share the frame with `other`: two visible planes of parallel
+/// lines must keep [`MIN_SCREEN_SPACING`] on screen, and only one 2D canopy may
+/// be on screen at a time.
+fn frames_together(p: &Plan, other: &Plan, view: View) -> bool {
+    if p.entry.is_canopy() && other.entry.is_canopy() {
+        return false;
+    }
+    (p.normal - other.normal).len_sq() > 1e-4
+        || p.visible_lines().all(|cross| {
+            other.visible_lines().all(|other_cross| {
+                (cross - other_cross).abs() as f32 >= MIN_SCREEN_SPACING * view.zoom
+            })
+        })
 }
 
 /// The scene is still composited at world resolution, before resampling.
@@ -1121,6 +1233,15 @@ fn shadow_offset(entry: ForeEntry) -> f32 {
     10.0 + 4.0 * entry.axis.x.abs()
 }
 
+/// Screen-pixel width of the ease at a plane's screen edge. The Flatbed's
+/// roadside reaches sweep at [`SKY_BRANCH_SPEED`] screen pixels a second, where
+/// the default [`EDGE_FADE_PX`] ramp would be a 0.18 s flick on the body, so
+/// they (and the canopy kind elsewhere) ease over [`SKY_EDGE_FADE_PX`].
+fn edge_fade_px(entry: ForeEntry, zoom: f32) -> f32 {
+    let ramp = if entry.is_sky_reach() { SKY_EDGE_FADE_PX } else { EDGE_FADE_PX };
+    ramp * zoom.max(0.25)
+}
+
 fn plan_entry(view: View, entry: ForeEntry, rat: Vec2, threats: &[(Vec2, f32)]) -> Option<Plan> {
     let normal = entry.normal();
     let view_span = project(view.size, normal);
@@ -1131,16 +1252,17 @@ fn plan_entry(view: View, entry: ForeEntry, rat: Vec2, threats: &[(Vec2, f32)]) 
     let screen_cross = centre_cross + (world_cross - centre_cross) * entry.depth;
     let k = entry_pixel_scale(entry, view);
     let radius = blur_radius(entry, view.zoom);
+    let fade_px = edge_fade_px(entry, view.zoom);
     let (mut body, shadow, body_tip, shadow_tip) = match entry.shape {
         ForeShape::Band(_) => {
             let body = Plane::new_band(
-                screen_cross, cross_extent(entry, k, radius), view_span, view.zoom,
+                screen_cross, cross_extent(entry, k, radius), view_span, fade_px,
             );
             let shadow = Plane::new_band(
                 world_cross + shadow_offset(entry),
                 cross_extent(entry, k, k / 2),
                 view_span,
-                view.zoom,
+                fade_px,
             );
             (body, shadow, f32::INFINITY, f32::INFINITY)
         }
@@ -1166,6 +1288,7 @@ fn plan_entry(view: View, entry: ForeEntry, rat: Vec2, threats: &[(Vec2, f32)]) 
                 basis,
                 view,
                 view_span,
+                fade_px,
             );
             let shadow = Plane::new_reach(
                 world_cross + shadow_offset(entry),
@@ -1174,6 +1297,7 @@ fn plan_entry(view: View, entry: ForeEntry, rat: Vec2, threats: &[(Vec2, f32)]) 
                 basis,
                 view,
                 view_span,
+                fade_px,
             );
             (body, shadow, body_tip, shadow_tip)
         }
@@ -1285,7 +1409,18 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
 
     let total = (pb.w * pb.h) as u32;
     let cap_full = total * coverage_pct(scene.level.theme) / 100;
-    let cap_skip = total * coverage_skip_pct(scene.level.theme) / 100;
+    // The Flatbed has no static placements: its whole foreground is the three
+    // analytic sky planes, each easing in and out at its own screen edge. They
+    // are exempt from the static coverage budget (the cap sits above the whole
+    // frame) because dimming or truncating one plane as another sweeps in reads
+    // as a pop — the half-disc canopy alone fills most of a frame and used to
+    // cut the wires' body off outright.
+    let flatbed_sky = scene.level.theme == Theme::Trailer;
+    let cap_skip = if flatbed_sky {
+        total * FLATBED_SKY_COVERAGE_PCT / 100
+    } else {
+        total * coverage_skip_pct(scene.level.theme) / 100
+    };
     budget_start(cap_skip);
     clear_disc_set(scene.rat - scene.cam, view.zoom);
     for (plan, raster) in layer.frame.iter().zip(&mut layer.rasters) {
@@ -1297,7 +1432,9 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
         } else {
             plan.body_area(view.size)
         };
-        let alpha = if est_writes > cap_skip.saturating_sub(painted) as f32 {
+        let alpha = if flatbed_sky {
+            plan.alpha
+        } else if est_writes > cap_skip.saturating_sub(painted) as f32 {
             plan.alpha.min(CLOUD_ALPHA_MAX)
         } else {
             coverage_alpha(plan.alpha, painted, cap_full)
@@ -2001,11 +2138,16 @@ fn sky_track(view: View, entry: ForeEntry) -> (f32, f32) {
         start = start.min(centre + (lo - body_hi - centre) / entry.depth);
         end = end.max(centre + (hi - body_lo - centre) / entry.depth);
     }
-    (start - 1.0, end + 1.0)
+    (start - SKY_TRACK_MARGIN, end + SKY_TRACK_MARGIN)
 }
 
 fn flatbed_reach_kind(seed: u64, event: u64) -> ReachKind {
-    let kinds = reach_kinds_for(Theme::Trailer);
+    // The Flatbed draws no horizontal item, so only kinds that may enter from
+    // the top or bottom edge (a vertical long axis) are eligible.
+    let kinds: Vec<ReachKind> = reach_kinds_for(Theme::Trailer)
+        .into_iter()
+        .filter(|&k| reach_allowed_sides(k).iter().any(|&s| is_vertical_edge(s)))
+        .collect();
     if kinds.is_empty() {
         return ReachKind::TreeCanopy;
     }
@@ -2028,9 +2170,12 @@ fn flatbed_reach_kind(seed: u64, event: u64) -> ReachKind {
     }
 }
 
-/// Analytic tracks on the Flatbed: centre-pinned wires, drifting cloud shadow,
-/// and off-screen-anchored roadside reaches (`TreeCanopy`, `LightPole`, `SignArm`),
-/// honouring each kind's `reach_spec(kind).sides`.
+/// Analytic tracks on the Flatbed: centre-pinned vertical wires, drifting cloud
+/// shadow, and off-screen-anchored roadside reaches (`TreeCanopy`, `LightPole`,
+/// `SignArm`) entering from the top or bottom edge only, honouring each kind's
+/// `reach_spec(kind).sides`. Nothing on the Flatbed lies horizontally: every
+/// item's long axis is vertical, so it can only sweep in and out across a side
+/// edge.
 fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeEntry>; 3] {
     if level.theme != Theme::Trailer {
         return [None; 3];
@@ -2042,7 +2187,9 @@ fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeEntry>; 3] 
         ForeEntry::from_band(fit_scale(ForeItem { kind, axis, cross: 0.0, depth, scale, seed }))
     };
 
-    let mut wires = band_entry(ForeKind::PowerLines, true, 2.0, 1.15, hash_u32(seed, 0x12));
+    // Wires run up and down: a vertical band pinned to the view centre, so it
+    // never leaves the frame and never fades.
+    let mut wires = band_entry(ForeKind::PowerLines, false, 2.0, 1.15, hash_u32(seed, 0x12));
     wires.cross = (view.cam + view.size * 0.5).dot(wires.normal());
 
     let mut cloud = band_entry(ForeKind::CloudBand, false, 1.8, 1.25, hash_u32(seed, 0xC10D));
@@ -2066,92 +2213,69 @@ fn sky_items(level: &Level, view: View, elapsed: f32) -> [Option<ForeEntry>; 3] 
 
         // Intersect `sides` with the north/south highway shoulders (`Top`/`Bottom`):
         // `LightPole` (`[Bottom]`) always takes `Bottom`; `TreeCanopy` and `SignArm`
-        // (`ALL`) take `Top` or `Bottom` along the roadside.
-        let mut vert_sides = [AnchorSide::Bottom; 2];
+        // (`ALL`) take `Top` or `Bottom` along the roadside. A kind that may only
+        // enter from a side edge would lie horizontally, so it is skipped.
+        let mut vert_sides = [AnchorSide::Bottom; 4];
         let mut vn = 0;
         for &s in sides {
-            if is_vertical_edge(s) && vn < 2 {
+            if is_vertical_edge(s) && vn < vert_sides.len() {
                 vert_sides[vn] = s;
                 vn += 1;
             }
         }
-        let chosen_side = if vn > 0 {
-            vert_sides[(hash_u32(seed ^ 0x51DE_0000, event) as usize) % vn]
-        } else if !sides.is_empty() {
-            sides[(hash_u32(seed ^ 0x51DE_0000, event) as usize) % sides.len()]
-        } else {
-            AnchorSide::Bottom
-        };
+        if vn == 0 {
+            return None;
+        }
+        let chosen_side = vert_sides[(hash_u32(seed ^ 0x51DE_0000, event) as usize) % vn];
 
-        let axis = if spec.organic && spec.shape == ReachShape::Strip {
-            let lean = 0.16 + hash01(seed ^ 0xA961_0000, event) * 0.28;
-            let sign_x = if hash_u32(seed ^ 0xD1AE_0000, event) & 1 == 0 { 1.0 } else { -1.0 };
-            inward_axis(chosen_side).rotate(sign_x * lean).normalized()
-        } else {
-            inward_axis(chosen_side)
-        };
+        // Every Flatbed reach kind is axis-aligned on its edge (no organic lean),
+        // so the long axis is exactly the inward vertical.
+        let axis = inward_axis(chosen_side);
 
         let depth = if spec.shape == ReachShape::Canopy { 2.2 } else if spec.organic { 2.6 } else { 2.4 };
         let mut entry = ForeEntry::reach(rkind, axis, Vec2::ZERO, depth, ev_seed);
         let normal = entry.normal();
 
-        if is_vertical_edge(chosen_side) {
-            let from_north = chosen_side == AnchorSide::Top;
-            let (start, end) = sky_track(view, entry);
-            let speed = (SKY_BRANCH_SPEED * view.zoom / entry.depth)
-                .max((end - start) / (SKY_BRANCH_PERIOD - 2.0));
-            let travelled = age * speed;
-            (travelled < end - start).then(|| {
-                let cross = if normal.x < 0.0 { start + travelled } else { end - travelled };
-                entry.cross = view.cam.dot(normal) + cross;
-                let tip_world_y = if spec.shape == ReachShape::Canopy {
-                    // Seat the full semicircular canopy flush on its anchor edge.
-                    let k = entry_pixel_scale(entry, view);
-                    let full_in = (spec.tip_len.round() as i32 * k) as f32;
-                    if from_north {
-                        view.cam.y + full_in
-                    } else {
-                        view.cam.y + view.size.y - full_in
-                    }
+        let from_north = chosen_side == AnchorSide::Top;
+        let (start, end) = sky_track(view, entry);
+        let speed = (SKY_BRANCH_SPEED * view.zoom / entry.depth)
+            .max((end - start) / (SKY_BRANCH_PERIOD - 2.0));
+        let travelled = age * speed;
+        // The track is the whole crossing plus `SKY_TRACK_MARGIN`, so both the
+        // body and the shadow's offset rect are clear of the view at each end;
+        // the item is dropped only once it has fully left.
+        (travelled < end - start).then(|| {
+            let cross = if normal.x < 0.0 { start + travelled } else { end - travelled };
+            entry.cross = view.cam.dot(normal) + cross;
+            let tip_world_y = if spec.shape == ReachShape::Canopy {
+                // Seat the full semicircular canopy flush on its anchor edge.
+                let k = entry_pixel_scale(entry, view);
+                let full_in = (spec.tip_len.round() as i32 * k) as f32;
+                if from_north {
+                    view.cam.y + full_in
                 } else {
-                    let mid_y = view.cam.y + view.size.y * 0.5;
-                    if (900.0..=1660.0).contains(&mid_y) {
-                        let reach_in = 152.0 + hash01(seed ^ 0x7190_0000, event) * 48.0;
-                        if from_north { 1072.0 + reach_in } else { 1488.0 - reach_in }
+                    view.cam.y + view.size.y - full_in
+                }
+            } else {
+                let mid_y = view.cam.y + view.size.y * 0.5;
+                if (900.0..=1660.0).contains(&mid_y) {
+                    let reach_in = 152.0 + hash01(seed ^ 0x7190_0000, event) * 48.0;
+                    if from_north { 1072.0 + reach_in } else { 1488.0 - reach_in }
+                } else {
+                    let frac = 0.38 + hash01(seed ^ 0x7190_0000, event) * 0.20;
+                    if from_north {
+                        view.cam.y + view.size.y * frac
                     } else {
-                        let frac = 0.38 + hash01(seed ^ 0x7190_0000, event) * 0.20;
-                        if from_north {
-                            view.cam.y + view.size.y * frac
-                        } else {
-                            view.cam.y + view.size.y * (1.0 - frac)
-                        }
+                        view.cam.y + view.size.y * (1.0 - frac)
                     }
-                };
-                let tip_world_x = view.cam.x + view.size.x * 0.5
-                    + (entry.cross - (view.cam + view.size * 0.5).dot(normal)) * normal.x;
-                let tip_world = Vec2::new(tip_world_x, tip_world_y);
-                entry.shape = ForeShape::Reach { kind: rkind, tip_along: tip_world.dot(axis) };
-                entry
-            })
-        } else {
-            let dur = SKY_BRANCH_PERIOD - 1.5;
-            if age >= dur {
-                return None;
-            }
-            let phase = age / dur;
-            let arch = 1.0 - (2.0 * phase - 1.0).abs();
-            let offset_sign = if hash_u32(seed ^ 0xC205_0000, event) & 1 == 0 { -1.0 } else { 1.0 };
-            let screen_cross_off = offset_sign * 56.0 * view.zoom;
-            let centre_cross = view.size.y * 0.5;
-            let world_cross = centre_cross + screen_cross_off / entry.depth;
-            entry.cross = view.cam.dot(normal) + world_cross;
-            let max_in = view.size.x * 0.48 + REACH_SHADOW_LEAD;
-            let pen = -REACH_SHADOW_LEAD - 4.0 + arch * (max_in + REACH_SHADOW_LEAD + 8.0);
-            let (along_lo, _) = project(view.size, axis);
-            let tip_along = view.cam.dot(axis) + along_lo + pen;
-            entry.shape = ForeShape::Reach { kind: rkind, tip_along };
-            Some(entry)
-        }
+                }
+            };
+            let tip_world_x = view.cam.x + view.size.x * 0.5
+                + (entry.cross - (view.cam + view.size * 0.5).dot(normal)) * normal.x;
+            let tip_world = Vec2::new(tip_world_x, tip_world_y);
+            entry.shape = ForeShape::Reach { kind: rkind, tip_along: tip_world.dot(axis) };
+            entry
+        })
     });
     [Some(wires), Some(cloud), roadside]
 }
@@ -2171,6 +2295,15 @@ pub(crate) fn sky_capture_time(
         return None;
     }
     let view = View { cam, size, zoom };
+    // `RATRUN_DUMP_SKY_AT=<seconds>` pins the Flatbed clock to `elapsed + n`
+    // instead of searching for a prominent frame, so one capture can step a run
+    // of frames across a whole sweep (0.0, 0.25, 0.5 …) and show the body and
+    // its shadow travelling in from the edge and out the other side.
+    if let Ok(at) = std::env::var("RATRUN_DUMP_SKY_AT") {
+        if let Ok(at) = at.trim().parse::<f32>() {
+            return Some(elapsed + at.max(0.0));
+        }
+    }
     let mut layer = ForeLayer::new();
     for step in 0..(60 * SKY_QUANT_HZ as i32) {
         let t = elapsed + step as f32 / SKY_QUANT_HZ;
@@ -2186,7 +2319,12 @@ pub(crate) fn sky_capture_time(
                 return false;
             }
             let plane = if p.entry.is_cloud() { p.shadow } else { p.body };
-            if plane.fade <= 0.75 {
+            // A roadside strip is vertical on the Flatbed and crosses the view
+            // centre, where the rat's own fade holds its body near half
+            // strength (measured 0.48–0.52), so it can never pass the bar the
+            // bands and the canopy are held to.
+            let strip = matches!(p.entry.shape, ForeShape::Reach { .. }) && !p.entry.is_canopy();
+            if plane.fade <= if strip { 0.4 } else { 0.75 } {
                 return false;
             }
             if p.entry.axis.x.abs() > 0.9 {
@@ -2925,7 +3063,12 @@ mod tests {
             let (b, b_used) = render(&mut world, &mut layer, cam, 1.0, 6.25);
             assert_eq!(a.pixels(), b.pixels(), "{theme:?}");
             assert_eq!(a_used, b_used);
-            assert!(a_used <= (VIEW.0 * VIEW.1) as u32 * coverage_skip_pct(theme) / 100);
+            let pct = if theme == Theme::Trailer {
+                FLATBED_SKY_COVERAGE_PCT
+            } else {
+                coverage_skip_pct(theme)
+            };
+            assert!(a_used <= (VIEW.0 * VIEW.1) as u32 * pct / 100);
         }
         let mut world = World::new(Theme::Sewer, 9);
         for kind in all_reach_kinds() {
@@ -2981,8 +3124,138 @@ mod tests {
                 let cam = Vec2::new(654.5, 1241.0);
                 let _ = render(&mut world, &mut layer, cam, zoom, elapsed);
                 assert!(layer.frame.iter().any(|p| p.entry.is_wires()));
-                assert!(layer.frame.len() <= MAX_BANDS_IN_VIEW);
+                assert!(layer.frame.len() <= MAX_FRAME_ITEMS);
             }
+        }
+    }
+
+    /// The Flatbed draws no item whose long axis is horizontal, at any clock and
+    /// camera: wires run up and down, the roadside reaches enter from the top or
+    /// bottom edge, and the cloud is a band on the vertical axis.
+    #[test]
+    fn no_flatbed_item_lies_horizontally() {
+        for seed in [5, 11] {
+            let world = World::new(Theme::Trailer, seed);
+            let mut layer = ForeLayer::new();
+            for cam in [Vec2::new(654.5, 1241.0), Vec2::new(600.0, 380.0)] {
+                let view = View { cam, size: Vec2::new(VIEW.0 as f32, VIEW.1 as f32), zoom: 1.0 };
+                for step in 0..(60 * SKY_QUANT_HZ as u32) {
+                    let elapsed = step as f32 / SKY_QUANT_HZ;
+                    for entry in sky_items(&world.level, view, elapsed).into_iter().flatten() {
+                        assert!(
+                            entry.axis.x.abs() <= 1e-5 && entry.axis.y.abs() > 0.99,
+                            "seed {seed}: Flatbed {entry:?} lies horizontally"
+                        );
+                    }
+                    layer.plan_frame(view, &world.level, cam + view.size * 0.5, elapsed, &[]);
+                    for plan in &layer.frame {
+                        assert!(
+                            plan.entry.axis.x.abs() <= 1e-5,
+                            "seed {seed} t {elapsed:.2}: planned {:?} lies horizontally",
+                            plan.entry.shape
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A sky item's shadow travels in and out continuously: across a sweep
+    /// sampled every frame its drawn area never steps, it enters at the screen
+    /// edge while the body is still off screen, and it is never dropped before
+    /// it has fully left (no flip at a 5–9 s schedule boundary).
+    #[test]
+    fn flatbed_sky_shadows_cross_without_a_jump() {
+        let size = Vec2::new(VIEW.0 as f32, VIEW.1 as f32);
+        let cam = Vec2::new(654.5, 1241.0);
+        // A tag per item, so a series follows one item rather than one slot.
+        let tag = |entry: ForeEntry| -> (u8, u8) {
+            match entry.shape {
+                ForeShape::Band(ForeKind::PowerLines) => (1, 0),
+                ForeShape::Band(ForeKind::CloudBand) => (2, 0),
+                ForeShape::Band(_) => (3, 0),
+                ForeShape::Reach { kind, .. } => (4, kind as u8),
+            }
+        };
+        for seed in [5, 11] {
+            let mut world = World::new(Theme::Trailer, seed);
+            let mut layer = ForeLayer::new();
+            let mut prev: Vec<((u8, u8), f32)> = Vec::new();
+            let mut prev_dark = 0.0f32;
+            let mut prev_canopy = false;
+            let mut led_in = 0;
+            for step in 0..(24 * 60) {
+                let elapsed = step as f32 / 60.0;
+                let (pb, _) = render(&mut world, &mut layer, cam, 1.0, elapsed);
+                let drawn: Vec<((u8, u8), f32)> = layer.frame.iter()
+                    .map(|p| {
+                        let alpha = p.alpha as f32 / ALPHA_MAX as f32;
+                        (tag(p.entry), p.shadow_area(size) * p.shadow.fade * alpha)
+                    })
+                    .collect();
+                if step > 0 {
+                    for &(key, cur) in &drawn {
+                        if let Some(&(_, before)) = prev.iter().find(|(k, _)| *k == key) {
+                            let jump = (cur - before).abs();
+                            // The floor is for the entry itself: the area and
+                            // the fade both ramp linearly, so the drawn figure
+                            // grows quadratically in 30 Hz steps (1, 20, 51, 96,
+                            // 179, 258, 351, 498 …). Measured over both seeds,
+                            // the largest step still under the 30 % bound is
+                            // 121 px² (230 -> 351); a pop is the whole shadow.
+                            assert!(
+                                jump <= (cur.max(before) * 0.30).max(128.0),
+                                "seed {seed} t {elapsed:.3}: {key:?} shadow drew {before:.0} -> {cur:.0} px"
+                            );
+                            if before < 1.0 && cur > 0.0 {
+                                let plan = layer.frame.iter()
+                                    .find(|p| tag(p.entry) == key)
+                                    .expect("the drawn item is planned");
+                                assert_eq!(
+                                    plan.body.fade, 0.0,
+                                    "seed {seed} t {elapsed:.3}: {key:?} body led its shadow in"
+                                );
+                                let (lo, hi) = project(size, plan.normal);
+                                let gap = (plan.shadow.span.1 - lo).min(hi - plan.shadow.span.0);
+                                assert!(
+                                    gap <= SKY_EDGE_FADE_PX + 8.0,
+                                    "seed {seed} t {elapsed:.3}: {key:?} shadow appeared {gap:.0} px inside the edge"
+                                );
+                                led_in += 1;
+                            }
+                        }
+                    }
+                    // An item that was drawn must not vanish until it has left.
+                    for &(key, before) in &prev {
+                        assert!(
+                            before <= 64.0 || drawn.iter().any(|(k, _)| *k == key),
+                            "seed {seed} t {elapsed:.3}: {key:?} vanished with {before:.0} px drawn"
+                        );
+                    }
+                }
+                let dark = pb.pixels().iter()
+                    .filter(|&&(r, g, b)| {
+                        (r, g, b) != FLOOR && r <= FLOOR.0 && g <= FLOOR.1 && b <= FLOOR.2
+                    })
+                    .count() as f32;
+                // The buffer is counted whole (a body's dark pixels cannot be
+                // told from the shadow's), so the step bound is skipped while
+                // the half-disc canopy is on screen: it covers most of the
+                // frame by design and doubles that count. Its own shadow is
+                // checked above through `shadow_area` like every other item.
+                let canopy_on = layer.frame.iter()
+                    .any(|p| p.entry.is_canopy() && p.body.fade > 0.0);
+                if step > 0 && !canopy_on && !prev_canopy {
+                    assert!(
+                        (dark - prev_dark).abs() <= (dark.max(prev_dark) * 0.35).max(900.0),
+                        "seed {seed} t {elapsed:.3}: {prev_dark:.0} -> {dark:.0} darkened px"
+                    );
+                }
+                prev_canopy = canopy_on;
+                prev_dark = dark;
+                prev = drawn;
+            }
+            assert!(led_in >= 2, "seed {seed}: only {led_in} sky items led their shadow in");
         }
     }
 
