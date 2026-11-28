@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.1 (2026-11-27, playtest build)
+
 - **Hantavirus lights go out smoothly.** When a poop leaves the floor before
   its fifteen seconds — pushed out by the newest one, or stepped in and spent —
   its green light, its floor glow and its bounced light now dim to nothing over

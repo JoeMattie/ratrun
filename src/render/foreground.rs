@@ -2319,7 +2319,12 @@ pub(crate) fn sky_capture_time(
                 return false;
             }
             let plane = if p.entry.is_cloud() { p.shadow } else { p.body };
-            if plane.fade <= 0.75 {
+            // A roadside strip is vertical on the Flatbed and crosses the view
+            // centre, where the rat's own fade holds its body near half
+            // strength (measured 0.48–0.52), so it can never pass the bar the
+            // bands and the canopy are held to.
+            let strip = matches!(p.entry.shape, ForeShape::Reach { .. }) && !p.entry.is_canopy();
+            if plane.fade <= if strip { 0.4 } else { 0.75 } {
                 return false;
             }
             if p.entry.axis.x.abs() > 0.9 {
