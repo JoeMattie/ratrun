@@ -8,6 +8,23 @@
   about half a second instead of cutting out in one frame, and the pellet
   dissolves with them. A poop that simply dries out ends exactly at zero, so it
   no longer blinks out on its last frame either.
+- **Flatbed foreground stops popping.** The truck level's overhead objects drew
+  their shadows on and off mid-screen because the wires, the cloud shadow and
+  the roadside item (tree, pole, sign) competed for the same two foreground
+  slots each frame and the nearest-to-centre pick flipped between them — the
+  roadside reach was often skipped while its shadow led in from the edge and
+  then appeared halfway across the frame. The three timed sky items now each
+  get their own slot, every one of them travels the whole crossing in from
+  off-screen and out the other side with margin for its shadow's offset, and an
+  item that has been drawn keeps its place until it has fully left. The
+  roadside ease across the screen edge is long enough to read as a fade (a
+  third of a second on the body, longer on the shadow) and the shadow still
+  leads its body into the frame from outside it. The Flatbed also lays nothing
+  horizontally any more: the power lines run up and down and its roadside
+  reaches enter only from the top or bottom edge, chosen where the items are
+  picked rather than hidden at draw time. Render-only; nothing the simulation
+  reads changed. `RATRUN_DUMP_SKY_AT=<seconds>` pins the sky clock for a
+  capture so a run of frames can be taken across one sweep.
 
 ## 0.5.0 (2026-11-26)
 
