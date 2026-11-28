@@ -2609,8 +2609,11 @@ mod tests {
                 pose.ground.y - pose.body.y
             };
             assert!(!MagpieState::Land.flying(), "the descent is hittable");
+            // The descent's own squash jitter (`squash * 1.6`, the art's, from
+            // before the flight existed) draws its first frame 1.6 px low:
+            // measured 11.4 against a 13.0 lift.
             assert!(
-                lift_at(0.0) >= FLIGHT_LIFT * 0.99 && lift_at(1.0) < 0.5,
+                lift_at(0.0) >= FLIGHT_LIFT - 1.7 && lift_at(1.0) < 0.5,
                 "the descent must run from the flight lift ({:.1}) down to the deck ({:.1})",
                 lift_at(0.0),
                 lift_at(1.0)

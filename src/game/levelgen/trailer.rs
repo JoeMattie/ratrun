@@ -1360,24 +1360,28 @@ mod tests {
                     Vec2::new((cx as f32 + 0.5) * 16.0, (cy as f32 + 0.5) * 16.0)
                 };
                 // A single lobe's bounding ellipse is inscribed in its own
-                // bounds, so its four corners are guaranteed plank. A union's
-                // corners are not (one lobe can reach another's corner), so
-                // only the single-lobe geometry is asserted exactly.
+                // bounds, so the four corners of the bounds rectangle are
+                // guaranteed plank. (The corner *cells'* centres are not: a
+                // hole two cells wide has them 8 px off its axis, well inside
+                // the ellipse — seeds 15 and 17.) A union's corners are not
+                // either (one lobe can reach another's corner), so only the
+                // single-lobe geometry is asserted exactly.
                 if pit.lobes().len() == 1 {
-                    for (cx, cy) in [
+                    let t = crate::game::collision::TILE_F;
+                    for (x, y) in [
                         (b.x, b.y),
-                        (b.right() - 1, b.y),
-                        (b.x, b.bottom() - 1),
-                        (b.right() - 1, b.bottom() - 1),
+                        (b.right(), b.y),
+                        (b.x, b.bottom()),
+                        (b.right(), b.bottom()),
                     ] {
-                        let p = centre(cx, cy);
+                        let p = Vec2::new(x as f32 * t, y as f32 * t);
                         assert!(
                             !pit.contains(p),
-                            "seed {seed}: the bounds corner ({cx}, {cy}) is a hole"
+                            "seed {seed}: the bounds corner ({x}, {y}) is a hole"
                         );
                         assert!(
                             level.trailer.pit_at(p).is_none(),
-                            "seed {seed}: the rat falls at the bounds corner ({cx}, {cy})"
+                            "seed {seed}: the rat falls at the bounds corner ({x}, {y})"
                         );
                     }
                 }

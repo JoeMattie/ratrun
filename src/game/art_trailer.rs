@@ -927,7 +927,7 @@ fn torn_hole(c: &mut Canvas<'_>, pit: &Pit, scroll_i: i32, bump: i32) {
             continue;
         }
         let h = hash(cx, cy);
-        if h % 3 == 0 {
+        if h.is_multiple_of(3) {
             continue;
         }
         // Walk out from the cell's centre to the rim, then stub outward.

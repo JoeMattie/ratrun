@@ -2202,7 +2202,7 @@ mod dropping_light_tests {
                 level: 5,
             },
             SpawnId(1),
-        ));
+        )).id();
 
         // One drawn frame at `w.elapsed`: the scene draw syncs the ghost list
         // before the floor art, then the lighting pass gathers. The two

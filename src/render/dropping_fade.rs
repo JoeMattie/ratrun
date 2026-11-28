@@ -422,7 +422,7 @@ mod tests {
         for i in 0..=72u32 {
             let f = smooth_fade(i as f32 / 72.0 * DROPPING_FADE_SECS);
             assert!(f <= prev + 1e-6, "smoothstep must never rise");
-            assert!(f >= 0.0 && f <= 1.0, "smoothstep stays in 0..=1");
+            assert!((0.0..=1.0).contains(&f), "smoothstep stays in 0..=1");
             prev = f;
         }
     }
@@ -569,10 +569,13 @@ mod tests {
                         level: 3,
                     },
                     SpawnId(id),
-                )));
+                )).id());
             }
+            // The earlier waves' ghosts are still held (the clock is not
+            // moved), so a live dropping must add none to them.
+            let held = fade.ghost_count();
             fade.update(&w.ecs, now);
-            assert_eq!(fade.ghost_count(), 0, "live droppings are not ghosts");
+            assert_eq!(fade.ghost_count(), held, "live droppings are not ghosts");
             // …then all removed on one tick (a crowd walking over them).
             for entity in spawned.into_iter().flatten() {
                 let _ = w.ecs.despawn(entity);
