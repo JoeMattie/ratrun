@@ -350,9 +350,27 @@ impl DroppingPlan {
 ///    ([`lighting::dropping_pen`]).
 ///
 /// The floor bloom and rim stay within `MAX_EXTENT` of the dropping's centre.
-/// Only the dropping's age and rank change the glow.
+/// Only the dropping's age and rank change the glow (`draw_dropping_fade`
+/// additionally dissolves the whole sprite by its own factor).
 pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f32) {
-    if pb.w == 0 || pb.h == 0 {
+    draw_dropping_fade(pb, d, cam, 1.0);
+}
+
+/// [`draw_dropping`] with every paint mixed toward the floor by `fade`: the
+/// sprite of a dropping that left the floor **early** (the cap's eviction or a
+/// body stepping in it), dissolving over `render::dropping_fade`'s
+/// `DROPPING_FADE_SECS` instead of popping out of the picture.
+///
+/// `fade == 1.0` paints exactly what [`draw_dropping`] paints (same halo, same
+/// rim, same matte pen on the pellet); below that the halo, rim, contact shadow
+/// and pellet are blended toward the floor they lie on, so nothing steps.
+/// `fade <= 0.0` paints nothing at all.
+pub fn draw_dropping_fade(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, fade: f32) {
+    if fade <= 0.0 || pb.w == 0 || pb.h == 0 {
+        return;
+    }
+    let fade = fade.min(1.0);
+    if fade <= 0.0 {
         return;
     }
     let (sx, sy) = w2s(d.pos, cam);
@@ -364,7 +382,10 @@ pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f3
         return;
     }
 
-    let plan = DroppingPlan::build(d);
+    let mut plan = DroppingPlan::build(d);
+    // The bloom's peak alpha carries the fade, so the halo, its rim and the
+    // emissive threshold above it all dim together.
+    plan.halo_peak *= fade;
     let rank_t = plan.tier as f32 / 4.0;
 
     // 1. Soft green floor halo / ground pool radiating from under/around the
@@ -407,9 +428,9 @@ pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f3
         for dx in -2..=3i32 {
             let b = mask_bit(dx, dy);
             if plan.shadow_under & b != 0 {
-                blend_floor_px(pb, sx + dx, sy + dy, SHADOW_COL, SHADOW_UNDER_ALPHA);
+                blend_floor_px(pb, sx + dx, sy + dy, SHADOW_COL, SHADOW_UNDER_ALPHA * fade);
             } else if plan.shadow_side & b != 0 {
-                blend_floor_px(pb, sx + dx, sy + dy, SHADOW_COL, SHADOW_SIDE_ALPHA);
+                blend_floor_px(pb, sx + dx, sy + dy, SHADOW_COL, SHADOW_SIDE_ALPHA * fade);
             }
         }
     }
@@ -436,6 +457,10 @@ pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f3
         (m, s, dp, HI_ARMED)
     };
 
+    // A fading pellet dissolves into the floor (and leaves the floor's own
+    // material byte behind, so the lighting effects never glaze a pellet that
+    // is on its way out); a full-strength one is plotted solid and stamped with
+    // the matte pen, exactly as before.
     let prev_pen = pb.set_pen(lighting::dropping_pen());
     for &(rx, ry) in plan.shape {
         let dx = if plan.flip_x {
@@ -453,7 +478,11 @@ pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f3
         } else {
             mid
         };
-        pb.plot(sx + dx, sy + dy, col);
+        if fade >= 1.0 {
+            pb.plot(sx + dx, sy + dy, col);
+        } else {
+            blend_floor_px(pb, sx + dx, sy + dy, col, fade);
+        }
     }
     pb.set_pen(prev_pen);
 }
@@ -467,7 +496,21 @@ pub fn draw_dropping(pb: &mut PixelBuffer, d: &Dropping, cam: Vec2, _elapsed: f3
 /// Drying droppings (`age > 12.0`) are skipped so they dim naturally alongside
 /// their fading ground light.
 pub fn mark_dropping_emissive(lm: &mut LightMap, pb: &PixelBuffer, d: &Dropping, cam: Vec2) {
-    if pb.w == 0 || pb.h == 0 || d.age > DRYING_AGE {
+    mark_dropping_emissive_fade(lm, pb, d, cam, 1.0);
+}
+
+/// [`mark_dropping_emissive`] for a dropping fading out early: the bloom's peak
+/// is scaled by `fade` first, so the marks thin out with the paint they protect
+/// (the buffer below them is already blended toward the floor) and stop once the
+/// halo is too faint to need them.
+pub fn mark_dropping_emissive_fade(
+    lm: &mut LightMap,
+    pb: &PixelBuffer,
+    d: &Dropping,
+    cam: Vec2,
+    fade: f32,
+) {
+    if fade <= 0.0 || pb.w == 0 || pb.h == 0 || d.age > DRYING_AGE {
         return;
     }
     let (sx, sy) = w2s(d.pos, cam);
@@ -479,7 +522,8 @@ pub fn mark_dropping_emissive(lm: &mut LightMap, pb: &PixelBuffer, d: &Dropping,
         return;
     }
 
-    let plan = DroppingPlan::build(d);
+    let mut plan = DroppingPlan::build(d);
+    plan.halo_peak *= fade.min(1.0);
     for (dx, dy) in plan.upper_rim() {
         lm.mark_emissive_rect(pb, sx + dx, sy + dy, 1, 1);
     }
