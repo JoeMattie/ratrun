@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The Magpie flies.** The Flatbed's boss no longer paces the deck it
+  arrived on: between attacks it circles you in the air at 56-84 px, banking
+  around your live position, crossing cargo stacks and holes in the planks,
+  riding the slipstream tailward and beating back upwind for it, at 110-140
+  px/s (faster than your walk at every phase). It comes down only to work:
+  a short visible descent onto the deck before every peck and every gust, so
+  kick its buried bill, not its shadow, and the peck, strafe, crate and gust
+  timings are the ones they always were. Now and then a beat ends in a low
+  wing-over past your shoulder. While it is up there nothing on the deck
+  reaches it and the name plate reads `IN THE AIR — OUT OF REACH`.
+- **Lost bosses walk back (the birds).** The Magpie no longer walks into the
+  cargo it used to be stopped by, and it is not walled off from you while it
+  flies: it is never called back into a fight it was already flying to.
+
 ## 0.5.0 (2026-11-26)
 
 - **Phones.** The web build plays on a phone. Landscape only: portrait shows

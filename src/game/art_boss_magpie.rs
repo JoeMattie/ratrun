@@ -21,9 +21,31 @@
 //!
 //! | phase | hp | rotation | read |
 //! |---|---|---|---|
-//! | 1 | `> 0.62` | `Perch` → `PeckWindup` → `Peck` → `Stuck` | a beak line on the planks: sidestep it, then bite the buried head |
-//! | 2 | `0.30..=0.62` | `Perch` → `Takeoff` → `StrafeWindup` → `StrafePass` → `SnatchDrop` → `Land` (alternating with `Peck`) | a shadow lane across the bed: be on the far side of it; then a marked square where the crate comes down |
-//! | 3 | `<= 0.30` | `GustWindup` → `Gust` → `Peck` / `StrafePass` | wing-beat gusts shove everything tailward in pulses with calm gaps; pecks in the gaps |
+//! | 1 | `> 0.62` | `Soar` → (`Swoop`) → `Land` → `PeckWindup` → `Peck` → `Stuck` | the shadow circling, then a descent: a beak line on the planks — sidestep it, then bite the buried head |
+//! | 2 | `0.30..=0.62` | `Soar` → `Takeoff` → `StrafeWindup` → `StrafePass` → `SnatchDrop` → `Land` (alternating with `Peck`) | a shadow lane across the bed: be on the far side of it; then a marked square where the crate comes down |
+//! | 3 | `<= 0.30` | `Soar` → `Land` → `GustWindup` → `Gust` → `Peck` / `StrafePass` | wing-beat gusts shove everything tailward in pulses with calm gaps; pecks in the gaps |
+//!
+//! ## The bird flies
+//!
+//! `Soar` is the neutral beat and it is **airborne**: the bird circles and
+//! banks over the deck around the rat, holding [`SOAR_RING`] px, riding the
+//! slipstream tailward and flapping back upwind for it, and it crosses cargo
+//! stacks and holes in the planks as if they were not there. Flight is
+//! [`SOAR_SPEED`] (110-140 px/s), faster than the rat's 58 px/s walk at every
+//! phase, so a bird that wants the rat always has it.
+//!
+//! It comes down only to work. A peck is preceded by `Land`: a short, visible
+//! descent onto a perch spot in the pecking band ([`DESCENT_MIN`]..
+//! [`DESCENT_MAX`] s at the bird's own flight speed), then the unchanged
+//! `PeckWindup` tell. The gust is flown the same way (it needs its wings braced
+//! against the planks). A strafing pass is flown from the air. Every one of
+//! those attack beats is drawn, telegraphed and timed exactly as it was before
+//! the bird learned to fly.
+//!
+//! Now and then a soaring beat ends in [`MagpieState::Swoop`]: a low, fast
+//! wing-over that skims past the rat at [`SWOOP_PASS_OFFSET`] px and climbs back
+//! out. It deals nothing (the fly-by is not an attack), and it keeps the fight
+//! moving when the rat has learnt to read the ring.
 //!
 //! ## The deck-peck
 //!
@@ -76,14 +98,16 @@
 //!
 //! ## The bird's own shapes (binding on the controller)
 //!
-//! * [`body_hit_circles`] — three circles: tail root, body, head. The head
-//!   carries `grounded: true` always (the bird flies *low*: belly to the
-//!   planks, claws trailing, so ground weapons reach it) but is **displaced to
-//!   the strike point** while the bill is buried, which is the whole point of
-//!   the punish window.
-//! * [`is_airborne`] — `Takeoff`, `StrafeWindup`, `StrafePass`, `SnatchDrop`:
-//!   body contact is off and the ground shadow goes soft and small; the hit
-//!   circles keep hitting.
+//! * [`body_hit_circles`] — three circles: tail root, body, head. On the deck
+//!   they are **grounded** (the rat's game reaches them, and the buried head is
+//!   **displaced to the strike point**, which is the whole point of the punish
+//!   window). Airborne they are drawn but ungrounded: nothing on the deck
+//!   reaches a bird in the air, so the landing is the damage window. The plate
+//!   says so while it flies ([`OVERHEAD_TAG`]).
+//! * [`is_airborne`] / [`out_of_reach`] — [`MagpieState::flying`]: `Soar`,
+//!   `Swoop`, `Takeoff`, `StrafeWindup`, `StrafePass`, `SnatchDrop`. Body
+//!   contact is off, the sprite is drawn at [`FLIGHT_LIFT`] over its own ground
+//!   shadow, and the ground shadow goes soft and small.
 //! * [`incoming_damage_mult`] — [`STUCK_DAMAGE_MULT`] in `Stuck`,
 //!   [`GUST_DAMAGE_MULT`] in the gust (the bird is on the deck with its wings
 //!   committed), `0.0` in `Death`.
@@ -168,7 +192,52 @@ pub const PERCH_BAND: [f32; 2] = [26.0, 62.0];
 
 /// Extra speed multiplier while hunting a rat that has left the hold: the bird
 /// runs (wings half open) after the rat down the deck.
+///
+/// Only `Perch`, the landed watch, still reads it: the neutral beat is flown
+/// (`Soar`) and the flight is already faster than the rat's walk.
 pub const HUNT_SPEED_MULT: f32 = 1.9;
+
+// ---- the neutral beat: flight ---------------------------------------------
+
+/// The bird's beat between attacks (`Soar`): the old perched watch, flown.
+pub const SOAR_DURATION: [f32; 3] = PERCH_DURATION;
+
+/// Flight speed per phase (`110 / 125 / 140` px/s). Over the rat's 58 px/s
+/// walk at every phase and under the strafing pass, so a bird that wants the
+/// rat can always have it: a boss cannot be outrun out of its own fight.
+pub const SOAR_SPEED: [f32; 3] = [110.0, 125.0, 140.0];
+
+/// The ring `Soar` holds the rat at, in px (`near`, `far`): the pecking band's
+/// flight equivalent, wide enough that the rat can read the shadow and always
+/// inside the bird's `PECK_REACH` after one more descent.
+pub const SOAR_RING: [f32; 2] = [56.0, 84.0];
+
+/// Past the ring by more than this, the bird stops arcing and comes straight
+/// at the rat at full flight speed (the recovery from an arrival across the
+/// deck).
+pub const SOAR_CHASE_BAND: f32 = 40.0;
+
+/// The slipstream's share of a soaring bird's ground track (px/s, toward the
+/// tailgate): it rides the deck's own wind and flaps back upwind for it, which
+/// is why the ring trails slack on the downwind side.
+pub const SOAR_DRIFT: f32 = 34.0;
+
+/// The low fly-by (`Swoop`): speed per phase and its beat.
+pub const SWOOP_SPEED: [f32; 3] = [140.0, 150.0, 160.0];
+pub const SWOOP_DURATION: f32 = 0.55;
+
+/// How far abeam of the rat the fly-by passes (px). Outside the rat's hurt
+/// radius by a wide margin, so the pass is never a hit — but close enough to
+/// be a pass.
+pub const SWOOP_PASS_OFFSET: f32 = 48.0;
+
+/// How far along the rat the fly-by's line ends (px).
+pub const SWOOP_RUN: f32 = 80.0;
+
+/// How high a flying bird is drawn above its own shadow (px): the lift
+/// `Takeoff` climbs to, and the height every airborne state flies at. `Land`
+/// ramps it back down to the planks.
+pub const FLIGHT_LIFT: f32 = 13.0;
 
 // ---- the deck-peck --------------------------------------------------------
 
@@ -263,6 +332,12 @@ pub const CRATE_LAND_PROGRESS: f32 = 0.74;
 /// `Land`: the bird settles back onto the deck.
 pub const LAND_DURATION: f32 = 0.55;
 
+/// The descent into a peck (`Land` flown at the bird's own flight speed): the
+/// beat is the distance over the speed, held inside these bounds so the
+/// descent is always short and always flies no faster than the bird can.
+pub const DESCENT_MIN: f32 = 0.35;
+pub const DESCENT_MAX: f32 = 1.20;
+
 // ---- the gust -------------------------------------------------------------
 
 /// `GustWindup`: the wings come back and the streaks gather.
@@ -328,11 +403,38 @@ const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 /// lethal area, damage and the counterplay the controller builds to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MagpieState {
-    /// **Hop / watch.** The bird stands on the cargo and walks the rat down to
-    /// its pecking band with the head-bob of a bird deciding where to stab.
+    /// **The bird in the air.** The neutral beat: it circles and banks over the
+    /// deck around the rat, holding [`SOAR_RING`] px, riding the slipstream
+    /// tailward and flapping back upwind for it, and crossing cargo and holes as
+    /// if they were not there — because, from up here, they are not.
+    ///
+    /// It is **airborne**: nothing grounded reaches it (`Boss::hit_shapes`),
+    /// and body contact is off. The counterplay is the descent: it lands to
+    /// peck, and that is the damage window.
+    ///
+    /// - Duration: [`SOAR_DURATION`] (`1.30 / 1.10 / 0.95` s) per beat.
+    /// - Warning: the shadow, always (`draw_magpie_ground`).
+    /// - Dangerous area: none (it does not touch the rat from up here).
+    Soar,
+
+    /// **The wing-over.** Now and then a beat ends in a low, fast pass: the bird
+    /// drops to the planks' height and skims past the rat at
+    /// [`SWOOP_PASS_OFFSET`] px, then climbs back out into the next `Soar`.
+    ///
+    /// - Duration: [`SWOOP_DURATION`] (0.55 s).
+    /// - Warning: the shadow tightens onto the planks and the wings sweep back.
+    /// - Dangerous area: none — it is a fly-by, not an attack.
+    Swoop,
+
+    /// **Hop / watch.** The landed pose: the bird stands on the deck, close to
+    /// the rat, with the head-bob of a bird deciding where to stab.
+    ///
+    /// The neutral beat is [`Soar`](Self::Soar) now, so this is the rig's
+    /// ground watch — the pose the landing settles out of, the Library card and
+    /// the behaviour tests that drive the deck-peck by hand.
     ///
     /// - Duration: [`PERCH_DURATION`] (`1.30 / 1.10 / 0.95` s).
-    /// - Warning: none (it is the neutral beat).
+    /// - Warning: none.
     /// - Dangerous area: body circle, [`CONTACT_DAMAGE`] (8).
     Perch,
 
@@ -417,12 +519,20 @@ pub enum MagpieState {
 }
 
 impl MagpieState {
-    /// Is the bird off the deck (no body contact, soft shadow)?
+    /// Is the bird off the deck (no body contact, no grounded hit shape, soft
+    /// shadow)?
+    ///
+    /// Airborne is a **contract**, not a pose: every state listed here is drawn
+    /// at [`FLIGHT_LIFT`] px over its own shadow and is out of every grounded
+    /// weapon's reach (`Boss::is_airborne`, `Boss::hit_shapes`), and no state
+    /// outside the list may be drawn off the planking.
     #[inline]
     pub fn flying(self) -> bool {
         matches!(
             self,
-            MagpieState::Takeoff
+            MagpieState::Soar
+                | MagpieState::Swoop
+                | MagpieState::Takeoff
                 | MagpieState::StrafeWindup
                 | MagpieState::StrafePass
                 | MagpieState::SnatchDrop
@@ -435,6 +545,20 @@ impl MagpieState {
 pub fn is_airborne(view: &MagpieView) -> bool {
     view.state.flying()
 }
+
+/// Is the bird out of every grounded weapon's reach right now?
+///
+/// The same rule as [`is_airborne`], named for the HUD: the plate says *why*
+/// the rat's ground game is finding nothing (see
+/// [`OVERHEAD_TAG`] and `render::hud::boss_plate`).
+#[inline]
+pub fn out_of_reach(view: &MagpieView) -> bool {
+    view.state.flying()
+}
+
+/// The plate's second line while the bird is flying: the fight tells the rat
+/// *why* its weapons are finding nothing.
+pub const OVERHEAD_TAG: &str = "IN THE AIR — OUT OF REACH";
 
 /// Incoming damage multiplier (the art owns it, as for the other bosses).
 #[inline]
@@ -527,6 +651,9 @@ pub struct MagpieView {
     pub lane_start: Vec2,
     /// `+1`/`-1`: which way the lane sweeps.
     pub sweep: f32,
+    /// `-1..=1`: the bank of a turning bird. Read only by the flying states;
+    /// the controller hands it the side of the bird's own orbit.
+    pub bank: f32,
     /// The bird is out of its hold, running the deck after a rat that fled.
     pub hunting: bool,
 }
@@ -545,6 +672,7 @@ impl MagpieView {
             target,
             lane_start: pos,
             sweep: 1.0,
+            bank: 0.0,
             hunting: false,
         }
     }
@@ -646,10 +774,27 @@ pub fn lane_segment(view: &MagpieView) -> (Vec2, Vec2) {
 // Pose
 // ============================================================================
 
-/// Most a flying bird may lift off the deck while it is still drawn over its
-/// own (grounded) hit shapes: the body radius is ~7 px, so a few pixels of lift
-/// keeps the sprite on the circles the rat can actually hit.
+/// Most a **grounded** bird may lift off the deck while it is still drawn over
+/// its own hit shapes: the body radius is ~7 px, so a few pixels of lift keeps
+/// the sprite on the circles the rat can actually hit.
+///
+/// Airborne states (`MagpieState::flying`) are not bound by it: their shapes are
+/// ungrounded, so nothing on the deck can reach them and the sprite is drawn at
+/// its true [`FLIGHT_LIFT`]. Neither is `Land`: it is the descent, drawn from
+/// the flight lift down to the planking while its shapes are already the rat's
+/// to hit again.
 const HIT_LIFT_MAX: f32 = 3.0;
+
+/// Is this state drawn in the air? Every airborne state, plus the descent that
+/// flies the bird back down onto the deck.
+#[inline]
+fn drawn_airborne(state: MagpieState) -> bool {
+    state.flying() || state == MagpieState::Land
+}
+
+/// How far a banked bird's lateral axis rolls toward its heading, per unit of
+/// `MagpieView::bank` (a shear of the wing line: the minimal 2D read of a bank).
+const BANK_SHEAR: f32 = 0.22;
 
 #[derive(Clone, Copy)]
 struct Pose {
@@ -739,6 +884,11 @@ impl Pose {
         };
 
         let ground = view.pos - cam;
+        let bank = if view.bank.is_finite() {
+            view.bank.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
         let spread: f32;
         let mut sweep = 0.0f32;
         let mut flap = 0.0f32;
@@ -814,9 +964,33 @@ impl Pose {
                 jitter = p * (tug * 1.4) - f * (tug.abs() * 1.2);
                 buried = true;
             }
+            MagpieState::Soar => {
+                // The beat of a bird working an arc: wide wings, one long
+                // lazy stroke, the tail steering, the head down on the rat.
+                altitude = FLIGHT_LIFT;
+                spread = 0.90;
+                flap = (anim * 7.0).sin() * 0.55;
+                sweep = -0.10;
+                tail_fan = 0.40;
+                tail_lift = 0.18 * (anim * 1.4).sin();
+                head_lunge = 0.30;
+            }
+            MagpieState::Swoop => {
+                // The wing-over: wings thrown back, the bird dropping to the
+                // planks through the middle of the pass and climbing out of it.
+                let dip = (prog * PI).sin();
+                altitude = FLIGHT_LIFT * (1.0 - 0.72 * dip);
+                spread = 1.0;
+                sweep = -0.78;
+                flap = (anim * 12.0).sin() * 0.30 * (1.0 - dip);
+                tail_lift = -0.20 * dip;
+                tail_fan = 0.25;
+                head_lunge = 0.55 + 0.28 * dip;
+                jitter = Vec2::new(0.0, dip * 0.8);
+            }
             MagpieState::Takeoff => {
                 let t = smoothstep(0.0, 0.75, prog);
-                altitude = 13.0 * t;
+                altitude = FLIGHT_LIFT * t;
                 spread = (prog / 0.55).min(1.0);
                 flap = (anim * 22.0).sin();
                 tail_lift = 0.4 * t;
@@ -824,7 +998,7 @@ impl Pose {
                 head_lunge = 0.20;
             }
             MagpieState::StrafeWindup => {
-                altitude = 13.0;
+                altitude = FLIGHT_LIFT;
                 spread = 1.0;
                 flap = (anim * 18.0).sin();
                 tail_lift = 0.15;
@@ -833,7 +1007,7 @@ impl Pose {
                 head_lunge = 0.48;
             }
             MagpieState::StrafePass => {
-                altitude = 13.0;
+                altitude = FLIGHT_LIFT;
                 spread = 1.0;
                 // Sleek swept-back stooping dive wings!
                 sweep = -0.82;
@@ -845,7 +1019,7 @@ impl Pose {
             MagpieState::SnatchDrop => {
                 // Hard aerial brake with wings thrown forward to wheel and release the crate!
                 let brake = smoothstep(0.0, 0.45, prog);
-                altitude = 13.0 + 4.0 * (1.0 - brake);
+                altitude = FLIGHT_LIFT + 4.0 * (1.0 - brake);
                 spread = 1.0;
                 sweep = 0.58 * brake;
                 flap = (anim * 22.0).sin() * brake;
@@ -855,7 +1029,7 @@ impl Pose {
             }
             MagpieState::Land => {
                 let t = smoothstep(0.0, 0.65, prog);
-                altitude = 13.0 * (1.0 - t);
+                altitude = FLIGHT_LIFT * (1.0 - t);
                 spread = (1.0 - t) * 0.92;
                 flap = (anim * 15.0).sin() * (1.0 - t);
                 let squash = (1.0 - t).powi(2);
@@ -925,6 +1099,12 @@ impl Pose {
                 Vec2::new(f.x * c - f.y * s, f.x * s + f.y * c),
                 Vec2::new(p.x * c - p.y * s, p.x * s + p.y * c),
             )
+        } else if view.state.flying() && bank.abs() > 1e-3 {
+            // A turning bird banks: the lateral axis rolls out of the plane, so
+            // the wing line leans into the arc. (A shear, because the screen
+            // has two axes — flagged for a Neon pass if it ever needs a real
+            // roll.)
+            (f, (p + f * (bank * BANK_SHEAR)).normalized())
         } else {
             (f, p)
         };
@@ -942,14 +1122,17 @@ impl Pose {
         } else {
             Vec2::ZERO
         };
-        // **The bird is drawn where its hit shapes are.** Its shapes stay on
-        // the deck in every state (`Boss::hit_shapes`: "a ground-only build
-        // must always be able to fight it"), so the sprite may only lift as far
-        // as those deck circles still reach — otherwise the rat was shooting
-        // the planks a dozen pixels under a floating bird. The flight still
-        // reads: the shadow shrinks and softens with the full `altitude`
-        // (below), the wings spread and the body leans.
-        let lift = altitude.min(HIT_LIFT_MAX);
+        // **A grounded bird is drawn where its hit shapes are.** On the deck
+        // the shapes are the rat's to hit, so the sprite may only lift as far as
+        // those deck circles still reach — otherwise the rat was shooting the
+        // planks a dozen pixels under a floating bird. Airborne, the shapes are
+        // ungrounded and nothing on the deck can reach them, so the sprite is
+        // drawn at its true altitude over its own (small, soft) shadow.
+        let lift = if drawn_airborne(view.state) {
+            altitude
+        } else {
+            altitude.min(HIT_LIFT_MAX)
+        };
         let head = head_world - cam + Vec2::new(0.0, -lift) + slump;
 
         // Visual body centre: during Peck/Stuck, lean the torso forward so the neck stays
@@ -2328,29 +2511,24 @@ pub fn draw_magpie_crate(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2) {
 mod tests {
     use super::*;
 
-    /// **The bird is drawn where it can be hit, in every state.** Its hit
-    /// shapes are the deck circles in `Boss::hit_shapes` (the design's "a
-    /// ground-only build must always be able to fight it"), so a flying state
-    /// must not lift the sprite out of them: the rat was shooting planks a
+    /// **A grounded bird is drawn where it can be hit.** On the deck its hit
+    /// shapes are the grounded circles in `Boss::hit_shapes`, so a grounded
+    /// state must not lift the sprite out of them: the rat was shooting planks a
     /// dozen pixels under a floating bird.
     #[test]
-    fn every_magpie_state_draws_its_body_over_its_hit_shapes() {
+    fn every_grounded_magpie_state_draws_its_body_over_its_hit_shapes() {
         let states = [
             MagpieState::Perch,
             MagpieState::Ruffle,
             MagpieState::PeckWindup,
             MagpieState::Peck,
             MagpieState::Stuck,
-            MagpieState::Takeoff,
-            MagpieState::StrafeWindup,
-            MagpieState::StrafePass,
-            MagpieState::SnatchDrop,
-            MagpieState::Land,
             MagpieState::GustWindup,
             MagpieState::Gust,
             MagpieState::Death,
         ];
         for state in states {
+            assert!(!state.flying(), "{state:?} is in the grounded list");
             for prog in [0.15f32, 0.55, 0.9] {
                 let mut view = MagpieView::new(
                     Vec2::new(46.0, 58.0),
@@ -2381,6 +2559,92 @@ mod tests {
         }
     }
 
+    /// **A flying bird is drawn in the air, over its own shadow.** The airborne
+    /// states are ungrounded (`Boss::hit_shapes`), so nothing on the deck can
+    /// reach them and the sprite is drawn at its true altitude — the shadow
+    /// stays on the planking where the rat can read it.
+    #[test]
+    fn a_flying_bird_is_drawn_above_its_shadow() {
+        for state in [
+            MagpieState::Soar,
+            MagpieState::Swoop,
+            MagpieState::Takeoff,
+            MagpieState::StrafeWindup,
+            MagpieState::StrafePass,
+            MagpieState::SnatchDrop,
+        ] {
+            assert!(state.flying(), "{state:?} must be airborne");
+            assert!(!has_body_contact(state), "{state:?} must not bump the rat");
+            let mut fullest = 0.0f32;
+            for prog in [0.2f32, 0.5, 0.8, 1.0] {
+                let mut view = MagpieView::new(
+                    Vec2::new(46.0, 58.0),
+                    Vec2::new(1.0, 0.0),
+                    Vec2::new(104.0, 66.0),
+                );
+                view.state = state;
+                view.progress = prog;
+                view.anim = 0.7 + prog * 3.0;
+                view.bank = 1.0;
+                let pose = Pose::from_view(&view, Vec2::ZERO, (206, 150, 70));
+                let lift = pose.ground.y - pose.body.y;
+                assert!(
+                    lift <= FLIGHT_LIFT + 4.5,
+                    "{state:?} at {prog}: drawn {lift:.1}px off the deck, past the flight lift"
+                );
+                assert!(lift >= 0.0, "{state:?} at {prog}: drawn under the deck");
+                fullest = fullest.max(lift);
+                // The shadow never leaves the bird's own footprint.
+                assert!(pose.ground.dist(view.pos) < 1e-3);
+            }
+            // **The descent is the way back down**: it starts at the flight's
+            // own height with its shapes already grounded (the rat can hit a
+            // bird that is landing) and settles onto the planks.
+            let lift_at = |prog: f32| {
+                let mut view =
+                    MagpieView::new(Vec2::new(46.0, 58.0), Vec2::new(1.0, 0.0), Vec2::new(104.0, 66.0));
+                view.state = MagpieState::Land;
+                view.progress = prog;
+                let pose = Pose::from_view(&view, Vec2::ZERO, (206, 150, 70));
+                pose.ground.y - pose.body.y
+            };
+            assert!(!MagpieState::Land.flying(), "the descent is hittable");
+            assert!(
+                lift_at(0.0) >= FLIGHT_LIFT * 0.99 && lift_at(1.0) < 0.5,
+                "the descent must run from the flight lift ({:.1}) down to the deck ({:.1})",
+                lift_at(0.0),
+                lift_at(1.0)
+            );
+            // Every airborne state climbs clear of the deck (and of the lift a
+            // grounded sprite is held to) at some point in its beat. `Takeoff`
+            // is the exception on entry by design: it starts on the planking.
+            if state != MagpieState::Takeoff {
+                assert!(
+                    fullest > HIT_LIFT_MAX + 0.5,
+                    "{state:?} is never drawn clear of the deck ({fullest:.1}px)"
+                );
+            } else {
+                let mut view = MagpieView::new(Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(104.0, 0.0));
+                view.state = MagpieState::Takeoff;
+                view.progress = 1.0;
+                let pose = Pose::from_view(&view, Vec2::ZERO, (206, 150, 70));
+                assert!(
+                    pose.ground.y - pose.body.y >= FLIGHT_LIFT * 0.99,
+                    "a finished takeoff must be at the flight lift"
+                );
+            }
+        }
+        // A bank really does leave the wing line: the lateral axis shears
+        // toward the heading and the body centre stays over the footprint.
+        let mut flat = MagpieView::new(Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(60.0, 0.0));
+        flat.state = MagpieState::Soar;
+        let mut banked = flat;
+        banked.bank = 1.0;
+        let a = Pose::from_view(&flat, Vec2::ZERO, (206, 150, 70));
+        let b = Pose::from_view(&banked, Vec2::ZERO, (206, 150, 70));
+        assert!(a.p.dot(b.p) < 1.0, "the bank must tilt the wing line");
+    }
+
     /// Development aid: `RATRUN_MAGPIE_SHEET=1 cargo test magpie_sheet`
     /// writes a contact sheet of every state of the fight to
     /// `/tmp/ratrun_magpie_sheet.ppm` (one cell per state, three progresses
@@ -2393,6 +2657,8 @@ mod tests {
         const CELL_W: usize = 150;
         const CELL_H: usize = 110;
         let states = [
+            MagpieState::Soar,
+            MagpieState::Swoop,
             MagpieState::Perch,
             MagpieState::Ruffle,
             MagpieState::PeckWindup,
@@ -2635,6 +2901,8 @@ mod tests {
             MagpieState::Peck,
             MagpieState::Ruffle,
             MagpieState::Gust,
+            MagpieState::Soar,
+            MagpieState::Swoop,
             MagpieState::Death,
         ] {
             assert!(!has_body_contact(s), "{s:?} must not bump the rat");
@@ -2652,6 +2920,8 @@ mod tests {
         let mut pb = PixelBuffer::new(120, 100);
         pb.clear((30, 32, 40));
         let states = [
+            MagpieState::Soar,
+            MagpieState::Swoop,
             MagpieState::Perch,
             MagpieState::Ruffle,
             MagpieState::PeckWindup,

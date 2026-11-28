@@ -1469,6 +1469,53 @@ mod tests {
         assert!(text.contains("BOSS ►"), "expected right-edge boss compass");
     }
 
+    /// **The off-screen arrow is kind-blind.** The compass reads the live
+    /// boss's offset (`World::boss_offset`, the living `Boss` entity whatever
+    /// its kind) and has no per-kind branch, so a bird, a crab, a mower and a
+    /// lantern all get a pointer while they are out of view.
+    #[test]
+    fn every_boss_kind_draws_the_compass_while_off_screen() {
+        use crate::game::ecs::systems::boss::BossKind;
+        for (kind, theme) in [
+            (BossKind::Cat, Theme::Sewer),
+            (BossKind::Broom, Theme::Kitchen),
+            (BossKind::Mower, Theme::Lab),
+            (BossKind::Mangle, Theme::Laundry),
+            (BossKind::NightEdition, Theme::Printworks),
+            (BossKind::Magpie, Theme::Trailer),
+            (BossKind::HorseshoeCrab, Theme::Sewer),
+            (BossKind::MegaRat, Theme::Kitchen),
+            (BossKind::Hawk, Theme::Trailer),
+            (BossKind::Cobra, Theme::Lab),
+            (BossKind::Lantern, Theme::Outfall),
+        ] {
+            let mut w = World::new(theme, 7);
+            w.viewport = Vec2::new(120.0, 74.0);
+            assert!(w.force_boss_here(kind), "{kind:?}: no arrival spot");
+            // Walk the rat away from it: the boss is now outside the view.
+            w.player.pos += Vec2::new(220.0, 0.0);
+            let offset = w.boss_offset().expect("a living boss has an offset");
+            assert!(
+                offset.len() > 0.0,
+                "{kind:?}: the arrow would point at the rat itself"
+            );
+            let mut hud = HudState::default();
+            hud.telemetry.set_boss_hp(w.boss_hp());
+            hud.telemetry.set_boss_offset(Some(offset));
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal
+                .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+                .unwrap();
+            let text = buf_text(&terminal);
+            assert!(
+                [" BOSS ► ", " ◄ BOSS ", " ▲ BOSS ", " ▼ BOSS "]
+                    .iter()
+                    .any(|label| text.contains(label)),
+                "{kind:?}: no boss arrow while it is off screen: {text}"
+            );
+        }
+    }
+
     #[test]
     fn critical_low_hp_shows_brackets_and_warning() {
         let mut w = World::new(Theme::Sewer, 7);

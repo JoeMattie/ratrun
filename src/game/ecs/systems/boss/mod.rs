@@ -549,7 +549,19 @@ impl BossKind {
             // 173 dps actually landed — far below the build the old number
             // was tuned against. Scaled linearly to a ~60 s fight; the next
             // batch run owns the final number.
-            BossKind::Magpie => 1.45,
+            //
+            // **Flight (0.5.x): the same pool again, for a bird that is no
+            // longer always hittable.** 1.45 was re-derived for a bird the
+            // rat's fire always found. The neutral beat is flown now, and the
+            // damage window is the deck (the descent into the peck, its tell
+            // and the buried bill; the whole gust, which is deck-work): about
+            // 45 % of a phase-1 rotation, 25 % of phase 2 (which is half
+            // strafing passes) and 40 % of phase 3, i.e. **~37 % of the
+            // fight**. Holding the tuned ~60 s at 37 % uptime is 1.45 x 0.37
+            // = 0.55. The Redtail is untouched: it was already scaled for a
+            // bird that is only reachable while it is low (0.8 at ~45 %).
+            // Unmeasured: `--bot-batch --practice --route flatbed` owns it.
+            BossKind::Magpie => 0.55,
             // The Sewer pool mate, and the only boss whose *pool* is smaller
             // than its art's: the dome sheds ~45 % of the rat's fire on any
             // run that does not flank it, so the raw number already buys a
@@ -779,7 +791,10 @@ impl BossKind {
             BossKind::Mower => BossState::Mower(MowerState::Patrol),
             BossKind::Mangle => BossState::Mangle(MangleState::Idle),
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Roll),
-            BossKind::Magpie => BossState::Magpie(MagpieState::Perch),
+            // It arrives flying: the neutral beat is the ring it flies around
+            // the rat (`MagpieState::Soar`), so a bird that spawned across the
+            // deck flies the deck instead of walking it.
+            BossKind::Magpie => BossState::Magpie(MagpieState::Soar),
             BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Dome),
             BossKind::MegaRat => BossState::MegaRat(MegaRatState::Groom),
             // It arrives as a shadow: the first state is the circling overhead.
@@ -799,7 +814,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::IDLE_P1,
             // The first walk beat is the phase-1 one (`night_edition::ROLL_DURATION[0]`).
             BossKind::NightEdition => 1.8,
-            BossKind::Magpie => art_boss_magpie::PERCH_DURATION[0],
+            BossKind::Magpie => art_boss_magpie::SOAR_DURATION[0],
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DOME_DURATION[0],
             BossKind::MegaRat => art_boss_megarat::GROOM_DURATION[0],
             BossKind::Hawk => art_boss_hawk::CIRCLE_DURATION[0],
@@ -2061,6 +2076,9 @@ impl Boss {
             // the body is drawn in the overhead pass (over the rat, as a bird
             // over a deck should be). The art owns the rule.
             BossState::Hawk(_) => art_boss_hawk::out_of_reach(&self.hawk_view()),
+            // A flying corvid is in the air on the same terms: the flight is
+            // the neutral beat, the landing is the damage window.
+            BossState::Magpie(_) => art_boss_magpie::is_airborne(&self.magpie_view()),
             _ => false,
         }
     }
@@ -2075,6 +2093,7 @@ impl Boss {
     pub fn overhead(&self) -> bool {
         match self.state {
             BossState::Hawk(_) => art_boss_hawk::out_of_reach(&self.hawk_view()),
+            BossState::Magpie(_) => art_boss_magpie::out_of_reach(&self.magpie_view()),
             _ => false,
         }
     }
@@ -2229,28 +2248,32 @@ impl Boss {
                 BossHitShapes::from_slice(&shapes[..len])
             }
             BossKind::Magpie => {
-                // The bird flies *low* (belly to the planks, claws trailing), so
-                // all three circles stay grounded even through a strafing pass:
-                // a ground-only build must always be able to fight it. While the
-                // bill is buried the head circle is parked at the strike point,
-                // which is what makes the punish window reachable.
+                // **Grounded on the deck, ungrounded in the air.** The bird's
+                // neutral beat is flight (`MagpieState::Soar`), so nothing on
+                // the planks reaches it up there: the landing is the damage
+                // window, and the plate says why while it flies
+                // (`Boss::overhead`, `art_boss_magpie::OVERHEAD_TAG`). While it
+                // is down and the bill is buried the head circle is parked at
+                // the strike point, which is what makes the punish window
+                // reachable.
                 let view = self.magpie_view();
+                let grounded = !art_boss_magpie::is_airborne(&view);
                 let circles = art_boss_magpie::body_hit_circles(&view);
                 let shapes: [BossHitShape; 3] = [
                     BossHitShape::Circle {
                         center: circles[0].0,
                         radius: circles[0].1,
-                        grounded: true,
+                        grounded,
                     },
                     BossHitShape::Circle {
                         center: circles[1].0,
                         radius: circles[1].1,
-                        grounded: true,
+                        grounded,
                     },
                     BossHitShape::Circle {
                         center: circles[2].0,
                         radius: circles[2].1,
-                        grounded: true,
+                        grounded,
                     },
                 ];
                 BossHitShapes::from_slice(&shapes)
@@ -2569,6 +2592,8 @@ impl Boss {
             target: self.target,
             lane_start: self.pounce_origin,
             sweep: self.scratch[magpie::S_LANE_DIR],
+            // The side of its own orbit, which is also the side it banks to.
+            bank: self.swipe_side,
             hunting: self.hunting,
         }
     }
@@ -4579,6 +4604,16 @@ fn pursue(ctx: &BossContext<'_>, boss: &mut Boss, dt: f32) {
         boss.leap_t = 0.0;
         return;
     }
+    // **A flying kind closes its own gaps.** The Magpie's neutral beat is
+    // travel (`MagpieState::Soar`: a ring around the rat's live position at
+    // [`art_boss_magpie::SOAR_SPEED`], over cargo and holes), so the shared rule
+    // must not walk it: `move_boss` collides with the cargo stacks a bird flies
+    // over, which is what left it pacing at the deck it spawned on. The clock
+    // above still runs, so the rejoin call and its cue still fire.
+    if boss.kind == BossKind::Magpie {
+        boss.leap_t = 0.0;
+        return;
+    }
     // Give a ready Sweeper sprint its tell before shared pursuit can close
     // the gap. Obstructed routes and the cooldown still use normal pursuit.
     if boss.kind == BossKind::Broom && broom::can_run(ctx, boss) {
@@ -4842,10 +4877,18 @@ pub fn boss_update_system(
         // [`RELOCATE_AFTER_SECS`] and [`RECALL_SECS`].
         let to_player = player.pos - boss.pos;
         let floats = boss.kind == BossKind::Lantern;
-        let no_los = !floats && level
-            .tiles
-            .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
-            .is_some();
+        // **A bird in the air is not walled off.** Cargo and holes are beneath
+        // it, so a blocked line is not a stranded boss (and the siege must not
+        // tear a wall down for a body that flies over it). Its own flight closes
+        // the gap; the distance gate below still calls it back from across the
+        // deck.
+        let airborne = floats
+            || (boss.kind == BossKind::Magpie && art_boss_magpie::is_airborne(&boss.magpie_view()));
+        let no_los = !airborne
+            && level
+                .tiles
+                .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
+                .is_some();
         // A boss that is close enough and can see the rat but cannot *move*
         // (wedged on a wall jamb, or with no attack whose footprint fits where
         // it stands) is just as stranded as one across the map — that is the
@@ -4860,7 +4903,7 @@ pub fn boss_update_system(
             fight.since_sample = 0.0;
         }
         let stuck = fight.stuck;
-        if !floats && (to_player.len() > REJOIN_DIST || no_los || stuck) {
+        if !airborne && (to_player.len() > REJOIN_DIST || no_los || stuck) {
             boss.lost += dt;
             // Only out of the neutral beat. The timer keeps running through an
             // attack, but the move itself waits for it to finish: relocating a
@@ -4913,7 +4956,7 @@ pub fn boss_update_system(
         // seconds is the condition the siege was written for, whether or not
         // the pacing looks like motion.
         let near = to_player.len() < 220.0 || boss.recall > 0.0;
-        let walled_off = !floats
+        let walled_off = !airborne
             && !walkable_line(&level, boss.pos, player.pos, boss.kind.body_radius(), SizeClass::Large);
         if near && walled_off {
             fight.siege += dt;

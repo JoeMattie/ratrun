@@ -13,9 +13,14 @@
 //! slipstream that drags light things toward the tailgate. Its boss is the one
 //! animal that *is* that motion — a magpie riding the wind over the cab.
 //!
-//! 1. **`Perch`** holds the rat in the pecking band (`26..62 px`) and circles,
-//!    wings tucked; out of its hold it runs the deck at
-//!    [`art_boss_magpie::HUNT_SPEED_MULT`] with its wings half open.
+//! 1. **`Soar`** is the neutral beat and it is **flown**: the bird circles and
+//!    banks over the deck around the rat's live position, holding
+//!    [`art_boss_magpie::SOAR_RING`] px at [`art_boss_magpie::SOAR_SPEED`], over
+//!    cargo and holes, riding the slipstream tailward and flapping back upwind
+//!    for it. It is airborne: nothing grounded reaches it, and it does not touch
+//!    the rat. Now and then a beat ends in a low wing-over (`Swoop`) past the
+//!    rat. It only comes down to work: every attack begins with `Land`, a short
+//!    visible descent onto a perch spot in the pecking band.
 //! 2. **Phase 1: the deck-peck.** `PeckWindup` paints the beak line from the
 //!    bill through the rat to a marked square and freezes it at
 //!    [`art_boss_magpie::PECK_LOCK_PROGRESS`]; `Peck` runs it (single hit);
@@ -50,15 +55,30 @@
 //!   [`art_boss_magpie::GUST_PIT_CLEARANCE`]) — the bird will not blow the rat
 //!   down a hole it cannot read.
 //!
-//! A refused move falls through to the cheaper one and finally back to `Perch`
-//! (which re-seeks), so the bird never idles on a move it cannot finish.
+//! A refused move falls through to the cheaper one (`Soar` picks again), and a
+//! peck or gust that dies at the bottom of its descent takes off again and
+//! keeps flying, so the bird never idles on a move it cannot finish.
+//!
+//! ## The flight (movement the framework does not own)
+//!
+//! `Soar`, `Swoop` and `Land` move with [`fly`], **not** [`move_boss`]: a bird
+//! crosses cargo stacks and holes in the planks, so the flight is steered
+//! straight at a moving target point and clamped only to the map's own edge.
+//! Nothing is ever placed: every tick's step is bounded by
+//! [`art_boss_magpie::SOAR_SPEED`] (or [`art_boss_magpie::SWOOP_SPEED`]) times
+//! `dt`, so the bird is only ever where its own wings carried it.
+//!
+//! The shared pursuit rule and the siege both step aside for it
+//! (`boss::pursue`, `boss_update_system`): the flight is always closing, and a
+//! bird is never walled off from the rat it can fly over.
 //!
 //! ## Determinism
 //!
-//! The controller draws **nothing** from the boss's rng stream: every attack is
-//! chosen from a fixed rotation in [`Boss::scratch`], and the perch always
-//! paces the same way round the rat (the `S_ROT` sign it reads is never
-//! negative, so the pace direction is a constant, not a draw). Nothing
+//! Every attack is chosen from a fixed rotation in [`Boss::scratch`] — the
+//! rotation, not the rng, decides what comes next. The **flight path** draws
+//! from the boss's own [`BossRng`](super::BossRng) stream only (the orbit's
+//! ring radius and the side it circles to, once per beat), so the run's rng
+//! order is untouched, exactly as the other controllers' own draws are. Nothing
 //! allocates per tick: hazards go into the boss's pre-reserved ring and the
 //! lane/line probes walk the stack.
 //!
@@ -80,6 +100,10 @@ const S_WALLED: usize = 1;
 const S_LANE_Y: usize = 2;
 /// The committed lane's direction (`+1`/`-1` along the deck).
 pub(crate) const S_LANE_DIR: usize = 3;
+/// The ring radius `Soar` is holding this beat (drawn on entry).
+const S_FLY_R: usize = 4;
+/// Beats flown since the last fly-by: every third beat ends in a `Swoop`.
+const S_FLY_BEATS: usize = 5;
 
 // ---- flags layout ---------------------------------------------------------
 
@@ -90,6 +114,12 @@ const F_CRATE: u32 = 1 << 1;
 /// The death beat has taken its one shot (its own bit: `F_LOCK` is the living
 /// bird's commit latch and may well be set when it dies).
 const F_DEATH: u32 = 1 << 2;
+/// This descent (`Land`) ends in a peck tell.
+const F_PECK_NEXT: u32 = 1 << 3;
+/// This descent (`Land`) ends in the gust.
+const F_GUST_NEXT: u32 = 1 << 4;
+/// This `Takeoff` was begun to fly a committed lane.
+const F_LANE_NEXT: u32 = 1 << 5;
 /// Gust pulse `k` has been fired: bits 8..8+[`art_boss_magpie::GUST_PULSES`].
 const F_PULSE0: u32 = 1 << 8;
 
@@ -104,6 +134,17 @@ const LANE_FREE_LEN: f32 = 190.0;
 
 /// The step the rat needs to leave a line or a lane (px).
 const ESCAPE_STEP: f32 = 24.0;
+
+/// How far inside the map's own edge a flying bird is kept (px).
+const FLY_MARGIN: f32 = 14.0;
+
+/// Where a peck's descent comes down, in px from the rat: the middle of the
+/// pecking band first, then nearer, then the band's outer edge.
+const PERCH_SPOTS: [f32; 3] = [46.0, 34.0, 58.0];
+
+/// How many bearings the descent tries around the rat (starts on the bird's
+/// own side, so the landing is always the short way down).
+const PERCH_SPOKES: u32 = 12;
 
 // ============================================================================
 // Controller
@@ -134,6 +175,8 @@ impl BossController for MagpieController {
         }
 
         match boss.state {
+            BossState::Magpie(MagpieState::Soar) => tick_soar(ctx, boss, out),
+            BossState::Magpie(MagpieState::Swoop) => tick_swoop(ctx, boss),
             BossState::Magpie(MagpieState::Perch) => tick_perch(ctx, boss, out),
             BossState::Magpie(MagpieState::Ruffle) => tick_ruffle(ctx, boss),
             BossState::Magpie(MagpieState::PeckWindup) => tick_peck_windup(ctx, boss),
@@ -195,6 +238,10 @@ impl BossController for MagpieController {
 #[inline]
 fn state_cue(state: MagpieState) -> Option<BossCue> {
     match state {
+        // The flight is the bird's resting state: no cue every beat (it would
+        // be one cry every 1.3 s). The wing-over gets the cry instead.
+        MagpieState::Soar => None,
+        MagpieState::Swoop => Some(BossCue::MagpieCry),
         MagpieState::Perch => Some(BossCue::MagpieCry),
         MagpieState::Ruffle => Some(BossCue::MagpieRuffle),
         MagpieState::PeckWindup => Some(BossCue::MagpieWindup),
@@ -238,11 +285,219 @@ fn tick_perch(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) 
     }
 }
 
+/// **The neutral beat, flown.**
+///
+/// The bird works a ring around the rat's **live** position: the next point on
+/// that ring a tick of flight ahead (a carrot), the slipstream dragging it
+/// tailward so it always ends up crabbing back upwind, and the whole thing
+/// skimmed over cargo and holes because a bird does not care where the planks
+/// are. Nothing is remembered about where it started, and nothing steers home:
+/// the only position in the steering is `ctx.player_pos`.
+fn tick_soar(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
+    let slot = phase_slot(boss);
+    let r = boss.scratch[S_FLY_R]
+        .clamp(art_boss_magpie::SOAR_RING[0], art_boss_magpie::SOAR_RING[1]);
+    let sign = if boss.swipe_side < 0.0 { -1.0 } else { 1.0 };
+    let speed = art_boss_magpie::SOAR_SPEED[slot];
+    let to = ctx.player_pos - boss.pos;
+    let dist = to.len();
+    let bearing = if dist > 1e-3 { to * (1.0 / dist) } else { boss.facing };
+
+    // The carrot: the ring point one tick of arc ahead. Chasing a point that is
+    // always exactly `r` from the rat is what keeps the ring around the rat
+    // instead of a circle around the spot the bird spawned at.
+    let arc = if r > 1.0 {
+        (speed * ctx.dt / r).clamp(0.0, 0.6)
+    } else {
+        0.0
+    };
+    let aim = if dist > r + art_boss_magpie::SOAR_CHASE_BAND {
+        // Out of the ring: come straight at the rat, at full flight speed,
+        // until the ring has it again (the arrival from across the deck).
+        ctx.player_pos
+    } else {
+        ctx.player_pos + bearing.rotate(arc * sign) * r
+    };
+    // The wind, as a velocity: the slipstream drags everything tailward, so the
+    // bird's ground track trails the carrot and it flies a little upwind for it.
+    let want = (aim - boss.pos) * (1.0 / ctx.dt.max(1e-4))
+        - Vec2::new(art_boss_magpie::SOAR_DRIFT, 0.0);
+    // Stay in the fight. The rectangle is rebuilt around the rat, so a ring
+    // flown at a rat inside it is inside it; this is the edge case (the bird is
+    // outside, or a step of the arc would leave). It turns back at the rat,
+    // never at a remembered spot: the rat is what the rectangle is centred on.
+    let mut dir = want;
+    if ctx.arena.contains_world(ctx.player_pos)
+        && (!ctx.arena.contains_world(boss.pos)
+            || !ctx.arena.contains_world(boss.pos + want.normalized() * 10.0))
+    {
+        dir = to;
+    }
+    fly(ctx, boss, dir, speed);
+    if dir.len_sq() > 1e-6 {
+        boss.facing = dir.normalized();
+    }
+    boss.target = ctx.player_pos;
+    if boss.progress() >= 1.0 {
+        // Every third beat ends in a wing-over instead of a turn.
+        let beats = boss.scratch[S_FLY_BEATS] + 1.0;
+        if beats >= 3.0 {
+            boss.scratch[S_FLY_BEATS] = 0.0;
+            enter_swoop(ctx, boss);
+        } else {
+            boss.scratch[S_FLY_BEATS] = beats;
+            next_attack(ctx, boss, out);
+        }
+    }
+}
+
+/// **The wing-over.** A straight, fast pass on a line that crosses safely
+/// abeam of the rat, then back up into the ring.
+///
+/// Nothing is queued and nothing is dealt: it is a fly-by, not an attack. The
+/// pass is aimed at a point [`art_boss_magpie::SWOOP_PASS_OFFSET`] px off the
+/// rat's shoulder, which keeps the whole chord further from the rat than the
+/// art's own offset (the pass reads without ever being a hit the rat cannot
+/// explain).
+fn tick_swoop(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+    let slot = phase_slot(boss);
+    let to = boss.target - boss.pos;
+    if to.len() > 1.0 {
+        fly(ctx, boss, to, art_boss_magpie::SWOOP_SPEED[slot]);
+        boss.facing = to.normalized();
+    }
+    boss.pounce_origin = boss.pos;
+    if boss.progress() >= 1.0 {
+        enter_soar(ctx, boss);
+    }
+}
+
+/// **Free flight.** A bird crosses cargo stacks and holes in the planks; it
+/// cannot leave the map. The step is bounded by `speed * dt` (through
+/// [`Boss::slow_mult`] like every other move), so the bird is only ever where
+/// its own wings carried it.
+fn fly(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) {
+    let step = dir.normalized() * (speed * boss.slow_mult() * ctx.dt);
+    if step.len_sq() <= 0.0 {
+        return;
+    }
+    let world = ctx.level.arena;
+    let max = Vec2::new(world.x - FLY_MARGIN, world.y - FLY_MARGIN);
+    if max.x <= FLY_MARGIN || max.y <= FLY_MARGIN {
+        return;
+    }
+    boss.pos = (boss.pos + step).clamp_box(Vec2::splat(FLY_MARGIN), max);
+}
+
+/// Fly up into the neutral ring: draw this beat's radius and the side it will
+/// circle to, from the boss's own stream (never the run's).
+fn enter_soar(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+    let slot = phase_slot(boss);
+    let lo = art_boss_magpie::SOAR_RING[0];
+    let hi = art_boss_magpie::SOAR_RING[1];
+    boss.scratch[S_FLY_R] = lo + (hi - lo) * ctx.rng.random::<f32>();
+    boss.swipe_side = if ctx.rng.random::<f32>() < 0.5 { -1.0 } else { 1.0 };
+    boss.pounce_origin = boss.pos;
+    boss.target = ctx.player_pos;
+    enter(boss, MagpieState::Soar, art_boss_magpie::SOAR_DURATION[slot]);
+}
+
+/// Plan and start the low pass.
+fn enter_swoop(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+    let slot = phase_slot(boss);
+    let sign = if boss.swipe_side < 0.0 { -1.0 } else { 1.0 };
+    let to = ctx.player_pos - boss.pos;
+    let bearing = if to.len_sq() > 1e-3 { to.normalized() } else { boss.facing };
+    // Abeam of the rat, a run further along the orbit's own direction.
+    let abeam = bearing.perp() * (sign * art_boss_magpie::SWOOP_PASS_OFFSET);
+    let ahead = bearing.perp() * (sign * art_boss_magpie::SWOOP_RUN);
+    boss.pounce_origin = boss.pos;
+    boss.target = ctx.player_pos + abeam + ahead;
+    boss.facing = (boss.target - boss.pos).normalized();
+    enter(boss, MagpieState::Swoop, art_boss_magpie::SWOOP_DURATION);
+}
+
+/// Where a peck's descent comes down: a spot in the pecking band around the
+/// rat, on a bearing close to the bird's own side of it, where the bird's body
+/// fits and the line to the rat is clear.
+fn perch_spot(ctx: &BossContext<'_>, boss: &Boss) -> Option<Vec2> {
+    let to = ctx.player_pos - boss.pos;
+    let base = if to.len_sq() > 1e-3 { to.normalized() } else { boss.facing };
+    let mut best: Option<(f32, Vec2)> = None;
+    for dist in PERCH_SPOTS {
+        for k in 0..PERCH_SPOKES {
+            // 0, +1, -1, +2, -2 ... spokes: the short way down first.
+            let step = ((k + 1) / 2) as f32 * (std::f32::consts::TAU / PERCH_SPOKES as f32);
+            let off = if k % 2 == 1 { step } else { -step };
+            let spot = ctx.player_pos - base.rotate(off) * dist;
+            if !ctx.footprint_fits(spot, art_boss_magpie::BODY_RADIUS) {
+                continue;
+            }
+            if !ctx.los_clear(spot, ctx.player_pos, 1.0) {
+                continue;
+            }
+            let travel = boss.pos.dist(spot);
+            if best.is_none_or(|(d, _)| travel < d) {
+                best = Some((travel, spot));
+            }
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+    best.map(|(_, spot)| spot)
+}
+
+/// Start the descent that ends in a peck, or refuse it (and keep flying).
+fn start_peck_descent(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
+    let Some(spot) = perch_spot(ctx, boss) else {
+        return false;
+    };
+    descend_to(boss, spot, F_PECK_NEXT);
+    true
+}
+
+/// Start the descent that ends in the gust. The gust is a push field, not a
+/// line, so the bird only needs somewhere on the deck to brace itself — it
+/// comes down where it is. The descent's own end re-checks the rule
+/// ([`commit_gust`]).
+fn start_gust_descent(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
+    if !gust_allowed(ctx, boss) {
+        return false;
+    }
+    let spot = boss.pos;
+    descend_to(boss, spot, F_GUST_NEXT);
+    true
+}
+
+/// Fly down onto `spot` over a beat that is the distance over the bird's own
+/// flight speed (held inside [`art_boss_magpie::DESCENT_MIN`]..
+/// [`art_boss_magpie::DESCENT_MAX`]), so the descent is visible, short, and
+/// never faster than the bird can fly.
+fn descend_to(boss: &mut Boss, spot: Vec2, intent: u32) {
+    let slot = phase_slot(boss);
+    let dist = boss.pos.dist(spot);
+    let secs = (dist / art_boss_magpie::SOAR_SPEED[slot].max(1.0)).clamp(
+        art_boss_magpie::DESCENT_MIN,
+        art_boss_magpie::DESCENT_MAX,
+    );
+    boss.pounce_origin = boss.pos;
+    boss.target = spot;
+    let to = spot - boss.pos;
+    if to.len_sq() > 1e-6 {
+        boss.facing = to.normalized();
+    }
+    enter(boss, MagpieState::Land, secs);
+    boss.flags |= intent;
+}
+
 fn tick_ruffle(_ctx: &mut BossContext<'_>, boss: &mut Boss) {
     // The phase-change pose: no contact, no attack, free damage (the art rule
     // `has_body_contact` owns the contact side).
     if boss.progress() >= 1.0 {
-        enter_perch(boss);
+        // Back to work, and back into the air: the flare happens on the deck,
+        // so the bird climbs out of it.
+        enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
     }
 }
 
@@ -264,8 +519,9 @@ fn tick_peck_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
         // Commit: the strike point the rat was shown a moment ago.
         let Some(strike) = pick_strike(ctx, boss) else {
             // The rat left the line's reach (walked behind cargo): the lunge is
-            // refused and the bird repositions instead of stabbing at nothing.
-            enter_perch(boss);
+            // refused and the bird climbs back out instead of stabbing at
+            // nothing.
+            enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
             return;
         };
         boss.flags |= F_LOCK;
@@ -327,12 +583,20 @@ fn tick_stuck(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     // its own strike. (No contact is applied by the art rule.)
     let _ = ctx;
     if boss.progress() >= 1.0 {
-        enter_perch(boss);
+        // The punish window is over: the bill comes out and the bird climbs back
+        // into the ring. It does not hop away from where it landed.
+        enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
     }
 }
 
 fn tick_takeoff(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if boss.progress() >= 1.0 {
+        if boss.flags & F_LANE_NEXT == 0 {
+            // A climb-out (out of a peck, or out of the ruffle): back into the
+            // air, where the neutral beat is flown.
+            enter_soar(ctx, boss);
+            return;
+        }
         // The lane is planned on entry so the art paints it on the first frame
         // of the windup; `queue_lane` re-plans with the same inputs at the lock.
         let slot = phase_slot(boss);
@@ -342,11 +606,12 @@ fn tick_takeoff(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 }
 
 fn tick_strafe_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
-    // Hover onto the lane's line (it passes through the rat), then hold.
+    // Hover onto the lane's line (it passes through the rat), then hold. The
+    // bird is airborne, so it crosses a cargo stack to reach its own lane.
     let lane_y = boss.scratch[S_LANE_Y];
     let dy = lane_y - boss.pos.y;
     if dy.abs() > 1.0 {
-        move_boss(ctx, boss, Vec2::new(0.0, dy), HOVER_SPEED);
+        fly(ctx, boss, Vec2::new(0.0, dy), HOVER_SPEED);
     }
     let dir = boss.scratch[S_LANE_DIR];
     boss.facing = Vec2::new(dir.signum(), 0.0);
@@ -357,7 +622,8 @@ fn tick_strafe_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
         // pass is refused. Flying it anyway would be a pass with no live lane
         // and no tell, so the bird repositions instead.
         if !queue_lane(ctx, boss) {
-            enter_perch(boss);
+            // Already in the air: give the turn back to the ring.
+            enter_soar(ctx, boss);
             return;
         }
         boss.flags |= F_LOCK;
@@ -365,7 +631,7 @@ fn tick_strafe_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if boss.progress() >= 1.0 {
         // Defensive: a windup that somehow ends unlocked never flies.
         if boss.flags & F_LOCK == 0 {
-            enter_perch(boss);
+            enter_soar(ctx, boss);
             return;
         }
         let slot = phase_slot(boss);
@@ -379,9 +645,11 @@ fn tick_strafe_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 fn tick_strafe_pass(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let dir = Vec2::new(boss.scratch[S_LANE_DIR].signum(), 0.0);
     let slot = phase_slot(boss);
-    let moved = move_boss(ctx, boss, dir, art_boss_magpie::STRAFE_SPEED[slot]);
+    // Flown, not walked: the lane is deck the bird's body fits along, and it is
+    // flown at the art's pass speed either way.
+    fly(ctx, boss, dir, art_boss_magpie::STRAFE_SPEED[slot]);
     let past = (boss.pos.x - boss.target.x) * dir.x >= 0.0;
-    if !moved || past || boss.progress() >= 1.0 {
+    if past || boss.progress() >= 1.0 {
         enter(boss, MagpieState::SnatchDrop, art_boss_magpie::CRATE_DURATION);
         boss.pounce_origin = boss.pos;
         boss.flags &= !F_CRATE;
@@ -400,10 +668,43 @@ fn tick_snatch_drop(_ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossO
     }
 }
 
-fn tick_land(_ctx: &mut BossContext<'_>, boss: &mut Boss) {
-    if boss.progress() >= 1.0 {
-        enter_perch(boss);
+/// **The descent.** A flying bird comes down onto a spot in its own pecking
+/// band (or, after a wing-over, settles where it stopped), then the beat it
+/// descended for begins: the unchanged peck tell, the gust, or back up into the
+/// ring.
+fn tick_land(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+let intent = boss.flags & (F_PECK_NEXT | F_GUST_NEXT);
+if intent != 0 {
+// Glide the rest of the way at the bird's own flight speed. The beat was
+// sized to the distance, so this arrives as the beat ends.
+let slot = phase_slot(boss);
+let to = boss.target - boss.pos;
+if to.len() > 1.0 {
+fly(ctx, boss, to, art_boss_magpie::SOAR_SPEED[slot]);
+}
+}
+    if boss.progress() < 1.0 {
+        return;
     }
+    if boss.flags & F_PECK_NEXT != 0 {
+        // The peck's own fairness rule decides at the bottom of the descent; a
+        // refused line means the bird climbs straight back out.
+        if !commit_peck(ctx, boss) {
+            enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
+        }
+        return;
+    }
+    if boss.flags & F_GUST_NEXT != 0 {
+        // The deck moved under it on the way down (the rat walked a hole into
+        // the gust's path, or the bird came down on cargo): refused, and it
+        // climbs back out.
+        if !commit_gust(ctx, boss) {
+            enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
+        }
+        return;
+    }
+    // A settle after the wing-over's crate: climb back out.
+    enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
 }
 
 fn tick_gust_windup(_ctx: &mut BossContext<'_>, boss: &mut Boss) {
@@ -475,11 +776,6 @@ fn enter_peck(boss: &mut Boss) {
     enter(boss, MagpieState::PeckWindup, art_boss_magpie::PECK_WINDUP[slot]);
 }
 
-fn enter_perch(boss: &mut Boss) {
-    let slot = phase_slot(boss);
-    enter(boss, MagpieState::Perch, art_boss_magpie::PERCH_DURATION[slot]);
-}
-
 /// Choose the next attack from the phase's rotation (no rng).
 fn next_attack(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
     let _ = out;
@@ -501,13 +797,17 @@ fn next_attack(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput)
             _ => Attack::Strafe,
         },
     };
-    // Fall through whatever the floor refuses, then re-seek.
+    // Fall through whatever the floor refuses, then keep flying.
+    //
+    // A peck and a gust need the deck underfoot, so they are started with a
+    // **descent** (`Land`) and the tell begins at the bottom of it; a strafe is
+    // flown from the air, and its `Takeoff` is the climb into the lane.
     let mut pick = want;
     for _ in 0..3 {
         let ok = match pick {
-            Attack::Peck => commit_peck(ctx, boss),
+            Attack::Peck => start_peck_descent(ctx, boss),
             Attack::Strafe => commit_strafe(ctx, boss),
-            Attack::Gust => commit_gust(ctx, boss),
+            Attack::Gust => start_gust_descent(ctx, boss),
         };
         if ok {
             return;
@@ -515,15 +815,16 @@ fn next_attack(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput)
         pick = match pick {
             Attack::Peck => {
                 // The peck is the cheapest and the last resort of the three; a
-                // refused peck means the rat is not reachable — reposition.
-                enter_perch(boss);
+                // refused peck means the rat is not reachable from the air —
+                // keep the ring and try again on the next beat.
+                enter_soar(ctx, boss);
                 return;
             }
             Attack::Strafe => Attack::Peck,
             Attack::Gust => Attack::Peck,
         };
     }
-    enter_perch(boss);
+    enter_soar(ctx, boss);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -607,6 +908,8 @@ fn commit_strafe(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     boss.pounce_origin = start;
     boss.target = end;
     enter(boss, MagpieState::Takeoff, art_boss_magpie::TAKEOFF_DURATION);
+    // `enter` clears the latch word, so the takeoff learns its job after it.
+    boss.flags |= F_LANE_NEXT;
     true
 }
 
@@ -696,11 +999,18 @@ fn plan_lane(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     }
 }
 
-/// Start a gust if the deck behind the rat is walkable.
+/// May the bird beat its wings down here? It needs deck under it to brace on,
+/// and it will **never** blow the rat down a hole it cannot read (the pulse is
+/// refused when the plank behind the rat is already a hole).
+fn gust_allowed(ctx: &BossContext<'_>, boss: &Boss) -> bool {
+    gust_pit_ahead(ctx).is_none()
+        && ctx.footprint_fits(boss.pos, art_boss_magpie::BODY_RADIUS)
+}
+
+/// Start a gust, from the deck (the flight comes down first: see
+/// [`start_gust_descent`]).
 fn commit_gust(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
-    // Never blow the rat down a hole it cannot read: the pulse is refused when
-    // the plank behind the rat is already a hole.
-    if gust_pit_ahead(ctx).is_some() {
+    if !gust_allowed(ctx, boss) {
         return false;
     }
     enter(
@@ -1029,7 +1339,7 @@ mod tests {
                     art::PECK_DAMAGE
                 );
             }
-            if state_of(&mut w) == MagpieState::Perch {
+            if matches!(state_of(&mut w), MagpieState::Takeoff | MagpieState::Soar) {
                 break;
             }
         }
@@ -1077,7 +1387,9 @@ mod tests {
             t += DT;
         }
         assert!((t - art::STUCK_DURATION[0]).abs() < 0.10, "stuck {t}");
-        assert_eq!(state_of(&mut w), MagpieState::Perch);
+        // The bill comes out and the bird climbs back into the ring: it does
+        // not hop away from where it landed.
+        assert_eq!(state_of(&mut w), MagpieState::Takeoff);
     }
 
     #[test]
@@ -1283,12 +1595,13 @@ mod tests {
         place(&mut w, row - Vec2::new(40.0, 0.0), row + Vec2::new(16.0, 0.0));
         let mut rng = rand::rngs::StdRng::seed_from_u64(3);
         let mut boss = boss_of(&mut w).expect("alive");
+        let before = magpie_state(&boss);
         let mut ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
         assert!(
             !commit_peck(&mut ctx, &mut boss),
             "a line the rat cannot leave is not a fair attack"
         );
-        assert_eq!(magpie_state(&boss), MagpieState::Perch);
+        assert_eq!(magpie_state(&boss), before, "a refused peck changes nothing");
     }
 
     // ---- phase change ----------------------------------------------------
@@ -1313,7 +1626,8 @@ mod tests {
             t += DT;
         }
         assert!((t - art::RUFFLE_DURATION).abs() < 0.08, "ruffle {t}");
-        assert_eq!(state_of(&mut w), MagpieState::Perch);
+        // The flare happens on the deck, so the bird climbs out of it.
+        assert_eq!(state_of(&mut w), MagpieState::Takeoff);
     }
 
     /// A phase threshold cancels the move it interrupts: a beak line that was
@@ -1343,7 +1657,7 @@ mod tests {
     }
 
     /// A lane that stops being fair between the takeoff and the lock is
-    /// refused: the bird goes back to its perch. It used to latch the lock
+    /// refused: the bird goes back to its ring. It used to latch the lock
     /// anyway and fly the pass with no live lane and no tell.
     #[test]
     fn a_lane_that_loses_its_fit_is_never_flown() {
@@ -1370,8 +1684,8 @@ mod tests {
         let boss = boss_of(&mut w).expect("alive");
         assert_eq!(
             magpie_state(&boss),
-            MagpieState::Perch,
-            "a refused lane must fall back to the perch, not a pass"
+            MagpieState::Soar,
+            "a refused lane must fall back to the ring, not a pass"
         );
         assert!(boss.hazards.is_empty(), "no lane was queued");
         assert!(
@@ -1458,4 +1772,274 @@ mod tests {
         assert!(d1 > 0.0);
     }
 
+    // ---- the flight -------------------------------------------------------
+
+    /// The bird's own fastest travel in one tick, with the tolerance the
+    /// steering's arithmetic needs. A placement (a pop-in, a rejoin teleport)
+    /// would be one to two orders of magnitude larger.
+    fn max_step() -> f32 {
+        art::PECK_LUNGE_SPEED
+            .max(art::SWOOP_SPEED[2])
+            .max(art::STRAFE_SPEED[2])
+            * DT
+            * 1.06
+    }
+
+    /// **The owner's regression.** The bird used to be tethered to the deck it
+    /// arrived on: it lunged and hopped back, and a rat that walked away left it
+    /// behind ("it never moves from where it spawned except to leap forward and
+    /// attack and then go back"). The ring is built on the rat's **live**
+    /// position every tick, so the bird walks the deck with it — and nothing it
+    /// does moves it further in one tick than its own wings can.
+    #[test]
+    fn the_flight_follows_a_rat_that_walks_the_deck() {
+        let mut w = trailer_world(37);
+        spawn_magpie(&mut w);
+        w.clear_enemies();
+        w.player.loadout.stats.max_hp = 1.0e6;
+        w.player.hp = 1.0e6;
+        let centre = arena_centre(&w);
+        // Down the bed from the tailgate: 300 px of the deck, straight through
+        // whatever cargo the seed stacked on it.
+        let start = centre - Vec2::new(150.0, 0.0);
+        place(&mut w, start - Vec2::new(180.0, 0.0), start);
+        let mut prev = boss_of(&mut w).expect("alive").pos;
+        let step = 300.0 / (10.0 / DT);
+        let mut flown = 0.0f32;
+        let mut worst = 0.0f32;
+        for i in 0..(10.0 / DT) as usize {
+            // The rat walks 300 px east over the 10 s. It is a scripted dummy:
+            // it holds its line whatever the fight does to it, so the test
+            // measures the bird and not the knockback.
+            w.player.pos = start + Vec2::new(step * (i + 1) as f32, 0.0);
+            tick(&mut w);
+            let boss = boss_of(&mut w).expect("alive");
+            let moved = boss.pos.dist(prev);
+            assert!(
+                moved <= max_step(),
+                "tick {i}: the bird travelled {moved:.2} px in {DT} s"
+            );
+            flown += moved;
+            prev = boss.pos;
+            if (i + 1) as f32 * DT >= 3.0 {
+                worst = worst.max(boss.pos.dist(w.player.pos));
+            }
+        }
+        assert!(
+            worst <= 120.0,
+            "the bird fell {worst:.0} px behind a rat walking the deck"
+        );
+        assert!(flown >= 300.0, "the bird only flew {flown:.0} px in 10 s");
+    }
+
+    /// **The neutral beat is flight.** Over 20 s the bird covers real ground,
+    /// and outside its attacks it holds the ring around the rat: `SOAR_RING`
+    /// (56-84 px) with the chase band's own ceiling.
+    ///
+    /// The sample starts a moment into the beat (progress `>= 0.5`): after an
+    /// attack the bird is where that attack left it — the peck's lunge parks it
+    /// about 25 px off the rat's shoulder — and it flies back out to the ring
+    /// from there.
+    #[test]
+    fn the_neutral_beat_is_flown() {
+        let mut w = trailer_world(38);
+        spawn_magpie(&mut w);
+        w.clear_enemies();
+        w.player.loadout.stats.max_hp = 1.0e6;
+        w.player.hp = 1.0e6;
+        let centre = arena_centre(&w);
+        place(&mut w, centre - Vec2::new(100.0, 0.0), centre);
+        let mut prev = boss_of(&mut w).expect("alive").pos;
+        let mut flown = 0.0f32;
+        let mut nearest = f32::MAX;
+        let mut furthest = 0.0f32;
+        for _ in 0..(20.0 / DT) as usize {
+            tick(&mut w);
+            let boss = boss_of(&mut w).expect("alive");
+            let moved = boss.pos.dist(prev);
+            assert!(moved <= max_step(), "the bird travelled {moved:.2} px in a tick");
+            flown += moved;
+            prev = boss.pos;
+            if matches!(state_of(&mut w), MagpieState::Soar | MagpieState::Swoop)
+                && boss.progress() >= 0.5
+            {
+                let d = boss.pos.dist(w.player.pos);
+                nearest = nearest.min(d);
+                furthest = furthest.max(d);
+            }
+        }
+        assert!(flown >= 400.0, "the bird only covered {flown:.0} px in 20 s");
+        assert!(
+            furthest <= 140.0,
+            "the ring drifted out to {furthest:.0} px from the rat"
+        );
+        assert!(
+            nearest >= 40.0,
+            "the ring closed to {nearest:.0} px from the rat"
+        );
+    }
+
+    /// **A bird crosses cargo and holes.** The neutral beat used to walk: a
+    /// cargo stack between it and the rat was a wall, and a hole in the planks a
+    /// detour — which is how a moving rat left the boss behind. The flight is
+    /// straight over both.
+    #[test]
+    fn the_flight_crosses_cargo_and_a_hole() {
+        let mut w = trailer_world(39);
+        spawn_magpie(&mut w);
+        w.clear_enemies();
+        w.player.loadout.stats.max_hp = 1.0e6;
+        w.player.hp = 1.0e6;
+        let centre = arena_centre(&w);
+        let rat = centre;
+        let (cx, cy) = crate::game::collision::cell_of(centre);
+        // A cargo column three cells west of the rat, and a hole in the planks
+        // in front of it: neither is anything to a bird in the air.
+        w.level.tiles.fill_cells(
+            cx - 3,
+            cy - 4,
+            1,
+            9,
+            TileKind::Wall(crate::game::art_walls::WallKind::Solid),
+        );
+        w.level.tiles.rebuild_masks();
+        w.level.trailer.pits.push(Pit::new(
+            crate::game::level::TileRect::new(cx - 6, cy, 2, 1),
+            PitKind::BrokenPlank,
+        ));
+        place(&mut w, centre - Vec2::new(200.0, 0.0), rat);
+        let d0 = boss_of(&mut w).expect("alive").pos.dist(rat);
+        assert!(d0 > 190.0, "the fixture starts the bird across the cargo ({d0})");
+        let mut d1 = d0;
+        for _ in 0..(4.0 / DT) as usize {
+            tick(&mut w);
+            d1 = boss_of(&mut w).expect("alive").pos.dist(rat);
+            if d1 <= art::SOAR_RING[1] + art::SOAR_CHASE_BAND {
+                break;
+            }
+        }
+        assert!(
+            d1 <= art::SOAR_RING[1] + art::SOAR_CHASE_BAND,
+            "the bird never crossed the cargo and the hole ({d0:.0} -> {d1:.0})"
+        );
+    }
+
+    /// **The wing-over is a fly-by, not an attack.** It queues nothing, deals
+    /// nothing, and passes the rat no closer than [`art::SWOOP_PASS_OFFSET`] px
+    /// abeam, then climbs back into the ring.
+    #[test]
+    fn a_wing_over_passes_the_rat_and_deals_nothing() {
+        let mut w = trailer_world(40);
+        spawn_magpie(&mut w);
+        w.clear_enemies();
+        let centre = arena_centre(&w);
+        place(&mut w, centre - Vec2::new(70.0, 0.0), centre);
+        // Plan the pass with the controller's own planner.
+        let (target, facing) = {
+            let mut boss = boss_of(&mut w).expect("alive");
+            boss.swipe_side = 1.0;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+            let mut ctx = boss_context(&w, &mut rng, crate::game::level::TileRect::new(0, 0, 8, 8));
+            enter_swoop(&mut ctx, &mut boss);
+            assert_eq!(magpie_state(&boss), MagpieState::Swoop);
+            (boss.target, boss.facing)
+        };
+        with_boss(&mut w, |b| {
+            b.target = target;
+            b.facing = facing;
+        });
+        set_state(&mut w, MagpieState::Swoop, art::SWOOP_DURATION);
+        let mut nearest = f32::MAX;
+        let mut queued = false;
+        let mut t = 0.0f32;
+        while state_of(&mut w) == MagpieState::Swoop && t < art::SWOOP_DURATION + 0.5 {
+            tick(&mut w);
+            t += DT;
+            let boss = boss_of(&mut w).expect("alive");
+            queued |= !boss.hazards.is_empty();
+            nearest = nearest.min(boss.pos.dist(w.player.pos));
+        }
+        assert!((t - art::SWOOP_DURATION).abs() < 0.08, "swoop beat {t}");
+        assert!(!queued, "a wing-over must queue no hazard");
+        assert!(
+            nearest >= 40.0,
+            "the pass came within {nearest:.0} px of the rat"
+        );
+        assert_eq!(state_of(&mut w), MagpieState::Soar);
+    }
+
+    /// **Flatbed, eight seeds, both birds, the scheduled arrival.** The
+    /// director's `BOSS_TIME` call spawns the boss out of sight; from there it
+    /// must close to its own engagement range inside 8 s, with every step
+    /// bounded by its own speed (the Magpie's; the Redtail's dive is a drawn
+    /// interpolation of its own art and is not this fix's to change), and its
+    /// spawn must be on the deck, on the horde's connected floor, and inside the
+    /// 34 x 28 fight rectangle.
+    #[test]
+    fn every_flatbed_bird_arrives_on_the_deck_and_reaches_the_rat() {
+        use crate::game::ecs::systems::spawn::SpawnScratch;
+        for seed in [3u64, 8, 17, 24, 41, 77, 128, 260] {
+            for kind in [BossKind::Magpie, BossKind::Hawk] {
+                let mut w = World::with_tuning(
+                    Theme::Trailer,
+                    seed,
+                    crate::tuning::RunTuning::with_base_boss_hazards(kind),
+                );
+                w.level_index = campaign::LEVEL_COUNT - 1;
+                // The App's own default viewport, so the arrival's ring is the
+                // one a real run measures.
+                w.viewport = Vec2::new(120.0, 74.0);
+                w.player.loadout.stats.max_hp = 1.0e6;
+                w.player.hp = 1.0e6;
+                w.boss_override = Some(kind);
+                w.elapsed = crate::game::director::BOSS_TIME;
+                w.update(DT, Vec2::ZERO, false);
+                let boss = boss_of(&mut w).unwrap_or_else(|| {
+                    panic!("{kind:?} seed {seed}: the schedule spawned no boss")
+                });
+                assert_eq!(boss.kind, kind, "seed {seed}: the override was ignored");
+                // On the deck, on the horde's floor, inside the rectangle.
+                let (cx, cy) = crate::game::collision::cell_of(boss.pos);
+                assert!(
+                    w.level.trailer.deck.contains(cx, cy),
+                    "{kind:?} seed {seed}: arrival off the deck at {cx},{cy}"
+                );
+                let mut scratch = SpawnScratch::default();
+                scratch.sync(&w.level);
+                assert!(
+                    scratch.is_reachable(&w.level, boss.pos),
+                    "{kind:?} seed {seed}: arrival off the horde's floor"
+                );
+                assert!(
+                    boss.arena.contains_world(boss.pos),
+                    "{kind:?} seed {seed}: arrival outside the fight rectangle"
+                );
+                // Eight seconds of the boss system (the rat stands still and is
+                // invulnerable here: the fix is the boss's own closure, and the
+                // whole schedule at `BOSS_TIME` would spend the window spawning
+                // a horde for each of the sixteen fights).
+                let mut prev = boss.pos;
+                let mut reached = false;
+                for _ in 0..(8.0 / DT) as usize {
+                    tick(&mut w);
+                    let Some(b) = boss_of(&mut w) else { break };
+                    if kind == BossKind::Magpie {
+                        let moved = b.pos.dist(prev);
+                        assert!(
+                            moved <= max_step(),
+                            "{kind:?} seed {seed}: travelled {moved:.2} px in one tick"
+                        );
+                    }
+                    prev = b.pos;
+                    if b.pos.dist(w.player.pos) <= kind.engage_range() {
+                        reached = true;
+                    }
+                }
+                assert!(
+                    reached,
+                    "{kind:?} seed {seed}: never reached engagement range in 8 s"
+                );
+            }
+        }
+    }
 }
