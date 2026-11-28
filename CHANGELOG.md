@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The soaring Magpie stays on screen.** Its neutral beat is an ellipse fitted
+  to the playfield now instead of a circle: the horizontal radius takes at most
+  0.40 of the view's width and the vertical at most 0.38 of its height (floored
+  at 40 and 22 px), so on the 1x screen the whole ring is in the picture — the
+  old 56-84 px ring was taller than the 74 px playfield and left the bird most
+  of the way off it. A large terminal still flies the authored 56-84 px ring as
+  its upper bound, the radius still varies beat to beat and its direction still
+  reverses, and the low wing-over's pass scales with the same fit. Flight speed,
+  every attack timing and the landing spot are unchanged, and the fit reads the
+  unzoomed view rather than the zoom, so the same seed plays identically at
+  every zoom.
+
 ## 0.5.1 (2026-11-27, playtest build)
 
 - **Hantavirus lights go out smoothly.** When a poop leaves the floor before
@@ -37,6 +49,15 @@
   timings are the ones they always were. Now and then a beat ends in a low
   wing-over past your shoulder. While it is up there nothing on the deck
   reaches it and the name plate reads `IN THE AIR — OUT OF REACH`.
+- **The Magpie's flight art.** Soaring uses a continuous burst-flap and glide
+  cycle in full top-down wingspan with the black, white and iridescent-blue
+  plumage; banking rolls the inner wing short, stretches the outer wing long,
+  and fans and twists the diamond tail into the turn. Low fly-bys sweep the
+  wings back into a fast dive silhouette with cool slipstream streaks behind
+  (no warning marks), landings flare with cupped braking wings, a fanned-down
+  tail and dropping legs that settle cleanly into the perched and peck-windup
+  stances, and the detached ground shadow sits on the bird's true deck position
+  while shrinking and sharpening as it descends.
 - **Lost bosses walk back (the birds).** The Magpie no longer walks into the
   cargo it used to be stopped by, and it is not walled off from you while it
   flies: it is never called back into a fight it was already flying to.

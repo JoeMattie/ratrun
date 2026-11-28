@@ -1946,6 +1946,8 @@ fn lantern_pursuit_and_weapon_shoves_cross_closed_walls() {
         player_radius: PLAYER_RADIUS,
         player_hurt_radius: PLAYER_RADIUS,
         arena,
+        // The App's 1x screen; the pursuit rule reads no view.
+        view: Vec2::new(120.0, 74.0),
         level: &level,
         flow: &flow,
         rng: &mut rng,

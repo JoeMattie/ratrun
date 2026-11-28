@@ -28,11 +28,13 @@
 //! ## The bird flies
 //!
 //! `Soar` is the neutral beat and it is **airborne**: the bird circles and
-//! banks over the deck around the rat, holding [`SOAR_RING`] px, riding the
-//! slipstream tailward and flapping back upwind for it, and it crosses cargo
-//! stacks and holes in the planks as if they were not there. Flight is
-//! [`SOAR_SPEED`] (110-140 px/s), faster than the rat's 58 px/s walk at every
-//! phase, so a bird that wants the rat always has it.
+//! banks over the deck around the rat on an ellipse **fitted to the playfield**
+//! ([`SOAR_FIT_X`] of the view's width, [`SOAR_FIT_Y`] of its height, floored at
+//! [`SOAR_MIN_R`], capped at [`SOAR_RING`] — the controller's `flight_radii`
+//! owns the arithmetic), riding the slipstream tailward and flapping back upwind
+//! for it, and it crosses cargo stacks and holes in the planks as if they were
+//! not there. Flight is [`SOAR_SPEED`] (110-140 px/s), faster than the rat's
+//! 58 px/s walk at every phase, so a bird that wants the rat always has it.
 //!
 //! It comes down only to work. A peck is preceded by `Land`: a short, visible
 //! descent onto a perch spot in the pecking band ([`DESCENT_MIN`]..
@@ -43,9 +45,10 @@
 //! the bird learned to fly.
 //!
 //! Now and then a soaring beat ends in [`MagpieState::Swoop`]: a low, fast
-//! wing-over that skims past the rat at [`SWOOP_PASS_OFFSET`] px and climbs back
-//! out. It deals nothing (the fly-by is not an attack), and it keeps the fight
-//! moving when the rat has learnt to read the ring.
+//! wing-over that skims past the rat at [`SWOOP_PASS_OFFSET`] px (scaled with
+//! the same view fit) and climbs back out. It deals nothing (the fly-by is not
+//! an attack), and it keeps the fight moving when the rat has learnt to read the
+//! ring.
 //!
 //! ## The deck-peck
 //!
@@ -126,7 +129,7 @@
 
 #![allow(dead_code)]
 
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
@@ -210,7 +213,28 @@ pub const SOAR_SPEED: [f32; 3] = [110.0, 125.0, 140.0];
 /// The ring `Soar` holds the rat at, in px (`near`, `far`): the pecking band's
 /// flight equivalent, wide enough that the rat can read the shadow and always
 /// inside the bird's `PECK_REACH` after one more descent.
+///
+/// It is the **drawn** radius, and the upper bound on the flown one: the flight
+/// is an ellipse fitted to the tick's [`Viewport`](crate::game::ecs::resources::Viewport)
+/// (see [`SOAR_FIT_X`], [`SOAR_FIT_Y`], [`SOAR_MIN_R`]), so on a large terminal
+/// a beat still draws exactly this ring pair, and on a 1x screen the same pair
+/// maps onto the smaller ellipse the view has room for.
 pub const SOAR_RING: [f32; 2] = [56.0, 84.0];
+
+/// The share of the simulation view's **width** the flight ellipse's horizontal
+/// radius may take. The view is the unzoomed screen (120 px at the App's 1x
+/// 120x40 playfield), never the render zoom, so the same seed flies the same
+/// path at every zoom.
+pub const SOAR_FIT_X: f32 = 0.40;
+
+/// The share of the simulation view's **height** the flight ellipse's vertical
+/// radius may take (the screen is half-block: 74 px on a 120x40 terminal).
+pub const SOAR_FIT_Y: f32 = 0.38;
+
+/// The floor under the flight ellipse's radii, in px (`horizontal`, `vertical`):
+/// a view too small for the fit keeps a ring the rat can still read as flight
+/// rather than a jitter around its own body.
+pub const SOAR_MIN_R: [f32; 2] = [40.0, 22.0];
 
 /// Past the ring by more than this, the bird stops arcing and comes straight
 /// at the rat at full flight speed (the recovery from an arrival across the
@@ -404,9 +428,11 @@ const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MagpieState {
     /// **The bird in the air.** The neutral beat: it circles and banks over the
-    /// deck around the rat, holding [`SOAR_RING`] px, riding the slipstream
-    /// tailward and flapping back upwind for it, and crossing cargo and holes as
-    /// if they were not there — because, from up here, they are not.
+    /// deck around the rat on an ellipse fitted to the view (see [`SOAR_FIT_X`],
+    /// [`SOAR_FIT_Y`], [`SOAR_MIN_R`]; [`SOAR_RING`] is the upper bound), riding
+    /// the slipstream tailward and flapping back upwind for it, and crossing
+    /// cargo and holes as if they were not there — because, from up here, they
+    /// are not.
     ///
     /// It is **airborne**: nothing grounded reaches it (`Boss::hit_shapes`),
     /// and body contact is off. The counterplay is the descent: it lands to
@@ -419,7 +445,8 @@ pub enum MagpieState {
 
     /// **The wing-over.** Now and then a beat ends in a low, fast pass: the bird
     /// drops to the planks' height and skims past the rat at
-    /// [`SWOOP_PASS_OFFSET`] px, then climbs back out into the next `Soar`.
+    /// [`SWOOP_PASS_OFFSET`] px scaled by the view fit, then climbs back out into
+    /// the next `Soar`.
     ///
     /// - Duration: [`SWOOP_DURATION`] (0.55 s).
     /// - Warning: the shadow tightens onto the planks and the wings sweep back.
@@ -792,9 +819,63 @@ fn drawn_airborne(state: MagpieState) -> bool {
     state.flying() || state == MagpieState::Land
 }
 
-/// How far a banked bird's lateral axis rolls toward its heading, per unit of
-/// `MagpieView::bank` (a shear of the wing line: the minimal 2D read of a bank).
-const BANK_SHEAR: f32 = 0.22;
+/// Period of one complete `Soar` burst-flap + glide cycle, in seconds.
+///
+/// Two articulated wingbeats run over the first 68 % of the cycle and ease
+/// smoothly into a full-span soaring glide over the remaining 32 %, keyed only
+/// to `MagpieView::anim`.
+const SOAR_CYCLE_SECS: f32 = 1.50;
+
+/// Articulated wing kinematics sampled from the continuous `Soar` flap-and-glide cycle.
+#[derive(Clone, Copy, Debug)]
+struct FlapState {
+    /// Power stroke (`+` downstroke, `-` upstroke, `0` level glide).
+    stroke: f32,
+    /// Span multiplier (`~0.62..1.11`: full reach on downstroke/glide, tucked on upstroke recovery).
+    span_scale: f32,
+    /// Fore/aft sweep offset (`+` forward catch, `-` recovery/glide sweep).
+    sweep_delta: f32,
+    /// Carpal wrist bend (`0..1`: straight on downstroke/glide, bent inward on upstroke).
+    wrist_fold: f32,
+    /// Wingtip primary finger splay (`0.28..1.0`: wide on downstroke/glide, closed on upstroke).
+    finger_splay: f32,
+    /// Vertical lift bob in px (`+` lifts body on the power downstroke).
+    body_bob: f32,
+    /// Wing shading bias across the beat.
+    shade_bias: f32,
+    /// Glide fraction (`0` during active flap burst, `1` during pure soaring glide).
+    glide: f32,
+}
+
+/// Sample the `C¹`-continuous periodic burst-flap and glide cycle for `Soar`.
+#[inline]
+fn soar_flap_kinematics(anim: f32) -> FlapState {
+    let a = if anim.is_finite() { anim } else { 0.0 };
+    let t = (a / SOAR_CYCLE_SECS).rem_euclid(1.0);
+    let env_in = smoothstep(0.0, 0.07, t);
+    let env_out = 1.0 - smoothstep(0.59, 0.68, t);
+    let env = env_in * env_out;
+    let theta = (t / 0.68).clamp(0.0, 1.0) * 2.0 * TAU;
+    let (s, c) = theta.sin_cos();
+    let up_tuck = (0.5 - 0.5 * (theta - 0.35).sin()).powi(2);
+    let stroke = env * (s + 0.18 * (2.0 * theta).sin());
+    let wrist_fold = env * up_tuck;
+    let span_scale = 1.0 + env * (0.11 * s - 0.38 * up_tuck);
+    let sweep_delta = env * (0.28 * c - 0.30 * up_tuck) - 0.08 * (1.0 - env);
+    let finger_splay = (1.0 - 0.68 * wrist_fold).clamp(0.28, 1.0);
+    let body_bob = env * (1.45 * s - 0.35 * c) + (1.0 - env) * (0.35 * (t * TAU).sin());
+    let shade_bias = env * (-0.22 * s + 0.16 * c);
+    FlapState {
+        stroke,
+        span_scale,
+        sweep_delta,
+        wrist_fold,
+        finger_splay,
+        body_bob,
+        shade_bias,
+        glide: 1.0 - env,
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Pose {
@@ -812,6 +893,25 @@ struct Pose {
     sweep: f32,
     /// Wing beat clock (`-1..1`).
     flap: f32,
+    /// Dynamic wing span multiplier from the flap cycle (`~0.62..1.11`).
+    span_scale: f32,
+    /// Carpal wrist fold (`0..1`) during upstroke recovery / sleek dive tuck.
+    wrist_fold: f32,
+    /// Cupped braking wing camber (`0..1`) during `Land` / `SnatchDrop`.
+    wing_cup: f32,
+    /// Primary wingtip finger splay (`0.2..1.0`).
+    finger_splay: f32,
+    /// Effective bank roll (`-1..=1`): inner wing (`side * bank > 0`) foreshortens,
+    /// outer wing extends long, tail fans and twists into the turn.
+    bank: f32,
+    /// Lateral rudder twist of the tail tip along `+p` (px).
+    tail_twist: f32,
+    /// Downward pitch of the fanned tail during landing brake (`0..1`).
+    tail_drop: f32,
+    /// Landing gear leg drop extension (`0..1`) during `Land` / `Takeoff` / `SnatchDrop`.
+    leg_drop: f32,
+    /// Flap-phase shading bias on the wings.
+    shade_bias: f32,
     /// Head centre in screen space.
     head: Vec2,
     /// True when the bill is driven into the oak plank (`Peck` / `Stuck`).
@@ -824,7 +924,7 @@ struct Pose {
     altitude: f32,
     /// Tail fan/lift (`-1..1`).
     tail_lift: f32,
-    /// Tail fan spread (`0..1`, wide on Gust / Takeoff / Ruffle).
+    /// Tail fan spread (`0..1`, wide on Gust / Takeoff / Ruffle / Land / banked Soar).
     tail_fan: f32,
     /// Feather ruffle `0..1` (phase-change pose).
     ruffle: f32,
@@ -884,7 +984,7 @@ impl Pose {
         };
 
         let ground = view.pos - cam;
-        let bank = if view.bank.is_finite() {
+        let raw_bank = if view.bank.is_finite() {
             view.bank.clamp(-1.0, 1.0)
         } else {
             0.0
@@ -892,6 +992,15 @@ impl Pose {
         let spread: f32;
         let mut sweep = 0.0f32;
         let mut flap = 0.0f32;
+        let mut span_scale = 1.0f32;
+        let mut wrist_fold = 0.0f32;
+        let mut wing_cup = 0.0f32;
+        let mut finger_splay = 0.85f32;
+        let mut eff_bank = 0.0f32;
+        let mut tail_twist = 0.0f32;
+        let mut tail_drop = 0.0f32;
+        let mut leg_drop = 0.0f32;
+        let mut shade_bias = 0.0f32;
         let mut altitude = 0.0f32;
         let mut head_lunge = 0.0f32;
         let mut stretch = 0.0f32;
@@ -965,42 +1074,62 @@ impl Pose {
                 buried = true;
             }
             MagpieState::Soar => {
-                // The beat of a bird working an arc: wide wings, one long
-                // lazy stroke, the tail steering, the head down on the rat.
-                altitude = FLIGHT_LIFT;
-                spread = 0.90;
-                flap = (anim * 7.0).sin() * 0.55;
-                sweep = -0.10;
-                tail_fan = 0.40;
-                tail_lift = 0.18 * (anim * 1.4).sin();
-                head_lunge = 0.30;
+                // Real burst-flap + glide cycle with true roll banking and rudder tail!
+                let fk = soar_flap_kinematics(anim);
+                eff_bank = raw_bank;
+                let b_abs = eff_bank.abs();
+                altitude = FLIGHT_LIFT + fk.body_bob;
+                spread = 0.96;
+                span_scale = fk.span_scale;
+                sweep = fk.sweep_delta;
+                flap = fk.stroke;
+                wrist_fold = fk.wrist_fold;
+                finger_splay = fk.finger_splay;
+                shade_bias = fk.shade_bias;
+                tail_fan = 0.44 + 0.38 * b_abs + 0.10 * fk.glide;
+                tail_twist = eff_bank * 5.0;
+                tail_lift = 0.14 * (anim * 1.4).sin() + 0.18 * fk.stroke;
+                head_lunge = 0.32;
             }
             MagpieState::Swoop => {
-                // The wing-over: wings thrown back, the bird dropping to the
-                // planks through the middle of the pass and climbing out of it.
+                // Low fast diving wing-over: wings swept sharply back, streamlined
+                // silhouette dipping close to the planks and climbing back out.
                 let dip = (prog * PI).sin();
+                let exit_flare = smoothstep(0.76, 1.0, prog);
+                eff_bank = raw_bank * (0.45 + 0.30 * (1.0 - dip));
                 altitude = FLIGHT_LIFT * (1.0 - 0.72 * dip);
-                spread = 1.0;
-                sweep = -0.78;
-                flap = (anim * 12.0).sin() * 0.30 * (1.0 - dip);
-                tail_lift = -0.20 * dip;
-                tail_fan = 0.25;
-                head_lunge = 0.55 + 0.28 * dip;
-                jitter = Vec2::new(0.0, dip * 0.8);
+                spread = 0.94 - 0.18 * dip + 0.04 * exit_flare;
+                span_scale = 0.94 - 0.12 * dip;
+                sweep = -0.78 - 0.26 * dip + 0.44 * exit_flare;
+                wrist_fold = 0.34 * dip;
+                finger_splay = 0.22 + 0.50 * exit_flare;
+                flap = (anim * 12.0).sin() * 0.20 * (1.0 - dip);
+                tail_fan = 0.12 + 0.24 * exit_flare + 0.16 * eff_bank.abs();
+                tail_twist = eff_bank * 3.0;
+                tail_lift = -0.18 * dip;
+                head_lunge = 0.76 + 0.32 * dip;
+                stretch = 0.32 + 0.28 * dip;
+                jitter = Vec2::new(0.0, dip * 0.45);
             }
             MagpieState::Takeoff => {
                 let t = smoothstep(0.0, 0.75, prog);
                 altitude = FLIGHT_LIFT * t;
                 spread = (prog / 0.55).min(1.0);
                 flap = (anim * 22.0).sin();
+                span_scale = 0.96 + 0.08 * flap;
+                wrist_fold = (0.5 - 0.5 * flap) * 0.45 * t;
+                finger_splay = 0.90 - 0.35 * wrist_fold;
                 tail_lift = 0.4 * t;
                 tail_fan = 0.75 * t;
+                leg_drop = (1.0 - smoothstep(0.15, 0.75, prog)) * 0.85;
                 head_lunge = 0.20;
             }
             MagpieState::StrafeWindup => {
                 altitude = FLIGHT_LIFT;
                 spread = 1.0;
                 flap = (anim * 18.0).sin();
+                span_scale = 0.96 + 0.06 * flap;
+                finger_splay = 0.90;
                 tail_lift = 0.15;
                 tail_fan = 0.50;
                 sweep = -0.22;
@@ -1008,34 +1137,56 @@ impl Pose {
             }
             MagpieState::StrafePass => {
                 altitude = FLIGHT_LIFT;
-                spread = 1.0;
+                spread = 0.96;
+                span_scale = 0.92;
                 // Sleek swept-back stooping dive wings!
-                sweep = -0.82;
-                flap = (anim * 10.0).sin() * 0.28;
+                sweep = -0.84;
+                wrist_fold = 0.25;
+                finger_splay = 0.28;
+                flap = (anim * 10.0).sin() * 0.24;
                 tail_lift = 0.0;
-                tail_fan = 0.25;
-                head_lunge = 0.65;
+                tail_fan = 0.22;
+                head_lunge = 0.68;
+                stretch = 0.35;
             }
             MagpieState::SnatchDrop => {
                 // Hard aerial brake with wings thrown forward to wheel and release the crate!
                 let brake = smoothstep(0.0, 0.45, prog);
                 altitude = FLIGHT_LIFT + 4.0 * (1.0 - brake);
                 spread = 1.0;
-                sweep = 0.58 * brake;
+                sweep = 0.56 * brake;
+                wing_cup = 0.78 * brake;
                 flap = (anim * 22.0).sin() * brake;
+                finger_splay = 0.95;
                 tail_lift = -0.35 * brake;
                 tail_fan = 0.85 * brake;
+                tail_drop = 0.55 * brake;
+                leg_drop = 0.70 * brake;
                 head_lunge = 0.35;
             }
             MagpieState::Land => {
-                let t = smoothstep(0.0, 0.65, prog);
-                altitude = FLIGHT_LIFT * (1.0 - t);
-                spread = (1.0 - t) * 0.92;
-                flap = (anim * 15.0).sin() * (1.0 - t);
-                let squash = (1.0 - t).powi(2);
-                jitter = Vec2::new(0.0, squash * 1.6);
-                tail_lift = 0.28;
-                tail_fan = 0.45 * (1.0 - t);
+                // Full-span cupped braking flare, tail fanned down, legs dropping,
+                // then a clean settle bridging into Perch and PeckWindup with no pop.
+                let desc = smoothstep(0.0, 0.78, prog);
+                let flare = ((prog / 0.82).clamp(0.0, 1.0) * PI).sin();
+                let fold = smoothstep(0.56, 1.0, prog);
+                eff_bank = raw_bank * (1.0 - smoothstep(0.0, 0.45, prog));
+                altitude = FLIGHT_LIFT * (1.0 - desc);
+                spread = 0.96 * (1.0 - fold) + 0.18 * fold + 0.04 * flare;
+                sweep = 0.56 * flare;
+                wing_cup = 0.95 * flare;
+                flap = (prog * TAU * 1.5).sin() * 0.55 * flare;
+                span_scale = 1.0 + 0.05 * flare - 0.08 * fold;
+                finger_splay = 0.96 * (1.0 - 0.55 * fold);
+                tail_fan = 0.44 * (1.0 - fold) + 0.55 * flare + 0.28 * fold;
+                tail_drop = 0.90 * flare;
+                tail_twist = eff_bank * 3.5;
+                tail_lift = -0.32 * flare;
+                leg_drop =
+                    smoothstep(0.05, 0.38, prog) * (1.0 - smoothstep(0.76, 0.96, prog));
+                let touch_squash = (((prog - 0.70) / 0.30).clamp(0.0, 1.0) * PI).sin();
+                jitter = Vec2::new(0.0, touch_squash * 1.1);
+                head_lunge = 0.32 * (1.0 - fold) + 0.12 * fold - 0.22 * flare;
             }
             MagpieState::GustWindup => {
                 // Claws dig into oak planks, chest puffs, huge wings haul far back!
@@ -1091,7 +1242,10 @@ impl Pose {
             }
         }
 
-        // Death rolls the entire bird over onto its flank in a dramatic collapse!
+        // Death rolls the entire bird over onto its flank in a dramatic collapse.
+        // Flying states keep `(f, p)` strictly orthonormal; `eff_bank` drives a
+        // true 3D-projected roll (foreshortened inner wing, long outer wing,
+        // rolled torso scapulars and twisted rudder tail).
         let (f, p) = if view.state == MagpieState::Death && death > 0.0 {
             let roll = smoothstep(0.15, 0.82, death) * 0.92;
             let (s, c) = roll.sin_cos();
@@ -1099,12 +1253,6 @@ impl Pose {
                 Vec2::new(f.x * c - f.y * s, f.x * s + f.y * c),
                 Vec2::new(p.x * c - p.y * s, p.x * s + p.y * c),
             )
-        } else if view.state.flying() && bank.abs() > 1e-3 {
-            // A turning bird banks: the lateral axis rolls out of the plane, so
-            // the wing line leans into the arc. (A shear, because the screen
-            // has two axes — flagged for a Neon pass if it ever needs a real
-            // roll.)
-            (f, (p + f * (bank * BANK_SHEAR)).normalized())
         } else {
             (f, p)
         };
@@ -1115,7 +1263,9 @@ impl Pose {
         let head_world = if matches!(view.state, MagpieState::Peck | MagpieState::Stuck) {
             view.target
         } else {
-            view.pos + f * (HEAD_OFFSET + head_lunge * 2.4 + stretch * 2.5)
+            view.pos
+                + f * (HEAD_OFFSET + head_lunge * 2.4 + stretch * 2.5)
+                + p * (eff_bank * 1.2)
         };
         let slump = if view.state == MagpieState::Death {
             p * (smoothstep(0.25, 0.85, death) * 6.5) - f * (death * 2.8)
@@ -1127,7 +1277,7 @@ impl Pose {
         // those deck circles still reach — otherwise the rat was shooting the
         // planks a dozen pixels under a floating bird. Airborne, the shapes are
         // ungrounded and nothing on the deck can reach them, so the sprite is
-        // drawn at its true altitude over its own (small, soft) shadow.
+        // drawn at its true altitude over its own detached ground shadow.
         let lift = if drawn_airborne(view.state) {
             altitude
         } else {
@@ -1151,6 +1301,15 @@ impl Pose {
             spread,
             sweep,
             flap,
+            span_scale,
+            wrist_fold,
+            wing_cup,
+            finger_splay,
+            bank: eff_bank,
+            tail_twist,
+            tail_drop,
+            leg_drop,
+            shade_bias,
             head,
             buried,
             head_lunge,
@@ -1351,11 +1510,11 @@ fn plumage(pose: &Pose) -> Plumage {
     let dead = ((pose.death - 0.30) / 0.70).clamp(0.0, 1.0);
     let e = pose.enraged;
     let mut back = mix((18, 22, 34), (14, 16, 28), e);
-    let mut gloss = mix((54, 70, 102), (76, 56, 112), e * 0.7);
+    let mut gloss = mix((58, 78, 118), (82, 58, 122), e * 0.7);
     let mut white = mix((244, 246, 252), (252, 246, 234), e * 0.5);
-    let mut white_sh = mix((158, 168, 184), (168, 152, 150), e * 0.5);
-    let mut sheen = mix((24, 134, 136), (92, 46, 158), e * 0.72);
-    let mut sheen_hi = mix((78, 214, 198), (162, 108, 242), e * 0.72);
+    let mut white_sh = mix((156, 168, 188), (168, 152, 150), e * 0.5);
+    let mut sheen = mix((22, 112, 168), (92, 46, 158), e * 0.72);
+    let mut sheen_hi = mix((74, 198, 234), (162, 108, 242), e * 0.72);
     let bill = (28, 28, 34);
     let hilt = mix((236, 204, 112), (255, 192, 82), e);
     let mut shadow = (8, 10, 16);
@@ -1387,71 +1546,168 @@ fn plumage(pose: &Pose) -> Plumage {
     }
 }
 
-/// Sculpted avian wing SDF: broad muscular inner wing-arm sweeping smoothly out to
-/// a tapered wrist & fanned primaries — folded cleanly along the flanks when perched!
+/// Per-side projected wing landmarks and bank roll metrics in local `(u, v)`.
+#[derive(Clone, Copy)]
+struct WingGeom {
+    root: (f32, f32),
+    wrist: (f32, f32),
+    tip: (f32, f32),
+    eff_span: f32,
+    bank_span: f32,
+    bank_chord: f32,
+    inner: f32,
+    cup: f32,
+    wb: f32,
+}
+
+#[inline]
+fn wing_geom(pose: &Pose, side: f32) -> WingGeom {
+    let spread = pose.spread.clamp(0.0, 1.0);
+    // `inner > 0`: wing rolled down inside the turn (foreshortened);
+    // `inner < 0`: wing raised on the outside of the turn (long and bright).
+    let inner = side * pose.bank;
+    let bank_span = 1.0 - 0.27 * inner - 0.13 * inner * inner;
+    let bank_chord = 1.0 - 0.12 * inner - 0.04 * inner * inner;
+    let bank_sweep = -0.14 * inner;
+
+    let eff_span = spread * pose.span_scale * bank_span;
+    let eff_sweep = pose.sweep + bank_sweep;
+    let wb = pose.wrist_fold * spread;
+    let cup = pose.wing_cup * spread;
+
+    let root = (4.6, side * 4.2);
+    let wrist = (
+        6.2 - 8.4 * (1.0 - spread) + 3.6 * eff_sweep + 2.4 * wb + 2.6 * cup,
+        side * (5.2 + 8.8 * eff_span - 1.4 * wb),
+    );
+    let tip = (
+        1.8 - 17.0 * (1.0 - spread) + 8.8 * eff_sweep - 5.6 * wb
+            + 3.2 * cup
+            + pose.flap * 2.0 * spread,
+        side * (4.4 + 18.6 * eff_span - 3.2 * wb),
+    );
+    WingGeom {
+        root,
+        wrist,
+        tip,
+        eff_span,
+        bank_span,
+        bank_chord,
+        inner,
+        cup,
+        wb,
+    }
+}
+
+/// Sculpted avian wing SDF: broad rounded magpie paddle wings in flight (with
+/// articulated carpal fold, cupped braking camber, and true roll foreshortening),
+/// sweeping into a sleek dive blade on `Swoop`/`StrafePass` and folding cleanly
+/// along the flanks when perched.
 #[inline]
 fn wing_sdf(pose: &Pose, side: f32, u: f32, v: f32) -> (f32, f32, f32) {
     let spread = pose.spread.clamp(0.0, 1.0);
-    let flap_pull = pose.flap * 2.2 * spread;
-    // Shoulder root & carpal wrist & wingtip coordinates in local `(u, v)`.
-    let root = (4.8, side * 4.4);
-    let wrist = (
-        6.2 - 8.5 * (1.0 - spread) + 3.2 * pose.sweep,
-        side * (5.6 + 8.0 * spread),
-    );
-    let tip = (
-        1.5 - 17.5 * (1.0 - spread) + 8.5 * pose.sweep + flap_pull,
-        side * (4.6 + 17.8 * spread),
-    );
-    // Broad inner secondary blade + sleek outer primary blade blended smoothly!
-    let d_inner = sd_taper(u, v, root, wrist, 5.2, 4.6 - 0.8 * spread);
-    let d_outer = sd_taper(u, v, wrist, tip, 4.5 - 0.8 * spread, 1.35);
-    let d_trail = sd_taper(
+    let g = wing_geom(pose, side);
+    let sleek = (-pose.sweep).clamp(0.0, 1.0);
+    let tip_r = (2.35 - 0.95 * sleek + 0.55 * g.cup) * g.bank_chord;
+    let d_inner = sd_taper(
         u,
         v,
-        (root.0 - 4.2, side * 4.2),
-        (wrist.0 - 4.0 * spread, side * (5.2 + 7.2 * spread)),
-        3.8,
-        2.6,
+        g.root,
+        g.wrist,
+        5.5 * g.bank_chord,
+        (5.2 - 0.4 * spread) * g.bank_chord,
     );
-    let mut d = smin(d_inner, d_outer, 2.2).min(d_trail);
+    let d_outer = sd_taper(
+        u,
+        v,
+        g.wrist,
+        g.tip,
+        (5.1 - 0.4 * spread) * g.bank_chord,
+        tip_r,
+    );
+    let trail_r = (g.root.0 - 5.2, side * 4.2);
+    let trail_w = (
+        g.wrist.0 - (5.6 - 1.4 * sleek + 1.8 * g.cup) * spread,
+        side * (4.8 + 8.4 * g.eff_span - 1.0 * g.wb),
+    );
+    let trail_m = (
+        g.tip.0 - (4.6 - 2.2 * sleek + 1.2 * g.cup) * spread,
+        side * (4.4 + 14.8 * g.eff_span - 2.4 * g.wb),
+    );
+    let d_trail = sd_taper(u, v, trail_r, trail_w, 4.3 * g.bank_chord, 3.6 * g.bank_chord);
+    let d_mid = sd_taper(
+        u,
+        v,
+        trail_w,
+        trail_m,
+        3.6 * g.bank_chord,
+        (2.5 - 0.7 * sleek) * g.bank_chord,
+    );
+    let mut d = smin(smin(d_inner, d_outer, 2.4), smin(d_trail, d_mid, 1.8), 1.9);
 
     // Phase 2/3 ragged feather battle-notches along the trailing edge!
-    if pose.enraged > 0.3 && u < wrist.0 - 1.2 {
+    if pose.enraged > 0.3 && u < g.wrist.0 - 1.2 {
         let notch = ((v * 1.45).sin()).max(0.0) * (0.85 * pose.enraged + 0.55 * pose.critical);
         d += notch;
     }
 
-    let span = ((v * side - 3.5) / (3.0 + 19.0 * spread)).clamp(0.0, 1.2);
-    let chord = ((u - (tip.0 - 5.0)) / 14.0).clamp(0.0, 1.0);
+    let max_v = (g.tip.1.abs() - 3.0).max(2.8);
+    let span = ((v * side - 3.0) / max_v).clamp(0.0, 1.2);
+    let spine_u = if span < 0.45 {
+        g.root.0 + (g.wrist.0 - g.root.0) * (span / 0.45)
+    } else {
+        g.wrist.0 + (g.tip.0 - g.wrist.0) * ((span - 0.45) / 0.55).clamp(0.0, 1.0)
+    };
+    let chord_w = (11.2 - 3.8 * span) * g.bank_chord;
+    let chord = ((u - (spine_u - chord_w * 0.68)) / chord_w.max(3.2)).clamp(0.0, 1.0);
     (d, span, chord)
 }
 
-/// Graduated diamond-shaped corvid tail SDF!
+/// Graduated 5-feather diamond-wedge corvid tail SDF with rudder bank twist and
+/// downward landing brake fan.
 #[inline]
 fn tail_sdf(pose: &Pose, u: f32, v: f32) -> (f32, f32) {
-    let lift_v = pose.tail_lift * 2.6;
-    let fan = 2.6 + 3.4 * pose.tail_fan;
-    // Central long tail rectrices + slightly shorter flanking fan feathers!
-    let d_center = sd_taper(u, v, (-4.5, 0.0), (-(5.5 + TAIL_LENGTH), lift_v), 3.4, 1.7);
-    let d_left = sd_taper(
+    let tlen = TAIL_LENGTH * (1.0 - 0.24 * pose.tail_drop);
+    let lift_v = pose.tail_lift * 2.2 + pose.tail_twist;
+    let fan = 2.6 + 3.8 * pose.tail_fan + 1.6 * pose.tail_drop;
+    let b = pose.bank;
+    let fan_neg = fan * (1.0 + 0.26 * b);
+    let fan_pos = fan * (1.0 - 0.26 * b);
+    let d_center = sd_taper(u, v, (-4.5, 0.0), (-(5.5 + tlen), lift_v), 3.4, 1.75);
+    let d_l1 = sd_taper(
         u,
         v,
-        (-4.5, -1.2),
-        (-(3.5 + TAIL_LENGTH * 0.84), lift_v - fan),
-        2.6,
+        (-4.5, -1.1),
+        (-(3.8 + tlen * 0.87), lift_v - fan_neg * 0.55),
+        2.5,
         1.45,
     );
-    let d_right = sd_taper(
+    let d_r1 = sd_taper(
         u,
         v,
-        (-4.5, 1.2),
-        (-(3.5 + TAIL_LENGTH * 0.84), lift_v + fan),
-        2.6,
+        (-4.5, 1.1),
+        (-(3.8 + tlen * 0.87), lift_v + fan_pos * 0.55),
+        2.5,
         1.45,
     );
-    let d = smin(d_center, d_left.min(d_right), 1.4);
-    let along = ((-u - 4.5) / TAIL_LENGTH).clamp(0.0, 1.0);
+    let d_l2 = sd_taper(
+        u,
+        v,
+        (-4.5, -1.5),
+        (-(2.8 + tlen * 0.72), lift_v - fan_neg),
+        2.2,
+        1.30,
+    );
+    let d_r2 = sd_taper(
+        u,
+        v,
+        (-4.5, 1.5),
+        (-(2.8 + tlen * 0.72), lift_v + fan_pos),
+        2.2,
+        1.30,
+    );
+    let d = smin(d_center, d_l1.min(d_r1).min(d_l2.min(d_r2)), 1.3);
+    let along = ((-u - 4.5) / tlen.max(6.0)).clamp(0.0, 1.0);
     (d, along)
 }
 
@@ -1520,6 +1776,9 @@ pub fn draw_magpie_ground(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2, ac
             let push = gust_pulse_active(view.state, view.progress);
             draw_gust(pb, &pose, if push { 1.0 } else { 0.18 });
         }
+        MagpieState::Land if pose.progress >= 0.62 => {
+            draw_land_dust(pb, &pose);
+        }
         MagpieState::Death if pose.death > 0.28 => {
             let t = ((pose.death - 0.28) / 0.44).clamp(0.0, 1.0);
             let fade = (1.0 - ((pose.death - 0.50) / 0.50).clamp(0.0, 1.0)) * 0.65;
@@ -1549,7 +1808,38 @@ pub fn draw_magpie_ground(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2, ac
     }
 }
 
-/// Crisp sweeping avian shadow on the oak planks (tight when perched, wide sweeping wings in flight!).
+/// Subtle oak-dust settle ring as the claws touch down at the end of `Land`.
+fn draw_land_dust(pb: &mut PixelBuffer, pose: &Pose) {
+    let t = ((pose.progress - 0.62) / 0.38).clamp(0.0, 1.0);
+    let fade = (1.0 - t) * 0.42 * pose.alpha;
+    if fade <= 0.01 {
+        return;
+    }
+    let r = 8.0 + 10.0 * t;
+    let steps = 36;
+    for i in 0..steps {
+        let a = i as f32 / steps as f32 * TAU;
+        let x = (pose.ground.x + a.cos() * r).round() as i32;
+        let y = (pose.ground.y + a.sin() * r * 0.78).round() as i32;
+        blend_px(pb, x, y, (206, 186, 152), fade);
+    }
+}
+
+/// Shadow scale, penumbra softness and opacity as a function of flight altitude.
+///
+/// Airborne, the shadow sits at the true ground position, soft and wide; as the
+/// bird descends onto the planks it shrinks, sharpens and darkens.
+#[inline]
+fn shadow_params(altitude: f32) -> (f32, f32, f32) {
+    let fly = (altitude / FLIGHT_LIFT).clamp(0.0, 1.35);
+    let scale = 0.84 + 0.24 * fly;
+    let soft_edge = 0.80 + 2.20 * fly;
+    let alpha = 0.58 - 0.24 * fly;
+    (scale, soft_edge, alpha)
+}
+
+/// Detached ground shadow on the oak planks at the bird's true position
+/// (shrinks, sharpens and darkens as the bird descends).
 fn draw_shadow(pb: &mut PixelBuffer, pose: &Pose) {
     // A cast shadow is floor, not body: stamp it with the floor pen so the
     // lighting's rim and sheen never treat it as a creature (batch 13).
@@ -1559,29 +1849,39 @@ fn draw_shadow(pb: &mut PixelBuffer, pose: &Pose) {
 }
 
 fn draw_shadow_body(pb: &mut PixelBuffer, pose: &Pose) {
-    let fly = (pose.altitude / 13.0).clamp(0.0, 1.4);
-    let alpha = (0.50 - 0.14 * fly) * pose.alpha;
-    let offset = Vec2::new(2.0 + 3.0 * fly, 3.0 + 5.0 * fly);
-    let centre = pose.ground + offset;
-    let reach = 29.0;
+    let fly = (pose.altitude / FLIGHT_LIFT).clamp(0.0, 1.35);
+    let (scale, soft_edge, base_alpha) = shadow_params(pose.altitude);
+    let alpha = base_alpha * pose.alpha;
+    let off_k = 1.0 - fly.clamp(0.0, 1.0);
+    let centre = pose.ground + Vec2::new(1.4 * off_k, 1.8 * off_k);
+    let reach = 36.0 * scale + soft_edge;
     let Some((x0, x1, y0, y1)) = clamp_bbox(pb, centre, reach) else {
         return;
     };
     let ink: Rgb = (4, 5, 8);
+    let inv_s = 1.0 / scale;
     for y in y0..=y1 {
         for x in x0..=x1 {
             let dx = x as f32 - centre.x;
             let dy = y as f32 - centre.y;
-            let u = dx * pose.f.x + dy * pose.f.y;
-            let v = dx * pose.p.x + dy * pose.p.y;
+            let u = (dx * pose.f.x + dy * pose.f.y) * inv_s;
+            let v = (dx * pose.p.x + dy * pose.p.y) * inv_s;
             let d_t = torso_sdf(pose, u, v);
             let (d_tail, _) = tail_sdf(pose, u, v);
             let (d_wl, _, _) = wing_sdf(pose, -1.0, u, v);
             let (d_wr, _, _) = wing_sdf(pose, 1.0, u, v);
-            let d = d_t.min(d_tail).min(d_wl).min(d_wr);
-            let soft_edge = 1.6 + 1.4 * fly;
+            let d_hd = ellipse_sdf(u, v, HEAD_OFFSET, pose.bank * 1.0, 4.8, 4.0);
+            let d_bk = sd_taper(
+                u,
+                v,
+                (HEAD_OFFSET + 3.0, pose.bank * 1.0),
+                (HEAD_OFFSET + BEAK_LENGTH * 0.9, pose.bank * 1.0),
+                1.8,
+                0.5,
+            );
+            let d = d_t.min(d_tail).min(d_wl).min(d_wr).min(d_hd).min(d_bk) * scale;
             if d < soft_edge {
-                let soft = ((soft_edge - d) / (soft_edge + 1.2)).clamp(0.0, 1.0);
+                let soft = ((soft_edge - d) / (soft_edge + 1.1)).clamp(0.0, 1.0);
                 blend_px(pb, x, y, ink, alpha * soft);
             }
         }
@@ -1917,7 +2217,11 @@ pub fn draw_magpie(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2, accent: R
         return;
     }
     let pal = plumage(&pose);
-    // 1) Scaly bird talons clutching the planks (or trailing under the belly in flight).
+    // 0) Cool slipstream air streaks behind a low fast Swoop pass (harmless).
+    if pose.state == MagpieState::Swoop {
+        draw_swoop_streaks(pb, &pose);
+    }
+    // 1) Scaly bird talons clutching the planks (or dropping in Land / tucked in flight).
     draw_talons(pb, &pose, &pal);
     // 2) Long graduated iridescent peacock-sheen magpie tail!
     draw_tail(pb, &pose, &pal);
@@ -1941,94 +2245,224 @@ pub fn draw_magpie(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2, accent: R
     }
 }
 
-/// Dark scaly corvid claws/talons peeking beneath the belly on the planks (or clutching the crate).
+/// Cool silver-white slipstream streaks peeling off the swept wingtips and tail
+/// during a harmless `Swoop` pass (strictly cool air ribbons, no damage cues).
+fn draw_swoop_streaks(pb: &mut PixelBuffer, pose: &Pose) {
+    let dip = (pose.progress * PI).sin();
+    let strength = (0.45 + 0.55 * dip) * pose.alpha;
+    if strength <= 0.04 {
+        return;
+    }
+    let hi_col: Rgb = (242, 248, 255);
+    let tail_col: Rgb = (158, 188, 218);
+    for &side in &[-1.0f32, 1.0] {
+        let g = wing_geom(pose, side);
+        let tip_sc = pose.place(g.tip.0, g.tip.1);
+        let length = (16.0 + 12.0 * dip) * (0.78 + 0.22 * g.bank_span);
+        let steps = (length * 1.4).ceil() as i32;
+        for i in 0..=steps {
+            let t = i as f32 / steps.max(1) as f32;
+            let wobble = (t * PI * 1.6 + pose.anim * 16.0 + side).sin() * (0.7 * t);
+            let q = tip_sc - pose.f * (1.0 + t * length) + pose.p * (side * 0.5 * t + wobble);
+            let a = strength * (1.0 - t).powf(1.2) * 0.85;
+            blend_px(pb, q.x.round() as i32, q.y.round() as i32, mix(hi_col, tail_col, t), a);
+        }
+        let mid_sc = pose.place(g.wrist.0 - 2.0, g.wrist.1 * 0.92);
+        let m_len = 10.0 + 8.0 * dip;
+        let m_steps = (m_len * 1.3).ceil() as i32;
+        for i in 0..=m_steps {
+            let t = i as f32 / m_steps.max(1) as f32;
+            let q = mid_sc - pose.f * (2.5 + t * m_len);
+            let a = strength * (1.0 - t).powf(1.35) * 0.52;
+            blend_px(
+                pb,
+                q.x.round() as i32,
+                q.y.round() as i32,
+                mix(hi_col, tail_col, 0.35 + 0.65 * t),
+                a,
+            );
+        }
+    }
+    let t_start = pose.place(-(5.5 + TAIL_LENGTH), pose.tail_twist);
+    let t_len = 10.0 + 7.0 * dip;
+    let t_steps = (t_len * 1.3).ceil() as i32;
+    for i in 0..=t_steps {
+        let t = i as f32 / t_steps.max(1) as f32;
+        let q = t_start - pose.f * (1.0 + t * t_len);
+        let a = strength * (1.0 - t).powf(1.4) * 0.45;
+        blend_px(pb, q.x.round() as i32, q.y.round() as i32, tail_col, a);
+    }
+}
+
+/// Dark scaly corvid claws/talons clutching the planks, dropping forward in `Land`,
+/// or tucked cleanly beneath the rump in cruising flight.
 fn draw_talons(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
     if pose.death > 0.65 {
         return;
     }
-    let leg_col: Rgb = (44, 42, 48);
-    let claw_col: Rgb = (178, 174, 166);
-    let tucked = pose.altitude > 4.0;
+    let leg_col: Rgb = (52, 50, 58);
+    let leg_hi: Rgb = (118, 114, 126);
+    let claw_col: Rgb = (212, 206, 192);
+    let drop = pose.leg_drop;
+    let tucked = pose.altitude > 4.0 && drop < 0.08;
     for &side in &[-1.0f32, 1.0] {
-        let step = if pose.state == MagpieState::Perch {
-            (pose.anim * 4.2 + if side < 0.0 { PI } else { 0.0 }).sin() * 1.6
+        if drop > 0.05 {
+            // Dropping landing gear: scaly tarsus reaching forward under the chest & down toward the planks.
+            let hip = pose.place(3.5, side * 3.8);
+            let reach_y = 1.6 + drop * 2.4;
+            let u_foot = 7.8 + 5.6 * drop;
+            let foot = pose.place(u_foot, side * (4.8 + 1.4 * drop)) + Vec2::new(0.0, reach_y);
+            draw_segment(pb, hip, foot, 1.05, pal.outline, 0.90 * pose.alpha);
+            draw_segment(pb, hip, foot, 0.68, leg_col, 0.98 * pose.alpha);
+            let mid = (hip + foot) * 0.5;
+            blend_px(
+                pb,
+                mid.x.round() as i32,
+                mid.y.round() as i32,
+                leg_hi,
+                0.85 * pose.alpha,
+            );
+            let splay = 0.55 + 0.16 * drop;
+            for &ang_off in &[-splay, 0.0, splay] {
+                let dir = pose.f.rotate(ang_off);
+                let tlen = 3.6 + 1.0 * drop;
+                let tip = foot + dir * tlen + Vec2::new(0.0, 0.6 * drop);
+                let toe = foot + dir * (tlen * 0.72) + Vec2::new(0.0, 0.4 * drop);
+                draw_segment(pb, foot, tip, 0.75, pal.outline, 0.88 * pose.alpha);
+                draw_segment(pb, foot, toe, 0.55, leg_col, 0.96 * pose.alpha);
+                blend_px(
+                    pb,
+                    tip.x.round() as i32,
+                    tip.y.round() as i32,
+                    claw_col,
+                    0.96 * pose.alpha,
+                );
+            }
+            let back_tip = foot - pose.f * 2.5 + Vec2::new(0.0, 0.4 * drop);
+            draw_segment(pb, foot, back_tip, 0.55, leg_col, 0.88 * pose.alpha);
+        } else if tucked {
+            let foot = pose.place(-4.8, side * 2.8) + Vec2::new(0.0, 1.2);
+            let tip = foot - pose.f * 2.2;
+            draw_segment(pb, foot, tip, 0.55, leg_col, 0.55 * pose.alpha);
         } else {
-            0.0
-        };
-        let u_base = if tucked { -2.5 } else { 1.2 + step };
-        let foot = pose.place(u_base, side * 5.8) + Vec2::new(0.0, if tucked { 2.5 } else { 1.4 });
-        // Three splayed dark corvid toes with pale horn talons!
-        for &ang_off in &[-0.50f32, 0.0, 0.50] {
-            let dir = pose.f.rotate(ang_off);
-            let tip = foot + dir * 3.4;
-            draw_segment(pb, foot, tip, 0.7, pal.outline, 0.80 * pose.alpha);
-            draw_segment(pb, foot, foot + dir * 2.4, 0.5, leg_col, 0.95 * pose.alpha);
-            blend_px(pb, tip.x.round() as i32, tip.y.round() as i32, claw_col, 0.90 * pose.alpha);
+            let step = if pose.state == MagpieState::Perch {
+                (pose.anim * 4.2 + if side < 0.0 { PI } else { 0.0 }).sin() * 1.6
+            } else {
+                0.0
+            };
+            let foot = pose.place(1.2 + step, side * 5.8) + Vec2::new(0.0, 1.4);
+            // Three splayed dark corvid toes with pale horn talons!
+            for &ang_off in &[-0.50f32, 0.0, 0.50] {
+                let dir = pose.f.rotate(ang_off);
+                let tip = foot + dir * 3.4;
+                draw_segment(pb, foot, tip, 0.7, pal.outline, 0.80 * pose.alpha);
+                draw_segment(pb, foot, foot + dir * 2.4, 0.5, leg_col, 0.95 * pose.alpha);
+                blend_px(
+                    pb,
+                    tip.x.round() as i32,
+                    tip.y.round() as i32,
+                    claw_col,
+                    0.90 * pose.alpha,
+                );
+            }
         }
     }
 }
 
 fn draw_wings(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
-    let reach = 32.0;
+    let reach = 38.0;
     let Some((x0, x1, y0, y1)) = clamp_bbox(pb, pose.body, reach) else {
         return;
     };
-    for &side in &[-1.0f32, 1.0] {
-        let flap = pose.flap * 0.22;
+    // Paint the dropped inner wing first and the raised outer wing on top when banked.
+    let sides = if pose.bank > 0.0 {
+        [1.0f32, -1.0]
+    } else {
+        [-1.0f32, 1.0]
+    };
+    for &side in &sides {
+        let g = wing_geom(pose, side);
+        let flap_l = pose.flap * 0.20 + pose.shade_bias;
+        let bank_lum = -0.26 * g.inner;
         for y in y0..=y1 {
             for x in x0..=x1 {
                 let (u, v) = pose.local(x, y);
-                if v * side < 1.8 {
+                if v * side < 1.6 {
                     continue;
                 }
                 let (d, span, chord) = wing_sdf(pose, side, u, v);
                 let cover = (0.55 - d * 1.25).clamp(0.0, 1.0);
                 if cover <= 0.0 {
                     if d < 1.15 {
-                        blend_px(pb, x, y, pal.outline, 0.82 * pose.alpha);
+                        blend_px(pb, x, y, pal.outline, 0.84 * pose.alpha);
                     }
                     continue;
                 }
-                // Feather barb striping across the wing span!
-                let barb = ((span * 14.0 + chord * 3.0).sin()) * 0.14;
-                let lum = pose.lit(0.32, side * 0.45) * 0.72 + flap + barb;
+                // Individual primary/secondary feather-barb striping across the wing span!
+                let barb = ((span * 15.0 + chord * 2.6).sin()) * 0.14;
+                // Cupped braking wing camber shading (bright arch leading edge, shaded hollow).
+                let cup_shade = g.cup
+                    * (0.34 * smoothstep(0.55, 0.90, chord)
+                        - 0.38
+                            * smoothstep(0.12, 0.45, chord)
+                            * (1.0 - smoothstep(0.50, 0.78, chord)));
+                let lum =
+                    pose.lit(0.30, side * 0.42) * 0.62 + flap_l + bank_lum + barb + cup_shade;
                 let mut c = shade3(pal.shadow, pal.back, pal.gloss, lum);
 
-                // Iconic Magpie **bold snow-white wing primary flash** on the mid-outer flight feathers!
+                // Iconic Magpie iridescent cobalt-blue / peacock-teal secondary speculum!
+                let speculum = smoothstep(0.06, 0.20, span)
+                    * (1.0 - smoothstep(0.46, 0.62, span))
+                    * smoothstep(0.14, 0.36, chord)
+                    * (1.0 - smoothstep(0.76, 0.92, chord));
+                if speculum > 0.04 {
+                    let sh_lum = lum * 0.55 + if g.inner < 0.0 { 0.20 } else { -0.10 };
+                    let sh_col = shade3(pal.sheen, pal.sheen_hi, pal.white, sh_lum);
+                    c = mix(c, sh_col, (speculum * 0.86).clamp(0.0, 0.94));
+                }
+
+                // Iconic Magpie bold snow-white primary flash framed by jet-black tips & leading edge!
                 let white_flash = if pose.spread > 0.20 {
-                    let s_band = smoothstep(0.32, 0.44, span) * (1.0 - smoothstep(0.76, 0.90, span));
-                    let c_band = smoothstep(0.18, 0.34, chord) * (1.0 - smoothstep(0.72, 0.88, chord));
-                    s_band * c_band * (0.65 + 0.35 * pose.spread)
+                    let s_band =
+                        smoothstep(0.34, 0.46, span) * (1.0 - smoothstep(0.76, 0.89, span));
+                    let c_band =
+                        smoothstep(0.14, 0.28, chord) * (1.0 - smoothstep(0.72, 0.85, chord));
+                    s_band * c_band * (0.76 + 0.24 * pose.spread)
                 } else {
                     // Folded wing shows crisp white scapular wing-bar edge!
                     smoothstep(0.15, 0.35, span) * (1.0 - smoothstep(0.55, 0.75, span)) * 0.75
                 };
                 if white_flash > 0.02 {
-                    let wcol = shade3(pal.white_sh, pal.white, (255, 255, 255), lum * 0.8);
+                    let vane = if (span * 19.0).sin().abs() > 0.16 {
+                        0.0
+                    } else {
+                        0.22
+                    };
+                    let wcol = shade3(pal.white_sh, pal.white, (255, 255, 255), lum * 0.75 - vane);
                     c = mix(c, wcol, white_flash.clamp(0.0, 0.96));
                 }
 
-                // Peacock iridescent teal-emerald (or P2/P3 violet!) sheen on the upper wing coverts!
-                let covert_band = smoothstep(0.08, 0.25, span)
-                    * (1.0 - smoothstep(0.45, 0.65, span))
-                    * smoothstep(0.45, 0.75, chord);
-                if covert_band > 0.05 {
-                    c = mix(c, shade3(pal.sheen, pal.sheen_hi, pal.white, lum * 0.5), covert_band * 0.68);
-                }
-
                 // Sleek leading-edge specular gloss highlight!
-                if d > -1.35 && chord > 0.52 {
-                    c = mix(c, pal.gloss, 0.48);
+                if d > -1.45 && chord > 0.56 {
+                    c = mix(
+                        c,
+                        pal.gloss,
+                        0.45 + 0.22 * (-g.inner).max(0.0) + 0.18 * g.cup,
+                    );
                 }
                 // Phase-2/3 crimson battle nick near the shoulder!
-                if pose.enraged > 0.4 && side > 0.0 && (u - 3.0).abs() < 1.2 && (v - 7.0).abs() < 1.4 {
+                if pose.enraged > 0.4
+                    && side > 0.0
+                    && (u - 3.0).abs() < 1.2
+                    && (v - 7.0).abs() < 1.4
+                {
                     c = mix(c, (214, 48, 52), 0.78);
                 }
 
                 let final_c = apply_hit(c, pose.hit);
                 if cover < 1.0 {
                     let bg = pb.pixel_at(x as usize, y as usize);
-                    let rimmed = mix(bg, pal.outline, 0.82 * pose.alpha);
+                    let rimmed = mix(bg, pal.outline, 0.84 * pose.alpha);
                     pb.plot(x, y, mix(rimmed, final_c, cover * pose.alpha));
                 } else {
                     blend_px(pb, x, y, final_c, pose.alpha);
@@ -2036,80 +2470,90 @@ fn draw_wings(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
             }
         }
 
-        // Five crisp splayed primary "finger" flight feathers at the spread wingtip!
-        if pose.spread > 0.48 {
-            let flap_pull = pose.flap * 2.2 * pose.spread;
-            let tip = pose.place(
-                1.5 - 17.5 * (1.0 - pose.spread) + 8.5 * pose.sweep + flap_pull,
-                side * (4.6 + 17.8 * pose.spread),
-            );
+        // Five crisp jet-black splayed primary "finger" flight feathers at the spread wingtip!
+        if pose.spread > 0.42 {
+            let tip_sc = pose.place(g.tip.0, g.tip.1);
+            let splay = pose.finger_splay;
+            let flen_scale = (0.62 + 0.38 * g.bank_span) * (0.70 + 0.30 * splay);
             for k in 0..5 {
                 let t = k as f32 / 4.0;
-                let base = tip + pose.f * ((0.5 - t) * 4.8) - pose.p * (side * t * 2.4);
-                let fan_dir = (pose.p * side * (0.75 + 0.25 * (1.0 - t))
-                    + pose.f * (0.25 - t * 0.85))
-                    .normalized();
-                let end = base + fan_dir * (3.6 + (1.0 - (t - 0.35).abs()) * 2.4);
-                draw_segment(pb, base, end, 0.95, pal.outline, 0.85 * pose.alpha);
+                let base = tip_sc
+                    + pose.f * ((0.5 - t) * 4.6 * (0.65 + 0.35 * splay))
+                    - pose.p * (side * t * 2.2 * g.bank_span);
+                let out_w = (0.45 + 0.55 * splay) * (0.75 + 0.25 * (1.0 - t));
+                let aft_w = (0.28 - t * 0.85) * splay - (0.55 + 0.35 * t) * (1.0 - splay);
+                let fan_dir = (pose.p * (side * out_w) + pose.f * aft_w).normalized();
+                let flen = (3.4 + (1.0 - (t - 0.35).abs()) * 2.4) * flen_scale;
+                let end = base + fan_dir * flen;
+                let mid = base + fan_dir * (flen * 0.36);
+                draw_segment(pb, base, end, 0.95, pal.outline, 0.88 * pose.alpha);
                 draw_segment(
                     pb,
                     base,
-                    base + fan_dir * 2.2,
+                    mid,
                     0.55,
-                    apply_hit(pal.white, pose.hit),
-                    0.95 * pose.alpha,
+                    apply_hit(pal.gloss, pose.hit),
+                    0.92 * pose.alpha,
                 );
                 draw_segment(
                     pb,
-                    base + fan_dir * 2.0,
+                    mid,
                     end,
                     0.55,
                     apply_hit(pal.back, pose.hit),
-                    0.95 * pose.alpha,
+                    0.96 * pose.alpha,
                 );
             }
         }
     }
 }
 
-/// Long graduated peacock-iridescent corvid tail with crisp dark outline & central quill lines!
+/// Long graduated peacock-iridescent corvid tail with rudder twist & crisp dark quill seams!
 fn draw_tail(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
-    let reach = 32.0;
-    let Some((x0, x1, y0, y1)) = clamp_bbox(pb, pose.body - pose.f * 10.0, reach) else {
+    let reach = 34.0;
+    let center = pose.body - pose.f * 10.0 + pose.p * (pose.tail_twist * 0.5);
+    let Some((x0, x1, y0, y1)) = clamp_bbox(pb, center, reach) else {
         return;
     };
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (u, v) = pose.local(x, y);
-            if u > -2.5 {
+            if u > -2.2 {
                 continue;
             }
             let (d, along) = tail_sdf(pose, u, v);
             let cover = (0.55 - d * 1.25).clamp(0.0, 1.0);
             if cover <= 0.0 {
                 if d < 1.15 {
-                    blend_px(pb, x, y, pal.outline, 0.82 * pose.alpha);
+                    blend_px(pb, x, y, pal.outline, 0.84 * pose.alpha);
                 }
                 continue;
             }
-            let lum = pose.lit(-0.35, (v / 6.0).clamp(-1.0, 1.0)) * 0.65;
+            let v_rel = v - pose.tail_twist * along;
+            let twist_lum = -0.22 * pose.bank * (v_rel / 5.0).clamp(-1.0, 1.0);
+            let drop_shade = -0.28 * pose.tail_drop * along;
+            let lum = pose.lit(-0.35, (v / 6.0).clamp(-1.0, 1.0)) * 0.62 + twist_lum + drop_shade;
             // Distinct individual rectrix feather quills running down the graduated tail!
-            let quill = ((v * 1.45).sin()).abs();
-            let iridescence = (0.35 + 0.55 * quill) * (1.0 - along * 0.35);
+            let quill = ((v_rel * 1.45).sin()).abs();
+            let iridescence = (0.42 + 0.52 * quill) * (1.0 - along * 0.30);
             let mut c = shade3(pal.shadow, pal.back, pal.sheen, lum);
-            c = mix(c, shade3(pal.sheen, pal.sheen_hi, pal.white, lum * 0.6), iridescence * 0.72);
+            c = mix(
+                c,
+                shade3(pal.sheen, pal.sheen_hi, pal.white, lum * 0.58),
+                (iridescence * 0.78).clamp(0.0, 0.92),
+            );
             // Crisp dark feather shaft seams between tail feathers.
             if quill < 0.16 {
                 c = mix(c, pal.shadow, 0.58);
             }
             // Subtle glossy dark band near the diamond tail tip.
-            if along > 0.84 {
-                c = mix(c, pal.shadow, (along - 0.84) * 3.8);
+            if along > 0.82 {
+                c = mix(c, pal.shadow, ((along - 0.82) * 3.6).clamp(0.0, 0.88));
             }
             let final_c = apply_hit(c, pose.hit);
             if cover < 1.0 {
                 let bg = pb.pixel_at(x as usize, y as usize);
-                let rimmed = mix(bg, pal.outline, 0.82 * pose.alpha);
+                let rimmed = mix(bg, pal.outline, 0.84 * pose.alpha);
                 pb.plot(x, y, mix(rimmed, final_c, cover * pose.alpha));
             } else {
                 blend_px(pb, x, y, final_c, pose.alpha);
@@ -2124,6 +2568,7 @@ fn draw_torso(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
     let Some((x0, x1, y0, y1)) = clamp_bbox(pb, pose.body, reach) else {
         return;
     };
+    let v_roll = pose.bank * 1.15;
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (u, v) = pose.local(x, y);
@@ -2136,27 +2581,33 @@ fn draw_torso(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
                 continue;
             }
             let nu = (u / 9.0).clamp(-1.0, 1.0);
-            let nv = (v / 6.6).clamp(-1.0, 1.0);
+            let nv = ((v - v_roll) / 6.6).clamp(-1.0, 1.0);
             let dome = (1.0 - (nu * nu * 0.45 + nv * nv * 0.65)).clamp(0.0, 1.0);
-            let lit = pose.lit(nu, nv);
+            let lit = pose.lit(nu, nv) - 0.18 * pose.bank * nv;
             let mut c = shade3(pal.shadow, pal.back, pal.gloss, lit * 0.85 + dome * 0.30);
 
-            // Subtle peacock iridescence shimmer over the upper mantle!
+            // Subtle iridescent blue-teal shimmer over the upper mantle!
             let mantle = smoothstep(-6.0, 4.0, u) * (1.0 - smoothstep(4.0, 8.5, u));
-            c = mix(c, pal.sheen, mantle * 0.34 * (0.6 + 0.4 * pose.enraged));
+            c = mix(c, pal.sheen, mantle * 0.36 * (0.6 + 0.4 * pose.enraged));
 
             // THE ICONIC MAGPIE SIGNATURE: twin blazing snow-white scapular shoulder crescents
-            // sweeping cleanly down both flanks of the back (`u ∈ [-5.5, 4.5], |v| ∈ [2.5, 6.2]`)!
-            let scap_d = ellipse_sdf(u, v.abs(), -0.5, 4.5, 5.4, 2.2);
+            // rolling across the flanks when the bird banks!
+            let v_shifted = v - v_roll;
+            let scap_d = ellipse_sdf(u, v_shifted.abs(), -0.5, 4.4, 5.4, 2.25);
             if scap_d < 0.45 {
                 let w_cov = (0.45 - scap_d).clamp(0.0, 1.0);
-                let w_col = shade3(pal.white_sh, pal.white, (255, 255, 255), lit * 0.75 + dome * 0.25);
+                let w_col = shade3(
+                    pal.white_sh,
+                    pal.white,
+                    (255, 255, 255),
+                    lit * 0.75 + dome * 0.25,
+                );
                 c = mix(c, w_col, w_cov * 0.96);
             }
             // Crisp white lower rump band just above the iridescent tail!
-            if u < -5.8 && u > -8.6 && v.abs() < 3.4 {
+            if u < -5.8 && u > -8.6 && v_shifted.abs() < 3.4 {
                 let w_col = shade3(pal.white_sh, pal.white, (255, 255, 255), lit * 0.6);
-                c = mix(c, w_col, 0.82);
+                c = mix(c, w_col, 0.84);
             }
             // Phase-3 crimson chest scuff!
             if pose.enraged > 0.75 && (u - 4.2).abs() < 1.3 && (v + 1.5).abs() < 1.5 {
@@ -2637,15 +3088,255 @@ mod tests {
                 );
             }
         }
-        // A bank really does leave the wing line: the lateral axis shears
-        // toward the heading and the body centre stays over the footprint.
+        // A bank rolls the bird cleanly without shearing `(f, p)`: the inner
+        // wing foreshortens, the outer wing extends long, the tail twists into
+        // the turn, and the body centre stays over the footprint.
         let mut flat = MagpieView::new(Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(60.0, 0.0));
         flat.state = MagpieState::Soar;
         let mut banked = flat;
         banked.bank = 1.0;
         let a = Pose::from_view(&flat, Vec2::ZERO, (206, 150, 70));
         let b = Pose::from_view(&banked, Vec2::ZERO, (206, 150, 70));
-        assert!(a.p.dot(b.p) < 1.0, "the bank must tilt the wing line");
+        assert!(b.f.dot(b.p).abs() < 1e-4, "the bank roll must keep (f, p) orthonormal");
+        let inner = wing_geom(&b, 1.0);
+        let outer = wing_geom(&b, -1.0);
+        assert!(
+            outer.tip.1.abs() > inner.tip.1.abs() * 1.45,
+            "outer wing ({:.1}) must read noticeably longer than foreshortened inner wing ({:.1})",
+            outer.tip.1.abs(),
+            inner.tip.1.abs()
+        );
+        assert!(
+            b.tail_twist > 2.0 && b.tail_fan > a.tail_fan,
+            "the banked tail must fan wider and twist into the turn"
+        );
+    }
+
+    #[test]
+    fn every_state_and_bank_draws_without_panic_and_within_bounds() {
+        let states = [
+            MagpieState::Soar,
+            MagpieState::Swoop,
+            MagpieState::Perch,
+            MagpieState::Ruffle,
+            MagpieState::PeckWindup,
+            MagpieState::Peck,
+            MagpieState::Stuck,
+            MagpieState::Takeoff,
+            MagpieState::StrafeWindup,
+            MagpieState::StrafePass,
+            MagpieState::SnatchDrop,
+            MagpieState::Land,
+            MagpieState::GustWindup,
+            MagpieState::Gust,
+            MagpieState::Death,
+        ];
+        let banks = [-1.5f32, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, f32::NAN, f32::INFINITY];
+        let facings = [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.707, -0.707),
+            Vec2::ZERO,
+        ];
+
+        // Degenerate 0x0 buffer must not panic for any state or bank.
+        let mut empty = PixelBuffer::new(0, 0);
+        for &state in &states {
+            for &bank in &banks {
+                let mut v = MagpieView::new(Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(20.0, 0.0));
+                v.state = state;
+                v.bank = bank;
+                draw_magpie_ground(&mut empty, &v, Vec2::ZERO, (206, 150, 70));
+                draw_magpie(&mut empty, &v, Vec2::ZERO, (206, 150, 70));
+                draw_magpie_crate(&mut empty, &v, Vec2::ZERO);
+            }
+        }
+
+        // Every state and bank value draws safely without panicking.
+        let mut scratch = PixelBuffer::new(160, 140);
+        for &state in &states {
+            for &bank in &banks {
+                for &facing in &facings {
+                    for &prog in &[0.0f32, 0.35, 0.72, 1.0] {
+                        let mut v = MagpieView::new(
+                            Vec2::new(80.0, 72.0),
+                            facing,
+                            Vec2::new(105.0, 76.0),
+                        );
+                        v.state = state;
+                        v.bank = bank;
+                        v.progress = prog;
+                        v.anim = prog * SOAR_CYCLE_SECS;
+                        v.lane_start = Vec2::new(50.0, 72.0);
+                        draw_magpie_ground(&mut scratch, &v, Vec2::ZERO, (206, 150, 70));
+                        draw_magpie(&mut scratch, &v, Vec2::ZERO, (206, 150, 70));
+                        draw_magpie_crate(&mut scratch, &v, Vec2::ZERO);
+                    }
+                }
+            }
+        }
+
+        // Flight states stay strictly inside `CULL_MARGIN` of `view.pos` (no pixels escape).
+        let bg: Rgb = (255, 0, 255);
+        let center = Vec2::new(90.0, 90.0);
+        let bound = (CULL_MARGIN + 2.0) as i32;
+        for &state in &[
+            MagpieState::Soar,
+            MagpieState::Swoop,
+            MagpieState::Land,
+            MagpieState::Takeoff,
+        ] {
+            for &bank in &[-1.0f32, 0.0, 1.0] {
+                for &prog in &[0.1f32, 0.5, 0.9] {
+                    let mut pb = PixelBuffer::new(180, 180);
+                    pb.clear(bg);
+                    let mut v = MagpieView::new(center, Vec2::new(1.0, 0.0), center + Vec2::new(40.0, 0.0));
+                    v.state = state;
+                    v.bank = bank;
+                    v.progress = prog;
+                    v.anim = prog * SOAR_CYCLE_SECS;
+                    draw_magpie_ground(&mut pb, &v, Vec2::ZERO, (206, 150, 70));
+                    draw_magpie(&mut pb, &v, Vec2::ZERO, (206, 150, 70));
+                    let mut drawn = 0usize;
+                    for y in 0..pb.h as i32 {
+                        for x in 0..pb.w as i32 {
+                            if pb.pixel_at(x as usize, y as usize) != bg {
+                                drawn += 1;
+                                let dx = (x - center.x as i32).abs();
+                                let dy = (y - center.y as i32).abs();
+                                assert!(
+                                    dx <= bound && dy <= bound,
+                                    "{state:?} (bank={bank}, prog={prog}) drew out of bounds at ({x},{y}), delta=({dx},{dy}) > {bound}"
+                                );
+                            }
+                        }
+                    }
+                    assert!(drawn > 80, "{state:?} (bank={bank}) must draw a visible bird ({drawn} px)");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn soar_flap_cycle_is_continuous_across_phases_and_wrap() {
+        let steps = 600usize;
+        let dt = (2.0 * SOAR_CYCLE_SECS) / steps as f32;
+        let mut prev = soar_flap_kinematics(0.0);
+        let mut min_span = prev.span_scale;
+        let mut max_span = prev.span_scale;
+        let mut max_fold = prev.wrist_fold;
+        let mut min_glide = prev.glide;
+        let mut max_glide = prev.glide;
+
+        for i in 1..=steps {
+            let t = i as f32 * dt;
+            let cur = soar_flap_kinematics(t);
+            assert!(cur.stroke.is_finite() && cur.span_scale.is_finite() && cur.body_bob.is_finite());
+            // Adjacent 5 ms samples must move smoothly with no jump or pop.
+            assert!(
+                (cur.stroke - prev.stroke).abs() < 0.16,
+                "stroke popped at t={t:.4}: {} -> {}",
+                prev.stroke,
+                cur.stroke
+            );
+            assert!(
+                (cur.span_scale - prev.span_scale).abs() < 0.06,
+                "span_scale popped at t={t:.4}: {} -> {}",
+                prev.span_scale,
+                cur.span_scale
+            );
+            assert!(
+                (cur.sweep_delta - prev.sweep_delta).abs() < 0.09,
+                "sweep_delta popped at t={t:.4}: {} -> {}",
+                prev.sweep_delta,
+                cur.sweep_delta
+            );
+            assert!(
+                (cur.wrist_fold - prev.wrist_fold).abs() < 0.08,
+                "wrist_fold popped at t={t:.4}: {} -> {}",
+                prev.wrist_fold,
+                cur.wrist_fold
+            );
+            assert!(
+                (cur.body_bob - prev.body_bob).abs() < 0.22,
+                "body_bob popped at t={t:.4}: {} -> {}",
+                prev.body_bob,
+                cur.body_bob
+            );
+            min_span = min_span.min(cur.span_scale);
+            max_span = max_span.max(cur.span_scale);
+            max_fold = max_fold.max(cur.wrist_fold);
+            min_glide = min_glide.min(cur.glide);
+            max_glide = max_glide.max(cur.glide);
+            prev = cur;
+        }
+
+        // The cycle must actually visit both articulated flaps (tuck + full downstroke) and glides.
+        assert!(max_span > 1.06, "downstroke must open past level span ({max_span:.2})");
+        assert!(min_span < 0.70, "upstroke tuck must fold inward ({min_span:.2})");
+        assert!(max_fold > 0.75, "upstroke must articulate the carpal wrist ({max_fold:.2})");
+        assert!(min_glide < 0.02 && max_glide > 0.99, "cycle must alternate flapping bursts and glides");
+
+        // Exact periodic wrap across SOAR_CYCLE_SECS and safety for negative anim.
+        let at0 = soar_flap_kinematics(0.0);
+        let at_end = soar_flap_kinematics(SOAR_CYCLE_SECS - 1e-4);
+        assert!((at0.span_scale - at_end.span_scale).abs() < 1e-3);
+        assert!((at0.stroke - at_end.stroke).abs() < 1e-3);
+        assert!((at0.glide - at_end.glide).abs() < 1e-3);
+        let neg = soar_flap_kinematics(-0.35);
+        assert!(neg.span_scale.is_finite() && neg.span_scale > 0.5);
+    }
+
+    #[test]
+    fn banking_rolls_asymmetrically_and_land_blends_with_sharpening_shadow() {
+        // Bank -1, 0, +1 produce distinct silhouettes and mirrored roll geometry.
+        let render_soar = |bank: f32| {
+            let mut pb = PixelBuffer::new(110, 110);
+            pb.clear((60, 48, 34));
+            let mut v = MagpieView::new(Vec2::new(55.0, 62.0), Vec2::new(1.0, 0.0), Vec2::new(90.0, 62.0));
+            v.state = MagpieState::Soar;
+            v.anim = 0.84 * SOAR_CYCLE_SECS;
+            v.bank = bank;
+            draw_magpie(&mut pb, &v, Vec2::ZERO, (206, 150, 70));
+            pb
+        };
+        let left = render_soar(-1.0);
+        let level = render_soar(0.0);
+        let right = render_soar(1.0);
+        assert_ne!(left.pixels(), level.pixels(), "bank=-1 must differ from level flight");
+        assert_ne!(right.pixels(), level.pixels(), "bank=+1 must differ from level flight");
+        assert_ne!(left.pixels(), right.pixels(), "bank=-1 and bank=+1 must roll opposite ways");
+
+        // Land flares with cupped wings, dropped tail and legs mid-descent, then
+        // settles cleanly into the range between Perch and PeckWindup.
+        let land_pose = |prog: f32| {
+            let mut v = MagpieView::new(Vec2::new(55.0, 62.0), Vec2::new(1.0, 0.0), Vec2::new(90.0, 62.0));
+            v.state = MagpieState::Land;
+            v.progress = prog;
+            v.bank = 0.8;
+            Pose::from_view(&v, Vec2::ZERO, (206, 150, 70))
+        };
+        let mid = land_pose(0.42);
+        let end = land_pose(1.0);
+        assert!(mid.wing_cup > 0.70, "Land must cup wings mid-descent ({:.2})", mid.wing_cup);
+        assert!(mid.tail_drop > 0.70, "Land must fan tail down mid-descent ({:.2})", mid.tail_drop);
+        assert!(mid.leg_drop > 0.70, "Land must drop legs mid-descent ({:.2})", mid.leg_drop);
+        assert!(end.altitude < 0.01 && end.wing_cup < 0.01 && end.leg_drop < 0.01);
+        assert!(end.bank.abs() < 0.01, "Land must level out bank before touching down");
+        assert!(
+            (0.0..=0.36).contains(&end.spread),
+            "Land end spread ({:.2}) must bridge Perch (0.0) and PeckWindup (0.36)",
+            end.spread
+        );
+
+        // Shadow shrinks, sharpens and darkens as altitude descends from FLIGHT_LIFT to 0.
+        let (scale_hi, soft_hi, alpha_hi) = shadow_params(FLIGHT_LIFT);
+        let (scale_mid, soft_mid, alpha_mid) = shadow_params(FLIGHT_LIFT * 0.5);
+        let (scale_lo, soft_lo, alpha_lo) = shadow_params(0.0);
+        assert!(scale_hi > scale_mid && scale_mid > scale_lo, "shadow must shrink on descent");
+        assert!(soft_hi > soft_mid && soft_mid > soft_lo, "shadow must sharpen on descent");
+        assert!(alpha_hi < alpha_mid && alpha_mid < alpha_lo, "shadow must darken on descent");
     }
 
     /// Development aid: `RATRUN_MAGPIE_SHEET=1 cargo test magpie_sheet`

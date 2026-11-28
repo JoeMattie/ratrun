@@ -2729,6 +2729,12 @@ pub struct BossContext<'a> {
     pub player_radius: f32,
     pub player_hurt_radius: f32,
     pub arena: TileRect,
+    /// The tick's simulation viewport in world pixels (the unzoomed screen the
+    /// run is played in), copied from the [`Viewport`] resource by
+    /// [`boss_update_system`]. **Not** the render zoom or the camera: a
+    /// controller that sizes anything against it stays identical at every zoom
+    /// (the Magpie's flight ellipse is the one that does).
+    pub view: Vec2,
     pub level: &'a Level,
     pub flow: &'a FlowField,
     pub rng: &'a mut StdRng,
@@ -4684,6 +4690,9 @@ pub fn boss_update_system(
     mut level: ResMut<Level>,
     mut player: ResMut<Player>,
     flow: Res<FlowField>,
+    // The tick's unzoomed screen, for controllers that fit a shape to it (the
+    // Magpie's flight ellipse). Never the zoom: see [`BossContext::view`].
+    viewport: Res<Viewport>,
     mut particles: ResMut<Particles>,
     mut damage_numbers: ResMut<DamageNumbers>,
     mut shake: ResMut<Shake>,
@@ -4785,6 +4794,7 @@ pub fn boss_update_system(
                     player_radius: PLAYER_RADIUS,
                     player_hurt_radius: PLAYER_RADIUS + player.buffs.giant_hit_padding(),
                     arena: boss.arena,
+                    view: viewport.0,
                     level: &level,
                     flow: &flow,
                     rng: &mut fight.rng.0,
@@ -5005,6 +5015,7 @@ pub fn boss_update_system(
                 player_radius: PLAYER_RADIUS,
                 player_hurt_radius: PLAYER_RADIUS + player.buffs.giant_hit_padding(),
                 arena: boss.arena,
+                view: viewport.0,
                 level: &level,
                 flow: &flow,
                 rng: &mut fight.rng.0,
@@ -5023,6 +5034,7 @@ pub fn boss_update_system(
                 player_radius: PLAYER_RADIUS,
                 player_hurt_radius: PLAYER_RADIUS + player.buffs.giant_hit_padding(),
                 arena: boss.arena,
+                view: viewport.0,
                 level: &level,
                 flow: &flow,
                 rng: &mut fight.rng.0,
