@@ -12,6 +12,15 @@
   timings are the ones they always were. Now and then a beat ends in a low
   wing-over past your shoulder. While it is up there nothing on the deck
   reaches it and the name plate reads `IN THE AIR — OUT OF REACH`.
+- **The Magpie's flight art.** Soaring uses a continuous burst-flap and glide
+  cycle in full top-down wingspan with the black, white and iridescent-blue
+  plumage; banking rolls the inner wing short, stretches the outer wing long,
+  and fans and twists the diamond tail into the turn. Low fly-bys sweep the
+  wings back into a fast dive silhouette with cool slipstream streaks behind
+  (no warning marks), landings flare with cupped braking wings, a fanned-down
+  tail and dropping legs that settle cleanly into the perched and peck-windup
+  stances, and the detached ground shadow sits on the bird's true deck position
+  while shrinking and sharpening as it descends.
 - **Lost bosses walk back (the birds).** The Magpie no longer walks into the
   cargo it used to be stopped by, and it is not walled off from you while it
   flies: it is never called back into a fight it was already flying to.
